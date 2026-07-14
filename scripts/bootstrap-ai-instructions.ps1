@@ -10,6 +10,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$manifestRelativePath = '.codex/ai-instructions.manifest.json'
+$initialCommitMessage = 'chore: add shared AI instructions'
+$syncCommitMessage = 'chore: sync shared AI instructions'
+
 function Invoke-Git {
     param(
         [Parameter(Mandatory = $true)]
@@ -36,6 +40,26 @@ function Invoke-Git {
     return $output
 }
 
+function Get-GitExitCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Repository,
+
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $null = & git -C $Repository @Arguments 2>&1
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
 function Get-FullPathWithoutTrailingSeparator {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -54,10 +78,112 @@ function Get-RepositoryRelativePath {
     return $FullPath.Substring($RepositoryRoot.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
 }
 
+function Get-NormalizedContentHash {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $content = [System.IO.File]::ReadAllText($Path)
+    $normalizedContent = $content.Replace("`r`n", "`n").Replace("`r", "`n")
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    $contentBytes = $utf8WithoutBom.GetBytes($normalizedContent)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        return [System.BitConverter]::ToString($sha256.ComputeHash($contentBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Test-IsAllowedManagedPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    return $Path -eq 'AGENTS.md' -or
+        $Path -eq '.github/copilot-instructions.md' -or
+        $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+        $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$'
+}
+
+function Test-GitPathHasChanges {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Repository,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    $workingTreeExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path)
+    $indexExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
+
+    if ($workingTreeExitCode -gt 1 -or $indexExitCode -gt 1) {
+        throw "Unable to inspect local changes for managed path: $Path"
+    }
+
+    return $workingTreeExitCode -eq 1 -or $indexExitCode -eq 1
+}
+
+function Test-WasCreatedByPreviousBootstrap {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Repository,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    if (Test-GitPathHasChanges -Repository $Repository -Path $Path) {
+        return $false
+    }
+
+    $addCommits = @(Invoke-Git -Repository $Repository -Arguments @('log', '--diff-filter=A', '--format=%H', '--', $Path))
+    if ($addCommits.Count -eq 0) {
+        return $false
+    }
+
+    $addCommit = ($addCommits | Select-Object -First 1).Trim()
+    $subject = (Invoke-Git -Repository $Repository -Arguments @('show', '-s', '--format=%s', $addCommit) | Select-Object -First 1).Trim()
+    if ($subject -ne $initialCommitMessage) {
+        return $false
+    }
+
+    $createdBlob = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', "$addCommit`:$Path") | Select-Object -First 1).Trim()
+    $currentBlob = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', "HEAD`:$Path") | Select-Object -First 1).Trim()
+    return $createdBlob -eq $currentBlob
+}
+
+function New-ManifestEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $TargetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Sha256
+    )
+
+    return [pscustomobject][ordered]@{
+        sourcePath = $SourcePath
+        targetPath = $TargetPath
+        sha256 = $Sha256
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    $resolvedRoot = & git -C (Get-Location).Path rev-parse --show-toplevel 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Output 'AI instruction bootstrap skipped: the current directory is not inside a Git repository.'
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $resolvedRoot = & git -C (Get-Location).Path rev-parse --show-toplevel 2>$null
+        $resolveExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($resolveExitCode -ne 0) {
+        Write-Output 'AI instruction sync skipped: the current directory is not inside a Git repository.'
         return
     }
 
@@ -67,34 +193,72 @@ if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
 $insideWorkTree = Invoke-Git -Repository $targetRootPath -Arguments @('rev-parse', '--is-inside-work-tree')
 if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
-    Write-Output "AI instruction bootstrap skipped: target is not a Git work tree: $targetRootPath"
+    Write-Output "AI instruction sync skipped: target is not a Git work tree: $targetRootPath"
+    return
+}
+
+$sourceCodexBaseInTarget = Join-Path $targetRootPath '.codex\AGENTS.en.md'
+$sourceCopilotBaseInTarget = Join-Path $targetRootPath '.github\copilot-instructions.en.md'
+if ((Test-Path -LiteralPath $sourceCodexBaseInTarget -PathType Leaf) -and
+    (Test-Path -LiteralPath $sourceCopilotBaseInTarget -PathType Leaf)) {
+    Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
     return
 }
 
 $families = @(
     @{
         Name = 'Codex'
-        SourceBase = '.codex\AGENTS.en.md'
+        SourceBase = '.codex/AGENTS.en.md'
         TargetBase = 'AGENTS.md'
-        SourceRules = '.codex\AI-Rules'
-        TargetRules = '.codex\AI-Rules'
+        SourceRules = '.codex/AI-Rules'
+        TargetRules = '.codex/AI-Rules'
     },
     @{
         Name = 'GitHub Copilot'
-        SourceBase = '.github\copilot-instructions.en.md'
-        TargetBase = '.github\copilot-instructions.md'
-        SourceRules = '.github\AI-Rules'
-        TargetRules = '.github\AI-Rules'
+        SourceBase = '.github/copilot-instructions.en.md'
+        TargetBase = '.github/copilot-instructions.md'
+        SourceRules = '.github/AI-Rules'
+        TargetRules = '.github/AI-Rules'
     }
 )
 
-$missingFamilies = @($families | Where-Object {
-    -not (Test-Path -LiteralPath (Join-Path $targetRootPath $_.TargetBase))
-})
+$manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
+$manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
+$manifestEntriesByTarget = @{}
 
-if ($missingFamilies.Count -eq 0) {
-    Write-Output 'AI instruction bootstrap: all instruction families already exist; no download or commit was required.'
-    return
+if ($manifestExists) {
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $manifestFullPath | ConvertFrom-Json
+    }
+    catch {
+        throw "Managed instruction manifest is not valid JSON: $manifestRelativePath"
+    }
+
+    if ($manifest.schemaVersion -ne 1) {
+        throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
+    }
+
+    if ($manifest.sourceRepository -ne $SourceRepository -or $manifest.sourceRef -ne $SourceRef) {
+        throw 'Managed instruction manifest source does not match the configured source repository and ref.'
+    }
+
+    foreach ($entry in @($manifest.files)) {
+        $targetPath = [string] $entry.targetPath
+        if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
+            throw "Unsafe target path in managed instruction manifest: $targetPath"
+        }
+
+        if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
+            throw "Duplicate target path in managed instruction manifest: $targetPath"
+        }
+
+        if ([string]::IsNullOrWhiteSpace([string] $entry.sourcePath) -or
+            [string] $entry.sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "Invalid managed instruction manifest entry: $targetPath"
+        }
+
+        $manifestEntriesByTarget[$targetPath] = $entry
+    }
 }
 
 $tempRootPath = Get-FullPathWithoutTrailingSeparator -Path ([System.IO.Path]::GetTempPath())
@@ -139,11 +303,11 @@ try {
     }
 
     $sourceRootPath = $archiveRoots[0].FullName
-    $familiesToCreate = New-Object System.Collections.Generic.List[object]
+    $desiredEntries = New-Object System.Collections.Generic.List[object]
 
-    foreach ($family in $missingFamilies) {
-        $sourceBasePath = Join-Path $sourceRootPath $family.SourceBase
-        $sourceRulesPath = Join-Path $sourceRootPath $family.SourceRules
+    foreach ($family in $families) {
+        $sourceBasePath = Join-Path $sourceRootPath $family.SourceBase.Replace('/', '\')
+        $sourceRulesPath = Join-Path $sourceRootPath $family.SourceRules.Replace('/', '\')
 
         if (-not (Test-Path -LiteralPath $sourceBasePath -PathType Leaf)) {
             throw "$($family.Name) base instruction is missing from GitHub archive: $($family.SourceBase)"
@@ -158,53 +322,222 @@ try {
             throw "$($family.Name) has no English rule modules in the GitHub archive."
         }
 
-        $familiesToCreate.Add(@{
-            Family = $family
-            SourceBasePath = $sourceBasePath
-            TargetBasePath = Join-Path $targetRootPath $family.TargetBase
-            EnglishRules = $englishRules
+        $desiredEntries.Add([pscustomobject]@{
+            FamilyName = $family.Name
+            SourcePath = $family.SourceBase
+            TargetPath = $family.TargetBase
+            SourceFullPath = $sourceBasePath
+            Sha256 = Get-NormalizedContentHash -Path $sourceBasePath
         })
+
+        foreach ($sourceRule in $englishRules) {
+            $sourceRelativePath = "$($family.SourceRules)/$($sourceRule.Name)"
+            $targetRelativePath = "$($family.TargetRules)/$($sourceRule.Name)"
+            $desiredEntries.Add([pscustomobject]@{
+                FamilyName = $family.Name
+                SourcePath = $sourceRelativePath
+                TargetPath = $targetRelativePath
+                SourceFullPath = $sourceRule.FullName
+                Sha256 = Get-NormalizedContentHash -Path $sourceRule.FullName
+            })
+        }
+    }
+
+    $desiredEntriesByTarget = @{}
+    foreach ($entry in $desiredEntries) {
+        if (-not (Test-IsAllowedManagedPath -Path $entry.TargetPath)) {
+            throw "Unsafe desired instruction target path: $($entry.TargetPath)"
+        }
+
+        if ($desiredEntriesByTarget.ContainsKey($entry.TargetPath)) {
+            throw "Duplicate desired instruction target path: $($entry.TargetPath)"
+        }
+
+        $desiredEntriesByTarget[$entry.TargetPath] = $entry
+    }
+
+    $eligibleFamilies = @{}
+    foreach ($family in $families) {
+        $baseTargetPath = $family.TargetBase
+        $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
+        $eligibleFamilies[$family.Name] =
+            $manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+            -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
+            (Test-WasCreatedByPreviousBootstrap -Repository $targetRootPath -Path $baseTargetPath)
     }
 
     $createdPaths = New-Object System.Collections.Generic.List[string]
+    $updatedPaths = New-Object System.Collections.Generic.List[string]
+    $removedPaths = New-Object System.Collections.Generic.List[string]
+    $adoptedPaths = New-Object System.Collections.Generic.List[string]
+    $skippedPaths = New-Object System.Collections.Generic.List[string]
+    $nextManifestEntries = New-Object System.Collections.Generic.List[object]
 
-    foreach ($item in $familiesToCreate) {
-        $targetBaseDirectory = Split-Path -Parent $item.TargetBasePath
-        if (-not [string]::IsNullOrWhiteSpace($targetBaseDirectory)) {
-            New-Item -ItemType Directory -Force -Path $targetBaseDirectory | Out-Null
+    foreach ($desiredEntry in @($desiredEntries | Sort-Object TargetPath)) {
+        $targetPath = $desiredEntry.TargetPath
+        $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+        $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
+        $managedEntry = $null
+
+        if (-not $eligibleFamilies[$desiredEntry.FamilyName]) {
+            if ($targetExists) {
+                $skippedPaths.Add($targetPath)
+            }
+            continue
         }
 
-        Copy-Item -LiteralPath $item.SourceBasePath -Destination $item.TargetBasePath
-        $createdPaths.Add((Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $item.TargetBasePath))
+        if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
+            $managedEntry = $manifestEntriesByTarget[$targetPath]
+        }
 
-        $targetRulesPath = Join-Path $targetRootPath $item.Family.TargetRules
-        New-Item -ItemType Directory -Force -Path $targetRulesPath | Out-Null
-
-        foreach ($sourceRule in $item.EnglishRules) {
-            $targetRulePath = Join-Path $targetRulesPath $sourceRule.Name
-            if (Test-Path -LiteralPath $targetRulePath) {
+        if ($null -ne $managedEntry) {
+            if (Test-GitPathHasChanges -Repository $targetRootPath -Path $targetPath) {
+                $skippedPaths.Add($targetPath)
+                $nextManifestEntries.Add((New-ManifestEntry -SourcePath ([string] $managedEntry.sourcePath) -TargetPath $targetPath -Sha256 ([string] $managedEntry.sha256)))
                 continue
             }
 
-            Copy-Item -LiteralPath $sourceRule.FullName -Destination $targetRulePath
-            $createdPaths.Add((Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $targetRulePath))
+            if (-not $targetExists) {
+                $targetDirectory = Split-Path -Parent $targetFullPath
+                New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
+                Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
+                $updatedPaths.Add($targetPath)
+                $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+                continue
+            }
+
+            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            if ($currentHash -eq [string] $managedEntry.sha256 -or $currentHash -eq $desiredEntry.Sha256) {
+                if ($currentHash -ne $desiredEntry.Sha256) {
+                    Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath -Force
+                    $updatedPaths.Add($targetPath)
+                }
+
+                $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+            }
+            else {
+                $skippedPaths.Add($targetPath)
+                $nextManifestEntries.Add((New-ManifestEntry -SourcePath ([string] $managedEntry.sourcePath) -TargetPath $targetPath -Sha256 ([string] $managedEntry.sha256)))
+            }
+
+            continue
+        }
+
+        if (-not $targetExists) {
+            $targetDirectory = Split-Path -Parent $targetFullPath
+            if (-not [string]::IsNullOrWhiteSpace($targetDirectory)) {
+                New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
+            }
+
+            Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
+            $createdPaths.Add($targetPath)
+            $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+            continue
+        }
+
+        if (Test-WasCreatedByPreviousBootstrap -Repository $targetRootPath -Path $targetPath) {
+            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            if ($currentHash -ne $desiredEntry.Sha256) {
+                Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath -Force
+                $updatedPaths.Add($targetPath)
+            }
+
+            $adoptedPaths.Add($targetPath)
+            $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+        }
+        else {
+            $skippedPaths.Add($targetPath)
         }
     }
 
-    $pathArguments = @($createdPaths.ToArray())
-    Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--') + $pathArguments) | Out-Null
-    Invoke-Git -Repository $targetRootPath -Arguments (@('diff', '--cached', '--check', '--') + $pathArguments) | Out-Null
-    Invoke-Git -Repository $targetRootPath -Arguments (@('commit', '--only', '--quiet', '-m', 'chore: add shared AI instructions', '--') + $pathArguments) | Out-Null
+    foreach ($managedTargetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
+        if ($desiredEntriesByTarget.ContainsKey($managedTargetPath)) {
+            continue
+        }
 
-    $committedPaths = @(Invoke-Git -Repository $targetRootPath -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'))
-    $unexpectedPaths = @($committedPaths | Where-Object { $_ -notin $pathArguments })
-    $missingPaths = @($pathArguments | Where-Object { $_ -notin $committedPaths })
+        $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
+        $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', '\')
+        if (Test-GitPathHasChanges -Repository $targetRootPath -Path $managedTargetPath) {
+            $skippedPaths.Add($managedTargetPath)
+            continue
+        }
 
-    if ($unexpectedPaths.Count -gt 0 -or $missingPaths.Count -gt 0) {
-        throw "Bootstrap commit verification failed. Unexpected: $($unexpectedPaths -join ', '); Missing: $($missingPaths -join ', ')"
+        if (Test-Path -LiteralPath $targetFullPath -PathType Leaf) {
+            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            if ($currentHash -ne [string] $managedEntry.sha256) {
+                $skippedPaths.Add($managedTargetPath)
+                continue
+            }
+
+            Remove-Item -LiteralPath $targetFullPath -Force
+            $removedPaths.Add($managedTargetPath)
+        }
     }
 
-    Write-Output "AI instructions downloaded from GitHub and committed: $($pathArguments -join ', ')"
+    $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
+    $manifestChanged = $false
+    if ($shouldWriteManifest) {
+        $manifestDirectory = Split-Path -Parent $manifestFullPath
+        New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
+
+        $manifestObject = [ordered]@{
+            schemaVersion = 1
+            sourceRepository = $SourceRepository
+            sourceRef = $SourceRef
+            files = @($nextManifestEntries | Sort-Object targetPath)
+        }
+        $manifestJson = ($manifestObject | ConvertTo-Json -Depth 5).Replace("`r`n", "`n") + "`n"
+        $existingManifestJson = if ($manifestExists) {
+            ([System.IO.File]::ReadAllText($manifestFullPath)).Replace("`r`n", "`n").Replace("`r", "`n")
+        }
+        else {
+            $null
+        }
+
+        if ($existingManifestJson -ne $manifestJson) {
+            $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($manifestFullPath, $manifestJson, $utf8WithoutBom)
+            $manifestChanged = $true
+        }
+    }
+
+    if ($skippedPaths.Count -gt 0) {
+        $uniqueSkippedPaths = @($skippedPaths | Sort-Object -Unique)
+        Write-Output "AI instructions customized or unmanaged; not overwritten: $($uniqueSkippedPaths -join ', ')"
+    }
+
+    $changedPaths = @(
+        @($createdPaths) +
+        @($updatedPaths) +
+        @($removedPaths) +
+        $(if ($manifestChanged) { @($manifestRelativePath) } else { @() }) |
+            Sort-Object -Unique
+    )
+
+    if ($changedPaths.Count -eq 0) {
+        Write-Output 'AI instructions are up to date; no commit was required.'
+        return
+    }
+
+    Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--') + $changedPaths) | Out-Null
+    Invoke-Git -Repository $targetRootPath -Arguments (@('diff', '--cached', '--check', '--') + $changedPaths) | Out-Null
+
+    $isInitialBootstrap = -not $manifestExists -and
+        $createdPaths.Count -gt 0 -and
+        $updatedPaths.Count -eq 0 -and
+        $adoptedPaths.Count -eq 0
+    $commitMessage = if ($isInitialBootstrap) { $initialCommitMessage } else { $syncCommitMessage }
+    Invoke-Git -Repository $targetRootPath -Arguments (@('commit', '--only', '--quiet', '-m', $commitMessage, '--') + $changedPaths) | Out-Null
+
+    $committedPaths = @(Invoke-Git -Repository $targetRootPath -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'))
+    $unexpectedPaths = @($committedPaths | Where-Object { $_ -notin $changedPaths })
+    $missingPaths = @($changedPaths | Where-Object { $_ -notin $committedPaths })
+
+    if ($unexpectedPaths.Count -gt 0 -or $missingPaths.Count -gt 0) {
+        throw "Instruction sync commit verification failed. Unexpected: $($unexpectedPaths -join ', '); Missing: $($missingPaths -join ', ')"
+    }
+
+    Write-Output "AI instructions synchronized from GitHub and committed: $($changedPaths -join ', ')"
 }
 finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)

@@ -1,4 +1,5 @@
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
+$script:ManifestPath = '.codex\ai-instructions.manifest.json'
 
 function Invoke-TestGit {
     param(
@@ -23,11 +24,36 @@ function New-TestSource {
     New-Item -ItemType Directory -Force -Path (Join-Path $Path '.codex\AI-Rules') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Path '.github\AI-Rules') | Out-Null
 
+    Set-TestText -Path (Join-Path $Path '.codex\AGENTS.en.md') -Value '# Codex English Base'
+    Set-TestText -Path (Join-Path $Path '.codex\AI-Rules\Testing.en.md') -Value '# Codex English Testing'
+    Set-TestText -Path (Join-Path $Path '.github\copilot-instructions.en.md') -Value '# Copilot English Base'
+    Set-TestText -Path (Join-Path $Path '.github\AI-Rules\Testing.en.md') -Value '# Copilot English Testing'
+}
+
+function Set-TestText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Value
+    )
+
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText((Join-Path $Path '.codex\AGENTS.en.md'), "# Codex English Base`n", $utf8WithoutBom)
-    [System.IO.File]::WriteAllText((Join-Path $Path '.codex\AI-Rules\Testing.en.md'), "# Codex English Testing`n", $utf8WithoutBom)
-    [System.IO.File]::WriteAllText((Join-Path $Path '.github\copilot-instructions.en.md'), "# Copilot English Base`n", $utf8WithoutBom)
-    [System.IO.File]::WriteAllText((Join-Path $Path '.github\AI-Rules\Testing.en.md'), "# Copilot English Testing`n", $utf8WithoutBom)
+    [System.IO.File]::WriteAllText($Path, "$Value`n", $utf8WithoutBom)
+}
+
+function Compress-TestSource {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SourceRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ArchivePath
+    )
+
+    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    Compress-Archive -Path $SourceRoot -DestinationPath $ArchivePath
 }
 
 function New-TestRepository {
@@ -70,7 +96,7 @@ Describe 'bootstrap-ai-instructions' {
         $targetRoot = Join-Path $TestDrive 'target'
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $archiveRoot, $sourceArchive, $targetRoot
         New-TestSource -Path $sourceRoot
-        Compress-Archive -Path $sourceRoot -DestinationPath $sourceArchive
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         New-TestRepository -Path $targetRoot
     }
 
@@ -81,14 +107,22 @@ Describe 'bootstrap-ai-instructions' {
         (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Codex English Testing'
         (Get-Content -Raw (Join-Path $targetRoot '.github\copilot-instructions.md')).Trim() | Should Be '# Copilot English Base'
         (Get-Content -Raw (Join-Path $targetRoot '.github\AI-Rules\Testing.en.md')).Trim() | Should Be '# Copilot English Testing'
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
+
+        $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        $manifest.schemaVersion | Should Be 1
+        $manifest.sourceRepository | Should Be 'SyuanTsai/SyuanTsai-AI-Instructions'
+        $manifest.sourceRef | Should Be 'main'
+        $manifest.files.Count | Should Be 4
 
         $commitMessage = Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')
         $commitMessage | Should Be 'chore: add shared AI instructions'
 
         $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        $committedFiles.Count | Should Be 4
+        $committedFiles.Count | Should Be 5
         ($committedFiles -contains 'AGENTS.md') | Should Be $true
         ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
+        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
         ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
         ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
     }
@@ -99,15 +133,19 @@ Describe 'bootstrap-ai-instructions' {
         Set-Content -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Existing Testing'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md', '.codex/AI-Rules/Testing.en.md') | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'existing instructions') | Out-Null
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AI-Rules\CodeReview.en.md') -Value '# Codex English Code Review'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Existing Agent'
         (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Existing Testing'
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot '.github\copilot-instructions.md') | Should Be $true
 
         $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        $committedFiles.Count | Should Be 2
+        $committedFiles.Count | Should Be 3
+        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
         ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
         ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
     }
@@ -129,5 +167,92 @@ Describe 'bootstrap-ai-instructions' {
         $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
         ($committedFiles -contains 'staged.txt') | Should Be $false
         ($committedFiles -contains 'README.md') | Should Be $false
+    }
+
+    It 'updates managed instructions when the source Agent changes' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AI-Rules\Testing.en.md') -Value '# Codex English Testing v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Codex English Testing v2'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) | Should Be 'chore: sync shared AI instructions'
+
+        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
+        ($committedFiles -contains 'AGENTS.md') | Should Be $true
+        ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
+        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+    }
+
+    It 'does not create another commit when managed instructions are current' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        ($output -join [Environment]::NewLine) | Should Match 'up to date'
+    }
+
+    It 'preserves customized managed files while updating other managed files' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Project-specific Agent'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'customize project agent') | Out-Null
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AI-Rules\Testing.en.md') -Value '# Codex English Testing v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Project-specific Agent'
+        (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Codex English Testing v2'
+        ($output -join [Environment]::NewLine) | Should Match 'customized.*AGENTS.md'
+    }
+
+    It 'adopts unchanged files created by the previous bootstrap and updates them' {
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex\AI-Rules') | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.github\AI-Rules') | Out-Null
+        Copy-Item -LiteralPath (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Destination (Join-Path $targetRoot 'AGENTS.md')
+        Copy-Item -LiteralPath (Join-Path $sourceRoot '.codex\AI-Rules\Testing.en.md') -Destination (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')
+        Copy-Item -LiteralPath (Join-Path $sourceRoot '.github\copilot-instructions.en.md') -Destination (Join-Path $targetRoot '.github\copilot-instructions.md')
+        Copy-Item -LiteralPath (Join-Path $sourceRoot '.github\AI-Rules\Testing.en.md') -Destination (Join-Path $targetRoot '.github\AI-Rules\Testing.en.md')
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md', '.codex/AI-Rules/Testing.en.md', '.github/copilot-instructions.md', '.github/AI-Rules/Testing.en.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'chore: add shared AI instructions') | Out-Null
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) | Should Be 'chore: sync shared AI instructions'
+    }
+
+    It 'removes an unchanged managed rule when the source removes it' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        $sourceRulePath = Join-Path $sourceRoot '.codex\AI-Rules\CodeReview.en.md'
+        Set-TestText -Path $sourceRulePath -Value '# Codex English Code Review'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        $targetRulePath = Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md'
+        Test-Path -LiteralPath $targetRulePath | Should Be $true
+
+        Remove-Item -LiteralPath $sourceRulePath
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Test-Path -LiteralPath $targetRulePath | Should Be $false
+        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
+        ($committedFiles -contains '.codex/AI-Rules/CodeReview.en.md') | Should Be $true
+        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
     }
 }
