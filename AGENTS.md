@@ -58,12 +58,21 @@ Base Agent 只描述載入條件：
 
 只啟用任務必要的 Agent。小型修改可使用 `Implementer → Test`；複雜功能可使用 `Planner → Implementer → Reviewer → Test`。不得固定執行全部 Agent，因為每次交接都會增加上下文與摘要成本。
 
+## 安全範例與個人設定
+
+- 受版本控制的 Instructions、文件、範例與測試資料一律使用虛構且去識別化的內容；URL 優先使用 `example.com`、`example.org` 或 `example.test` 等保留網域。
+- Repository 名稱、組織名稱、remote URL、使用者名稱、本機路徑、tenant、account、email 與其他環境識別資訊均以中性 placeholder 表示。
+- 真實個人設定保存在 `~/.codex/`、環境變數或其他未受此 Repository 追蹤的個人設定檔；Repository 只記錄設定 schema、欄位用途與安全範例。
+- commit 或 push 前，檢查 working tree、staged diff 與目前 branch 的可達歷史，確認內容已完成去識別化，且沒有 credential、token、secret 或私人 Repository 識別資訊。
+- 發現實際識別資訊時，先以安全範例取代並再次驗證；若內容已送交遠端，先向使用者說明影響範圍並取得歷史清理授權，再以受保護的方式更新遠端。
+
 ## 修改流程
 
 1. 判斷規則屬於共通 Base、條件式模組或平台專屬內容。
 2. 先修改繁體中文來源，再同步適用的平台與英文版本。
 3. 確認各版本的規則、例外與載入條件一致。
-4. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
-5. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
+4. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
+5. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
+6. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
 
 純 Markdown Instructions 修改不需要單元測試。若新舊要求衝突，或 fan-out 範圍不明且會影響產物，停止修改並詢問使用者。
