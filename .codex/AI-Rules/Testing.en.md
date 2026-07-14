@@ -2,12 +2,10 @@
 
 ## Test-First Development
 
-- Use the TDD Red-Green-Refactor cycle by default: first create a test that fails because the target behavior is missing, write the smallest production change that makes it pass, then refactor under test protection.
-- During feature analysis or planning, define the expected behavior, test level, first failing test, and required smoke and regression tests before scheduling production-code changes.
-- Before modifying production code, add or update tests first as the general rule. Do not change production code and add tests afterward.
+- Use the TDD Red-Green-Refactor cycle by default: first create the smallest test that fails because the target behavior is missing, write the smallest production change that makes it pass, then refactor under test protection.
+- During feature analysis or planning, define the expected behavior, suitable test level, and smallest failing test, then plan smoke and regression coverage according to the change's risk.
 - Prefer unit tests.
 - If unit testing is unsuitable, explain why to the user first, then use the closest applicable approach in the existing test architecture.
-- TDD guides the Agent's implementation workflow. Code review should focus on the correctness, risks, and necessary coverage of the final code and tests rather than reconstructing the development sequence.
 
 The following changes are exempt from test-first development:
 
@@ -46,6 +44,6 @@ Cover as applicable:
 - Keep performance tests separate from functional tests.
 - Performance tests must run multiple measured samples and record the sample count, average execution time, minimum execution time, maximum execution time, and DB query count. Mark DB query count as not applicable when no database is involved.
 - Reset the SQL command counter only after seeding so Arrange SQL is excluded.
-- N+1 tests must use enough data and verify that SQL count does not grow linearly with result count.
+- N+1 tests should compare at least two result sizes, record the DB query count for each, and confirm that the query count remains fixed or within an explicit upper bound instead of growing linearly with the result count.
 - CI must not use execution time in milliseconds as a hard threshold. Verify query count, query shape, and result correctness.
 - Mark manual benchmarks `Skip` by default and exclude them from normal test runs.

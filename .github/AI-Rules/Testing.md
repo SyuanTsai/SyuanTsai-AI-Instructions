@@ -2,12 +2,10 @@
 
 ## 測試先行
 
-- 預設使用 TDD 的 Red-Green-Refactor 循環：先建立會因缺少目標行為而失敗的測試，再以最小 production code 使測試通過，最後在測試保護下重構。
-- 分析或規劃功能時，計畫必須先定義預期行為、測試層級、第一個失敗測試，以及需要的 Smoke Test 與 Regression Test，再安排 production code 修改。
-- 修改 production code 前，原則上必須先新增或更新測試，不得先改 production code 再補測試。
+- 預設採用 TDD 的 Red-Green-Refactor 循環：先建立會因缺少目標行為而失敗的最小測試，再以最小 production code 使測試通過，最後在測試保護下重構。
+- 分析或規劃功能時，先定義預期行為、適合的測試層級與最小失敗測試，並依變更風險安排 Smoke Test 與 Regression Test。
 - 優先新增或更新單元測試。
 - 不適合單元測試時，先向使用者說明原因，再採用既有測試架構中最接近的測試方式。
-- TDD 用於指導 Agent 的開發流程；Code Review 應聚焦最終程式與測試的正確性、風險及必要涵蓋，而非重建開發歷程。
 
 下列修改可排除測試先行：
 
@@ -46,6 +44,6 @@ Controller 若包含 business logic、條件判斷、錯誤處理或資料轉換
 - 效能測試與一般功能測試必須分開。
 - 效能測試必須進行多次量測，並記錄樣本數、平均執行時間、最小執行時間、最大執行時間及 DB query count；不涉及資料庫時，DB query count 標記為不適用。
 - seed 完成後才可重設 SQL command counter，避免計入 Arrange 階段的 SQL。
-- N+1 測試必須使用足夠資料量，並驗證 SQL 數量不隨結果筆數線性增加。
+- N+1 測試應比較至少兩種結果資料量，記錄各自的 DB query count，並確認查詢數維持固定或符合明確上限，而非隨結果筆數線性增加。
 - CI 不得以執行毫秒數作為硬性門檻；應驗證 query count、查詢形狀與結果正確性。
 - 手動 benchmark 預設標記為 `Skip`，不得在一般測試流程執行。
