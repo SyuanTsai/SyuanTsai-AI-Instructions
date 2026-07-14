@@ -56,6 +56,23 @@ function Compress-TestSource {
     Compress-Archive -Path $SourceRoot -DestinationPath $ArchivePath
 }
 
+function New-TestConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string[]] $AutoCommitRepositories = @()
+    )
+
+    $configuration = [ordered]@{
+        schemaVersion = 1
+        autoCommitRepositories = @($AutoCommitRepositories)
+    }
+    $configurationJson = ($configuration | ConvertTo-Json -Depth 3).Replace("`r`n", "`n") + "`n"
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $configurationJson, $utf8WithoutBom)
+}
+
 function New-TestRepository {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -75,11 +92,14 @@ function Invoke-BootstrapScript {
         [string] $SourceArchivePath,
 
         [Parameter(Mandatory = $true)]
-        [string] $TargetRoot
+        [string] $TargetRoot,
+
+        [string] $ConfigurationPath = $script:TestConfigurationPath
     )
 
     $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
-        -SourceArchivePath $SourceArchivePath -TargetRoot $TargetRoot 2>&1
+        -SourceArchivePath $SourceArchivePath -TargetRoot $TargetRoot `
+        -ConfigurationPath $ConfigurationPath 2>&1
 
     if ($LASTEXITCODE -ne 0) {
         throw "Bootstrap script failed: $($output -join [Environment]::NewLine)"
@@ -94,10 +114,13 @@ Describe 'bootstrap-ai-instructions' {
         $sourceRoot = Join-Path $archiveRoot 'SyuanTsai-AI-Instructions-main'
         $sourceArchive = Join-Path $TestDrive 'source.zip'
         $targetRoot = Join-Path $TestDrive 'target'
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $archiveRoot, $sourceArchive, $targetRoot
+        $configurationPath = Join-Path $TestDrive 'sync-config.json'
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $archiveRoot, $sourceArchive, $targetRoot, $configurationPath
         New-TestSource -Path $sourceRoot
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         New-TestRepository -Path $targetRoot
+        New-TestConfiguration -Path $configurationPath -AutoCommitRepositories @($targetRoot)
+        $script:TestConfigurationPath = $configurationPath
     }
 
     It 'creates both English instruction families and commits only those files' {
@@ -254,5 +277,61 @@ Describe 'bootstrap-ai-instructions' {
         $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
         ($committedFiles -contains '.codex/AI-Rules/CodeReview.en.md') | Should Be $true
         ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+    }
+
+    It 'syncs files without staging or committing when the repository is not allowlisted' {
+        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+        $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff', '--cached', '--name-only')).Count | Should Be 0
+        $personalAgentStashes = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs') | Where-Object { $_ -match 'PersonalAgent$' })
+        $personalAgentStashes.Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Match 'without commit'
+        ($output -join [Environment]::NewLine) | Should Match 'PersonalAgent stash'
+    }
+
+    It 'continues refreshing managed files while prior sync changes remain uncommitted' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $committedHead = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit.json'
+        New-TestConfiguration -Path $noCommitConfigurationPath
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v3'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $committedHead
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v3'
+        $personalAgentStashes = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs') | Where-Object { $_ -match 'PersonalAgent$' })
+        $personalAgentStashes.Count | Should Be 1
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('show', 'stash@{0}:AGENTS.md')) -join "`n" | Should Match '# Codex English Base v3'
+        ($output -join [Environment]::NewLine) | Should Match 'without commit'
+    }
+
+    It 'keeps and reapplies the existing PersonalAgent stash when no source update is needed' {
+        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit.json'
+        New-TestConfiguration -Path $noCommitConfigurationPath
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+        $stashBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
+        ($output -join [Environment]::NewLine) | Should Match 'up to date'
     }
 }

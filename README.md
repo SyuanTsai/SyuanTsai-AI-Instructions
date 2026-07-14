@@ -8,7 +8,7 @@
 
 ```text
 請完整讀取 README.md，依「新電腦安裝」重建個人 Codex bootstrap 設定。
-保留既有的 ~/.codex/AGENTS.md 與 hooks.json 內容，只合併本文件指定的區塊與 SessionStart hook。
+保留既有的 ~/.codex/AGENTS.md、hooks.json 與 ai-instructions-sync.json 內容，只合併本文件指定的區塊、SessionStart hook 與缺少的設定欄位。
 安裝後依「驗證」執行檢查；不得 push，也不得覆寫目標 Repository 已自行修改或不受 manifest 管理的 Instructions。
 ```
 
@@ -26,19 +26,21 @@
    - `.github/copilot-instructions.en.md` → 目標 Repository 的 `.github/copilot-instructions.md`
    - `.github/AI-Rules/*.en.md` → 目標 Repository 的 `.github/AI-Rules/*.en.md`
 6. 使用目標 Repository 的 `.codex/ai-instructions.manifest.json` 記錄受管理檔案及最後套用的 SHA-256。
-7. 來源 Agent 更新後，只自動更新內容仍等於 manifest hash、沒有 staged/unstaged changes 的受管理檔案。
+7. 來源 Agent 更新後，只自動更新內容仍等於 manifest hash 且沒有 staged changes 的受管理檔案；尚未 commit 的前一次同步結果仍可繼續更新。
 8. 來源新增 rule module 時自動建立；來源移除 rule module 時，只刪除未被專案修改的受管理檔案。
 9. 已由專案自行修改或原本就不受管理的 Instructions 不覆寫；若 Base file 不受管理，整個 family 都不自動補齊，並在輸出中列出衝突路徑。
 10. 舊版 bootstrap 建立的檔案若仍與其 `chore: add shared AI instructions` 建立 commit 完全一致，會安全接管並建立 manifest。
-11. 首次建立使用 commit message `chore: add shared AI instructions`；後續更新使用 `chore: sync shared AI instructions`。
-12. 只 commit 本次同步的 Instructions 與 manifest；保留原本 staged、unstaged 與 unrelated changes，不自動 push。
+11. 只有 Repository 絕對根目錄列在個人 `~/.codex/ai-instructions-sync.json` 的 `autoCommitRepositories` 時才自動 commit；首次建立使用 `chore: add shared AI instructions`，後續更新使用 `chore: sync shared AI instructions`。
+12. 非 allowlist Repository 仍同步 Instructions 與 manifest，但不 stage、不 commit；同步結果會建立為名稱 `PersonalAgent` 的 Git stash，隨即用 `git stash apply` 抓回 working tree，stash 本身保留。
+13. 來源沒有更新時保留現有 `PersonalAgent` stash；需要更新時，先成功建立並套用新版 stash，再刪除舊的同名 stash。其他 stash 不受影響。
+14. 所有 Repository 都保留 unrelated staged/unstaged changes，而且永遠不自動 push。
 
 ## 新電腦安裝
 
 ### 1. 前置需求
 
 - Windows PowerShell 5.1 或 PowerShell 7。
-- Git 可由終端機執行，且已設定 `user.name` 與 `user.email`。
+- Git 可由終端機執行；只有 allowlist Repository 的自動 commit 需要先設定 `user.name` 與 `user.email`。
 - Codex Desktop 或其他支援 Codex hooks 的 Codex surface。
 - 能連線至 `https://github.com/SyuanTsai/SyuanTsai-AI-Instructions`。
 
@@ -75,7 +77,38 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 
 安裝後的 script 不依賴來源 Repository 的本機路徑；執行時會直接從 GitHub 下載最新英文版 Instructions，並依 manifest 安全同步新增、更新與移除。
 
-### 4. 更新個人 AGENTS.md
+### 4. 設定允許自動 commit 的 Repository
+
+建立或編輯 `$codexHome/ai-instructions-sync.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "autoCommitRepositories": [
+    "C:\\GitFile\\Personal\\OwnedProjectA",
+    "D:\\Work\\OwnedProjectB"
+  ]
+}
+```
+
+規則：
+
+- 只接受 Git Repository 根目錄的完整絕對路徑，不支援 wildcard 或 Repository 名稱。
+- Windows 路徑比對不分大小寫，尾端斜線不影響結果。
+- 設定檔不存在、清單為空或目前 Repository 不在清單時，仍會同步檔案，但不會 stage、commit 或 push；同步內容會保存到 `PersonalAgent` stash 並立即 apply 回 working tree。
+- 只有明確列入清單的 Repository 才會自動 commit；自動 commit 仍永遠不會 push。
+- 不要把主要負責人不是自己的 Repository 加入清單。
+
+最安全的預設設定是空清單：
+
+```json
+{
+  "schemaVersion": 1,
+  "autoCommitRepositories": []
+}
+```
+
+### 5. 更新個人 AGENTS.md
 
 編輯 `$codexHome/AGENTS.md`。保留既有個人規則，確認下列區塊存在；若已存在則更新，不要重複附加：
 
@@ -85,11 +118,13 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 - 開始處理 Git Repository 時，由 `SessionStart` hook 從 `SyuanTsai/SyuanTsai-AI-Instructions` 的 GitHub `main` branch 下載並同步英文 Codex 與 GitHub Copilot Instructions。
 - 若 hook 未執行，先執行：`$CODEX_HOME/hooks/bootstrap-ai-instructions.ps1`；未設定 `CODEX_HOME` 時使用 `~/.codex/hooks/bootstrap-ai-instructions.ps1`。
 - 以 `.codex/ai-instructions.manifest.json` 管理共享檔案；只更新未被專案修改的受管理檔案，不得覆寫 customized 或 unmanaged Instructions。
-- 只 commit bootstrap 新增、更新、移除的受管理檔案與 manifest；首次 commit 使用 `chore: add shared AI instructions`，後續使用 `chore: sync shared AI instructions`，不得自動 push。
+- 只有 Repository 絕對根目錄列在 `~/.codex/ai-instructions-sync.json` 的 `autoCommitRepositories` 時才自動 commit；非 allowlist Repository 仍同步檔案，但不得 stage 或 commit，並以 `PersonalAgent` stash 保存後立即 apply 回 working tree。
+- 更新非 allowlist Repository 時，只能在新版 `PersonalAgent` stash 成功建立並套用後刪除舊的同名 stash；不得刪除其他 stash。
+- allowlist Repository 只 commit bootstrap 新增、更新、移除的受管理檔案與 manifest；首次使用 `chore: add shared AI instructions`，後續使用 `chore: sync shared AI instructions`，永遠不得自動 push。
 - GitHub 無法存取、目前位置不是 Git Repository 或無法安全隔離 commit 時，停止 bootstrap 並回報原因。
 ```
 
-### 5. 合併 SessionStart hook
+### 6. 合併 SessionStart hook
 
 編輯 `$codexHome/hooks.json`，保留所有既有 hooks，並在 `hooks.SessionStart` 中加入或更新以下 entry。`command` 與 `commandWindows` 內必須使用新電腦 `$hookScript` 的完整絕對路徑，不能複製舊電腦的 username 或磁碟路徑。
 
@@ -115,9 +150,25 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 - 寫入前後都必須用 `ConvertFrom-Json` 驗證 JSON。
 - 同一個 bootstrap command 只能保留一份。
 
-### 6. 重新啟動並信任 hook
+### 7. 重新啟動並信任 hook
 
 關閉並重新開啟 Codex。因為 hook definition 是本機可執行命令，首次安裝或內容變更後，使用 Codex 的 `/hooks` 檢查並信任這個 hook。
+
+## 在其他 branch 取得 PersonalAgent
+
+非 allowlist Repository 同步後，Agent 檔案仍會留在目前 working tree，同時保留一份 `PersonalAgent` stash。切換到其他 branch 後，可先尋找同名 stash：
+
+```powershell
+git stash list --format='%gd %gs'
+```
+
+確認 reference 後套用，例如：
+
+```powershell
+git stash apply 'stash@{0}'
+```
+
+使用 `apply`，不要使用 `pop`，才能繼續保留 `PersonalAgent` stash。若目標 branch 已有同路徑的自訂 Instructions，Git 可能產生 conflict；不得使用 force 覆寫，應保留專案版本或人工合併。
 
 ## 驗證
 
@@ -127,14 +178,16 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $hookScript = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
 $hooksFile = Join-Path $codexHome 'hooks.json'
+$syncConfigurationFile = Join-Path $codexHome 'ai-instructions-sync.json'
 
 Test-Path -LiteralPath $hookScript
 Get-Content -Raw -LiteralPath $hooksFile | ConvertFrom-Json | Out-Null
+Get-Content -Raw -LiteralPath $syncConfigurationFile | ConvertFrom-Json | Out-Null
 Select-String -LiteralPath $hooksFile -SimpleMatch 'bootstrap-ai-instructions.ps1'
 Select-String -LiteralPath (Join-Path $codexHome 'AGENTS.md') -SimpleMatch 'Repository Instructions Bootstrap'
 ```
 
-四項都必須成功，且 `hooks.json` 不得包含舊電腦的絕對路徑。
+五項都必須成功，且 `hooks.json` 不得包含舊電腦的絕對路徑。逐一確認 `autoCommitRepositories` 只包含允許自動 commit 的 Repository。
 
 ### Script tests
 
@@ -145,15 +198,16 @@ Import-Module Pester
 Invoke-Pester .\tests\bootstrap-ai-instructions.Tests.ps1
 ```
 
-預期結果為 `8 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions、舊版 bootstrap 接管、安全移除 rule module，以及保留 unrelated staged/unstaged changes。
+預期結果為 `11 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、非 allowlist 不 commit、未 commit 同步結果的連續更新，以及 `PersonalAgent` stash 的建立、重新套用、保留與更新。
 
 ### Smoke test
 
-在一個可丟棄且已設定 Git identity 的空白 Git Repository 中執行已安裝的 hook script。確認：
+分別以 allowlist 與非 allowlist 設定，在可丟棄的空白 Git Repository 中執行已安裝的 hook script。確認：
 
 - 建立 `AGENTS.md`、`.codex/AI-Rules/*.en.md`、`.github/copilot-instructions.md`、`.github/AI-Rules/*.en.md` 與 `.codex/ai-instructions.manifest.json`。
-- 最新 commit message 是 `chore: add shared AI instructions`。
-- commit 只包含 bootstrap 新增的檔案。
+- allowlist Repository 的最新 commit message 是 `chore: add shared AI instructions`，而且只包含 bootstrap 新增的檔案。
+- 非 allowlist Repository 取得相同檔案，但 HEAD、Git index 與遠端都不變；檔案留在 working tree，且 `git stash list` 只出現一份最新的 `PersonalAgent` stash。
+- 新建 `PersonalAgent` stash 後檔案會自動 apply 回 working tree，stash reference 仍存在；無來源更新時不重建 stash。
 - 未變更來源時再執行一次，顯示 Instructions 已是最新版本且不新增 commit。
 - 使用更新過的來源 archive 做 Regression Test 時，未客製化的受管理檔案會更新，commit message 是 `chore: sync shared AI instructions`。
 - 修改一個目標 Agent 後再同步，該檔案會保留且輸出列出 customized path，其他未修改的受管理檔案仍正常更新。
@@ -164,6 +218,7 @@ Invoke-Pester .\tests\bootstrap-ai-instructions.Tests.ps1
 - 共通 Instructions 依根目錄 `AGENTS.md` 維護：先改繁體中文來源，再同步 Codex、GitHub Copilot 與英文版本。
 - 修改 `scripts/bootstrap-ai-instructions.ps1` 時，先更新 `tests/bootstrap-ai-instructions.Tests.ps1` 並執行 Pester。
 - 本 Repository 的英文 Instructions 更新並 push 至 GitHub 後，各專案會在下一個 Codex task 啟動時同步未被客製化的受管理檔案。
+- 修改 `~/.codex/ai-instructions-sync.json` 即可控制哪些 Repository 允許自動 commit；未列入的 Repository 更新 working tree 並保留 `PersonalAgent` stash。
 - 已存在但不受 manifest 管理的專案 Instructions 不會被自動接管；唯一例外是可由 Git history 證明仍未修改的舊版 bootstrap 產物。
 - bootstrap script 更新後，個人 hook 目錄中的已安裝副本不會自動更新。重新執行「安裝 bootstrap script」並重啟 Codex；若 `hooks.json` definition 沒有改變，通常不需要重新信任，但仍可用 `/hooks` 檢查狀態。
 - `scripts/`、`tests/` 與本 `README.md` 必須一併 commit 並 push，否則新電腦無法從 GitHub 還原完整設定。
@@ -173,5 +228,5 @@ Invoke-Pester .\tests\bootstrap-ai-instructions.Tests.ps1
 - `AGENTS.md`：本 Instructions Repository 的維護規範。
 - `.codex/`：fan-out 給 Codex 的繁體中文與英文 Instructions。
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
-- `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions 並 commit 的 bootstrap script。
+- `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions，依個人 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。
