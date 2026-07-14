@@ -67,6 +67,42 @@ function Get-FullPathWithoutTrailingSeparator {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
 }
 
+function Get-NormalizedRepositoryLocation {
+    param([Parameter(Mandatory = $true)][string] $RepositoryUrl)
+
+    $trimmedUrl = $RepositoryUrl.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmedUrl)) {
+        throw 'Repository URL cannot be empty.'
+    }
+
+    $hostName = $null
+    $repositoryPath = $null
+    $absoluteUri = $null
+    if ([System.Uri]::TryCreate($trimmedUrl, [System.UriKind]::Absolute, [ref] $absoluteUri) -and
+        -not [string]::IsNullOrWhiteSpace($absoluteUri.Host)) {
+        $hostName = $absoluteUri.Host
+        $repositoryPath = $absoluteUri.AbsolutePath
+    }
+    elseif ($trimmedUrl -match '^(?:[^@/]+@)?(?<Host>[^:/]+):(?<Path>.+)$') {
+        $hostName = $Matches.Host
+        $repositoryPath = $Matches.Path
+    }
+    else {
+        throw "Repository URL must identify a remote Git repository: $RepositoryUrl"
+    }
+
+    $normalizedPath = $repositoryPath.Trim([char[]]@('/', '\'))
+    if ($normalizedPath.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $normalizedPath = $normalizedPath.Substring(0, $normalizedPath.Length - 4)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($normalizedPath)) {
+        throw "Repository URL does not contain a repository path: $RepositoryUrl"
+    }
+
+    return "$($hostName.ToLowerInvariant())/$normalizedPath"
+}
+
 function Get-RepositoryRelativePath {
     param(
         [Parameter(Mandatory = $true)]
@@ -349,24 +385,40 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     }
 
     if ($configuration.PSObject.Properties.Name -notcontains 'schemaVersion' -or
-        $configuration.schemaVersion -ne 1) {
+        $configuration.schemaVersion -ne 2) {
         throw "Unsupported AI instruction sync configuration schema: $configurationFullPath"
     }
 
-    if ($configuration.PSObject.Properties.Name -notcontains 'autoCommitRepositories') {
-        throw "AI instruction sync configuration is missing autoCommitRepositories: $configurationFullPath"
+    if ($configuration.PSObject.Properties.Name -notcontains 'autoCommitRepositoryUrls') {
+        throw "AI instruction sync configuration is missing autoCommitRepositoryUrls: $configurationFullPath"
     }
 
-    foreach ($configuredRepository in @($configuration.autoCommitRepositories)) {
-        $configuredPath = [string] $configuredRepository
-        if ([string]::IsNullOrWhiteSpace($configuredPath) -or
-            -not [System.IO.Path]::IsPathRooted($configuredPath)) {
-            throw "autoCommitRepositories must contain absolute repository paths: $configuredPath"
+    $configuredRepositoryLocations = @(
+        foreach ($configuredRepositoryUrl in @($configuration.autoCommitRepositoryUrls)) {
+            try {
+                Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $configuredRepositoryUrl)
+            }
+            catch {
+                throw "autoCommitRepositoryUrls contains an invalid repository URL '$configuredRepositoryUrl': $($_.Exception.Message)"
+            }
         }
+    )
 
-        $normalizedConfiguredPath = Get-FullPathWithoutTrailingSeparator -Path $configuredPath
-        if ($normalizedConfiguredPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $autoCommitEnabled = $true
+    if ($configuredRepositoryLocations.Count -gt 0 -and
+        (Get-GitExitCode -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin')) -eq 0) {
+        $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
+        foreach ($originUrl in $originUrls) {
+            $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
+            foreach ($configuredRepositoryLocation in $configuredRepositoryLocations) {
+                if ($originLocation.Equals($configuredRepositoryLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $autoCommitEnabled = $true
+                    break
+                }
+            }
+
+            if ($autoCommitEnabled) {
+                break
+            }
         }
     }
 }

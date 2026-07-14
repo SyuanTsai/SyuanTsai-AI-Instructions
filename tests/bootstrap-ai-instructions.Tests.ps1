@@ -1,5 +1,6 @@
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
 $script:ManifestPath = '.codex\ai-instructions.manifest.json'
+$script:TestRepositoryUrl = 'git@example.com:team/bootstrap-test.git'
 
 function Invoke-TestGit {
     param(
@@ -61,12 +62,12 @@ function New-TestConfiguration {
         [Parameter(Mandatory = $true)]
         [string] $Path,
 
-        [string[]] $AutoCommitRepositories = @()
+        [string[]] $AutoCommitRepositoryUrls = @()
     )
 
     $configuration = [ordered]@{
-        schemaVersion = 1
-        autoCommitRepositories = @($AutoCommitRepositories)
+        schemaVersion = 2
+        autoCommitRepositoryUrls = @($AutoCommitRepositoryUrls)
     }
     $configurationJson = ($configuration | ConvertTo-Json -Depth 3).Replace("`r`n", "`n") + "`n"
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
@@ -74,13 +75,19 @@ function New-TestConfiguration {
 }
 
 function New-TestRepository {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string] $OriginUrl = $script:TestRepositoryUrl
+    )
 
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
     Invoke-TestGit -Repository $Path -Arguments @('init', '--quiet') | Out-Null
     Invoke-TestGit -Repository $Path -Arguments @('config', 'user.name', 'Bootstrap Test') | Out-Null
     Invoke-TestGit -Repository $Path -Arguments @('config', 'user.email', 'bootstrap@example.test') | Out-Null
     Invoke-TestGit -Repository $Path -Arguments @('config', 'core.autocrlf', 'true') | Out-Null
+    Invoke-TestGit -Repository $Path -Arguments @('remote', 'add', 'origin', $OriginUrl) | Out-Null
     Set-Content -LiteralPath (Join-Path $Path 'README.md') -Value '# Test Repository'
     Invoke-TestGit -Repository $Path -Arguments @('add', '--', 'README.md') | Out-Null
     Invoke-TestGit -Repository $Path -Arguments @('commit', '--quiet', '-m', 'initial commit') | Out-Null
@@ -119,7 +126,7 @@ Describe 'bootstrap-ai-instructions' {
         New-TestSource -Path $sourceRoot
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         New-TestRepository -Path $targetRoot
-        New-TestConfiguration -Path $configurationPath -AutoCommitRepositories @($targetRoot)
+        New-TestConfiguration -Path $configurationPath -AutoCommitRepositoryUrls @($script:TestRepositoryUrl)
         $script:TestConfigurationPath = $configurationPath
     }
 
@@ -148,6 +155,32 @@ Describe 'bootstrap-ai-instructions' {
         ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
         ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
         ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+    }
+
+    It 'matches the actual repository location across SSH and HTTPS origin URL formats' {
+        New-TestConfiguration -Path $configurationPath `
+            -AutoCommitRepositoryUrls @('https://example.com/team/bootstrap-test.git')
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) |
+            Should Be 'chore: add shared AI instructions'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+    }
+
+    It 'does not allow auto commit based on a matching local folder name' {
+        $namedTargetRoot = Join-Path $TestDrive 'OwnedProject'
+        New-TestRepository -Path $namedTargetRoot -OriginUrl 'git@example.com:someone-else/owned-project.git'
+        New-TestConfiguration -Path $configurationPath `
+            -AutoCommitRepositoryUrls @('git@example.com:team/owned-project.git')
+        $commitBefore = Invoke-TestGit -Repository $namedTargetRoot -Arguments @('rev-parse', 'HEAD')
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $namedTargetRoot
+
+        (Invoke-TestGit -Repository $namedTargetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        @(Invoke-TestGit -Repository $namedTargetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
     It 'does not overwrite an existing Codex family and still creates a missing GitHub family' {
