@@ -7,6 +7,7 @@
 - Before modifying production code, add or update tests first as the general rule. Do not change production code and add tests afterward.
 - Prefer unit tests.
 - If unit testing is unsuitable, explain why to the user first, then use the closest applicable approach in the existing test architecture.
+- TDD guides the Agent's implementation workflow. Code review should focus on the correctness, risks, and necessary coverage of the final code and tests rather than reconstructing the development sequence.
 
 The following changes are exempt from test-first development:
 
