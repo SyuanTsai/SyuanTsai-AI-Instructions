@@ -18,6 +18,7 @@
 - 涉及 EF、SQL、database query 或資料存取效能 → `.codex/AI-Rules/Database.md`
 - Review 程式碼或 Pull Request → `.codex/AI-Rules/CodeReview.md`
 - 使用者要求提供交給 GitHub Copilot 的提示詞 → `.codex/AI-Rules/CopilotPrompt.md`
+- 查詢或修改 JIRA issue，或任務中的 issue key 需要提供工作脈絡 → `.codex/AI-Rules/Jira.md`
 
 若適用模組不存在，指出缺少的檔案，不得臆測其內容。
 

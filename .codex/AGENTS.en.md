@@ -18,6 +18,7 @@ Read the applicable file in full only when its condition is met. Do not load unr
 - EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md`
 - Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md`
 - A prompt requested for GitHub Copilot → `.codex/AI-Rules/CopilotPrompt.en.md`
+- A JIRA issue must be queried or changed, or an issue key in the task is needed for work context → `.codex/AI-Rules/Jira.en.md`
 
 If an applicable module is missing, identify the missing file and do not invent its contents.
 
