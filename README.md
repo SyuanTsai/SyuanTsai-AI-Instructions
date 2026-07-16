@@ -61,25 +61,34 @@ git pull --ff-only
 git remote get-url origin
 ```
 
-### 3. 安裝 bootstrap script
+### 3. 執行本機安裝腳本
 
-Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.codex`。把 Repository 中已測試的 script 複製到個人 hook 目錄：
+Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.codex`。執行安裝腳本會完成下列本機設定：
+
+- 複製 `scripts/bootstrap-ai-instructions.ps1` 到個人 hook 目錄。
+- 建立或遷移 `$codexHome/ai-instructions-sync.json` 為 schema version 2，只保留允許自動 commit 的 Repository URL，移除舊版本機路徑設定。
+- 在 `$codexHome/AGENTS.md` 新增或更新 `Repository Instructions Bootstrap` 區塊，保留其他個人規則。
+- 在 `$codexHome/hooks.json` 的 `hooks.SessionStart` 新增或更新唯一一個 bootstrap entry，保留其他 hooks。
 
 ```powershell
-$repositoryRoot = (git rev-parse --show-toplevel).Trim()
-$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
-$hookDirectory = Join-Path $codexHome 'hooks'
-$hookScript = Join-Path $hookDirectory 'bootstrap-ai-instructions.ps1'
-
-New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
-Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instructions.ps1') -Destination $hookScript -Force
+.\scripts\install-ai-instructions-bootstrap.ps1
 ```
 
-安裝後的 script 不依賴來源 Repository 的本機路徑；執行時會直接從 GitHub 下載最新英文版 Instructions，並依 manifest 安全同步新增、更新與移除。
+若要在安裝時加入允許自動 commit 的 Repository，可傳入 URL；請只使用真實 remote URL，不要使用本機資料夾路徑：
+
+```powershell
+.\scripts\install-ai-instructions-bootstrap.ps1 `
+  -AutoCommitRepositoryUrls @(
+    'git@example.com:your-account/owned-project-a.git',
+    'https://example.com/your-account/owned-project-b.git'
+  )
+```
+
+安裝後的 bootstrap script 不依賴來源 Repository 的本機路徑；執行時會直接從 GitHub 下載最新英文版 Instructions，並依 manifest 安全同步新增、更新與移除。
 
 ### 4. 設定允許自動 commit 的 Repository
 
-建立或編輯 `$codexHome/ai-instructions-sync.json`：
+安裝腳本會建立或保留 `$codexHome/ai-instructions-sync.json`。需要手動調整 allowlist 時，編輯成以下格式：
 
 ```json
 {
@@ -111,9 +120,9 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 }
 ```
 
-### 5. 更新個人 AGENTS.md
+### 5. 確認個人 AGENTS.md
 
-編輯 `$codexHome/AGENTS.md`。保留既有個人規則，確認下列區塊存在；若已存在則更新，不要重複附加：
+安裝腳本會保留既有個人規則，並新增或更新下列區塊；若手動維護，確認同一區塊不要重複附加：
 
 ```markdown
 ## Repository Instructions Bootstrap
@@ -127,9 +136,9 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\bootstrap-ai-instruct
 - GitHub 無法存取、目前位置不是 Git Repository 或無法安全隔離 commit 時，停止 bootstrap 並回報原因。
 ```
 
-### 6. 合併 SessionStart hook
+### 6. 確認 SessionStart hook
 
-編輯 `$codexHome/hooks.json`，保留所有既有 hooks，並在 `hooks.SessionStart` 中加入或更新以下 entry。`command` 與 `commandWindows` 內必須使用新電腦 `$hookScript` 的完整絕對路徑，不能複製舊電腦的 username 或磁碟路徑。
+安裝腳本會保留所有既有 hooks，並在 `hooks.SessionStart` 中加入或更新以下 entry。`command` 與 `commandWindows` 內必須使用新電腦 `$hookScript` 的完整絕對路徑，不能複製舊電腦的 username 或磁碟路徑。
 
 ```json
 {
@@ -198,10 +207,10 @@ Select-String -LiteralPath (Join-Path $codexHome 'AGENTS.md') -SimpleMatch 'Repo
 
 ```powershell
 Import-Module Pester
-Invoke-Pester .\tests\bootstrap-ai-instructions.Tests.ps1
+Invoke-Pester .\tests
 ```
 
-預期結果為 `13 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新，以及 `PersonalAgent` stash 的建立、重新套用、保留與更新。
+預期結果為 `16 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的 idempotent 合併與設定遷移。
 
 ### Smoke test
 
@@ -232,4 +241,6 @@ Invoke-Pester .\tests\bootstrap-ai-instructions.Tests.ps1
 - `.codex/`：fan-out 給 Codex 的繁體中文與英文 Instructions。
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
 - `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions，依個人 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。
+- `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝 hook script、合併 `AGENTS.md`、`hooks.json` 與 `ai-instructions-sync.json`。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。
+- `tests/install-ai-instructions-bootstrap.Tests.ps1`：本機安裝腳本的 Pester tests。
