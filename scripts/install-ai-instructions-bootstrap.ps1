@@ -2,13 +2,15 @@
 param(
     [string] $RepositoryRoot,
     [string] $CodexHome,
-    [string[]] $AutoCommitRepositoryUrls = @()
+    [string[]] $AutoCommitRepositoryUrls = @(),
+    [string[]] $ExcludedRepositoryUrls = @(),
+    [string[]] $ExcludedRepositoryPaths = @()
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$bootstrapSectionBase64 = 'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOmWi+Wni+iZleeQhiBHaXQgUmVwb3NpdG9yeSDmmYLvvIznlLEgYFNlc3Npb25TdGFydGAgaG9vayDlvp4gYFN5dWFuVHNhaS9TeXVhblRzYWktQUktSW5zdHJ1Y3Rpb25zYCDnmoQgR2l0SHViIGBtYWluYCBicmFuY2gg5LiL6LyJ5Lim5ZCM5q2l6Iux5paHIENvZGV4IOiIhyBHaXRIdWIgQ29waWxvdCBJbnN0cnVjdGlvbnPjgIIKLSDoi6UgaG9vayDmnKrln7fooYzvvIzlhYjln7fooYzvvJpgJENPREVYX0hPTUUvaG9va3MvYm9vdHN0cmFwLWFpLWluc3RydWN0aW9ucy5wczFg77yb5pyq6Kit5a6aIGBDT0RFWF9IT01FYCDmmYLkvb/nlKggYH4vLmNvZGV4L2hvb2tzL2Jvb3RzdHJhcC1haS1pbnN0cnVjdGlvbnMucHMxYOOAggotIOS7pSBgLmNvZGV4L2FpLWluc3RydWN0aW9ucy5tYW5pZmVzdC5qc29uYCDnrqHnkIblhbHkuqvmqpTmoYjvvJvlj6rmm7TmlrDmnKrooqvlsIjmoYjkv67mlLnnmoTlj5fnrqHnkIbmqpTmoYjvvIzkuI3lvpfopoblr6sgY3VzdG9taXplZCDmiJYgdW5tYW5hZ2VkIEluc3RydWN0aW9uc+OAggotIOWPquaciSBSZXBvc2l0b3J5IOeahCBgb3JpZ2luYCDlr6bpmpvkvY3nva7liJflnKggYH4vLmNvZGV4L2FpLWluc3RydWN0aW9ucy1zeW5jLmpzb25gIOeahCBgYXV0b0NvbW1pdFJlcG9zaXRvcnlVcmxzYCDmmYLmiY3oh6rli5UgY29tbWl077yb5LiN5b6X5L2/55So5pys5qmf6LOH5paZ5aS+5L2N572u5Yik5pa344CC6Z2eIGFsbG93bGlzdCBSZXBvc2l0b3J5IOS7jeWQjOatpeaqlOahiO+8jOS9huS4jeW+lyBzdGFnZSDmiJYgY29tbWl077yM5Lim5LulIGBQZXJzb25hbEFnZW50YCBzdGFzaCDkv53lrZjlvoznq4vljbMgYXBwbHkg5ZueIHdvcmtpbmcgdHJlZeOAggotIOabtOaWsOmdniBhbGxvd2xpc3QgUmVwb3NpdG9yeSDmmYLvvIzlj6rog73lnKjmlrDniYggYFBlcnNvbmFsQWdlbnRgIHN0YXNoIOaIkOWKn+W7uueri+S4puWll+eUqOW+jOWIqumZpOiIiueahOWQjOWQjSBzdGFzaO+8m+S4jeW+l+WIqumZpOWFtuS7liBzdGFzaOOAggotIGFsbG93bGlzdCBSZXBvc2l0b3J5IOWPqiBjb21taXQgYm9vdHN0cmFwIOaWsOWinuOAgeabtOaWsOOAgeenu+mZpOeahOWPl+euoeeQhuaqlOahiOiIhyBtYW5pZmVzdO+8m+mmluasoeS9v+eUqCBgY2hvcmU6IGFkZCBzaGFyZWQgQUkgaW5zdHJ1Y3Rpb25zYO+8jOW+jOe6jOS9v+eUqCBgY2hvcmU6IHN5bmMgc2hhcmVkIEFJIGluc3RydWN0aW9uc2DvvIzmsLjpgaDkuI3lvpfoh6rli5UgcHVzaOOAggotIEdpdEh1YiDnhKHms5XlrZjlj5bjgIHnm67liY3kvY3nva7kuI3mmK8gR2l0IFJlcG9zaXRvcnkg5oiW54Sh5rOV5a6J5YWo6ZqU6ZuiIGNvbW1pdCDmmYLvvIzlgZzmraIgYm9vdHN0cmFwIOS4puWbnuWgseWOn+WboOOAgg=='
+$bootstrapSectionBase64 = 'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwDQoNCi0g6ZaL5aeL6JmV55CGIEdpdCBSZXBvc2l0b3J5IOaZgu+8jOeUsSBgU2Vzc2lvblN0YXJ0YCBob29rIOW+niBgU3l1YW5Uc2FpL1N5dWFuVHNhaS1BSS1JbnN0cnVjdGlvbnNgIOeahCBHaXRIdWIgYG1haW5gIGJyYW5jaCDkuIvovInkuKblkIzmraXoi7HmlocgQ29kZXgg6IiHIEdpdEh1YiBDb3BpbG90IEluc3RydWN0aW9uc+OAggotIOiLpSBob29rIOacquWft+ihjO+8jOWFiOWft+ihjO+8mmAkQ09ERVhfSE9NRS9ob29rcy9ib290c3RyYXAtYWktaW5zdHJ1Y3Rpb25zLnBzMWDvvJvmnKroqK3lrpogYENPREVYX0hPTUVgIOaZguS9v+eUqCBgfi8uY29kZXgvaG9va3MvYm9vdHN0cmFwLWFpLWluc3RydWN0aW9ucy5wczFg44CCCi0g5LulIGAuY29kZXgvYWktaW5zdHJ1Y3Rpb25zLm1hbmlmZXN0Lmpzb25gIOeuoeeQhuWFseS6q+aqlOahiO+8m+WPquabtOaWsOacquiiq+WwiOahiOS/ruaUueeahOWPl+euoeeQhuaqlOahiO+8jOS4jeW+l+imhuWvqyBjdXN0b21pemVkIOaIliB1bm1hbmFnZWQgSW5zdHJ1Y3Rpb25z44CCCi0gUmVwb3NpdG9yeSDnmoQgYG9yaWdpbmAg5a+m6Zqb5L2N572u5YiX5ZyoIGB+Ly5jb2RleC9haS1pbnN0cnVjdGlvbnMtc3luYy5qc29uYCDnmoQgYGV4Y2x1ZGVkUmVwb3NpdG9yeVVybHNg77yM5oiWIHRhc2sg5ZWf5YuV55uu6YyE5L2N5pa8IGBleGNsdWRlZFJlcG9zaXRvcnlQYXRoc2Ag55qEIHJlcG8tcmVsYXRpdmUg55uu6YyE5bqV5LiL5pmC77yM55u05o6l55Wl6YGO5ZCM5q2l77yb5LiN5b6X5L2/55So5pys5qmf6LOH5paZ5aS+5L2N572u5Yik5pa344CCCi0g5Y+q5pyJIFJlcG9zaXRvcnkg55qEIGBvcmlnaW5gIOWvpumam+S9jee9ruWIl+WcqCBgYXV0b0NvbW1pdFJlcG9zaXRvcnlVcmxzYCDmmYLmiY3oh6rli5UgY29tbWl044CC6Z2eIGFsbG93bGlzdCDkuJTmnKrooqvmjpLpmaTnmoQgUmVwb3NpdG9yeSDmiJbnm67pjITku43lkIzmraXmqpTmoYjvvIzkvYbkuI3lvpcgc3RhZ2Ug5oiWIGNvbW1pdO+8jOS4puS7pSBgUGVyc29uYWxBZ2VudGAgc3Rhc2gg5L+d5a2Y5b6M56uL5Y2zIGFwcGx5IOWbniB3b3JraW5nIHRyZWXjgIIKLSDmm7TmlrDpnZ4gYWxsb3dsaXN0IFJlcG9zaXRvcnkg5pmC77yM5Y+q6IO95Zyo5paw54mIIGBQZXJzb25hbEFnZW50YCBzdGFzaCDmiJDlip/lu7rnq4vkuKblpZfnlKjlvozliKrpmaToiIrnmoTlkIzlkI0gc3Rhc2jvvJvkuI3lvpfliKrpmaTlhbbku5Ygc3Rhc2jjgIIKLSBhbGxvd2xpc3QgUmVwb3NpdG9yeSDlj6ogY29tbWl0IGJvb3RzdHJhcCDmlrDlop7jgIHmm7TmlrDjgIHnp7vpmaTnmoTlj5fnrqHnkIbmqpTmoYjoiIcgbWFuaWZlc3TvvJvpppbmrKHkvb/nlKggYGNob3JlOiBhZGQgc2hhcmVkIEFJIGluc3RydWN0aW9uc2DvvIzlvoznuozkvb/nlKggYGNob3JlOiBzeW5jIHNoYXJlZCBBSSBpbnN0cnVjdGlvbnNg77yM5rC46YGg5LiN5b6X6Ieq5YuVIHB1c2jjgIIKLSBHaXRIdWIg54Sh5rOV5a2Y5Y+W44CB55uu5YmN5L2N572u5LiN5pivIEdpdCBSZXBvc2l0b3J5IOaIlueEoeazleWuieWFqOmalOmboiBjb21taXQg5pmC77yM5YGc5q2iIGJvb3RzdHJhcCDkuKblm57loLHljp/lm6DjgII='
 $bootstrapSection = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($bootstrapSectionBase64))
 
 function Invoke-Git {
@@ -70,6 +72,27 @@ function Test-IsRepositoryUrl {
     }
 
     return $trimmedValue -match '^(?:[^@/\\]+@)?[^:/\\]+:.+'
+}
+
+function Test-IsRepositoryRelativePath {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $trimmedValue = $Value.Trim().Replace('\', '/').Trim('/')
+    if ([string]::IsNullOrWhiteSpace($trimmedValue)) {
+        return $false
+    }
+
+    if ([System.IO.Path]::IsPathRooted($Value) -or $trimmedValue -match '^[A-Za-z]:') {
+        return $false
+    }
+
+    foreach ($part in @($trimmedValue -split '/+')) {
+        if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..') {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Test-ObjectHasProperty {
@@ -144,7 +167,11 @@ function Set-SyncConfiguration {
         [Parameter(Mandatory = $true)]
         [string] $ConfigurationPath,
 
-        [string[]] $AdditionalRepositoryUrls = @()
+        [string[]] $AdditionalRepositoryUrls = @(),
+
+        [string[]] $AdditionalExcludedRepositoryUrls = @(),
+
+        [string[]] $AdditionalExcludedRepositoryPaths = @()
     )
 
     $existingConfiguration = $null
@@ -168,6 +195,28 @@ function Set-SyncConfiguration {
         $candidateUrls.Add([string] $value)
     }
 
+    $candidateExcludedUrls = New-Object System.Collections.Generic.List[string]
+    foreach ($propertyName in @('excludedRepositoryUrls', 'excludedRepositories')) {
+        foreach ($value in @(Get-StringArrayProperty -Object $existingConfiguration -PropertyName $propertyName)) {
+            $candidateExcludedUrls.Add($value)
+        }
+    }
+
+    foreach ($value in @($AdditionalExcludedRepositoryUrls)) {
+        $candidateExcludedUrls.Add([string] $value)
+    }
+
+    $candidateExcludedPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($propertyName in @('excludedRepositoryPaths', 'excludedPaths')) {
+        foreach ($value in @(Get-StringArrayProperty -Object $existingConfiguration -PropertyName $propertyName)) {
+            $candidateExcludedPaths.Add($value)
+        }
+    }
+
+    foreach ($value in @($AdditionalExcludedRepositoryPaths)) {
+        $candidateExcludedPaths.Add([string] $value)
+    }
+
     $repositoryUrls = @(
         $candidateUrls |
             Where-Object { Test-IsRepositoryUrl -Value ([string] $_) } |
@@ -175,9 +224,25 @@ function Set-SyncConfiguration {
             Sort-Object -Unique
     )
 
+    $excludedRepositoryUrls = @(
+        $candidateExcludedUrls |
+            Where-Object { Test-IsRepositoryUrl -Value ([string] $_) } |
+            ForEach-Object { ([string] $_).Trim() } |
+            Sort-Object -Unique
+    )
+
+    $excludedRepositoryPaths = @(
+        $candidateExcludedPaths |
+            Where-Object { Test-IsRepositoryRelativePath -Value ([string] $_) } |
+            ForEach-Object { ([string] $_).Trim().Replace('\', '/').Trim('/') } |
+            Sort-Object -Unique
+    )
+
     $configuration = [ordered]@{
         schemaVersion = 2
         autoCommitRepositoryUrls = @($repositoryUrls)
+        excludedRepositoryUrls = @($excludedRepositoryUrls)
+        excludedRepositoryPaths = @($excludedRepositoryPaths)
     }
     $configurationJson = ($configuration | ConvertTo-Json -Depth 4).Replace("`r`n", "`n") + "`n"
     Write-Utf8NoBomFile -Path $ConfigurationPath -Content $configurationJson
@@ -301,7 +366,10 @@ $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
 Copy-Item -LiteralPath $sourceBootstrapScript -Destination $hookScript -Force
 
-Set-SyncConfiguration -ConfigurationPath $configurationPath -AdditionalRepositoryUrls $AutoCommitRepositoryUrls
+Set-SyncConfiguration -ConfigurationPath $configurationPath `
+    -AdditionalRepositoryUrls $AutoCommitRepositoryUrls `
+    -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls `
+    -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths
 Set-BootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
 Set-SessionStartHook -HooksPath $hooksPath -HookScriptPath $hookScript
 

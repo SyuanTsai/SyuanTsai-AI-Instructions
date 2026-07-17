@@ -62,12 +62,18 @@ function New-TestConfiguration {
         [Parameter(Mandatory = $true)]
         [string] $Path,
 
-        [string[]] $AutoCommitRepositoryUrls = @()
+        [string[]] $AutoCommitRepositoryUrls = @(),
+
+        [string[]] $ExcludedRepositoryUrls = @(),
+
+        [string[]] $ExcludedRepositoryPaths = @()
     )
 
     $configuration = [ordered]@{
         schemaVersion = 2
         autoCommitRepositoryUrls = @($AutoCommitRepositoryUrls)
+        excludedRepositoryUrls = @($ExcludedRepositoryUrls)
+        excludedRepositoryPaths = @($ExcludedRepositoryPaths)
     }
     $configurationJson = ($configuration | ConvertTo-Json -Depth 3).Replace("`r`n", "`n") + "`n"
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
@@ -101,12 +107,36 @@ function Invoke-BootstrapScript {
         [Parameter(Mandatory = $true)]
         [string] $TargetRoot,
 
-        [string] $ConfigurationPath = $script:TestConfigurationPath
+        [string] $ConfigurationPath = $script:TestConfigurationPath,
+
+        [string] $WorkingDirectory,
+
+        [switch] $UseCurrentRepositoryRoot
     )
 
-    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
-        -SourceArchivePath $SourceArchivePath -TargetRoot $TargetRoot `
-        -ConfigurationPath $ConfigurationPath 2>&1
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $script:BootstrapScript,
+        '-SourceArchivePath', $SourceArchivePath,
+        '-ConfigurationPath', $ConfigurationPath
+    )
+
+    if (-not $UseCurrentRepositoryRoot) {
+        $arguments += @('-TargetRoot', $TargetRoot)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        Push-Location -LiteralPath $WorkingDirectory
+    }
+    try {
+        $output = & powershell.exe @arguments 2>&1
+    }
+    finally {
+        if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            Pop-Location
+        }
+    }
 
     if ($LASTEXITCODE -ne 0) {
         throw "Bootstrap script failed: $($output -join [Environment]::NewLine)"
@@ -181,6 +211,41 @@ Describe 'bootstrap-ai-instructions' {
         (Invoke-TestGit -Repository $namedTargetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
         @(Invoke-TestGit -Repository $namedTargetRoot -Arguments @('stash', 'list', '--format=%gs') |
             Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    It 'skips synchronization when the repository is excluded' {
+        New-TestConfiguration -Path $configurationPath `
+            -AutoCommitRepositoryUrls @($script:TestRepositoryUrl) `
+            -ExcludedRepositoryUrls @('https://example.com/team/bootstrap-test.git')
+        $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'repository is excluded'
+    }
+
+    It 'skips synchronization when the startup directory is excluded' {
+        $planningDirectory = Join-Path $targetRoot 'docs\architecture-planning'
+        New-Item -ItemType Directory -Force -Path $planningDirectory | Out-Null
+        New-TestConfiguration -Path $configurationPath `
+            -AutoCommitRepositoryUrls @($script:TestRepositoryUrl) `
+            -ExcludedRepositoryPaths @('docs/architecture-planning')
+        $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -WorkingDirectory $planningDirectory -UseCurrentRepositoryRoot
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'directory is excluded'
     }
 
     It 'does not overwrite an existing Codex family and still creates a missing GitHub family' {

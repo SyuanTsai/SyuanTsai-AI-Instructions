@@ -9,7 +9,11 @@ function Invoke-InstallScript {
         [Parameter(Mandatory = $true)]
         [string] $CodexHome,
 
-        [string[]] $AutoCommitRepositoryUrls = @()
+        [string[]] $AutoCommitRepositoryUrls = @(),
+
+        [string[]] $ExcludedRepositoryUrls = @(),
+
+        [string[]] $ExcludedRepositoryPaths = @()
     )
 
     $arguments = @(
@@ -24,6 +28,20 @@ function Invoke-InstallScript {
         $arguments += '-AutoCommitRepositoryUrls'
         foreach ($repositoryUrl in $AutoCommitRepositoryUrls) {
             $arguments += $repositoryUrl
+        }
+    }
+
+    if ($ExcludedRepositoryUrls.Count -gt 0) {
+        $arguments += '-ExcludedRepositoryUrls'
+        foreach ($repositoryUrl in $ExcludedRepositoryUrls) {
+            $arguments += $repositoryUrl
+        }
+    }
+
+    if ($ExcludedRepositoryPaths.Count -gt 0) {
+        $arguments += '-ExcludedRepositoryPaths'
+        foreach ($repositoryPath in $ExcludedRepositoryPaths) {
+            $arguments += $repositoryPath
         }
     }
 
@@ -70,10 +88,14 @@ Describe 'install-ai-instructions-bootstrap' {
         $configuration = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | ConvertFrom-Json
         $configuration.schemaVersion | Should Be 2
         @($configuration.autoCommitRepositoryUrls).Count | Should Be 0
+        @($configuration.excludedRepositoryUrls).Count | Should Be 0
+        @($configuration.excludedRepositoryPaths).Count | Should Be 0
 
         $agents = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'AGENTS.md')
         $agents | Should Match 'Repository Instructions Bootstrap'
         $agents | Should Match 'SessionStart'
+        $agents | Should Match 'excludedRepositoryUrls'
+        $agents | Should Match 'excludedRepositoryPaths'
 
         $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
         @($hooks.hooks.SessionStart).Count | Should Be 1
@@ -147,7 +169,7 @@ Keep this section too.
         @($hooks.hooks.Stop).Count | Should Be 1
     }
 
-    It 'migrates sync configuration to schema version 2 and keeps only repository URLs' {
+    It 'migrates sync configuration to schema version 2 and keeps repository URLs and paths' {
         Set-TestText -Path (Join-Path $codexHome 'ai-instructions-sync.json') -Value @'
 {
   "schemaVersion": 1,
@@ -159,12 +181,20 @@ Keep this section too.
   ],
   "repositoryUrls": [
     "https://example.com/team/second-project.git"
+  ],
+  "excludedRepositoryUrls": [
+    "git@example.com:team/planning-only.git"
+  ],
+  "excludedRepositoryPaths": [
+    "docs/architecture-planning"
   ]
 }
 '@
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome `
-            -AutoCommitRepositoryUrls @('ssh://git@example.com/team/new-project.git')
+            -AutoCommitRepositoryUrls @('ssh://git@example.com/team/new-project.git') `
+            -ExcludedRepositoryUrls @('https://example.com/team/architecture-only.git') `
+            -ExcludedRepositoryPaths @('design/planning-only')
 
         $configuration = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | ConvertFrom-Json
         $configuration.schemaVersion | Should Be 2
@@ -172,6 +202,12 @@ Keep this section too.
         ($configuration.autoCommitRepositoryUrls -contains 'git@example.com:team/old-project.git') | Should Be $true
         ($configuration.autoCommitRepositoryUrls -contains 'https://example.com/team/second-project.git') | Should Be $true
         ($configuration.autoCommitRepositoryUrls -contains 'ssh://git@example.com/team/new-project.git') | Should Be $true
+        @($configuration.excludedRepositoryUrls).Count | Should Be 2
+        ($configuration.excludedRepositoryUrls -contains 'git@example.com:team/planning-only.git') | Should Be $true
+        ($configuration.excludedRepositoryUrls -contains 'https://example.com/team/architecture-only.git') | Should Be $true
+        @($configuration.excludedRepositoryPaths).Count | Should Be 2
+        ($configuration.excludedRepositoryPaths -contains 'docs/architecture-planning') | Should Be $true
+        ($configuration.excludedRepositoryPaths -contains 'design/planning-only') | Should Be $true
         ($configuration.PSObject.Properties.Name -contains 'autoCommitRepositoryPaths') | Should Be $false
     }
 }
