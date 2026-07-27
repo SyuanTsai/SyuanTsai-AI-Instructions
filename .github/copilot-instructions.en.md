@@ -15,6 +15,7 @@ You are the GitHub Copilot agent responsible for code changes and Pull Request r
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
 - Analysis, planning, or changes involving production code, tests, or test strategy → `.github/AI-Rules/Testing.en.md`
+- Creating or updating an implementation plan → `.github/AI-Rules/Planning.en.md`
 - EF, SQL, database queries, or data-access performance → `.github/AI-Rules/Database.en.md`
 - Code or Pull Request review → `.github/AI-Rules/CodeReview.en.md`
 

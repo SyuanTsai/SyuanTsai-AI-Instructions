@@ -15,6 +15,7 @@
 只在符合條件時完整讀取對應檔案，未涉及的規則不得載入：
 
 - 分析、規劃或修改 production code、測試或測試策略 → `.github/AI-Rules/Testing.md`
+- 提出或更新實作計畫 → `.github/AI-Rules/Planning.md`
 - 涉及 EF、SQL、database query 或資料存取效能 → `.github/AI-Rules/Database.md`
 - Review 程式碼或 Pull Request → `.github/AI-Rules/CodeReview.md`
 
