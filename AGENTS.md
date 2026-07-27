@@ -72,8 +72,8 @@ Base Agent 只描述載入條件：
 
 ## 安全範例與個人設定
 
-- 受版本控制的 Instructions、文件、範例與測試資料一律使用虛構且去識別化的內容；URL 優先使用 `example.com`、`example.org` 或 `example.test` 等保留網域。
-- Repository 名稱、組織名稱、remote URL、使用者名稱、本機路徑、tenant、account、email 與其他環境識別資訊均以中性 placeholder 表示。
+- 受版本控制的 Instructions、文件、範例與測試資料不得包含私人、敏感或非必要的真實識別資訊；URL 範例優先使用 `example.com`、`example.org` 或 `example.test` 等保留網域。
+- Repository 名稱、組織名稱、remote URL、使用者名稱、本機路徑、tenant、account、email 與其他環境識別資訊，在功能運作不需要真實值時以中性 placeholder 表示。bootstrap、安裝或其他功能若必須指向刻意公開的 canonical Repository，可保留其公開名稱與 URL，但不得包含 credential、token、私人端點或其他非必要識別資訊。
 - 真實個人設定保存在 `~/.codex/`、環境變數或其他未受此 Repository 追蹤的個人設定檔；Repository 只記錄設定 schema、欄位用途與安全範例。
 - commit 或 push 前，檢查 working tree、staged diff 與目前 branch 的可達歷史，確認內容已完成去識別化，且沒有 credential、token、secret 或私人 Repository 識別資訊。
 - 發現實際識別資訊時，先以安全範例取代並再次驗證；若內容已送交遠端，先向使用者說明影響範圍並取得歷史清理授權，再以受保護的方式更新遠端。

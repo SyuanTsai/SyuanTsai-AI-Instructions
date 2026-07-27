@@ -5,4 +5,4 @@
 - Do not use projection as a business response shape, DTO, primary application return model, or carrier for core logic.
 - Do not add a model, DTO, or class to carry returned data unless the user explicitly approves it.
 - Before changing data access, inspect only the relevant existing queries, entity relationships, indexes, and conventions.
-- For query performance or N+1 work, also load `.github/AI-Rules/Testing.en.md` and validate using its performance-test rules.
+- For query performance or N+1 work, also load `.github/AI-Rules/PerformanceTesting.en.md` and validate using its rules.
