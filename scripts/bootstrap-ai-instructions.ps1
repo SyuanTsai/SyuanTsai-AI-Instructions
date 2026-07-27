@@ -103,6 +103,68 @@ function Get-NormalizedRepositoryLocation {
     return "$($hostName.ToLowerInvariant())/$normalizedPath"
 }
 
+function Test-RepositoryLocationMatches {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RepositoryLocation,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $ConfiguredRepositoryLocations
+    )
+
+    foreach ($configuredRepositoryLocation in $ConfiguredRepositoryLocations) {
+        if ($RepositoryLocation.Equals($configuredRepositoryLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-NormalizedRepositoryRelativeDirectoryPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $trimmedPath = $Path.Trim().Replace('\', '/').Trim('/')
+    if ([string]::IsNullOrWhiteSpace($trimmedPath)) {
+        throw 'Repository-relative directory path cannot be empty.'
+    }
+
+    if ([System.IO.Path]::IsPathRooted($Path) -or $trimmedPath -match '^[A-Za-z]:') {
+        throw "Repository-relative directory path must not be rooted: $Path"
+    }
+
+    $parts = @($trimmedPath -split '/+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($part in $parts) {
+        if ($part -eq '.' -or $part -eq '..') {
+            throw "Repository-relative directory path must not contain . or .. segments: $Path"
+        }
+    }
+
+    return $parts -join '/'
+}
+
+function Test-RepositoryDirectoryMatches {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $RepositoryRelativePath,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $ConfiguredRepositoryPaths
+    )
+
+    foreach ($configuredRepositoryPath in $ConfiguredRepositoryPaths) {
+        if ($RepositoryRelativePath.Equals($configuredRepositoryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $RepositoryRelativePath.StartsWith("$configuredRepositoryPath/", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-RepositoryRelativePath {
     param(
         [Parameter(Mandatory = $true)]
@@ -330,6 +392,7 @@ function Update-PersonalAgentStash {
     return $newStashHash
 }
 
+$syncStartPath = Get-FullPathWithoutTrailingSeparator -Path (Get-Location).Path
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -350,6 +413,14 @@ if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
 }
 
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
+$syncStartRelativePath = ''
+if ($syncStartPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $syncStartRelativePath = ''
+}
+elseif ($syncStartPath.StartsWith($targetRootPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $syncStartRelativePath = Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $syncStartPath
+}
+
 $insideWorkTree = Invoke-Git -Repository $targetRootPath -Arguments @('rev-parse', '--is-inside-work-tree')
 if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
     Write-Output "AI instruction sync skipped: target is not a Git work tree: $targetRootPath"
@@ -404,18 +475,51 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         }
     )
 
-    if ($configuredRepositoryLocations.Count -gt 0 -and
+    $excludedRepositoryLocations = @(
+        if ($configuration.PSObject.Properties.Name -contains 'excludedRepositoryUrls') {
+            foreach ($excludedRepositoryUrl in @($configuration.excludedRepositoryUrls)) {
+                try {
+                    Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $excludedRepositoryUrl)
+                }
+                catch {
+                    throw "excludedRepositoryUrls contains an invalid repository URL '$excludedRepositoryUrl': $($_.Exception.Message)"
+                }
+            }
+        }
+    )
+
+    $excludedRepositoryPaths = @(
+        if ($configuration.PSObject.Properties.Name -contains 'excludedRepositoryPaths') {
+            foreach ($excludedRepositoryPath in @($configuration.excludedRepositoryPaths)) {
+                try {
+                    Get-NormalizedRepositoryRelativeDirectoryPath -Path ([string] $excludedRepositoryPath)
+                }
+                catch {
+                    throw "excludedRepositoryPaths contains an invalid repository-relative path '$excludedRepositoryPath': $($_.Exception.Message)"
+                }
+            }
+        }
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($syncStartRelativePath) -and
+        (Test-RepositoryDirectoryMatches -RepositoryRelativePath $syncStartRelativePath -ConfiguredRepositoryPaths $excludedRepositoryPaths)) {
+        Write-Output "AI instruction sync skipped: directory is excluded by ai-instructions-sync.json: $syncStartRelativePath"
+        return
+    }
+
+    if (($configuredRepositoryLocations.Count -gt 0 -or $excludedRepositoryLocations.Count -gt 0) -and
         (Get-GitExitCode -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin')) -eq 0) {
         $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
         foreach ($originUrl in $originUrls) {
             $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
-            foreach ($configuredRepositoryLocation in $configuredRepositoryLocations) {
-                if ($originLocation.Equals($configuredRepositoryLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $autoCommitEnabled = $true
-                    break
-                }
+            if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $excludedRepositoryLocations) {
+                Write-Output "AI instruction sync skipped: repository is excluded by ai-instructions-sync.json: $originUrl"
+                return
             }
 
+            if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $configuredRepositoryLocations) {
+                $autoCommitEnabled = $true
+            }
             if ($autoCommitEnabled) {
                 break
             }
