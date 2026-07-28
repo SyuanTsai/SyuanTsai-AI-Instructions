@@ -6,7 +6,7 @@
 - Review 涉及 production code 或測試時，載入 `.codex/AI-Rules/Testing.md`；以最終程式與測試的正確性、風險及必要涵蓋為審查重點，TDD 歷程僅作為開發參考。
 - 測試相關 finding 應對應最終變更中的實質問題，例如缺少必要測試、assertion 不足、測試可能因錯誤原因通過，或功能行為不正確。
 - 依 Testing 規則判斷目前變更是否需要測試；需要測試的新增程式碼應有適當層級的單元測試或整合測試。
-- Review 範圍包含個人任務統計時，確認至少 90% 的任務符合測試要求；包含 coverage report 時，確認 contributed code 維持至少 60% test coverage。
+- Review 包含本機測試結果或 coverage report 時，優先採用目前 Repository 或使用者明確指定的計算方式與門檻，並回報使用的測試或 coverage command、量測範圍、排除項目與結果。Repository 未定義門檻時不得自行套用通用百分比；應回報實際數值，並指出未涵蓋的高風險行為。
 - Review 涉及 EF、SQL 或 query 時，載入 `.codex/AI-Rules/Database.md` 檢查 projection 與資料存取限制。
 - 若變更使用 projection 處理效能問題，finding 應聚焦仍未解決的資料載入根因與實際影響，並指出應檢查的不必要 entity、relationship、row 或 round trip。
 - 除非使用者明確要求修正，Review 僅提供檢查結果，不修改程式碼。

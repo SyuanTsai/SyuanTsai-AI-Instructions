@@ -1,8 +1,11 @@
 # JIRA
 
-## 存取方式
+## 存取方式與 API 端點
 
-- 優先使用目前環境已核准的本機 JIRA REST helper；沒有 helper 時，僅在 `JIRA_BASE_URL`、`JIRA_EMAIL` 與 `JIRA_API_TOKEN` 都可由執行環境取得時，透過 shell 呼叫 JIRA REST API。
+- Jira Cloud 使用 scoped API Token；從環境變數讀取 `JIRA_BASE_URL`、`JIRA_EMAIL`、`JIRA_API_TOKEN`、`JIRA_CLOUD_ID` 與 `JIRA_API_BASE_URL`。
+- 所有 `/rest/api/3/...` 與 `/rest/agile/1.0/...` 呼叫都必須以 `JIRA_API_BASE_URL` 為基底；不得以 `JIRA_BASE_URL` 直接呼叫 REST API。
+- 若 `JIRA_CLOUD_ID` 或 `JIRA_API_BASE_URL` 缺失，可唯讀呼叫 `${JIRA_BASE_URL}/_edge/tenant_info` 取得 Cloud ID，並將 API base 組成 `https://api.atlassian.com/ex/jira/{cloudId}`。無法安全取得必要值時停止操作並回報缺少項目，不得猜測端點。
+- 優先使用遵守上述端點與憑證規則、且目前環境已核准的本機 JIRA REST helper；沒有 helper 時，僅在 `JIRA_EMAIL`、`JIRA_API_TOKEN` 與可用的 `JIRA_API_BASE_URL` 都可取得時，透過 shell 呼叫 JIRA REST API。
 - 憑證只從環境變數或核准的秘密儲存區讀取。不得輸出、記錄、寫入提示詞、Instructions、Repository、命令參數或回覆，也不得以探測命令顯示其值。
 - 除非目前組織明確允許且環境已配置，否則不得使用 Atlassian MCP 或 Rovo。存在 `ATLASSIAN_ROVO_MCP_TOKEN` 不代表已取得使用 MCP 的授權。
 
