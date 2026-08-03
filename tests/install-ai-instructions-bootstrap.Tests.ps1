@@ -77,7 +77,7 @@ Describe 'install-ai-instructions-bootstrap' {
         $codexHome = Join-Path $TestDrive '.codex'
     }
 
-    It 'installs the bootstrap script and creates local Codex configuration files' {
+    It 'installs on-demand bootstrap without creating a SessionStart hook' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
         $installedHookScript = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
@@ -93,17 +93,16 @@ Describe 'install-ai-instructions-bootstrap' {
 
         $agents = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'AGENTS.md')
         $agents | Should Match 'Repository Instructions Bootstrap'
-        $agents | Should Match 'SessionStart'
+        $agents | Should Match 'production code'
+        $agents | Should Match '問問題'
+        $agents | Should Not Match 'SessionStart'
         $agents | Should Match 'excludedRepositoryUrls'
         $agents | Should Match 'excludedRepositoryPaths'
 
-        $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
-        @($hooks.hooks.SessionStart).Count | Should Be 1
-        $hooks.hooks.SessionStart[0].matcher | Should Be 'startup'
-        $hooks.hooks.SessionStart[0].hooks[0].commandWindows | Should Match 'bootstrap-ai-instructions\.ps1'
+        Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
 
-    It 'preserves existing personal content and does not duplicate bootstrap entries' {
+    It 'preserves personal content and unrelated hooks while removing the bootstrap SessionStart entry' {
         Set-TestText -Path (Join-Path $codexHome 'AGENTS.md') -Value @'
 # Personal Codex Rules
 
@@ -161,12 +160,37 @@ Keep this section too.
         ([regex]::Matches($agents, 'Repository Instructions Bootstrap')).Count | Should Be 1
 
         $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
-        @($hooks.hooks.SessionStart).Count | Should Be 2
+        @($hooks.hooks.SessionStart).Count | Should Be 1
         @($hooks.hooks.SessionStart | Where-Object {
             @($_.hooks | Where-Object { $_.command -match 'bootstrap-ai-instructions\.ps1' }).Count -gt 0
-        }).Count | Should Be 1
+        }).Count | Should Be 0
         @($hooks.hooks.SessionStart | Where-Object { $_.matcher -eq 'other' }).Count | Should Be 1
         @($hooks.hooks.Stop).Count | Should Be 1
+    }
+
+    It 'removes SessionStart when the legacy bootstrap is its only entry' {
+        Set-TestText -Path (Join-Path $codexHome 'hooks.json') -Value @'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -File \"C:\\old\\bootstrap-ai-instructions.ps1\""
+          }
+        ]
+      }
+    ]
+  }
+}
+'@
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
+        ($hooks.hooks.PSObject.Properties.Name -contains 'SessionStart') | Should Be $false
     }
 
     It 'migrates sync configuration to schema version 2 and keeps repository URLs and paths' {

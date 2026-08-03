@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$bootstrapSectionBase64 = 'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwDQoNCi0g6ZaL5aeL6JmV55CGIEdpdCBSZXBvc2l0b3J5IOaZgu+8jOeUsSBgU2Vzc2lvblN0YXJ0YCBob29rIOW+niBgU3l1YW5Uc2FpL1N5dWFuVHNhaS1BSS1JbnN0cnVjdGlvbnNgIOeahCBHaXRIdWIgYG1haW5gIGJyYW5jaCDkuIvovInkuKblkIzmraXoi7HmlocgQ29kZXgg6IiHIEdpdEh1YiBDb3BpbG90IEluc3RydWN0aW9uc+OAggotIOiLpSBob29rIOacquWft+ihjO+8jOWFiOWft+ihjO+8mmAkQ09ERVhfSE9NRS9ob29rcy9ib290c3RyYXAtYWktaW5zdHJ1Y3Rpb25zLnBzMWDvvJvmnKroqK3lrpogYENPREVYX0hPTUVgIOaZguS9v+eUqCBgfi8uY29kZXgvaG9va3MvYm9vdHN0cmFwLWFpLWluc3RydWN0aW9ucy5wczFg44CCCi0g5LulIGAuY29kZXgvYWktaW5zdHJ1Y3Rpb25zLm1hbmlmZXN0Lmpzb25gIOeuoeeQhuWFseS6q+aqlOahiO+8m+WPquabtOaWsOacquiiq+WwiOahiOS/ruaUueeahOWPl+euoeeQhuaqlOahiO+8jOS4jeW+l+imhuWvqyBjdXN0b21pemVkIOaIliB1bm1hbmFnZWQgSW5zdHJ1Y3Rpb25z44CCCi0gUmVwb3NpdG9yeSDnmoQgYG9yaWdpbmAg5a+m6Zqb5L2N572u5YiX5ZyoIGB+Ly5jb2RleC9haS1pbnN0cnVjdGlvbnMtc3luYy5qc29uYCDnmoQgYGV4Y2x1ZGVkUmVwb3NpdG9yeVVybHNg77yM5oiWIHRhc2sg5ZWf5YuV55uu6YyE5L2N5pa8IGBleGNsdWRlZFJlcG9zaXRvcnlQYXRoc2Ag55qEIHJlcG8tcmVsYXRpdmUg55uu6YyE5bqV5LiL5pmC77yM55u05o6l55Wl6YGO5ZCM5q2l77yb5LiN5b6X5L2/55So5pys5qmf6LOH5paZ5aS+5L2N572u5Yik5pa344CCCi0g5Y+q5pyJIFJlcG9zaXRvcnkg55qEIGBvcmlnaW5gIOWvpumam+S9jee9ruWIl+WcqCBgYXV0b0NvbW1pdFJlcG9zaXRvcnlVcmxzYCDmmYLmiY3oh6rli5UgY29tbWl044CC6Z2eIGFsbG93bGlzdCDkuJTmnKrooqvmjpLpmaTnmoQgUmVwb3NpdG9yeSDmiJbnm67pjITku43lkIzmraXmqpTmoYjvvIzkvYbkuI3lvpcgc3RhZ2Ug5oiWIGNvbW1pdO+8jOS4puS7pSBgUGVyc29uYWxBZ2VudGAgc3Rhc2gg5L+d5a2Y5b6M56uL5Y2zIGFwcGx5IOWbniB3b3JraW5nIHRyZWXjgIIKLSDmm7TmlrDpnZ4gYWxsb3dsaXN0IFJlcG9zaXRvcnkg5pmC77yM5Y+q6IO95Zyo5paw54mIIGBQZXJzb25hbEFnZW50YCBzdGFzaCDmiJDlip/lu7rnq4vkuKblpZfnlKjlvozliKrpmaToiIrnmoTlkIzlkI0gc3Rhc2jvvJvkuI3lvpfliKrpmaTlhbbku5Ygc3Rhc2jjgIIKLSBhbGxvd2xpc3QgUmVwb3NpdG9yeSDlj6ogY29tbWl0IGJvb3RzdHJhcCDmlrDlop7jgIHmm7TmlrDjgIHnp7vpmaTnmoTlj5fnrqHnkIbmqpTmoYjoiIcgbWFuaWZlc3TvvJvpppbmrKHkvb/nlKggYGNob3JlOiBhZGQgc2hhcmVkIEFJIGluc3RydWN0aW9uc2DvvIzlvoznuozkvb/nlKggYGNob3JlOiBzeW5jIHNoYXJlZCBBSSBpbnN0cnVjdGlvbnNg77yM5rC46YGg5LiN5b6X6Ieq5YuVIHB1c2jjgIIKLSBHaXRIdWIg54Sh5rOV5a2Y5Y+W44CB55uu5YmN5L2N572u5LiN5pivIEdpdCBSZXBvc2l0b3J5IOaIlueEoeazleWuieWFqOmalOmboiBjb21taXQg5pmC77yM5YGc5q2iIGJvb3RzdHJhcCDkuKblm57loLHljp/lm6DjgII='
+$bootstrapSectionBase64 = 'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOWPquaciea6luWCmeW7uueri+aIluabtOaWsCBwcm9kdWN0aW9uIGNvZGUg55qE5a+m5L2c6KiI55Wr5pmC77yM5omN5Z+36KGMIGAkQ09ERVhfSE9NRS9ob29rcy9ib290c3RyYXAtYWktaW5zdHJ1Y3Rpb25zLnBzMWDvvJvmnKroqK3lrpogYENPREVYX0hPTUVgIOaZguS9v+eUqCBgfi8uY29kZXgvaG9va3MvYm9vdHN0cmFwLWFpLWluc3RydWN0aW9ucy5wczFg44CCCi0g5Zau57SU5ZWP5ZWP6aGM44CB6YeQ5riF6ZyA5rGC44CB56K66KqN5oiW6Kej6YeL5ZWP6aGM77yM5Lul5Y+K5YW25LuW5bCa5pyq6ZaL5aeL6KaP5YqDIGNvZGUg55qE5bel5L2c77yM5LiN5b6X5Z+36KGMIGJvb3RzdHJhcO+8jOS5n+S4jeW+l+WDheeCuumAmeS6m+W3peS9nOWwh+WFseS6qyBJbnN0cnVjdGlvbnMg5oiWIG1hbmlmZXN0IOWKoOWFpSBSZXBvc2l0b3J544CCCi0g5ZCM5q2l5a6M5oiQ5b6M77yM5YWI6K6A5Y+WIFJlcG9zaXRvcnkg5paw5aKe5oiW5pu05paw55qEIGBBR0VOVFMubWRgIOiIh+ebruWJjeS7u+WLmemBqeeUqOeahOimj+WJh+aooee1hO+8jOWGjeaPkOWHuuWvpuS9nOioiOeVq+OAggotIOS7pSBgLmNvZGV4L2FpLWluc3RydWN0aW9ucy5tYW5pZmVzdC5qc29uYCDnrqHnkIblhbHkuqvmqpTmoYjvvJvlj6rmm7TmlrDmnKrooqvlsIjmoYjkv67mlLnnmoTlj5fnrqHnkIbmqpTmoYjvvIzkuI3lvpfopoblr6sgY3VzdG9taXplZCDmiJYgdW5tYW5hZ2VkIEluc3RydWN0aW9uc+OAggotIFJlcG9zaXRvcnkg55qEIGBvcmlnaW5gIOWvpumam+S9jee9ruWIl+WcqCBgfi8uY29kZXgvYWktaW5zdHJ1Y3Rpb25zLXN5bmMuanNvbmAg55qEIGBleGNsdWRlZFJlcG9zaXRvcnlVcmxzYO+8jOaIliB0YXNrIOWVn+WLleebrumMhOS9jeaWvCBgZXhjbHVkZWRSZXBvc2l0b3J5UGF0aHNgIOeahCByZXBvLXJlbGF0aXZlIOebrumMhOW6leS4i+aZgu+8jOebtOaOpeeVpemBjuWQjOatpe+8m+S4jeW+l+S9v+eUqOacrOapn+izh+aWmeWkvuS9jee9ruWIpOaWt+OAggotIOWPquaciSBSZXBvc2l0b3J5IOeahCBgb3JpZ2luYCDlr6bpmpvkvY3nva7liJflnKggYGF1dG9Db21taXRSZXBvc2l0b3J5VXJsc2Ag5pmC5omN6Ieq5YuVIGNvbW1pdOOAgumdniBhbGxvd2xpc3Qg5LiU5pyq6KKr5o6S6Zmk55qEIFJlcG9zaXRvcnkg5oiW55uu6YyE5LuN5ZCM5q2l5qqU5qGI77yM5L2G5LiN5b6XIHN0YWdlIOaIliBjb21taXTvvIzkuKbku6UgYFBlcnNvbmFsQWdlbnRgIHN0YXNoIOS/neWtmOW+jOeri+WNsyBhcHBseSDlm54gd29ya2luZyB0cmVl44CCCi0g5pu05paw6Z2eIGFsbG93bGlzdCBSZXBvc2l0b3J5IOaZgu+8jOWPquiDveWcqOaWsOeJiCBgUGVyc29uYWxBZ2VudGAgc3Rhc2gg5oiQ5Yqf5bu656uL5Lim5aWX55So5b6M5Yiq6Zmk6IiK55qE5ZCM5ZCNIHN0YXNo77yb5LiN5b6X5Yiq6Zmk5YW25LuWIHN0YXNo44CCCi0gYWxsb3dsaXN0IFJlcG9zaXRvcnkg5Y+qIGNvbW1pdCBib290c3RyYXAg5paw5aKe44CB5pu05paw44CB56e76Zmk55qE5Y+X566h55CG5qqU5qGI6IiHIG1hbmlmZXN077yb6aaW5qyh5L2/55SoIGBjaG9yZTogYWRkIHNoYXJlZCBBSSBpbnN0cnVjdGlvbnNg77yM5b6M57qM5L2/55SoIGBjaG9yZTogc3luYyBzaGFyZWQgQUkgaW5zdHJ1Y3Rpb25zYO+8jOawuOmBoOS4jeW+l+iHquWLlSBwdXNo44CCCi0gR2l0SHViIOeEoeazleWtmOWPluOAgeebruWJjeS9jee9ruS4jeaYryBHaXQgUmVwb3NpdG9yeSDmiJbnhKHms5XlronlhajpmpTpm6IgY29tbWl0IOaZgu+8jOWBnOatoiBib290c3RyYXAg5Lim5Zue5aCx5Y6f5Zug44CC'
 $bootstrapSection = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($bootstrapSectionBase64))
 
 function Invoke-Git {
@@ -250,52 +250,27 @@ function Set-SyncConfiguration {
     Get-Content -Raw -LiteralPath $ConfigurationPath | ConvertFrom-Json | Out-Null
 }
 
-function Set-SessionStartHook {
+function Remove-BootstrapSessionStartHook {
     param(
         [Parameter(Mandatory = $true)]
-        [string] $HooksPath,
-
-        [Parameter(Mandatory = $true)]
-        [string] $HookScriptPath
+        [string] $HooksPath
     )
 
-    $hooksDocument = $null
-    if (Test-Path -LiteralPath $HooksPath -PathType Leaf) {
-        try {
-            $hooksDocument = Get-Content -Raw -LiteralPath $HooksPath | ConvertFrom-Json
-        }
-        catch {
-            throw "Codex hooks file is not valid JSON: $HooksPath"
-        }
+    if (-not (Test-Path -LiteralPath $HooksPath -PathType Leaf)) {
+        return
     }
 
-    if ($null -eq $hooksDocument) {
-        $hooksDocument = [pscustomobject]@{
-            hooks = [pscustomobject]@{}
-        }
+    try {
+        $hooksDocument = Get-Content -Raw -LiteralPath $HooksPath | ConvertFrom-Json
+    }
+    catch {
+        throw "Codex hooks file is not valid JSON: $HooksPath"
     }
 
-    if (-not (Test-ObjectHasProperty -Object $hooksDocument -PropertyName 'hooks') -or $null -eq $hooksDocument.hooks) {
-        $hooksDocument | Add-Member -NotePropertyName 'hooks' -NotePropertyValue ([pscustomobject]@{})
-    }
-
-    if (-not (Test-ObjectHasProperty -Object $hooksDocument.hooks -PropertyName 'SessionStart')) {
-        $hooksDocument.hooks | Add-Member -NotePropertyName 'SessionStart' -NotePropertyValue @()
-    }
-
-    $escapedHookScriptPath = $HookScriptPath.Replace('"', '\"')
-    $command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$escapedHookScriptPath`""
-    $bootstrapEntry = [ordered]@{
-        matcher = 'startup'
-        hooks = @(
-            [ordered]@{
-                type = 'command'
-                command = $command
-                commandWindows = $command
-                timeout = 60
-                statusMessage = 'Downloading shared AI instructions from GitHub'
-            }
-        )
+    if (-not (Test-ObjectHasProperty -Object $hooksDocument -PropertyName 'hooks') -or
+        $null -eq $hooksDocument.hooks -or
+        -not (Test-ObjectHasProperty -Object $hooksDocument.hooks -PropertyName 'SessionStart')) {
+        return
     }
 
     $sessionStartEntries = New-Object System.Collections.Generic.List[object]
@@ -327,9 +302,14 @@ function Set-SessionStartHook {
             $sessionStartEntries.Add($entry)
         }
     }
-    $sessionStartEntries.Add([pscustomobject] $bootstrapEntry)
 
-    $hooksDocument.hooks.PSObject.Properties['SessionStart'].Value = @($sessionStartEntries.ToArray())
+    if ($sessionStartEntries.Count -eq 0) {
+        $hooksDocument.hooks.PSObject.Properties.Remove('SessionStart')
+    }
+    else {
+        $hooksDocument.hooks.PSObject.Properties['SessionStart'].Value = @($sessionStartEntries.ToArray())
+    }
+
     $hooksJson = ($hooksDocument | ConvertTo-Json -Depth 12).Replace("`r`n", "`n") + "`n"
     Write-Utf8NoBomFile -Path $HooksPath -Content $hooksJson
 
@@ -371,9 +351,9 @@ Set-SyncConfiguration -ConfigurationPath $configurationPath `
     -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls `
     -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths
 Set-BootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
-Set-SessionStartHook -HooksPath $hooksPath -HookScriptPath $hookScript
+Remove-BootstrapSessionStartHook -HooksPath $hooksPath
 
 Write-Output "Installed AI instructions bootstrap script: $hookScript"
 Write-Output "Updated Codex AGENTS.md bootstrap section: $agentsPath"
-Write-Output "Updated Codex SessionStart hook: $hooksPath"
+Write-Output "Removed legacy AI instructions bootstrap SessionStart hook when present: $hooksPath"
 Write-Output "Updated AI instructions sync configuration: $configurationPath"
