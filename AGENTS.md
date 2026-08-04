@@ -1,6 +1,6 @@
 # AI Instructions 維護規範
 
-你是此 Repository 的 Instructions 維護 Agent。此 Repository 不承載一般產品功能；你的主要責任是維護 `.codex/` 與 `.github/` 中會 fan out 到其他專案使用的真實 Agent Instructions。
+你是此 Repository 的 Instructions 與 Skills 維護 Agent。此 Repository 不承載一般產品功能；你的主要責任是維護 `.codex/`、`.github/` 與 `.agents/skills/` 中會 fan out 到其他專案使用的真實 Agent Instructions 與共用工作流程。
 
 ## 維護目標
 
@@ -8,9 +8,12 @@
 - `.codex/AGENTS.en.md`：Codex 英文 Instructions。
 - `.github/copilot-instructions.md`：GitHub Copilot 繁體中文 Instructions。
 - `.github/copilot-instructions.en.md`：GitHub Copilot 英文 Instructions。
+- `.agents/skills/<skill-name>/SKILL.md`：Codex 與 GitHub Copilot 共用的 Agent Skill；其 scripts、references、assets 與其他必要資源維持在同一個 Skill 目錄。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
 
 繁體中文版本是主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
+
+Agent Skill 是兩平台共用的單一產物，不建立 Codex 與 GitHub Copilot 的重複版本。Skill 應使用平台中立的描述與流程；需要平台專屬工具時，在同一個 Skill 中提供清楚的選擇條件與安全 fallback。
 
 ## Base Agent 設計原則
 
@@ -58,6 +61,17 @@ Base Agent 只描述載入條件：
 
 只載入當前任務需要的模組；不存在的模組不得臆測。新增領域規則時，優先建立條件式模組，不得直接膨脹 Base Agent。
 
+## 共用 Agent Skills
+
+可重複執行的專門工作流程、領域知識，或需要 scripts、references、assets 的能力，優先建立在 `.agents/skills/`。每個 Skill 必須：
+
+- 使用 lowercase kebab-case 且不超過 64 個字元的目錄名稱，並與 frontmatter 的 `name` 一致。
+- 包含 `SKILL.md`，frontmatter 只使用兩平台共通的 `name` 與 `description`；`description` 同時清楚描述能力與觸發情境。
+- 只保留完成工作所需的檔案；詳細參考資料放在一層可直接由 `SKILL.md` 連結的 `references/`，重複且需可靠執行的操作放在已驗證的 `scripts/`，輸出會使用的資源放在 `assets/`。
+- 不承接必須每次套用的安全、資料完整性、測試或 Repository 規範；這類 guardrail 保留在 Base Agent 或條件式規則模組，並由其在適用時引導使用對應 Skill。
+
+`.agents/skills/.gitkeep` 只用來讓來源 Repository 保留空目錄，不得 fan out 到目標 Repository。bootstrap 必須遞迴管理合法 Skill 目錄中的檔案，支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
+
 ## Agent 職責拆分
 
 不得建立萬能 Agent。需要多 Agent 時，應維持單一職責：
@@ -80,7 +94,7 @@ Base Agent 只描述載入條件：
 
 ## 修改流程
 
-1. 判斷規則屬於共通 Base、條件式模組或平台專屬內容。
+1. 判斷內容屬於共通 Base、條件式模組、共用 Agent Skill 或平台專屬內容。
 2. 依「正向規則設計原則」確認規則以期望結果、判斷依據與可採用行為為核心。
 3. 先修改繁體中文來源，再同步適用的平台與英文版本。
 4. 確認各版本的規則、例外與載入條件一致。

@@ -24,6 +24,10 @@
 
 若適用模組不存在，指出缺少的檔案，不得臆測其內容。
 
+## Shared Skills
+
+`.agents/skills/` 提供 Codex 與 GitHub Copilot 共用的可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
+
 ## Agents
 
 需要多 Agent 且環境支援時，維持單一職責：Planner 只規劃、Implementer 只實作、Test Agent 只測試、Reviewer 只審查、Translator 只翻譯。只啟用任務必要的 Agent；簡單任務不得為了分工而增加交接成本。

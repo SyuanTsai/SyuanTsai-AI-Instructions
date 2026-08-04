@@ -194,13 +194,67 @@ function Get-NormalizedContentHash {
     }
 }
 
+function Get-RawContentHash {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        return [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Get-ManagedContentHash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $TargetPath
+    )
+
+    if ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
+        return Get-RawContentHash -Path $Path
+    }
+
+    return Get-NormalizedContentHash -Path $Path
+}
+
 function Test-IsAllowedManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
-    return $Path -eq 'AGENTS.md' -or
+    if ($Path -eq 'AGENTS.md' -or
         $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
-        $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$'
+        $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') {
+        return $true
+    }
+
+    if (-not $Path.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+
+    $skillPathParts = @($Path.Substring('.agents/skills/'.Length) -split '/')
+    if ($skillPathParts.Count -lt 2 -or
+        $skillPathParts[0] -notmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
+        return $false
+    }
+
+    foreach ($skillPathPart in $skillPathParts) {
+        if ([string]::IsNullOrWhiteSpace($skillPathPart) -or
+            $skillPathPart -eq '.' -or
+            $skillPathPart -eq '..' -or
+            $skillPathPart.Contains('\')) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Test-GitPathHasChanges {
@@ -543,6 +597,8 @@ $families = @(
         TargetRules = '.github/AI-Rules'
     }
 )
+$sharedSkillsFamilyName = 'Shared Agent Skills'
+$sharedSkillsSource = '.agents/skills'
 
 $manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
 $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
@@ -665,6 +721,47 @@ try {
         }
     }
 
+    $sourceSkillsPath = Join-Path $sourceRootPath $sharedSkillsSource.Replace('/', '\')
+    if (-not (Test-Path -LiteralPath $sourceSkillsPath -PathType Container)) {
+        throw "Shared Agent Skill directory is missing from GitHub archive: $sharedSkillsSource"
+    }
+
+    $unexpectedRootSkillFiles = @(
+        Get-ChildItem -LiteralPath $sourceSkillsPath -File |
+            Where-Object { $_.Name -ne '.gitkeep' }
+    )
+    if ($unexpectedRootSkillFiles.Count -gt 0) {
+        throw "Shared Agent Skill files must be inside a named skill directory: $($unexpectedRootSkillFiles.Name -join ', ')"
+    }
+
+    $sourceSkillDirectories = @(Get-ChildItem -LiteralPath $sourceSkillsPath -Directory | Sort-Object Name)
+    foreach ($sourceSkillDirectory in $sourceSkillDirectories) {
+        if ($sourceSkillDirectory.Name -notmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
+            throw "Invalid shared Agent Skill directory name: $($sourceSkillDirectory.Name)"
+        }
+
+        $sourceSkillDefinition = Join-Path $sourceSkillDirectory.FullName 'SKILL.md'
+        if (-not (Test-Path -LiteralPath $sourceSkillDefinition -PathType Leaf)) {
+            throw "Shared Agent Skill is missing SKILL.md: $($sourceSkillDirectory.Name)"
+        }
+
+        $sourceSkillFiles = @(
+            Get-ChildItem -LiteralPath $sourceSkillDirectory.FullName -Recurse -File |
+                Where-Object { $_.Name -ne '.gitkeep' } |
+                Sort-Object FullName
+        )
+        foreach ($sourceSkillFile in $sourceSkillFiles) {
+            $sourceRelativePath = Get-RepositoryRelativePath -RepositoryRoot $sourceRootPath -FullPath $sourceSkillFile.FullName
+            $desiredEntries.Add([pscustomobject]@{
+                FamilyName = $sharedSkillsFamilyName
+                SourcePath = $sourceRelativePath
+                TargetPath = $sourceRelativePath
+                SourceFullPath = $sourceSkillFile.FullName
+                Sha256 = Get-RawContentHash -Path $sourceSkillFile.FullName
+            })
+        }
+    }
+
     $desiredEntriesByTarget = @{}
     foreach ($entry in $desiredEntries) {
         if (-not (Test-IsAllowedManagedPath -Path $entry.TargetPath)) {
@@ -687,6 +784,7 @@ try {
             -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
             (Test-WasCreatedByPreviousBootstrap -Repository $targetRootPath -Path $baseTargetPath)
     }
+    $eligibleFamilies[$sharedSkillsFamilyName] = $true
 
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
@@ -734,7 +832,7 @@ try {
                 continue
             }
 
-            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            $currentHash = Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath
             if ($currentHash -eq [string] $managedEntry.sha256 -or $currentHash -eq $desiredEntry.Sha256) {
                 if ($currentHash -ne $desiredEntry.Sha256) {
                     Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath -Force
@@ -764,7 +862,7 @@ try {
         }
 
         if (Test-WasCreatedByPreviousBootstrap -Repository $targetRootPath -Path $targetPath) {
-            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            $currentHash = Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath
             if ($currentHash -ne $desiredEntry.Sha256) {
                 Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath -Force
                 $updatedPaths.Add($targetPath)
@@ -791,7 +889,7 @@ try {
         }
 
         if (Test-Path -LiteralPath $targetFullPath -PathType Leaf) {
-            $currentHash = Get-NormalizedContentHash -Path $targetFullPath
+            $currentHash = Get-ManagedContentHash -Path $targetFullPath -TargetPath $managedTargetPath
             if ($currentHash -ne [string] $managedEntry.sha256) {
                 $skippedPaths.Add($managedTargetPath)
                 continue
@@ -868,7 +966,7 @@ try {
                 $targetPath = [string] $manifestEntry.targetPath
                 $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
                 if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
-                    (Get-NormalizedContentHash -Path $targetFullPath) -eq [string] $manifestEntry.sha256 -and
+                    (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -eq [string] $manifestEntry.sha256 -and
                     (Test-GitPathNeedsCommit -Repository $targetRootPath -Path $targetPath)) {
                     $stashPaths.Add($targetPath)
                 }
@@ -909,7 +1007,7 @@ try {
         $targetPath = [string] $manifestEntry.targetPath
         $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
         if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
-            (Get-NormalizedContentHash -Path $targetFullPath) -eq [string] $manifestEntry.sha256 -and
+            (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -eq [string] $manifestEntry.sha256 -and
             (Test-GitPathNeedsCommit -Repository $targetRootPath -Path $targetPath)) {
             $commitPaths.Add($targetPath)
         }

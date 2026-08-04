@@ -24,11 +24,13 @@ function New-TestSource {
 
     New-Item -ItemType Directory -Force -Path (Join-Path $Path '.codex\AI-Rules') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Path '.github\AI-Rules') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Path '.agents\skills') | Out-Null
 
     Set-TestText -Path (Join-Path $Path '.codex\AGENTS.en.md') -Value '# Codex English Base'
     Set-TestText -Path (Join-Path $Path '.codex\AI-Rules\Testing.en.md') -Value '# Codex English Testing'
     Set-TestText -Path (Join-Path $Path '.github\copilot-instructions.en.md') -Value '# Copilot English Base'
     Set-TestText -Path (Join-Path $Path '.github\AI-Rules\Testing.en.md') -Value '# Copilot English Testing'
+    Set-TestText -Path (Join-Path $Path '.agents\skills\.gitkeep') -Value '# Keep the shared skills directory'
 }
 
 function Set-TestText {
@@ -185,6 +187,66 @@ Describe 'bootstrap-ai-instructions' {
         ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
         ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
         ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\.gitkeep') | Should Be $false
+    }
+
+    It 'recursively syncs shared Agent Skill files and removes managed resources deleted from the source' {
+        # Given
+        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\write-project-prompt'
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'assets') | Out-Null
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value "---`nname: write-project-prompt`ndescription: Write a project prompt.`n---`n`n# Write project prompt"
+        Set-TestText -Path (Join-Path $sourceSkillPath 'references\format.md') -Value '# Prompt format'
+        [System.IO.File]::WriteAllBytes((Join-Path $sourceSkillPath 'assets\preview.bin'), [byte[]]@(0x80))
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        $targetSkillPath = Join-Path $targetRoot '.agents\skills\write-project-prompt'
+        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Match '# Write project prompt$'
+        (Get-Content -Raw (Join-Path $targetSkillPath 'references\format.md')).Trim() | Should Be '# Prompt format'
+        [System.IO.File]::ReadAllBytes((Join-Path $targetSkillPath 'assets\preview.bin'))[0] | Should Be 0x80
+        Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\.gitkeep') | Should Be $false
+        $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/write-project-prompt/SKILL.md' }).Count | Should Be 1
+        @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/write-project-prompt/references/format.md' }).Count | Should Be 1
+
+        # Given a changed skill and a removed managed reference
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value "---`nname: write-project-prompt`ndescription: Write a project prompt.`n---`n`n# Write project prompt v2"
+        [System.IO.File]::WriteAllBytes((Join-Path $sourceSkillPath 'assets\preview.bin'), [byte[]]@(0x81))
+        Remove-Item -LiteralPath (Join-Path $sourceSkillPath 'references\format.md')
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Match '# Write project prompt v2$'
+        [System.IO.File]::ReadAllBytes((Join-Path $targetSkillPath 'assets\preview.bin'))[0] | Should Be 0x81
+        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\format.md') | Should Be $false
+    }
+
+    It 'preserves an existing unmanaged Agent Skill while syncing other instructions' {
+        # Given
+        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\existing-skill'
+        New-Item -ItemType Directory -Force -Path $sourceSkillPath | Out-Null
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value '# Shared skill'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        $targetSkillPath = Join-Path $targetRoot '.agents\skills\existing-skill'
+        New-Item -ItemType Directory -Force -Path $targetSkillPath | Out-Null
+        Set-TestText -Path (Join-Path $targetSkillPath 'SKILL.md') -Value '# Project skill'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', '.agents/skills/existing-skill/SKILL.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add project skill') | Out-Null
+
+        # When
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Project skill'
+        ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged.*\.agents/skills/existing-skill/SKILL.md'
     }
 
     It 'matches the actual repository location across SSH and HTTPS origin URL formats' {

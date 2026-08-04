@@ -98,6 +98,8 @@ Describe 'install-ai-instructions-bootstrap' {
         $agents | Should Not Match 'SessionStart'
         $agents | Should Match 'excludedRepositoryUrls'
         $agents | Should Match 'excludedRepositoryPaths'
+        $agents | Should Match 'Agent Skills'
+        $agents | Should Match 'customized or unmanaged Instructions or Agent Skills'
 
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }

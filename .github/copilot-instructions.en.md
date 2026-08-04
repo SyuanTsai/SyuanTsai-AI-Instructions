@@ -22,4 +22,8 @@ Read the applicable file in full only when its condition is met. Do not load unr
 
 If an applicable module is missing, identify the missing file and do not invent its contents.
 
+## Shared Skills
+
+`.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
+
 When multiple agents are needed and supported, keep each agent focused and activate only the roles required by the task. Stop the affected change and ask the user when missing information would materially change the implementation result, additional authority is required, or new and existing rules conflict.
