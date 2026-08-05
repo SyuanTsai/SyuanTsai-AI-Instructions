@@ -17,6 +17,7 @@
 - 分析、規劃或修改 production code、測試或測試策略 → `.github/AI-Rules/Testing.md`
 - 涉及 EF、SQL、database query 或資料存取效能 → `.github/AI-Rules/Database.md`
 - Review 程式碼或 Pull Request → `.github/AI-Rules/CodeReview.md`
+- 產生 Git Commit Message → `.github/AI-Rules/GitCommit.md`
 
 若適用模組不存在，指出缺少的檔案，不得臆測其內容。
 
