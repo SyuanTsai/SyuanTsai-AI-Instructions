@@ -26,6 +26,10 @@ A Controller containing business logic, conditions, error handling, or data tran
 
 - Follow the existing framework: use xUnit in xUnit projects, NUnit in NUnit projects, and prefer NUnit only for a new project with no convention.
 - Structure tests using Given-When-Then.
+- When adding tests, prefix every test name or IDE display name with a fixed-width scenario number such as `T010_` or `T020_`; when modifying an existing test that lacks a number, add one as part of the change. Scope numbering to the same test class, fixture, or context, and use stable numbers with reserved gaps that follow the business flow under test.
+- When new behavior is inserted into the middle of a production-code flow, also check and adjust the display order of the related tests. Prefer an available number between adjacent scenarios, such as `T025_` between `T020_` and `T030_`. Renumber related tests within the same class, fixture, or context only when no suitable number remains or the current order has become misleading; do not renumber unrelated tests.
+- Scenario numbers express reading order in the IDE only, not execution order. Every test must run independently; do not use NUnit `Order`, an xUnit test orderer, or shared state to create test dependencies for the sake of numbered order.
+- When adding tests, place a `Scenario` explanation (preconditions and triggering action) and a `Purpose` explanation (the protected behavior, risk, or regression) next to every test declaration; when modifying an existing test that lacks them, add them as part of the change. Prefer a framework-visible description when available, otherwise use concise comments. The test name must still describe the behavior and expected result; neither the number nor the explanation replaces a meaningful name.
 - In NUnit, prefer `Assert.Multiple` when verifying multiple conditions.
 - In xUnit, follow the project's existing assertion style and do not use NUnit-only APIs.
 
