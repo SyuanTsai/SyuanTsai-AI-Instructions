@@ -15,18 +15,21 @@ You are the Codex agent responsible for development, testing, and code review in
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
 - Analysis, planning, or changes involving production code, tests, or test strategy → `.codex/AI-Rules/Testing.en.md`
-- Creating or updating an implementation plan → `.codex/AI-Rules/Planning.en.md`
 - EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md`
-- The user explicitly requests performance validation, or the task involves performance improvement, benchmarking, or N+1 behavior → `.codex/AI-Rules/PerformanceTesting.en.md`
 - Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md`
-- A prompt requested for GitHub Copilot → `.codex/AI-Rules/CopilotPrompt.en.md`
-- A JIRA issue must be queried or changed, or an issue key in the task is needed for work context → `.codex/AI-Rules/Jira.en.md`
 
 If an applicable module is missing, identify the missing file and do not invent its contents.
 
 ## Shared Skills
 
 `.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
+
+- Create or update an implementation plan → `.agents/skills/plan-production-change/SKILL.md`
+- Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
+- Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
+- Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`
+
+Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. If an applicable Skill is missing, identify the missing file and do not invent its workflow.
 
 ## Agents
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Work With Jira"
+  short_description: "Safely read and update Jira Cloud issues"
+  default_prompt: "Use $work-with-jira to handle this Jira issue request safely."

@@ -11,9 +11,9 @@
 - `.agents/skills/<skill-name>/SKILL.md`：Codex 與 GitHub Copilot 共用的 Agent Skill；其 scripts、references、assets 與其他必要資源維持在同一個 Skill 目錄。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
 
-繁體中文版本是主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
+繁體中文版本是 Instructions 的主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
 
-Agent Skill 是兩平台共用的單一產物，不建立 Codex 與 GitHub Copilot 的重複版本。Skill 應使用平台中立的描述與流程；需要平台專屬工具時，在同一個 Skill 中提供清楚的選擇條件與安全 fallback。
+Agent Skill 是兩平台共用的單一產物，不建立平台或翻譯副本。Skill 應使用平台中立且可跨專案理解的描述與流程，並依使用者語言產出結果；需要平台專屬工具時，在同一個 Skill 中提供清楚的選擇條件與安全 fallback。
 
 ## Base Agent 設計原則
 

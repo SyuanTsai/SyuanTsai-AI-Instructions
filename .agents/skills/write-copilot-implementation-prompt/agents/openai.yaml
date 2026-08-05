@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Copilot Implementation Prompt"
+  short_description: "Write self-contained prompts for GitHub Copilot"
+  default_prompt: "Use $write-copilot-implementation-prompt to prepare a GitHub Copilot implementation prompt."

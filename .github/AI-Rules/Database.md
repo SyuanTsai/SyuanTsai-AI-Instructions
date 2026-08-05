@@ -5,4 +5,4 @@
 - projection 不承接 business response shape、DTO、主要 application return model 或核心邏輯。
 - 除非使用者明確同意，不得為了承接回傳資料而新增 model、DTO 或 class。
 - 修改前先檢查既有 query、entity 關係、索引與資料存取慣例；只檢查與任務直接相關的部分。
-- 涉及 query 效能或 N+1 時，同時載入 `.github/AI-Rules/PerformanceTesting.md` 並依其規則驗證。
+- 涉及 query 效能或 N+1 時，同時使用 `.agents/skills/verify-data-access-performance/SKILL.md` 進行診斷與驗證。

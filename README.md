@@ -252,7 +252,11 @@ Invoke-Pester .\tests
 - `AGENTS.md`：本 Instructions Repository 的維護規範。
 - `.codex/`：fan-out 給 Codex 的繁體中文與英文 Instructions。
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
-- `.agents/skills/`：fan-out 給 Codex 與 GitHub Copilot 共用的 Agent Skills；`.gitkeep` 只保留來源目錄，不會同步。
+- `.agents/skills/`：fan-out 給 Codex 與 GitHub Copilot 共用的 Agent Skills；目錄暫時為空時可用 `.gitkeep` 保留來源目錄，bootstrap 不會同步該 placeholder。
+  - `plan-production-change`：依 Scope、風險與不確定性建立實作計畫。
+  - `verify-data-access-performance`：診斷並驗證 query 效能、query count 與 N+1。
+  - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞並建議最低充分模型。
+  - `work-with-jira`：依 scoped API 與授權規則安全查詢或修改 Jira Cloud。
 - `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions 與 Agent Skills，依個人排除清單跳過指定 Repository 或目錄，依 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。
 - `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝按需同步 script、合併 `AGENTS.md` 與 `ai-instructions-sync.json`，並移除舊版 bootstrap `SessionStart` hook。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。

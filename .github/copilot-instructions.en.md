@@ -15,9 +15,7 @@ You are the GitHub Copilot agent responsible for code changes and Pull Request r
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
 - Analysis, planning, or changes involving production code, tests, or test strategy → `.github/AI-Rules/Testing.en.md`
-- Creating or updating an implementation plan → `.github/AI-Rules/Planning.en.md`
 - EF, SQL, database queries, or data-access performance → `.github/AI-Rules/Database.en.md`
-- The user explicitly requests performance validation, or the task involves performance improvement, benchmarking, or N+1 behavior → `.github/AI-Rules/PerformanceTesting.en.md`
 - Code or Pull Request review → `.github/AI-Rules/CodeReview.en.md`
 
 If an applicable module is missing, identify the missing file and do not invent its contents.
@@ -25,5 +23,12 @@ If an applicable module is missing, identify the missing file and do not invent 
 ## Shared Skills
 
 `.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
+
+- Create or update an implementation plan → `.agents/skills/plan-production-change/SKILL.md`
+- Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
+- Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
+- Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`
+
+Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. If an applicable Skill is missing, identify the missing file and do not invent its workflow.
 
 When multiple agents are needed and supported, keep each agent focused and activate only the roles required by the task. Stop the affected change and ask the user when missing information would materially change the implementation result, additional authority is required, or new and existing rules conflict.
