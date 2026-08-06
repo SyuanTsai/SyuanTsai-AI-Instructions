@@ -14,7 +14,7 @@
 
 只在符合條件時完整讀取對應檔案，未涉及的規則不得載入：
 
-- 分析、規劃或修改 production code、測試或測試策略 → `.codex/AI-Rules/Testing.md`
+- 規劃或修改 production code，或新增、修改測試或測試策略 → `.codex/AI-Rules/Testing.md`
 - 涉及 EF、SQL、database query 或資料存取效能 → `.codex/AI-Rules/Database.md`
 - Review 程式碼或 Pull Request → `.codex/AI-Rules/CodeReview.md`
 

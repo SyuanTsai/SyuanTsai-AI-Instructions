@@ -17,4 +17,4 @@ description: Diagnose and verify data-access performance improvements with query
 7. For N+1 validation, compare at least two result sizes, record query counts for both, and confirm that the count stays fixed or within an explicit bound rather than growing linearly.
 8. Do not use elapsed milliseconds as a hard CI threshold. In CI, assert query count, query shape, and result correctness.
 9. Mark manual benchmarks skipped by default so normal test runs do not execute them.
-10. Report the commands, dataset or sample sizes, measurements, query counts, conclusion, and remaining uncertainty.
+10. Report in the user's language the commands, dataset or sample sizes, measurements, query counts, conclusion, and remaining uncertainty.

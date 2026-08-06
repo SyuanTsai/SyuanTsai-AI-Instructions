@@ -20,4 +20,4 @@ description: Safely read, search, create, comment on, assign, edit, or transitio
 3. Request only the fields needed for the task and avoid exposing unrelated personal data, internal links, or sensitive content.
 4. Before a write, verify the target issue and intended change. Obtain confirmation before bulk, destructive, or difficult-to-reverse operations.
 5. On failure, report the HTTP status, operation type, and a safely redacted error summary. Never return an Authorization header, token, or complete sensitive response body.
-6. Report what was read or changed, the target issue keys, and any unresolved permission or configuration problem without exposing secrets.
+6. Report in the user's language what was read or changed, the target issue keys, and any unresolved permission or configuration problem without exposing secrets.

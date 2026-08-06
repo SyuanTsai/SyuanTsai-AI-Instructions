@@ -14,7 +14,7 @@ You are the Codex agent responsible for development, testing, and code review in
 
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
-- Analysis, planning, or changes involving production code, tests, or test strategy → `.codex/AI-Rules/Testing.en.md`
+- Planning or modifying production code, or adding or modifying tests or test strategy → `.codex/AI-Rules/Testing.en.md`
 - EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md`
 - Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md`
 

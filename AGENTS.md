@@ -6,12 +6,15 @@
 
 - `.codex/AGENTS.md`：Codex 繁體中文 Instructions。
 - `.codex/AGENTS.en.md`：Codex 英文 Instructions。
+- `.codex/AI-Rules/<rule>.md` 與 `.codex/AI-Rules/<rule>.en.md`：Codex 繁體中文與英文條件式規則模組。
 - `.github/copilot-instructions.md`：GitHub Copilot 繁體中文 Instructions。
 - `.github/copilot-instructions.en.md`：GitHub Copilot 英文 Instructions。
+- `.github/AI-Rules/<rule>.md` 與 `.github/AI-Rules/<rule>.en.md`：GitHub Copilot 繁體中文與英文條件式規則模組。
 - `.agents/skills/<skill-name>/SKILL.md`：Codex 與 GitHub Copilot 共用的 Agent Skill；其 scripts、references、assets 與其他必要資源維持在同一個 Skill 目錄。
+- `.agents/skills/<skill-name>/agents/openai.yaml`：Skill 的 OpenAI interface metadata；存在時必須與 `SKILL.md` 的能力及觸發情境一致。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
 
-繁體中文版本是 Instructions 的主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
+繁體中文版本是 Base Instructions 與條件式規則模組的主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
 
 Agent Skill 是兩平台共用的單一產物，不建立平台或翻譯副本。Skill 應使用平台中立且可跨專案理解的描述與流程，並依使用者語言產出結果；需要平台專屬工具時，在同一個 Skill 中提供清楚的選擇條件與安全 fallback。
 
