@@ -257,6 +257,8 @@ function New-UserControlledPowerShellLaunch {
 
         [string[]] $CommandSearchPaths = @(),
 
+        [hashtable] $Environment = @{},
+
         [Parameter(Mandatory = $true)]
         [string] $WorkingDirectory,
 
@@ -324,6 +326,7 @@ function New-UserControlledPowerShellLaunch {
     return [pscustomobject]@{
         filePath = $powerShellPath
         arguments = @('-NoLogo', '-NoProfile', '-EncodedCommand', $encodedCommand)
+        environment = $Environment
         workingDirectory = $resolvedWorkingDirectory
         windowStyle = 'Normal'
         waitForExit = [bool] $WaitForExit
@@ -339,6 +342,8 @@ function Start-UserControlledPowerShellProcess {
         [string[]] $Arguments = @(),
 
         [string[]] $CommandSearchPaths = @(),
+
+        [hashtable] $Environment = @{},
 
         [Parameter(Mandatory = $true)]
         [string] $WorkingDirectory,
@@ -357,6 +362,7 @@ function Start-UserControlledPowerShellProcess {
             Start-Process `
                 -FilePath $Launch.filePath `
                 -ArgumentList $Launch.arguments `
+                -Environment $Launch.environment `
                 -WorkingDirectory $Launch.workingDirectory `
                 -WindowStyle $Launch.windowStyle `
                 -PassThru
@@ -368,6 +374,7 @@ function Start-UserControlledPowerShellProcess {
             -Command $Command `
             -Arguments $Arguments `
             -CommandSearchPaths $CommandSearchPaths `
+            -Environment $Environment `
             -WorkingDirectory $WorkingDirectory `
             -WindowTitle $WindowTitle `
             -Instructions $Instructions `

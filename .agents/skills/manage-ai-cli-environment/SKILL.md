@@ -31,6 +31,7 @@ Keep interactive subscription readiness separate from headless readiness. Locall
 ## Run the tooling
 
 - Run `./tools/ai-usage.ps1` to probe all resources in parallel and write `.ai/usage-state.json`.
+- Run `./tools/ai-usage.ps1 -InteractiveResourceName <name>` when the user wants to inspect provider-owned usage in the official CLI. It opens one visible PowerShell 7 window with the selected resource profile environment and leaves all commands and choices to the user. Codex and Junie instruct the user to run `/usage`; Copilot shows Plan quota in its status line and uses `/statusline` when quota is hidden; Agy can only show accessible models because its verified CLI has no usage command. Treat this path as human review: do not parse its terminal output or write a guessed percentage to `.ai/usage-state.json`.
 - Run `./tools/ai-doctor.ps1` for explicit installed/version/auth/config diagnostics. Add `-Repair` only when interactive install or login is intended.
 - Run `./tools/ai-login.ps1 -ResourceName <name>` when the user needs to own the complete setup or login interaction in a separate visible PowerShell.
 - Run a worker wrapper with the provider's normal arguments, for example `./tools/codex-spark.ps1 exec "<task>"`.
@@ -48,4 +49,4 @@ Read [provider-capabilities.md](references/provider-capabilities.md) before chan
 
 ## Keep output and logs safe
 
-Return standardized JSON reasons. Log only operational fields from the allowlist in `logging.ps1`; never log raw arguments, prompts, stdout/stderr, environment values, tokens, keys, or credentials. Do not screen scrape interactive `/usage` output or infer quota from plan names.
+Return standardized JSON reasons. Log only operational fields from the allowlist in `logging.ps1`; never log raw arguments, prompts, stdout/stderr, environment values, tokens, keys, or credentials. Pass delegated profile values through the child-process environment rather than its command line. Do not screen scrape interactive `/usage` output, Copilot status lines, or infer quota from plan names.

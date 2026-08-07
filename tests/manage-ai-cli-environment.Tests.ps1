@@ -433,6 +433,33 @@ Describe 'AI CLI process startup' {
         $result.exitCode | Should Be 0
         $script:waitCalls | Should Be 1
     }
+
+    # Scenario: A selected resource profile requires environment variables inside its delegated PowerShell.
+    # Purpose: Preserve account isolation without placing credentials in arguments, output, or repository files.
+    It 'T070_sets_child_environment_before_starting_the_user_controlled_cli' {
+        # Given
+        $cliShim = Join-Path $TestDrive 'cli-environment-test.bat'
+        [System.IO.File]::WriteAllText(
+            $cliShim,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+
+        # When
+        $launch = New-UserControlledPowerShellLaunch `
+            -Command $cliShim `
+            -Environment @{ COPILOT_HOME = 'C:\profiles\company' } `
+            -WorkingDirectory $TestDrive `
+            -WindowTitle 'CLI usage inspection'
+        $encodedCommandIndex = [Array]::IndexOf($launch.arguments, '-EncodedCommand') + 1
+        $decodedCommand = [System.Text.Encoding]::Unicode.GetString(
+            [Convert]::FromBase64String($launch.arguments[$encodedCommandIndex])
+        )
+
+        # Then
+        $launch.environment.COPILOT_HOME | Should Be 'C:\profiles\company'
+        $decodedCommand | Should Not Match 'C:\\profiles\\company'
+    }
 }
 
 Describe 'AI CLI user-controlled login' {
@@ -467,6 +494,84 @@ Describe 'AI CLI user-controlled login' {
         ($definition.arguments -join ' ') | Should Be 'login --device-code'
         $definition.confirmationPrompt | Should Match 'press Enter'
         $definition.preselectBrowser | Should Be $false
+    }
+}
+
+Describe 'AI CLI user-controlled usage inspection' {
+    # Scenario: Every managed resource is inspected through its official CLI in a visible terminal.
+    # Purpose: Let the user see provider-owned usage information without scraping terminal output or guessing a quota.
+    It 'T010_defines_a_user_controlled_cli_usage_flow_for_every_resource' {
+        # Given
+        $resourceNames = @('codexMain', 'codexSpark', 'copilotPersonal', 'copilotCompany', 'agy', 'junie')
+
+        # When
+        $definitions = @($resourceNames | ForEach-Object {
+            Get-UserControlledUsageDefinition -ResourceName $_ -RepositoryRoot $TestDrive
+        })
+
+        # Then
+        $definitions.Count | Should Be 6
+        @($definitions | Where-Object { $_.interactionOwner -ne 'user' }).Count | Should Be 0
+        @($definitions | Where-Object { $_.machineReadable }).Count | Should Be 0
+        (($definitions | Where-Object resourceName -eq 'copilotCompany').instructions -join ' ') | Should Match '/statusline'
+        (($definitions | Where-Object resourceName -eq 'codexMain').instructions -join ' ') | Should Match '/usage'
+        (($definitions | Where-Object resourceName -eq 'junie').instructions -join ' ') | Should Match '/usage'
+        (($definitions | Where-Object resourceName -eq 'agy').instructions -join ' ') | Should Match 'does not expose'
+    }
+
+    # Scenario: Copilot Company usage is opened from an isolated Company profile directory.
+    # Purpose: Prevent the manual quota check from silently using the Personal resource profile.
+    It 'T020_passes_the_selected_copilot_profile_environment_to_the_visible_terminal' {
+        # Given
+        $stateRoot = Join-Path $TestDrive 'state'
+        $script:usageLaunch = $null
+        $processStarter = {
+            param($Launch)
+            $script:usageLaunch = $Launch
+            return [pscustomobject]@{ Id = 4545 }
+        }
+
+        # When
+        $result = Start-UserControlledUsageInspection `
+            -ResourceName 'copilotCompany' `
+            -RepositoryRoot $TestDrive `
+            -StateRoot $stateRoot `
+            -ProcessStarter $processStarter
+        $encodedCommandIndex = [Array]::IndexOf($script:usageLaunch.arguments, '-EncodedCommand') + 1
+        $decodedCommand = [System.Text.Encoding]::Unicode.GetString(
+            [Convert]::FromBase64String($script:usageLaunch.arguments[$encodedCommandIndex])
+        )
+
+        # Then
+        $result.started | Should Be $true
+        $result.usageKnown | Should Be $false
+        $result.source | Should Be 'provider-cli-user-visible'
+        $script:usageLaunch.environment.COPILOT_HOME | Should Be (Join-Path $stateRoot 'copilot\company')
+        $decodedCommand | Should Not Match 'COPILOT_HOME'
+    }
+
+    # Scenario: Copilot Personal has no dedicated token in process or user environment.
+    # Purpose: Never let a manual Personal quota check fall back to the Company account in the system credential store.
+    It 'T030_blocks_personal_usage_inspection_when_the_isolated_token_is_missing' {
+        # Given
+        $script:personalUsageStarts = 0
+        $environmentReader = {
+            param($Name, $Target)
+            return $null
+        }
+
+        # When
+        $result = Start-UserControlledUsageInspection `
+            -ResourceName 'copilotPersonal' `
+            -RepositoryRoot $TestDrive `
+            -StateRoot (Join-Path $TestDrive 'state') `
+            -EnvironmentReader $environmentReader `
+            -ProcessStarter { param($Launch) $script:personalUsageStarts++ }
+
+        # Then
+        $result.started | Should Be $false
+        $result.reason | Should Be 'authentication_required'
+        $script:personalUsageStarts | Should Be 0
     }
 }
 

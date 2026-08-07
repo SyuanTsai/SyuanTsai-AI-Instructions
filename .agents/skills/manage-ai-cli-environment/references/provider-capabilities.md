@@ -15,6 +15,8 @@ Verified against local `--help` where executable access was available and offici
 
 No listed daily probe currently returns a reliable account `usedPercent`. Keep the default `usageSource` as `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit.
 
+For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selected official CLI in one user-controlled PowerShell. It preserves Copilot Personal/Company profile environment isolation, but deliberately returns `usageKnown: false` because the visible provider output is not parsed. Copilot Personal additionally requires its dedicated token before the window can open so it cannot fall back to the Company credential-store account.
+
 ## Provider-specific rules
 
 ### Codex

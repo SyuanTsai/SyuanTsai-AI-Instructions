@@ -220,7 +220,7 @@ Import-Module Pester
 Invoke-Pester .\tests
 ```
 
-預期結果為 `51 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新、本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移，以及 AI CLI Resource 的額度政策、probe/retry、failure classification、profile 隔離、安全 logging、native option forwarding、成功 wrapper exit code、尚未刷新 PATH 的使用者 CLI shim、Windows batch shim、六種 Resource 的使用者控制登入 PowerShell、Copilot Company device-code、Junie 互動登入與 headless credential 分離，以及環境層安裝。
+預期結果為 `55 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新、本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移，以及 AI CLI Resource 的額度政策、probe/retry、failure classification、profile 隔離、安全 logging、native option forwarding、成功 wrapper exit code、尚未刷新 PATH 的使用者 CLI shim、Windows batch shim、六種 Resource 的使用者控制登入與人工用量檢視 PowerShell、Copilot Company device-code、Copilot Personal 額度檢視的 token 隔離、Junie 互動登入與 headless credential 分離，以及環境層安裝。
 
 ### Smoke test
 
