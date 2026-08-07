@@ -17,3 +17,5 @@ foreach ($file in @(
 
 $toolsRoot = Split-Path -Parent $commonRoot
 . (Join-Path $toolsRoot 'codex\usage.ps1')
+. (Join-Path $toolsRoot 'copilot\credentials.ps1')
+. (Join-Path $toolsRoot 'copilot\usage.ps1')

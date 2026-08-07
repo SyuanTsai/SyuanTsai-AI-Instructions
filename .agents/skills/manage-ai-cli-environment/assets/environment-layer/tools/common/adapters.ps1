@@ -33,7 +33,22 @@ function Get-ProviderAdapter {
                 login = [pscustomobject]@{ command = 'codex'; arguments = @('login') }
             }
         }
-        { $_ -in @('copilotPersonal', 'copilotCompany') } {
+        'copilotPersonal' {
+            return [pscustomobject]@{
+                provider = $ResourceName
+                executable = 'copilot'
+                primaryProbe = [pscustomobject]@{ mode = 'execution'; command = 'copilot'; arguments = @() }
+                diagnosticProbe = [pscustomobject]@{ command = 'copilot'; arguments = @('version') }
+                usageSource = 'github-billing-user'
+                model = $null
+                install = [pscustomobject]@{
+                    command = 'winget'
+                    arguments = @('install', '--id', 'GitHub.Copilot', '--exact', '--accept-package-agreements', '--accept-source-agreements')
+                }
+                login = [pscustomobject]@{ command = 'copilot'; arguments = @('login') }
+            }
+        }
+        'copilotCompany' {
             return [pscustomobject]@{
                 provider = $ResourceName
                 executable = 'copilot'
@@ -93,6 +108,12 @@ function Get-ResourceEnvironment {
         [scriptblock] $EnvironmentReader = {
             param($Name, $Target)
             [Environment]::GetEnvironmentVariable($Name, $Target)
+        },
+
+        [scriptblock] $CredentialReader = {
+            param($TargetName)
+            $profile = if ($TargetName -match '/company$') { 'company' } else { 'personal' }
+            Get-CopilotCredential -Profile $profile
         }
     )
 
@@ -109,16 +130,21 @@ function Get-ResourceEnvironment {
     if ($ResourceName -in @('copilotPersonal', 'copilotCompany')) {
         $profile = if ($ResourceName -eq 'copilotPersonal') { 'personal' } else { 'company' }
         $environment.COPILOT_HOME = Join-Path (Join-Path $StateRoot 'copilot') $profile
+        $environment.GH_TOKEN = $null
+        $environment.GITHUB_TOKEN = $null
 
+        $token = & $CredentialReader (Get-CopilotCredentialTargetName -Profile $profile)
         $tokenVariable = if ($profile -eq 'personal') {
             'AI_CLI_COPILOT_PERSONAL_TOKEN'
         }
         else {
             'AI_CLI_COPILOT_COMPANY_TOKEN'
         }
-        $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::Process)
         if ([string]::IsNullOrWhiteSpace([string] $token)) {
-            $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::User)
+            $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::Process)
+            if ([string]::IsNullOrWhiteSpace([string] $token)) {
+                $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::User)
+            }
         }
         if (-not [string]::IsNullOrWhiteSpace($token)) {
             $environment.COPILOT_GITHUB_TOKEN = $token

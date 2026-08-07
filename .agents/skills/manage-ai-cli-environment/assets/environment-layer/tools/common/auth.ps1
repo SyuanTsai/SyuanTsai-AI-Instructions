@@ -32,7 +32,8 @@ function Get-UserControlledLoginDefinition {
             $command = Join-Path $toolsRoot 'copilot-personal-token.ps1'
             $arguments = @($resolvedRepositoryRoot)
             $confirmationPrompt = $null
-            $instructions.Add('Enter the dedicated Personal token only in the secure prompt in this window; it remains isolated from Company stored authentication.')
+            $instructions.Add('Enter the dedicated Personal token only in the secure prompt in this window; it is stored in Windows Credential Manager and remains isolated from Company authentication.')
+            $instructions.Add('Use a user-owned fine-grained token with Copilot Requests and Plan read permissions so both CLI execution and the official billing usage query can work.')
         }
         'copilotCompany' {
             $arguments = @('login', '--device-code')

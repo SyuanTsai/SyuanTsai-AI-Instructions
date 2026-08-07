@@ -8,12 +8,12 @@ Verified against local `--help` where executable access was available and offici
 | --- | --- | --- | --- | --- | --- |
 | Codex Main | `codex login status`, then `tools/codex/get-usage.ps1` | CLI/auth first; app-server returns the current account rate-limit snapshot | Supported through stable `account/rateLimits/read` | `npm install --global @openai/codex` | `tools/codex/login.ps1`; user owns the visible PowerShell and official login choices |
 | Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Supported only when `rateLimitsByLimitId` contains a distinct Spark meter | Same as Codex Main | `tools/codex/login.ps1`; shares Codex auth, then verify Spark with a real task |
-| Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | `ai-login.ps1 -ResourceName copilotPersonal`; enter the isolated token only in its secure prompt |
+| Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Official user billing API returns monthly premium-request quantity but no compatible plan denominator; explicit private endpoint may return quota percentage | `winget install GitHub.Copilot` | `tools/copilot/personal/login.ps1`; enter the isolated token only in its secure prompt |
 | Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `ai-login.ps1 -ResourceName copilotCompany`; terminal runs `copilot login --device-code` and the user opens the URL in any browser/profile |
 | Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | `ai-login.ps1 -ResourceName agy`; user completes the official account flow |
 | Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | `ai-login.ps1 -ResourceName junie`; user makes all TUI and browser/account choices, then verifies with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
 
-Codex is the only listed resource with a verified machine-readable account `usedPercent`: the provider-owned tool uses the official app-server JSON-RPC surface. Other providers remain `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit. A missing distinct Spark snapshot is also UNKNOWN and must never inherit the Main percentage.
+Codex has a verified official machine-readable account `usedPercent`. Copilot Personal's official billing API supplies a usage amount but not a compatible plan denominator, so its percentage remains UNKNOWN unless the caller explicitly selects the non-public quota endpoint. Other providers remain `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit. A missing distinct Spark snapshot is also UNKNOWN and must never inherit the Main percentage.
 
 For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selected official CLI in one user-controlled PowerShell. It preserves Copilot Personal/Company profile environment isolation, but deliberately returns `usageKnown: false` because the visible provider output is not parsed. Copilot Personal additionally requires its dedicated token before the window can open so it cannot fall back to the Company credential-store account.
 
@@ -41,12 +41,14 @@ Official sources:
 ### GitHub Copilot
 
 - Use separate `COPILOT_HOME` values for personal and company config/state, but do not treat that as authentication isolation: the official OAuth flow prefers the system credential store.
-- Require `authenticationMode: token` for a profile that must not fall back to the shared stored credential. Map only its dedicated user environment token to `COPILOT_GITHUB_TOKEN` in the child process.
-- Configure Personal through the secure prompt opened by `ai-login.ps1`; do not paste the token into chat or use the Company OAuth flow for the Personal profile.
+- Require `authenticationMode: token` for a profile that must not fall back to the shared stored credential. Map only its dedicated Windows Credential Manager secret to `COPILOT_GITHUB_TOKEN` in the child process and remove inherited `GH_TOKEN` and `GITHUB_TOKEN`.
+- Configure Personal through `tools/copilot/personal/login.ps1` or `ai-login.ps1`; do not paste the token into chat or use the Company OAuth flow for the Personal profile. Use a user-owned fine-grained token with `Copilot Requests` and `Plan: read`.
 - Configure Company with `copilot login --device-code`. Keep the URL and one-time code in the user-controlled terminal so an existing default-browser session cannot choose the account implicitly.
 - The default config uses stored authentication for Company and requires a dedicated token for Personal.
 - Do not use `/user switch` as the daily isolation mechanism.
-- Do not parse `/usage`, the footer, or status line. Add an official billing API only when the caller provides scoped credentials, account scope, and a compatible quota denominator outside version control.
+- Use `tools/copilot/personal/get-usage.ps1` for the official user premium-request billing amount. Keep `usedPercent` unknown because the response does not contain the Personal plan denominator.
+- Keep `-PrivateEndpoint` explicit for `copilot_internal/user`; never enable it by default or silently fall back to it. Return safe UNKNOWN when the endpoint rejects the token or changes schema.
+- Do not parse `/usage`, the footer, or status line.
 
 Official sources:
 
