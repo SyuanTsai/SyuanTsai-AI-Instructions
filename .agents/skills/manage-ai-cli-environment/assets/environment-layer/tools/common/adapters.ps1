@@ -177,3 +177,39 @@ function Get-JunieConsumptionMode {
 
     return [pscustomobject]@{ consumptionMode = 'unknown'; consumptionModeVerified = $false }
 }
+
+function Get-JunieCredentialEnvironment {
+    [CmdletBinding()]
+    param()
+
+    $environment = @{}
+    foreach ($name in @(
+        'JUNIE_API_KEY',
+        'JUNIE_ANTHROPIC_API_KEY',
+        'JUNIE_OPENAI_API_KEY',
+        'JUNIE_GOOGLE_API_KEY',
+        'JUNIE_GROK_API_KEY',
+        'JUNIE_OPENROUTER_API_KEY'
+    )) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $environment[$name] = $value
+        }
+    }
+
+    return $environment
+}
+
+function Resolve-JunieHeadlessAuthentication {
+    [CmdletBinding()]
+    param(
+        [hashtable] $Environment = @{}
+    )
+
+    $consumption = Get-JunieConsumptionMode -Environment $Environment
+    return [pscustomobject]@{
+        ready = $consumption.consumptionModeVerified
+        reason = if ($consumption.consumptionModeVerified) { $null } else { 'headless_credential_required' }
+        source = $consumption.consumptionMode
+    }
+}

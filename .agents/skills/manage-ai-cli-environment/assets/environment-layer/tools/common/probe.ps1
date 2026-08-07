@@ -223,14 +223,7 @@ function Invoke-ResourceAvailability {
         $state.model = $adapter.model
     }
     if ($ResourceName -eq 'junie') {
-        $ambient = @{}
-        foreach ($name in @('JUNIE_API_KEY', 'JUNIE_ANTHROPIC_API_KEY', 'JUNIE_OPENAI_API_KEY', 'JUNIE_GOOGLE_API_KEY', 'JUNIE_GROK_API_KEY', 'JUNIE_OPENROUTER_API_KEY')) {
-            $value = [Environment]::GetEnvironmentVariable($name)
-            if (-not [string]::IsNullOrWhiteSpace($value)) {
-                $ambient[$name] = $value
-            }
-        }
-        $consumption = Get-JunieConsumptionMode -Environment $ambient
+        $consumption = Get-JunieConsumptionMode -Environment (Get-JunieCredentialEnvironment)
         $state.consumptionMode = $consumption.consumptionMode
         $state.consumptionModeVerified = $consumption.consumptionModeVerified
     }

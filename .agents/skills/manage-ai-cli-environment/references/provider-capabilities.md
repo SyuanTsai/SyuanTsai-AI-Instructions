@@ -11,7 +11,7 @@ Verified against local `--help` where executable access was available and offici
 | Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | Configure `AI_CLI_COPILOT_PERSONAL_TOKEN` |
 | Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `copilot login` for stored company auth, or configure `AI_CLI_COPILOT_COMPANY_TOKEN` |
 | Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | Start `agy` and complete the official browser flow |
-| Junie | Requested task; `junie --version` in usage/doctor diagnostics | Actual task verifies CLI/auth; version verifies executable only | Unsupported; `/usage` is session cost, not account quota | Official Junie PowerShell installer | Start `junie` and choose an official authentication option |
+| Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | Start `junie`, pause before confirming JetBrains Account login, let the user activate the intended browser profile, then continue and verify with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
 
 No listed daily probe currently returns a reliable account `usedPercent`. Keep the default `usageSource` as `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit.
 
@@ -57,10 +57,12 @@ Official sources:
 
 ### JetBrains Junie
 
-- Use task execution as the optimistic auth probe; avoid a paid no-op preflight.
+- Verify stored JetBrains Account authentication with a minimal interactive task; avoid a second paid no-op preflight before user work.
+- Start interactive `junie` and stop while **Continue with JetBrains account** remains selected in the terminal. Ask the user to activate the intended Chrome profile/window and wait for explicit confirmation before sending Enter. Then pause again for the user to select the intended JetBrains identity and verify it with `/account`. Multiple Chrome profiles or already signed-in identities are not reliable account evidence.
+- Treat `JUNIE_API_KEY` as the documented headless, usage-based billing option, not as the only way to use a JetBrains subscription. In locally verified CLI 26.8.3, stored account OAuth worked interactively but did not satisfy `--task`; require `JUNIE_API_KEY` or documented BYOK evidence before a non-interactive worker call.
 - Mark `byok` verified only when a documented `JUNIE_*_API_KEY` provider variable is present.
 - Mark `jetbrains-ai` verified when `JUNIE_API_KEY` is present. Otherwise keep consumption mode unknown; a stored interactive login or custom config cannot be distinguished safely without task/config evidence.
-- Do not treat session `/usage` as account quota.
+- `/usage` may confirm an interactive task's session cost and remaining balance, but do not scrape its TUI or map it to `usedPercent`.
 
 Official sources:
 

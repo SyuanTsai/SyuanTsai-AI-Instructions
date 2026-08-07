@@ -154,6 +154,22 @@ function Invoke-InteractiveProcess {
         return $exitCode -eq 0
     }
     catch {
+        $resolvedCommand = Get-Command $Command -ErrorAction SilentlyContinue | Select-Object -First 1
+        $resolvedSource = if ($null -ne $resolvedCommand -and $resolvedCommand.CommandType -eq 'Application') {
+            [string] $resolvedCommand.Source
+        }
+        else {
+            $null
+        }
+        if (-not [string]::IsNullOrWhiteSpace($resolvedSource)) {
+            $suppliedPath = try { [System.IO.Path]::GetFullPath($Command) } catch { $Command }
+            if (-not $resolvedSource.Equals($suppliedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return Invoke-InteractiveProcess `
+                    -Command $resolvedSource `
+                    -Arguments $Arguments `
+                    -Environment $Environment
+            }
+        }
         return $false
     }
 }

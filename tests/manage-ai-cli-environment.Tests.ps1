@@ -283,6 +283,32 @@ Describe 'AI CLI process startup' {
         $result.exitCode | Should Be 0
         $result.stdout.Trim() | Should Be 'AI_CLI_BATCH_OK'
     }
+
+    # Scenario: An official login command is exposed as a Windows batch shim.
+    # Purpose: Ensure repair can start Junie's interactive login after installation.
+    It 'T030_executes_an_interactive_batch_shim_after_command_resolution' {
+        # Given
+        $batchPath = Join-Path $TestDrive 'provider-login-shim.bat'
+        [System.IO.File]::WriteAllText(
+            $batchPath,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+
+        $previousPath = $env:Path
+        try {
+            $env:Path = "$TestDrive;$previousPath"
+
+            # When
+            $result = Invoke-InteractiveProcess -Command 'provider-login-shim'
+        }
+        finally {
+            $env:Path = $previousPath
+        }
+
+        # Then
+        $result | Should Be $true
+    }
 }
 
 Describe 'AI CLI operational logging' {
@@ -488,5 +514,90 @@ Describe 'AI CLI environment installer' {
         $payload = $process.stdout | ConvertFrom-Json
         $payload.success | Should Be $false
         $payload.reason | Should Be 'resource_disabled'
+    }
+
+    # Scenario: Junie has an interactive JetBrains Account login but no headless credential evidence.
+    # Purpose: Explain that subscription login remains interactive-only instead of starting a doomed task.
+    It 'T040_requires_a_headless_credential_for_non_interactive_junie_tasks' {
+        # Given
+        $targetRoot = Join-Path $TestDrive 'junie-auth-repository'
+        New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+        Install-AiCliEnvironment -TargetRoot $targetRoot
+        $credentialNames = @(
+            'JUNIE_API_KEY',
+            'JUNIE_ANTHROPIC_API_KEY',
+            'JUNIE_OPENAI_API_KEY',
+            'JUNIE_GOOGLE_API_KEY',
+            'JUNIE_GROK_API_KEY',
+            'JUNIE_OPENROUTER_API_KEY'
+        )
+        $previousValues = @{}
+        foreach ($name in $credentialNames) {
+            $previousValues[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        $script:taskCalls = 0
+        $processRunner = {
+            param($Command, $Arguments, $Environment, $TimeoutSeconds)
+            $script:taskCalls++
+            New-TestProcessResult -StdOut 'task executed'
+        }
+
+        try {
+            # When
+            $result = Invoke-GuardedResourceCommand `
+                -ResourceName 'junie' `
+                -RepositoryRoot $targetRoot `
+                -Arguments @('test task') `
+                -ProcessRunner $processRunner `
+                -NoRepair
+        }
+        finally {
+            foreach ($name in $credentialNames) {
+                [Environment]::SetEnvironmentVariable($name, $previousValues[$name], 'Process')
+            }
+        }
+
+        # Then
+        $result.available | Should Be $false
+        $result.reason | Should Be 'headless_credential_required'
+        $result.authenticationAction | Should Be 'interactive_login_or_configure_headless_key'
+        $script:taskCalls | Should Be 0
+    }
+
+    # Scenario: Junie has explicit API-key evidence and returns an unclassified provider error.
+    # Purpose: Do not misreport provider failures as missing interactive authentication.
+    It 'T050_preserves_junie_provider_errors_when_api_key_evidence_exists' {
+        # Given
+        $targetRoot = Join-Path $TestDrive 'junie-provider-error-repository'
+        New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+        Install-AiCliEnvironment -TargetRoot $targetRoot
+        $previousValue = [Environment]::GetEnvironmentVariable('JUNIE_API_KEY', 'Process')
+        [Environment]::SetEnvironmentVariable('JUNIE_API_KEY', 'test-junie-token', 'Process')
+        $script:taskCalls = 0
+        $processRunner = {
+            param($Command, $Arguments, $Environment, $TimeoutSeconds)
+            $script:taskCalls++
+            New-TestProcessResult -ExitCode 1 -StdErr 'Junie failed with the message: 功能錯誤。'
+        }
+
+        try {
+            # When
+            $result = Invoke-GuardedResourceCommand `
+                -ResourceName 'junie' `
+                -RepositoryRoot $targetRoot `
+                -Arguments @('test task') `
+                -ProcessRunner $processRunner `
+                -NoRepair
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('JUNIE_API_KEY', $previousValue, 'Process')
+        }
+
+        # Then
+        $result.available | Should Be $false
+        $result.reason | Should Be 'provider_error'
+        $result.authenticationAction | Should BeNullOrEmpty
+        $script:taskCalls | Should Be 1
     }
 }

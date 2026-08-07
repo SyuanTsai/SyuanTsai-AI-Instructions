@@ -66,6 +66,7 @@ function Invoke-GuardedResourceCommand {
     $availability = $null
     $bootstrapAction = $null
     $authenticationAction = $null
+    $junieEnvironment = $null
 
     if ($ResourceName -in @('copilotPersonal', 'copilotCompany')) {
         $profileAuthentication = Resolve-CopilotProfileAuthentication `
@@ -81,6 +82,22 @@ function Invoke-GuardedResourceCommand {
                 -HardLimitPercent $hardLimit `
                 -Warning $null `
                 -AuthenticationAction 'profile_token_required'
+            Write-AiEnvironmentLog -RepositoryRoot $RepositoryRoot -Entry $blocked
+            return $blocked
+        }
+    }
+    if ($ResourceName -eq 'junie') {
+        $junieEnvironment = Get-JunieCredentialEnvironment
+        $headlessAuthentication = Resolve-JunieHeadlessAuthentication -Environment $junieEnvironment
+        if (-not $headlessAuthentication.ready) {
+            $blocked = New-GuardFailureResult `
+                -ResourceName $ResourceName `
+                -Reason $headlessAuthentication.reason `
+                -UsageKnown $false `
+                -UsedPercent $null `
+                -HardLimitPercent $hardLimit `
+                -Warning $null `
+                -AuthenticationAction 'interactive_login_or_configure_headless_key'
             Write-AiEnvironmentLog -RepositoryRoot $RepositoryRoot -Entry $blocked
             return $blocked
         }
@@ -214,14 +231,7 @@ function Invoke-GuardedResourceCommand {
         $success.model = $adapter.model
     }
     if ($ResourceName -eq 'junie') {
-        $ambient = @{}
-        foreach ($name in @('JUNIE_API_KEY', 'JUNIE_ANTHROPIC_API_KEY', 'JUNIE_OPENAI_API_KEY', 'JUNIE_GOOGLE_API_KEY', 'JUNIE_GROK_API_KEY', 'JUNIE_OPENROUTER_API_KEY')) {
-            $value = [Environment]::GetEnvironmentVariable($name)
-            if (-not [string]::IsNullOrWhiteSpace($value)) {
-                $ambient[$name] = $value
-            }
-        }
-        $consumption = Get-JunieConsumptionMode -Environment $ambient
+        $consumption = Get-JunieConsumptionMode -Environment $junieEnvironment
         $success.consumptionMode = $consumption.consumptionMode
         $success.consumptionModeVerified = $consumption.consumptionModeVerified
     }

@@ -22,6 +22,10 @@ Set `enabled` and `hardLimitPercent` independently for every resource. Set `unkn
 
 Keep credentials outside the repository. Copilot OAuth login is stored in the system credential store and is not isolated by `COPILOT_HOME`. The default config therefore allows the Company profile to use that stored credential and requires `AI_CLI_COPILOT_PERSONAL_TOKEN` for Personal. Set `authenticationMode` to `token` for any profile that must never fall back to the stored account. The wrappers map only the selected token to the child process and use separate `COPILOT_HOME` directories for config and state.
 
+For Junie subscription access, start `junie` and leave **Continue with JetBrains account** selected in the terminal. Do not confirm it yet. Ask the user to activate the intended Chrome profile/window and wait for an explicit ready response; only then confirm the terminal choice so the OAuth URL opens in that browser context. Require the user to select the intended JetBrains identity on the official page; never infer identity from an already signed-in browser session. Verify it with `/account`, then run a minimal interactive task. For headless usage-based billing, generate a token at `https://junie.jetbrains.com/cli` and store it as `JUNIE_API_KEY`; documented provider variables are also supported for BYOK. Never pass credentials through chat, command history, repository files, or logs.
+
+Keep interactive subscription readiness separate from headless readiness. Locally verified Junie CLI 26.8.3 can run an interactive JetBrains AI task after account OAuth, while the same stored account does not satisfy `--task`. The non-interactive wrapper therefore requires `JUNIE_API_KEY` or a documented BYOK variable and otherwise returns `headless_credential_required` with `authenticationAction: interactive_login_or_configure_headless_key` before spending a task call.
+
 ## Run the tooling
 
 - Run `./tools/ai-usage.ps1` to probe all resources in parallel and write `.ai/usage-state.json`.
@@ -35,7 +39,7 @@ Apply the hard-limit guard in the wrapper before task execution. When a provider
 
 Use the adapter's primary probe first. On success, do not run `Get-Command`, version, auth, or health checks. On failure, classify the error before diagnostic fallback. After install or login, retry only the primary probe.
 
-Treat Copilot and Junie task execution as the optimistic auth probe because their verified CLIs expose no non-consuming machine-readable auth-and-quota command. Do not add a second AI call merely as preflight.
+Treat Copilot task execution as the optimistic auth probe because its verified CLI exposes no non-consuming machine-readable auth-and-quota command. For Junie, use an interactive task to verify stored JetBrains Account authentication, and use the requested non-interactive task only after headless credential evidence exists. Do not add a second AI call merely as preflight.
 
 Read [provider-capabilities.md](references/provider-capabilities.md) before changing commands, parsers, install flows, login flows, account isolation, Spark verification, or Junie consumption-mode detection.
 
