@@ -14,3 +14,6 @@ foreach ($file in @(
 )) {
     . (Join-Path $commonRoot $file)
 }
+
+$toolsRoot = Split-Path -Parent $commonRoot
+. (Join-Path $toolsRoot 'codex\usage.ps1')

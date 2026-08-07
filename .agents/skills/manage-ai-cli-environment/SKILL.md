@@ -14,7 +14,7 @@ Manage resource reality only: determine whether a named AI CLI resource can run 
 3. Preserve an existing `.ai/config.json`; pass `-Force` only to refresh managed tool scripts.
 4. Keep `.ai/logs/`, `.ai/usage-state.json`, and any profile state ignored by Git.
 
-The installer copies `assets/environment-layer/` so the target repository receives `.ai/config.json`, six worker wrappers, `ai-login.ps1`, `ai-usage.ps1`, `ai-doctor.ps1`, and the common modules.
+The installer copies `assets/environment-layer/` so the target repository receives `.ai/config.json`, six worker wrappers, `ai-login.ps1`, `ai-usage.ps1`, `ai-doctor.ps1`, provider-owned tool directories, and the common modules.
 
 ## Configure resources
 
@@ -31,13 +31,16 @@ Keep interactive subscription readiness separate from headless readiness. Locall
 ## Run the tooling
 
 - Run `./tools/ai-usage.ps1` to probe all resources in parallel and write `.ai/usage-state.json`.
+- Run `./tools/codex/get-usage.ps1` for a machine-readable Codex provider snapshot. It starts the official `codex app-server`, calls `account/rateLimits/read`, and returns independent `codexMain` and `codexSpark` states without reading or returning authentication tokens. Add `-ResourceName codexMain` or `-ResourceName codexSpark` to select one state.
+- Use `./tools/codex/get-usage.ps1 -PrivateEndpoint -ResourceName <name>` only as an explicit compatibility path when app-server is unavailable and the user accepts reliance on the non-public ChatGPT `/wham/usage` endpoint. Never fall back to it silently.
+- Run `./tools/codex/login.ps1` and `./tools/codex/doctor.ps1` for Codex-owned login and diagnostics. Login remains fully user-controlled in its delegated PowerShell window.
 - Run `./tools/ai-usage.ps1 -InteractiveResourceName <name>` when the user wants to inspect provider-owned usage in the official CLI. It opens one visible PowerShell 7 window with the selected resource profile environment and leaves all commands and choices to the user. Codex and Junie instruct the user to run `/usage`; Copilot shows Plan quota in its status line and uses `/statusline` when quota is hidden; Agy can only show accessible models because its verified CLI has no usage command. Treat this path as human review: do not parse its terminal output or write a guessed percentage to `.ai/usage-state.json`.
 - Run `./tools/ai-doctor.ps1` for explicit installed/version/auth/config diagnostics. Add `-Repair` only when interactive install or login is intended.
 - Run `./tools/ai-login.ps1 -ResourceName <name>` when the user needs to own the complete setup or login interaction in a separate visible PowerShell.
 - Run a worker wrapper with the provider's normal arguments, for example `./tools/codex-spark.ps1 exec "<task>"`.
 - Add `-NoRepair` to a worker when it must return a structured install/auth error without opening an interactive repair flow.
 
-Apply the hard-limit guard in the wrapper before task execution. When a provider has no safe machine-readable quota source, enforce `unknownUsagePolicy` and return `usageKnown: false`.
+Apply the hard-limit guard in the wrapper before task execution. Codex consumes its provider-owned app-server result; when a provider or a distinct Codex meter has no safe machine-readable quota source, enforce `unknownUsagePolicy` and return `usageKnown: false`.
 
 ## Preserve probe efficiency
 

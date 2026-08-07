@@ -92,6 +92,8 @@ function Invoke-ResourceAvailability {
 
         [scriptblock] $LoginRunner,
 
+        [scriptblock] $UsageRunner,
+
         [switch] $Repair
     )
 
@@ -195,7 +197,20 @@ function Invoke-ResourceAvailability {
         }
     }
 
-    $usage = Get-ResourceUsage -Adapter $adapter -ProbeResult $probeResult
+    $usage = if ($adapter.usageSource -eq 'codex-app-server') {
+        if ($null -ne $UsageRunner) {
+            & $UsageRunner $ResourceName $timeoutSeconds
+        }
+        elseif ($null -eq $ProcessRunner) {
+            (Invoke-CodexUsageSnapshot -TimeoutSeconds $timeoutSeconds).resources.$ResourceName
+        }
+        else {
+            New-CodexUnknownUsage -Source 'codex-app-server' -Reason 'usage_not_probed_in_test_transport'
+        }
+    }
+    else {
+        Get-ResourceUsage -Adapter $adapter -ProbeResult $probeResult
+    }
     $policy = Resolve-UsageAvailability `
         -UsageKnown $usage.known `
         -UsedPercent $usage.usedPercent `

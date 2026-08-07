@@ -6,14 +6,14 @@ Verified against local `--help` where executable access was available and offici
 
 | Resource | Daily primary probe | What it verifies | Machine-readable account usage | Install | Login |
 | --- | --- | --- | --- | --- | --- |
-| Codex Main | `codex login status` | CLI start and active authentication mode | Unsupported; `/usage` is interactive | `npm install --global @openai/codex` | `ai-login.ps1 -ResourceName codexMain`; user owns the visible PowerShell and official login choices |
-| Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Unsupported; `/usage` is interactive | Same as Codex Main | `ai-login.ps1 -ResourceName codexSpark`; shares Codex auth, then verify Spark with a real task |
+| Codex Main | `codex login status`, then `tools/codex/get-usage.ps1` | CLI/auth first; app-server returns the current account rate-limit snapshot | Supported through stable `account/rateLimits/read` | `npm install --global @openai/codex` | `tools/codex/login.ps1`; user owns the visible PowerShell and official login choices |
+| Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Supported only when `rateLimitsByLimitId` contains a distinct Spark meter | Same as Codex Main | `tools/codex/login.ps1`; shares Codex auth, then verify Spark with a real task |
 | Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | `ai-login.ps1 -ResourceName copilotPersonal`; enter the isolated token only in its secure prompt |
 | Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `ai-login.ps1 -ResourceName copilotCompany`; terminal runs `copilot login --device-code` and the user opens the URL in any browser/profile |
 | Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | `ai-login.ps1 -ResourceName agy`; user completes the official account flow |
 | Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | `ai-login.ps1 -ResourceName junie`; user makes all TUI and browser/account choices, then verifies with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
 
-No listed daily probe currently returns a reliable account `usedPercent`. Keep the default `usageSource` as `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit.
+Codex is the only listed resource with a verified machine-readable account `usedPercent`: the provider-owned tool uses the official app-server JSON-RPC surface. Other providers remain `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit. A missing distinct Spark snapshot is also UNKNOWN and must never inherit the Main percentage.
 
 For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selected official CLI in one user-controlled PowerShell. It preserves Copilot Personal/Company profile environment isolation, but deliberately returns `usageKnown: false` because the visible provider output is not parsed. Copilot Personal additionally requires its dedicated token before the window can open so it cannot fall back to the Company credential-store account.
 
@@ -22,6 +22,11 @@ For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selec
 ### Codex
 
 - Use `codex login status` as the non-interactive auth probe.
+- Use `tools/codex/get-usage.ps1` as the provider-owned usage probe. Its default transport initializes `codex app-server` over stdio and calls stable `account/rateLimits/read`.
+- Treat `rateLimits` as the general Codex snapshot. Select Spark only from a `rateLimitsByLimitId` entry whose identifier or provider name identifies Spark; do not derive it from Main.
+- Map windows by `windowDurationMins`, not by primary/secondary position. Use the highest used percentage among the selected resource's compatible windows for the hard-limit guard.
+- Let app-server own token loading and refresh. Do not return provider errors, stderr, access tokens, account identifiers, or authorization headers in usage state.
+- Keep the direct `/backend-api/wham/usage` implementation explicit behind `-PrivateEndpoint`; it is a non-public compatibility path and must never be an automatic fallback.
 - Do not parse TUI `/usage`; official documentation describes it as an interactive menu/action.
 - Keep Main and Spark as separate resource states and hard limits even when they share CLI authentication.
 - Force `gpt-5.3-codex-spark` in the Spark wrapper. Mark `modelAvailable: true` only after a real Spark task succeeds; classify an explicit provider model error as `model_unavailable`. Leave it null in non-consuming status reports.
@@ -31,6 +36,7 @@ Official sources:
 - https://learn.chatgpt.com/docs/developer-commands?surface=cli
 - https://learn.chatgpt.com/docs/auth
 - https://learn.chatgpt.com/docs/models
+- https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md
 
 ### GitHub Copilot
 

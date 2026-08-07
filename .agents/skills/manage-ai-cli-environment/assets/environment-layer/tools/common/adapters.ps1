@@ -15,7 +15,7 @@ function Get-ProviderAdapter {
                 executable = 'codex'
                 primaryProbe = [pscustomobject]@{ mode = 'status'; command = 'codex'; arguments = @('login', 'status') }
                 diagnosticProbe = [pscustomobject]@{ command = 'codex'; arguments = @('--version') }
-                usageSource = 'unsupported'
+                usageSource = 'codex-app-server'
                 model = $null
                 install = [pscustomobject]@{ command = 'npm'; arguments = @('install', '--global', '@openai/codex') }
                 login = [pscustomobject]@{ command = 'codex'; arguments = @('login') }
@@ -27,7 +27,7 @@ function Get-ProviderAdapter {
                 executable = 'codex'
                 primaryProbe = [pscustomobject]@{ mode = 'status'; command = 'codex'; arguments = @('login', 'status') }
                 diagnosticProbe = [pscustomobject]@{ command = 'codex'; arguments = @('--version') }
-                usageSource = 'unsupported'
+                usageSource = 'codex-app-server'
                 model = 'gpt-5.3-codex-spark'
                 install = [pscustomobject]@{ command = 'npm'; arguments = @('install', '--global', '@openai/codex') }
                 login = [pscustomobject]@{ command = 'codex'; arguments = @('login') }
