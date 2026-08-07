@@ -185,6 +185,68 @@ function ConvertTo-PowerShellSingleQuotedLiteral {
     return "'$($Value.Replace("'", "''"))'"
 }
 
+function Resolve-AiCliCommandPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Command,
+
+        [string[]] $CommandSearchPaths = @()
+    )
+
+    $resolvedCommand = Get-Command $Command -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $resolvedCommand) {
+        if (-not [string]::IsNullOrWhiteSpace([string] $resolvedCommand.Source)) {
+            return [string] $resolvedCommand.Source
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string] $resolvedCommand.Path)) {
+            return [string] $resolvedCommand.Path
+        }
+        return [string] $resolvedCommand.Name
+    }
+
+    $searchPaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $CommandSearchPaths) {
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $searchPaths.Add([Environment]::ExpandEnvironmentVariables($path))
+        }
+    }
+
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
+        $searchPaths.Add((Join-Path $userProfile '.local\bin'))
+    }
+    $localApplicationData = [Environment]::GetFolderPath('LocalApplicationData')
+    if (-not [string]::IsNullOrWhiteSpace($localApplicationData)) {
+        $searchPaths.Add((Join-Path $localApplicationData 'Microsoft\WinGet\Links'))
+    }
+    foreach ($target in @([EnvironmentVariableTarget]::Process, [EnvironmentVariableTarget]::User, [EnvironmentVariableTarget]::Machine)) {
+        $pathValue = [Environment]::GetEnvironmentVariable('Path', $target)
+        foreach ($path in ([string] $pathValue -split [IO.Path]::PathSeparator)) {
+            if (-not [string]::IsNullOrWhiteSpace($path)) {
+                $searchPaths.Add([Environment]::ExpandEnvironmentVariables($path))
+            }
+        }
+    }
+
+    $extensions = if ([System.IO.Path]::HasExtension($Command)) {
+        @('')
+    }
+    else {
+        @('', '.exe', '.cmd', '.bat', '.ps1')
+    }
+    foreach ($directory in ($searchPaths | Select-Object -Unique)) {
+        foreach ($extension in $extensions) {
+            $candidate = Join-Path $directory ($Command + $extension)
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return [System.IO.Path]::GetFullPath($candidate)
+            }
+        }
+    }
+
+    throw "Command was not found: $Command"
+}
+
 function New-UserControlledPowerShellLaunch {
     [CmdletBinding()]
     param(
@@ -192,6 +254,8 @@ function New-UserControlledPowerShellLaunch {
         [string] $Command,
 
         [string[]] $Arguments = @(),
+
+        [string[]] $CommandSearchPaths = @(),
 
         [Parameter(Mandatory = $true)]
         [string] $WorkingDirectory,
@@ -211,20 +275,7 @@ function New-UserControlledPowerShellLaunch {
         throw "Working directory does not exist: $resolvedWorkingDirectory"
     }
 
-    $resolvedCommand = Get-Command $Command -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $resolvedCommand) {
-        throw "Command was not found: $Command"
-    }
-
-    $commandPath = if (-not [string]::IsNullOrWhiteSpace([string] $resolvedCommand.Source)) {
-        [string] $resolvedCommand.Source
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace([string] $resolvedCommand.Path)) {
-        [string] $resolvedCommand.Path
-    }
-    else {
-        [string] $resolvedCommand.Name
-    }
+    $commandPath = Resolve-AiCliCommandPath -Command $Command -CommandSearchPaths $CommandSearchPaths
 
     $powerShellPath = Join-Path $PSHOME 'pwsh.exe'
     if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
@@ -239,6 +290,7 @@ function New-UserControlledPowerShellLaunch {
 
     $scriptLines = [System.Collections.Generic.List[string]]::new()
     $scriptLines.Add('$ErrorActionPreference = ''Stop''')
+    $scriptLines.Add('Remove-Item Env:TERM -ErrorAction SilentlyContinue')
     $scriptLines.Add("`$Host.UI.RawUI.WindowTitle = $windowTitleLiteral")
     $scriptLines.Add("Set-Location -LiteralPath $workingDirectoryLiteral")
     $scriptLines.Add("Write-Host $windowTitleLiteral -ForegroundColor Cyan")
@@ -286,6 +338,8 @@ function Start-UserControlledPowerShellProcess {
 
         [string[]] $Arguments = @(),
 
+        [string[]] $CommandSearchPaths = @(),
+
         [Parameter(Mandatory = $true)]
         [string] $WorkingDirectory,
 
@@ -313,6 +367,7 @@ function Start-UserControlledPowerShellProcess {
         $launch = New-UserControlledPowerShellLaunch `
             -Command $Command `
             -Arguments $Arguments `
+            -CommandSearchPaths $CommandSearchPaths `
             -WorkingDirectory $WorkingDirectory `
             -WindowTitle $WindowTitle `
             -Instructions $Instructions `

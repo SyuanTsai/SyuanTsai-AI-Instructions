@@ -284,6 +284,32 @@ Describe 'AI CLI process startup' {
         $result.stdout.Trim() | Should Be 'AI_CLI_BATCH_OK'
     }
 
+    # Scenario: A newly installed CLI shim exists in a user bin directory that the current process PATH has not loaded yet.
+    # Purpose: Start the delegated login window immediately after installation without requiring Codex or PowerShell to restart.
+    It 'T025_resolves_a_user_cli_shim_before_the_process_path_refreshes' {
+        # Given
+        $shimPath = Join-Path $TestDrive 'junie.bat'
+        [System.IO.File]::WriteAllText(
+            $shimPath,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+
+        # When
+        $launch = New-UserControlledPowerShellLaunch `
+            -Command 'junie' `
+            -CommandSearchPaths @($TestDrive) `
+            -WorkingDirectory $TestDrive `
+            -WindowTitle 'Junie interactive setup'
+        $encodedCommandIndex = [Array]::IndexOf($launch.arguments, '-EncodedCommand') + 1
+        $decodedCommand = [System.Text.Encoding]::Unicode.GetString(
+            [Convert]::FromBase64String($launch.arguments[$encodedCommandIndex])
+        )
+
+        # Then
+        $decodedCommand | Should Match ([regex]::Escape($shimPath))
+    }
+
     # Scenario: An official login command is exposed as a Windows batch shim.
     # Purpose: Ensure repair can start Junie's interactive login after installation.
     It 'T030_executes_an_interactive_batch_shim_after_command_resolution' {
@@ -340,6 +366,8 @@ Describe 'AI CLI process startup' {
         $decodedCommand | Should Match ([regex]::Escape($cliShim))
         $decodedCommand | Should Match 'Make every interactive choice in this window\.'
         $decodedCommand | Should Match "Read-Host 'Choose the intended browser context, then press Enter\.'"
+        $decodedCommand | Should Match 'Remove-Item Env:TERM -ErrorAction SilentlyContinue'
+        $decodedCommand.IndexOf('Remove-Item Env:TERM') | Should BeLessThan $decodedCommand.IndexOf("& '$cliShim'")
         $decodedCommand.IndexOf('Read-Host') | Should BeLessThan $decodedCommand.IndexOf("& '$cliShim'")
         $decodedCommand | Should Not Match 'chrome\.exe|msedge\.exe|firefox\.exe|Start-Process\s+[^\r\n]*https?://'
     }
