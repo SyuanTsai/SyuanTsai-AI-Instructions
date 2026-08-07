@@ -53,6 +53,147 @@ function New-TestProcessResult {
     }
 }
 
+Describe 'Codex machine-readable usage' {
+    # Scenario: A signed-in Codex auth file contains an access token and account identifier.
+    # Purpose: Query the read-only usage endpoint with the selected account while never returning credentials.
+    It 'T010_reads_local_auth_and_queries_usage_without_exposing_credentials' {
+        # Given
+        $authPath = Join-Path $TestDrive 'auth.json'
+        @{
+            tokens = @{
+                access_token = 'test-access-token'
+                account_id = 'test-account-id'
+            }
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $authPath -Encoding utf8
+        $script:requestedUri = $null
+        $script:requestedHeaders = $null
+        $requestRunner = {
+            param($Uri, $Headers, $TimeoutSeconds)
+            $script:requestedUri = $Uri
+            $script:requestedHeaders = $Headers
+            return [pscustomobject]@{
+                rate_limit = [pscustomobject]@{
+                    primary_window = [pscustomobject]@{ used_percent = 25; limit_window_seconds = 18000; reset_after_seconds = 900 }
+                    secondary_window = $null
+                }
+            }
+        }
+
+        # When
+        $usage = Invoke-CodexUsageProbe `
+            -ResourceName 'codexMain' `
+            -AuthPath $authPath `
+            -RequestRunner $requestRunner
+
+        # Then
+        $usage.known | Should Be $true
+        $usage.usedPercent | Should Be 25
+        $usage.source | Should Be 'chatgpt-wham-usage-private'
+        $script:requestedUri | Should Be 'https://chatgpt.com/backend-api/wham/usage'
+        $script:requestedHeaders.Authorization | Should Be 'Bearer test-access-token'
+        $script:requestedHeaders.'ChatGPT-Account-ID' | Should Be 'test-account-id'
+        ($usage | ConvertTo-Json -Depth 8) | Should Not Match 'test-access-token|test-account-id'
+    }
+
+    # Scenario: Codex returns current-session and weekly windows with different usage percentages.
+    # Purpose: Preserve both windows and guard the resource using the most consumed compatible window.
+    It 'T020_normalizes_main_windows_and_uses_the_highest_consumption' {
+        # Given
+        $response = [pscustomobject]@{
+            rate_limit = [pscustomobject]@{
+                primary_window = [pscustomobject]@{ used_percent = 18; limit_window_seconds = 18000; reset_after_seconds = 600 }
+                secondary_window = [pscustomobject]@{ used_percent = 36; limit_window_seconds = 604800; reset_at = 1786200000 }
+            }
+        }
+
+        # When
+        $usage = ConvertFrom-CodexUsageResponse -ResourceName 'codexMain' -Response $response
+
+        # Then
+        $usage.known | Should Be $true
+        $usage.usedPercent | Should Be 36
+        @($usage.details).Count | Should Be 2
+        @($usage.details | Where-Object { $_.scope -eq 'session' -and $_.remainingPercent -eq 82 }).Count | Should Be 1
+        @($usage.details | Where-Object { $_.scope -eq 'weekly' -and $_.usedPercent -eq 36 }).Count | Should Be 1
+    }
+
+    # Scenario: Codex returns a separate additional rate-limit meter for Spark.
+    # Purpose: Keep Spark independent from Main and calculate its guard percentage only from the Spark meter.
+    It 'T030_uses_only_the_spark_additional_rate_limit' {
+        # Given
+        $response = [pscustomobject]@{
+            rate_limit = [pscustomobject]@{
+                primary_window = [pscustomobject]@{ used_percent = 92; limit_window_seconds = 18000 }
+                secondary_window = [pscustomobject]@{ used_percent = 88; limit_window_seconds = 604800 }
+            }
+            additional_rate_limits = @(
+                [pscustomobject]@{
+                    limit_name = 'codex_spark'
+                    display_name = 'GPT-5.3-Codex-Spark'
+                    rate_limit = [pscustomobject]@{
+                        primary_window = [pscustomobject]@{ used_percent = 40; limit_window_seconds = 18000 }
+                        secondary_window = [pscustomobject]@{ used_percent = 60; limit_window_seconds = 604800 }
+                    }
+                }
+            )
+        }
+
+        # When
+        $usage = ConvertFrom-CodexUsageResponse -ResourceName 'codexSpark' -Response $response
+
+        # Then
+        $usage.known | Should Be $true
+        $usage.usedPercent | Should Be 60
+        @($usage.details).Count | Should Be 2
+        @($usage.details | Where-Object usedPercent -gt 60).Count | Should Be 0
+    }
+
+    # Scenario: The account usage response has Main windows but no distinct Spark meter.
+    # Purpose: Never guess Spark consumption from Main when the provider does not expose a compatible meter.
+    It 'T040_keeps_spark_unknown_when_its_meter_is_absent' {
+        # Given
+        $response = [pscustomobject]@{
+            rate_limit = [pscustomobject]@{
+                primary_window = [pscustomobject]@{ used_percent = 20; limit_window_seconds = 18000 }
+                secondary_window = [pscustomobject]@{ used_percent = 30; limit_window_seconds = 604800 }
+            }
+        }
+
+        # When
+        $usage = ConvertFrom-CodexUsageResponse -ResourceName 'codexSpark' -Response $response
+
+        # Then
+        $usage.known | Should Be $false
+        $usage.usedPercent | Should Be $null
+        $usage.reason | Should Be 'usage_meter_unavailable'
+    }
+
+    # Scenario: Local authentication is missing, the request fails, or the provider response is incomplete.
+    # Purpose: Degrade to UNKNOWN without throwing, leaking an error body, or treating missing data as zero.
+    It 'T050_returns_safe_unknown_results_for_auth_request_and_schema_failures' {
+        # Given
+        $missingAuthPath = Join-Path $TestDrive 'missing-auth.json'
+        $authPath = Join-Path $TestDrive 'valid-auth.json'
+        @{ tokens = @{ access_token = 'private-token'; account_id = 'private-account' } } |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath $authPath -Encoding utf8
+        $failingRequest = { throw 'network failed with private-token' }
+
+        # When
+        $missingAuth = Invoke-CodexUsageProbe -ResourceName 'codexMain' -AuthPath $missingAuthPath
+        $requestFailure = Invoke-CodexUsageProbe -ResourceName 'codexMain' -AuthPath $authPath -RequestRunner $failingRequest
+        $invalidResponse = ConvertFrom-CodexUsageResponse -ResourceName 'codexMain' -Response ([pscustomobject]@{})
+
+        # Then
+        $missingAuth.reason | Should Be 'authentication_state_unavailable'
+        $requestFailure.reason | Should Be 'usage_query_failed'
+        $invalidResponse.reason | Should Be 'usage_response_invalid'
+        $missingAuth.usedPercent | Should Be $null
+        $requestFailure.usedPercent | Should Be $null
+        ($requestFailure | ConvertTo-Json -Depth 6) | Should Not Match 'private-token|network failed'
+    }
+}
+
 Describe 'AI CLI resource policy' {
     # Scenario: The configured resource is disabled before any external work begins.
     # Purpose: Protect the no-probe, no-login, and no-execution guarantee for disabled resources.
@@ -155,6 +296,9 @@ Describe 'AI CLI probe classification and retry' {
         $result.authenticationReady | Should Be $true
         $result.usageKnown | Should Be $false
         $result.warning | Should Be 'usage_unknown'
+        $result.usage.acquisitionMode | Should Be 'official_api'
+        $result.usage.machineReadable | Should Be $true
+        $result.usage.known | Should Be $false
         $script:probeCalls | Should Be 1
         $script:installCalls | Should Be 0
         $script:loginCalls | Should Be 0
@@ -237,6 +381,49 @@ Describe 'AI CLI probe classification and retry' {
         $result.authenticationAction | Should Be 'failed'
         $script:probeCalls | Should Be 1
         $script:loginCalls | Should Be 1
+    }
+
+    # Scenario: The Junie CLI is unavailable while a separately exported Central Console snapshot is readable.
+    # Purpose: Keep CLI readiness and usage acquisition independent in the returned resource state.
+    It 'T060_preserves_independently_acquired_usage_when_cli_readiness_fails' {
+        # Given
+        $configuration = New-TestAiConfiguration
+        $processRunner = {
+            param($Command, $Arguments, $Environment, $TimeoutSeconds)
+            New-TestProcessResult -CommandNotFound $true
+        }
+        $usageRunner = {
+            param($ResourceName, $TimeoutSeconds)
+            [pscustomobject]@{
+                source = 'jetbrains-central-console-csv'
+                acquisitionMode = 'csv_import'
+                known = $true
+                usedPercent = 40
+                remainingPercent = 60
+                usedQuantity = 40
+                limitQuantity = 100
+                remainingQuantity = 60
+                unitType = 'AI Credits'
+                scope = 'monthly'
+                details = @()
+                reason = $null
+            }
+        }
+
+        # When
+        $result = Invoke-ResourceAvailability `
+            -ResourceName 'junie' `
+            -Configuration $configuration `
+            -ProcessRunner $processRunner `
+            -UsageRunner $usageRunner
+
+        # Then
+        $result.available | Should Be $false
+        $result.reason | Should Be 'command_not_found'
+        $result.cliReady | Should Be $false
+        $result.usageKnown | Should Be $true
+        $result.usedPercent | Should Be 40
+        $result.usage.acquisitionMode | Should Be 'csv_import'
     }
 }
 
@@ -460,6 +647,7 @@ Describe 'AI CLI process startup' {
         $launch.environment.COPILOT_HOME | Should Be 'C:\profiles\company'
         $decodedCommand | Should Not Match 'C:\\profiles\\company'
     }
+
 }
 
 Describe 'AI CLI user-controlled login' {
@@ -631,6 +819,28 @@ Describe 'Provider adapter contracts' {
         $junie.primaryProbe.mode | Should Be 'execution'
     }
 
+    # Scenario: Every provider exposes how usage can be acquired independently from CLI readiness.
+    # Purpose: Prevent the shared flow from assuming that every authenticated CLI has a machine-readable quota.
+    It 'T015_declares_usage_acquisition_capabilities_per_provider' {
+        # Given / When
+        $codex = Get-ProviderAdapter -ResourceName 'codexMain'
+        $copilotPersonal = Get-ProviderAdapter -ResourceName 'copilotPersonal'
+        $copilotCompany = Get-ProviderAdapter -ResourceName 'copilotCompany'
+        $agy = Get-ProviderAdapter -ResourceName 'agy'
+        $junie = Get-ProviderAdapter -ResourceName 'junie'
+
+        # Then
+        $codex.usageAcquisition.mode | Should Be 'official_api'
+        $codex.usageAcquisition.machineReadable | Should Be $true
+        $copilotPersonal.usageAcquisition.mode | Should Be 'provider_api'
+        $copilotPersonal.usageAcquisition.machineReadable | Should Be $true
+        $copilotCompany.usageAcquisition.mode | Should Be 'unsupported'
+        $copilotCompany.usageAcquisition.machineReadable | Should Be $false
+        $agy.usageAcquisition.mode | Should Be 'unsupported'
+        $junie.usageAcquisition.mode | Should Be 'interactive'
+        $junie.usageAcquisition.machineReadable | Should Be $false
+    }
+
     # Scenario: Personal and company Copilot profiles resolve from the same local state root.
     # Purpose: Prevent the two accounts from sharing one mutable COPILOT_HOME session.
     It 'T020_isolates_copilot_personal_and_company_profile_state' {
@@ -720,6 +930,81 @@ Describe 'Provider adapter contracts' {
     }
 }
 
+Describe 'Normalized usage contract' {
+    # Scenario: A provider returns a known percentage without quantity fields.
+    # Purpose: Expose one stable contract without inventing amount or limit knowledge.
+    It 'T010_normalizes_known_percentage_without_inventing_quantities' {
+        # Given
+        $providerUsage = [pscustomobject]@{
+            known = $true
+            usedPercent = 35
+            remainingPercent = 65
+            source = 'codex-app-server'
+            scope = 'weekly'
+            details = @()
+        }
+
+        # When
+        $usage = ConvertTo-UsageSnapshot `
+            -ResourceName 'codexMain' `
+            -Usage $providerUsage `
+            -AcquisitionMode 'official_api'
+
+        # Then
+        $usage.provider | Should Be 'codexMain'
+        $usage.acquisitionMode | Should Be 'official_api'
+        $usage.machineReadable | Should Be $true
+        $usage.known | Should Be $true
+        $usage.usageAmountKnown | Should Be $false
+        $usage.limitAmountKnown | Should Be $false
+        $usage.remainingAmountKnown | Should Be $false
+        $usage.usedPercent | Should Be 35
+    }
+
+    # Scenario: Junie exposes usage through a user-controlled interactive command only.
+    # Purpose: Preserve a useful action while ensuring unknown usage is not treated as zero or machine-readable.
+    It 'T020_normalizes_interactive_usage_as_unknown_with_a_human_action' {
+        # Given
+        $providerUsage = New-JunieUsageSnapshot
+
+        # When
+        $usage = ConvertTo-UsageSnapshot `
+            -ResourceName 'junie' `
+            -Usage $providerUsage `
+            -AcquisitionMode 'interactive'
+
+        # Then
+        $usage.acquisitionMode | Should Be 'interactive'
+        $usage.machineReadable | Should Be $false
+        $usage.known | Should Be $false
+        $usage.usedPercent | Should Be $null
+        $usage.reason | Should Be 'interactive_usage_only'
+        $usage.actions[0].type | Should Be 'human_review'
+    }
+
+    # Scenario: Percentage usage is unknown and the configured policy denies unknown usage.
+    # Purpose: Keep policy evaluation independent from the provider acquisition mechanism.
+    It 'T030_applies_unknown_policy_to_a_normalized_snapshot' {
+        # Given
+        $usage = ConvertTo-UsageSnapshot `
+            -ResourceName 'junie' `
+            -Usage (New-JunieUsageSnapshot) `
+            -AcquisitionMode 'interactive'
+
+        # When
+        $result = Resolve-UsageSnapshotAvailability `
+            -UsageSnapshot $usage `
+            -HardLimitPercent 100 `
+            -UnknownUsagePolicy 'deny'
+
+        # Then
+        $result.available | Should Be $false
+        $result.reason | Should Be 'usage_unknown'
+        $result.usage.acquisitionMode | Should Be 'interactive'
+        $result.usage.known | Should Be $false
+    }
+}
+
 Describe 'AI CLI environment installer' {
     # Scenario: The environment layer is installed twice into a clean target repository.
     # Purpose: Ensure installation is repeatable and preserves an existing resource configuration.
@@ -741,6 +1026,8 @@ Describe 'AI CLI environment installer' {
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\ai-login.ps1') | Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\copilot-personal-token.ps1') | Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\common\resource-policy.ps1') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'tools\common\usage-contract.ps1') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'tools\jetbrains-central-console\import-usage.ps1') | Should Be $true
         (Get-Content -Raw -LiteralPath $configPath) | Should Match '"hardLimitPercent": 70'
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.gitignore')) | Should Match '\.ai/logs/'
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.gitignore')) | Should Match '\.ai/usage-state\.json'

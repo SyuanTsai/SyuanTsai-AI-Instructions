@@ -112,3 +112,34 @@ function Resolve-UsageAvailability {
         hardLimitPercent = $HardLimitPercent
     }
 }
+
+function Resolve-UsageSnapshotAvailability {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject] $UsageSnapshot,
+
+        [Parameter(Mandatory = $true)]
+        [double] $HardLimitPercent,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('allow', 'warn', 'deny')]
+        [string] $UnknownUsagePolicy
+    )
+
+    $policy = Resolve-UsageAvailability `
+        -UsageKnown ([bool] $UsageSnapshot.known) `
+        -UsedPercent $UsageSnapshot.usedPercent `
+        -HardLimitPercent $HardLimitPercent `
+        -UnknownUsagePolicy $UnknownUsagePolicy
+
+    return [pscustomobject]@{
+        available = $policy.available
+        reason = $policy.reason
+        warning = $policy.warning
+        usageKnown = $policy.usageKnown
+        usedPercent = $policy.usedPercent
+        hardLimitPercent = $policy.hardLimitPercent
+        usage = $UsageSnapshot
+    }
+}

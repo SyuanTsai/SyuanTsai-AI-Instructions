@@ -16,6 +16,11 @@ function Get-ProviderAdapter {
                 primaryProbe = [pscustomobject]@{ mode = 'status'; command = 'codex'; arguments = @('login', 'status') }
                 diagnosticProbe = [pscustomobject]@{ command = 'codex'; arguments = @('--version') }
                 usageSource = 'codex-app-server'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'official_api'
+                    source = 'codex-app-server'
+                    machineReadable = $true
+                }
                 model = $null
                 install = [pscustomobject]@{ command = 'npm'; arguments = @('install', '--global', '@openai/codex') }
                 login = [pscustomobject]@{ command = 'codex'; arguments = @('login') }
@@ -28,6 +33,11 @@ function Get-ProviderAdapter {
                 primaryProbe = [pscustomobject]@{ mode = 'status'; command = 'codex'; arguments = @('login', 'status') }
                 diagnosticProbe = [pscustomobject]@{ command = 'codex'; arguments = @('--version') }
                 usageSource = 'codex-app-server'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'official_api'
+                    source = 'codex-app-server'
+                    machineReadable = $true
+                }
                 model = 'gpt-5.3-codex-spark'
                 install = [pscustomobject]@{ command = 'npm'; arguments = @('install', '--global', '@openai/codex') }
                 login = [pscustomobject]@{ command = 'codex'; arguments = @('login') }
@@ -40,6 +50,11 @@ function Get-ProviderAdapter {
                 primaryProbe = [pscustomobject]@{ mode = 'execution'; command = 'copilot'; arguments = @() }
                 diagnosticProbe = [pscustomobject]@{ command = 'copilot'; arguments = @('version') }
                 usageSource = 'github-billing-user'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'provider_api'
+                    source = 'github-billing-user'
+                    machineReadable = $true
+                }
                 model = $null
                 install = [pscustomobject]@{
                     command = 'winget'
@@ -55,6 +70,11 @@ function Get-ProviderAdapter {
                 primaryProbe = [pscustomobject]@{ mode = 'execution'; command = 'copilot'; arguments = @() }
                 diagnosticProbe = [pscustomobject]@{ command = 'copilot'; arguments = @('version') }
                 usageSource = 'unsupported'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'unsupported'
+                    source = 'unsupported'
+                    machineReadable = $false
+                }
                 model = $null
                 install = [pscustomobject]@{
                     command = 'winget'
@@ -70,6 +90,11 @@ function Get-ProviderAdapter {
                 primaryProbe = [pscustomobject]@{ mode = 'status'; command = 'agy'; arguments = @('models') }
                 diagnosticProbe = [pscustomobject]@{ command = 'agy'; arguments = @('--help') }
                 usageSource = 'unsupported'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'unsupported'
+                    source = 'unsupported'
+                    machineReadable = $false
+                }
                 model = $null
                 install = [pscustomobject]@{
                     command = 'powershell.exe'
@@ -84,7 +109,12 @@ function Get-ProviderAdapter {
                 executable = 'junie'
                 primaryProbe = [pscustomobject]@{ mode = 'execution'; command = 'junie'; arguments = @() }
                 diagnosticProbe = [pscustomobject]@{ command = 'junie'; arguments = @('--version') }
-                usageSource = 'unsupported'
+                usageSource = 'junie-interactive-usage'
+                usageAcquisition = [pscustomobject]@{
+                    mode = 'interactive'
+                    source = 'junie-interactive-usage'
+                    machineReadable = $false
+                }
                 model = $null
                 install = [pscustomobject]@{
                     command = 'powershell.exe'

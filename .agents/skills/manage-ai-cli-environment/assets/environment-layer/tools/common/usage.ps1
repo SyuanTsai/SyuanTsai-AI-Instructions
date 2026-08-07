@@ -164,5 +164,14 @@ function Get-ResourceUsage {
         known = $false
         usedPercent = $null
         source = [string] $Adapter.usageSource
+        reason = if ($Adapter.usageAcquisition.mode -eq 'unsupported') {
+            'usage_unsupported'
+        }
+        elseif ($Adapter.usageAcquisition.mode -eq 'interactive') {
+            'interactive_usage_only'
+        }
+        else {
+            'usage_unavailable'
+        }
     }
 }

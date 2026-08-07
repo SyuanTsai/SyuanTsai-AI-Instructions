@@ -44,6 +44,9 @@ foreach ($resourceName in $script:AiResourceNames) {
         usageKnown = $state.usageKnown
         usedPercent = $state.usedPercent
         hardLimitPercent = $state.hardLimitPercent
+        usageAcquisitionMode = $state.usageAcquisitionMode
+        usageMachineReadable = $state.usage.machineReadable
+        usage = $state.usage
         available = $state.available
         reason = $state.reason
         warning = $state.warning

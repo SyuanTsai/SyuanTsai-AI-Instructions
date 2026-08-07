@@ -99,7 +99,13 @@ function Invoke-ResourceAvailability {
 
     $resourceConfig = Get-ResourceConfig -Configuration $Configuration -ResourceName $ResourceName
     $hardLimitPercent = [double] $resourceConfig.hardLimitPercent
+    $adapter = Get-ProviderAdapter -ResourceName $ResourceName
     if (-not $resourceConfig.enabled) {
+        $usage = New-UnknownUsageSnapshot `
+            -ResourceName $ResourceName `
+            -Source $adapter.usageAcquisition.source `
+            -AcquisitionMode $adapter.usageAcquisition.mode `
+            -Reason 'resource_disabled'
         return [pscustomobject]@{
             provider = $ResourceName
             available = $false
@@ -110,12 +116,14 @@ function Invoke-ResourceAvailability {
             usageKnown = $false
             usedPercent = $null
             hardLimitPercent = $hardLimitPercent
+            usageSource = $usage.source
+            usageAcquisitionMode = $usage.acquisitionMode
+            usage = $usage
             bootstrapAction = $null
             authenticationAction = $null
         }
     }
 
-    $adapter = Get-ProviderAdapter -ResourceName $ResourceName
     $environment = Get-ResourceEnvironment -ResourceName $ResourceName -StateRoot $StateRoot
     if ($ResourceName -in @('copilotPersonal', 'copilotCompany')) {
         $profileAuthentication = Resolve-CopilotProfileAuthentication `
@@ -123,6 +131,11 @@ function Invoke-ResourceAvailability {
             -ResourceConfig $resourceConfig `
             -Environment $environment
         if (-not $profileAuthentication.ready) {
+            $usage = New-UnknownUsageSnapshot `
+                -ResourceName $ResourceName `
+                -Source $adapter.usageAcquisition.source `
+                -AcquisitionMode $adapter.usageAcquisition.mode `
+                -Reason $profileAuthentication.reason
             return [pscustomobject]@{
                 provider = $ResourceName
                 available = $false
@@ -134,6 +147,9 @@ function Invoke-ResourceAvailability {
                 usageKnown = $false
                 usedPercent = $null
                 hardLimitPercent = $hardLimitPercent
+                usageSource = $usage.source
+                usageAcquisitionMode = $usage.acquisitionMode
+                usage = $usage
                 bootstrapAction = $null
                 authenticationAction = 'profile_token_required'
             }
@@ -181,6 +197,26 @@ function Invoke-ResourceAvailability {
         else {
             Classify-ProbeFailure -ProcessResult $probeResult
         }
+        $usage = if ($null -ne $UsageRunner) {
+            $independentUsage = & $UsageRunner $ResourceName $timeoutSeconds
+            $mode = if ($independentUsage.PSObject.Properties['acquisitionMode']) {
+                [string] $independentUsage.acquisitionMode
+            }
+            else {
+                [string] $adapter.usageAcquisition.mode
+            }
+            ConvertTo-UsageSnapshot `
+                -ResourceName $ResourceName `
+                -Usage $independentUsage `
+                -AcquisitionMode $mode
+        }
+        else {
+            New-UnknownUsageSnapshot `
+                -ResourceName $ResourceName `
+                -Source $adapter.usageAcquisition.source `
+                -AcquisitionMode $adapter.usageAcquisition.mode `
+                -Reason $failure.reason
+        }
         return [pscustomobject]@{
             provider = $ResourceName
             available = $false
@@ -188,32 +224,52 @@ function Invoke-ResourceAvailability {
             warning = $null
             cliReady = $failure.reason -ne 'command_not_found'
             authenticationReady = if ($failure.reason -in @('authentication_required', 'authentication_failed')) { $false } else { $null }
-            usageKnown = $false
-            usedPercent = $null
+            usageKnown = $usage.known
+            usedPercent = $usage.usedPercent
             hardLimitPercent = $hardLimitPercent
+            usageSource = $usage.source
+            usageAcquisitionMode = $usage.acquisitionMode
+            usage = $usage
             bootstrapAction = $bootstrapAction
             authenticationAction = $authenticationAction
             durationMs = $probeResult.durationMs
         }
     }
 
-    $usage = if ($adapter.usageSource -eq 'codex-app-server') {
-        if ($null -ne $UsageRunner) {
-            & $UsageRunner $ResourceName $timeoutSeconds
-        }
-        elseif ($null -eq $ProcessRunner) {
+    $providerUsage = if ($null -ne $UsageRunner) {
+        & $UsageRunner $ResourceName $timeoutSeconds
+    }
+    elseif ($adapter.usageAcquisition.mode -eq 'official_api' -and $adapter.usageSource -eq 'codex-app-server') {
+        if ($null -eq $ProcessRunner) {
             (Invoke-CodexUsageSnapshot -TimeoutSeconds $timeoutSeconds).resources.$ResourceName
         }
         else {
             New-CodexUnknownUsage -Source 'codex-app-server' -Reason 'usage_not_probed_in_test_transport'
         }
     }
+    elseif ($ResourceName -eq 'copilotPersonal' -and
+        $null -eq $ProcessRunner -and
+        $environment.ContainsKey('COPILOT_GITHUB_TOKEN')) {
+        Invoke-CopilotPersonalUsageSnapshot -Token ([string] $environment.COPILOT_GITHUB_TOKEN)
+    }
+    elseif ($ResourceName -eq 'junie') {
+        New-JunieUsageSnapshot
+    }
     else {
         Get-ResourceUsage -Adapter $adapter -ProbeResult $probeResult
     }
-    $policy = Resolve-UsageAvailability `
-        -UsageKnown $usage.known `
-        -UsedPercent $usage.usedPercent `
+    $usage = ConvertTo-UsageSnapshot `
+        -ResourceName $ResourceName `
+        -Usage $providerUsage `
+        -AcquisitionMode $adapter.usageAcquisition.mode
+    if ($providerUsage.PSObject.Properties['acquisitionMode']) {
+        $usage = ConvertTo-UsageSnapshot `
+            -ResourceName $ResourceName `
+            -Usage $providerUsage `
+            -AcquisitionMode ([string] $providerUsage.acquisitionMode)
+    }
+    $policy = Resolve-UsageSnapshotAvailability `
+        -UsageSnapshot $usage `
         -HardLimitPercent $hardLimitPercent `
         -UnknownUsagePolicy $Configuration.unknownUsagePolicy
 
@@ -228,6 +284,8 @@ function Invoke-ResourceAvailability {
         usedPercent = $policy.usedPercent
         hardLimitPercent = $policy.hardLimitPercent
         usageSource = $usage.source
+        usageAcquisitionMode = $usage.acquisitionMode
+        usage = $usage
         bootstrapAction = $bootstrapAction
         authenticationAction = $authenticationAction
         durationMs = $probeResult.durationMs

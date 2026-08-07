@@ -14,17 +14,25 @@ function New-GuardFailureResult {
         [string] $AuthenticationAction = $null
     )
 
+    $adapter = Get-ProviderAdapter -ResourceName $ResourceName
+    $usage = ConvertTo-UsageSnapshot `
+        -ResourceName $ResourceName `
+        -AcquisitionMode $adapter.usageAcquisition.mode `
+        -Usage ([pscustomobject]@{
+            source = $adapter.usageAcquisition.source
+            known = $UsageKnown
+            usedPercent = $UsedPercent
+            reason = if ($UsageKnown) { $null } else { 'usage_unavailable' }
+        })
+    $usage | Add-Member -NotePropertyName hardLimitPercent -NotePropertyValue $HardLimitPercent
+
     return [pscustomobject]@{
         provider = $ResourceName
         success = $false
         available = $false
         reason = $Reason
         warning = $Warning
-        usage = [pscustomobject]@{
-            known = $UsageKnown
-            usedPercent = $UsedPercent
-            hardLimitPercent = $HardLimitPercent
-        }
+        usage = $usage
         result = $null
         bootstrapAction = $BootstrapAction
         authenticationAction = $AuthenticationAction
@@ -212,17 +220,31 @@ function Invoke-GuardedResourceCommand {
         return $failed
     }
 
+    $usageSnapshot = if ($null -ne $availability.PSObject.Properties['usage']) {
+        $availability.usage
+    }
+    else {
+        ConvertTo-UsageSnapshot `
+            -ResourceName $ResourceName `
+            -AcquisitionMode $adapter.usageAcquisition.mode `
+            -Usage ([pscustomobject]@{
+                source = $adapter.usageAcquisition.source
+                known = $availability.usageKnown
+                usedPercent = $availability.usedPercent
+                reason = if ($availability.usageKnown) { $null } else { 'usage_unavailable' }
+            })
+    }
+    if ($null -eq $usageSnapshot.PSObject.Properties['hardLimitPercent']) {
+        $usageSnapshot | Add-Member -NotePropertyName hardLimitPercent -NotePropertyValue $hardLimit
+    }
+
     $success = [ordered]@{
         provider = $ResourceName
         success = $true
         available = $true
         reason = $null
         warning = $availability.warning
-        usage = [pscustomobject]@{
-            known = $availability.usageKnown
-            usedPercent = $availability.usedPercent
-            hardLimitPercent = $hardLimit
-        }
+        usage = $usageSnapshot
         result = $execution.stdout
         durationMs = $execution.durationMs
     }

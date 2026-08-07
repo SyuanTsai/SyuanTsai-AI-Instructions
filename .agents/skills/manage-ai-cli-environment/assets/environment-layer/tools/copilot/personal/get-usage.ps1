@@ -13,7 +13,11 @@ try {
     $result = Invoke-CopilotPersonalUsageSnapshot `
         -Token ([string] $token) `
         -PrivateEndpoint:$PrivateEndpoint
-    $result | ConvertTo-Json -Depth 12
+    ConvertTo-UsageSnapshot `
+        -ResourceName 'copilotPersonal' `
+        -Usage $result `
+        -AcquisitionMode 'provider_api' |
+        ConvertTo-Json -Depth 12
 }
 finally {
     $token = $null

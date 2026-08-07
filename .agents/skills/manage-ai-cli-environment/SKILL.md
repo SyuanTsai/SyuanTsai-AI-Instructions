@@ -1,56 +1,89 @@
 ---
 name: manage-ai-cli-environment
-description: Install, configure, probe, diagnose, and safely invoke Codex Main, Codex Spark, GitHub Copilot Personal, GitHub Copilot Company, Google Antigravity (agy), and JetBrains Junie CLI resources. Use when Codex or GitHub Copilot needs to answer whether one of these AI CLI resources is currently usable, enforce independent usage limits, isolate Copilot accounts, bootstrap a missing CLI, guide official login, refresh usage-state.json, or run ai-doctor without adding routing or orchestration.
+description: Install, configure, evaluate, refresh, diagnose, and safely execute global Codex Main, Codex Spark, GitHub Copilot Personal, GitHub Copilot Company, Google Antigravity (agy), and JetBrains Junie CLI resources. Use when Codex or GitHub Copilot needs a machine-wide Resource Guard, independent usage limits, isolated Copilot accounts, official login guidance, provider diagnostics, or enforced AI CLI execution without routing or repository dependencies.
 ---
 
 # Manage AI CLI Environment
 
-Manage resource reality only: determine whether a named AI CLI resource can run and explain why it cannot. Keep routing, fallback, task classification, and multi-agent strategy out of this layer.
+Manage one shared user/machine resource reality. Answer whether a specifically requested AI CLI resource may be used, and enforce that decision before execution. Keep goal planning, resource selection, routing, fallback, and multi-agent strategy outside this skill.
 
-## Install the environment layer
+Read [global-resource-guard.md](references/global-resource-guard.md) before changing the guard contract, state schema, freshness policy, execution boundary, or install location. Read [provider-capabilities.md](references/provider-capabilities.md) before changing provider commands, usage acquisition, login, account isolation, or consumption-mode detection.
+
+## Install the Global Resource Guard
 
 1. Require PowerShell 7 or newer on Windows.
-2. Run `scripts/install-ai-cli-environment.ps1 -TargetRoot <repository-root>`.
-3. Preserve an existing `.ai/config.json`; pass `-Force` only to refresh managed tool scripts.
-4. Keep `.ai/logs/`, `.ai/usage-state.json`, and any profile state ignored by Git.
+2. Run `scripts/install-global-ai-resource-guard.ps1` without a target to install under `%LOCALAPPDATA%\ai-resource-guard`.
+3. Set the user or process variable `AI_RESOURCE_GUARD_HOME` to choose another global location. Use `-TargetRoot` only for controlled installation or testing.
+4. Use `-Force` to refresh managed scripts. Reinstallation always preserves an existing `config.json`.
 
-The installer copies `assets/environment-layer/` so the target repository receives `.ai/config.json`, six worker wrappers, `ai-login.ps1`, `ai-usage.ps1`, `ai-doctor.ps1`, provider-owned tool directories, and the common modules.
+The installer creates `bin/`, `lib/`, `provider-tools/`, `state/resources/`, `profiles/`, and `logs/` under the global root. It must not inspect or modify the current Repository, create Repository-local `.ai/` or `tools/` files, or update `.gitignore`.
 
-## Configure resources
+The older `scripts/install-ai-cli-environment.ps1 -TargetRoot <repository-root>` workflow is compatibility-only. Do not select it for new Global Resource Guard installations.
 
-Set `enabled` and `hardLimitPercent` independently for every resource. Set `unknownUsagePolicy` to `allow`, `warn`, or `deny`. Treat a null percentage as unknown, never as zero.
+## Use lazy, resource-specific evaluation
 
-Keep credentials outside the repository. Copilot OAuth login is stored in the system credential store and is not isolated by `COPILOT_HOME`. The default config therefore allows the Company profile to use that stored credential and requires a dedicated Personal token stored under `ai-cli/copilot/personal` in Windows Credential Manager. The legacy `AI_CLI_COPILOT_PERSONAL_TOKEN` user variable remains read-only migration fallback. Set `authenticationMode` to `token` for any profile that must never fall back to the stored account. The wrappers map only the selected token to the child process, remove inherited `GH_TOKEN` and `GITHUB_TOKEN`, and use separate `COPILOT_HOME` directories for config and state.
+Evaluate only when a Goal, Agent, Skill, Script, or orchestration layer is about to use a named resource:
 
-Run `./tools/ai-login.ps1 -ResourceName <name>` for every interactive login or account-setup flow. It opens a visible PowerShell 7 window, removes runner-only `TERM=dumb` state so native TUIs can initialize, gives the user complete control of the provider CLI, pauses before browser-based flows, waits for that window to finish, and then lets the caller resume verification. Do not drive the delegated TUI, preselect a browser or browser profile, infer an account from an existing browser session, or relay each provider choice through chat. The user chooses the account, browser context/profile, model, import, trust, and other provider options in that window; after it closes, verify the resource once.
+```powershell
+& "$env:LOCALAPPDATA\ai-resource-guard\bin\evaluate-resource.ps1" -ResourceName junie
+```
 
-Copilot Personal uses a dedicated secure token prompt in the delegated window and persists the token in Windows Credential Manager; it must not run the shared OAuth login used by Company. Use a user-owned fine-grained token with `Copilot Requests` and `Plan: read`. Copilot Company must use `copilot login --device-code` so the terminal displays the URL and code and the user can open them in any browser/profile; do not use the default desktop web flow, which may open an already signed-in account. For Junie subscription access, the user chooses the intended JetBrains identity and verifies it with `/account`, then runs a minimal interactive task. For headless usage-based billing, generate a token at `https://junie.jetbrains.com/cli` and store it as `JUNIE_API_KEY`; documented provider variables are also supported for BYOK. Never pass credentials through chat, command history, repository files, or logs.
+`EvaluateResource(resource)` reads `config.json` and only `state/resources/<resource>.json`. It performs no CLI call, network request, usage refresh, scan of other resources, routing, or fallback. Missing, invalid, or stale state fails closed. A valid fresh state with unknown usage follows `unknownUsagePolicy` (`allow`, `warn`, or `deny`); null usage is never treated as zero.
 
-Keep interactive subscription readiness separate from headless readiness. Locally verified Junie CLI 26.8.3 can run an interactive JetBrains AI task after account OAuth, while the same stored account does not satisfy `--task`. The non-interactive wrapper therefore requires `JUNIE_API_KEY` or a documented BYOK variable and otherwise returns `headless_credential_required` with `authenticationAction: interactive_login_or_configure_headless_key` before spending a task call.
+Configure `enabled`, `hardLimitPercent`, optional per-resource `stateMaxAgeSeconds`, and optional per-resource `unknownUsagePolicy` independently. The hard limit is inclusive: `usedPercent >= hardLimitPercent` blocks the resource.
 
-## Run the tooling
+## Refresh usage state separately
 
-- Run `./tools/ai-usage.ps1` to probe all resources in parallel and write `.ai/usage-state.json`.
-- Run `./tools/codex/get-usage.ps1` for a machine-readable Codex provider snapshot. It starts the official `codex app-server`, calls `account/rateLimits/read`, and returns independent `codexMain` and `codexSpark` states without reading or returning authentication tokens. Add `-ResourceName codexMain` or `-ResourceName codexSpark` to select one state.
-- Use `./tools/codex/get-usage.ps1 -PrivateEndpoint -ResourceName <name>` only as an explicit compatibility path when app-server is unavailable and the user accepts reliance on the non-public ChatGPT `/wham/usage` endpoint. Never fall back to it silently.
-- Run `./tools/codex/login.ps1` and `./tools/codex/doctor.ps1` for Codex-owned login and diagnostics. Login remains fully user-controlled in its delegated PowerShell window.
-- Run `./tools/copilot/personal/login.ps1`, `doctor.ps1`, and `get-usage.ps1` for the equivalent Copilot Personal workflow. The default usage path calls GitHub's user premium-request billing endpoint and reports the amount without guessing a plan limit. Add `-PrivateEndpoint` only when the user explicitly accepts the non-public `copilot_internal/user` quota surface; never fall back to it silently.
-- Run `./tools/ai-usage.ps1 -InteractiveResourceName <name>` when the user wants to inspect provider-owned usage in the official CLI. It opens one visible PowerShell 7 window with the selected resource profile environment and leaves all commands and choices to the user. Codex and Junie instruct the user to run `/usage`; Copilot shows Plan quota in its status line and uses `/statusline` when quota is hidden; Agy can only show accessible models because its verified CLI has no usage command. Treat this path as human review: do not parse its terminal output or write a guessed percentage to `.ai/usage-state.json`.
-- Run `./tools/ai-doctor.ps1` for explicit installed/version/auth/config diagnostics. Add `-Repair` only when interactive install or login is intended.
-- Run `./tools/ai-login.ps1 -ResourceName <name>` when the user needs to own the complete setup or login interaction in a separate visible PowerShell.
-- Run a worker wrapper with the provider's normal arguments, for example `./tools/codex-spark.ps1 exec "<task>"`.
-- Add `-NoRepair` to a worker when it must return a structured install/auth error without opening an interactive repair flow.
+The collector is independent from evaluation. Refresh exactly the resource whose reality needs updating:
 
-Apply the hard-limit guard in the wrapper before task execution. Codex consumes its provider-owned app-server result; when a provider or a distinct Codex meter has no safe machine-readable quota source, enforce `unknownUsagePolicy` and return `usageKnown: false`.
+```powershell
+& "$env:LOCALAPPDATA\ai-resource-guard\bin\refresh-resource-state.ps1" -ResourceName codexMain
+```
 
-## Preserve probe efficiency
+The collector invokes only that provider, normalizes readiness and usage, strips raw output and identity data, and atomically replaces `state/resources/<resource>.json`. It never evaluates policy or executes the requested AI task. Do not refresh every resource at Goal start.
 
-Use the adapter's primary probe first. On success, do not run `Get-Command`, version, auth, or health checks. On failure, classify the error before diagnostic fallback. After install or login, retry only the primary probe.
+Provider adapters declare usage acquisition as `official_api`, `provider_api`, `csv_import`, `interactive`, or `unsupported`. Only `usage.known: true` with a non-null `usedPercent` may drive the percentage hard limit. Amount-only data remains informational and must not become a guessed percentage.
 
-Treat Copilot task execution as the optimistic auth probe because its verified CLI exposes no non-consuming machine-readable auth-and-quota command. For Junie, use an interactive task to verify stored JetBrains Account authentication, and use the requested non-interactive task only after headless credential evidence exists. Do not add a second AI call merely as preflight.
+For an administrator-provided JetBrains Central Console export, refresh Junie with explicit column mapping:
 
-Read [provider-capabilities.md](references/provider-capabilities.md) before changing commands, parsers, install flows, login flows, account isolation, Spark verification, or Junie consumption-mode detection.
+```powershell
+& "$env:LOCALAPPDATA\ai-resource-guard\bin\refresh-resource-state.ps1" `
+  -ResourceName junie `
+  -JunieCentralConsoleCsvPath <csv> `
+  -JunieUsedColumn <column> `
+  -JunieLimitColumn <column>
+```
 
-## Keep output and logs safe
+Use the export as Junie quota only when its filtered scope is compatible. Otherwise treat it as informational combined JetBrains AI Credits.
 
-Return standardized JSON reasons. Log only operational fields from the allowlist in `logging.ps1`; never log raw arguments, prompts, stdout/stderr, environment values, tokens, keys, or credentials. Pass delegated profile values through the child-process environment rather than its command line. Do not screen scrape interactive `/usage` output, Copilot status lines, or infer quota from plan names.
+## Enforce execution through the Guard
+
+Run AI CLI work only through the execution entry point:
+
+```powershell
+& "$env:LOCALAPPDATA\ai-resource-guard\bin\execute-resource.ps1" `
+  -ResourceName junie `
+  -WorkingDirectory <working-directory> `
+  -ResourceArguments @('review this change')
+```
+
+`ExecuteResource(resource, arguments)` calls evaluation internally. When unavailable, it returns a structured rejection and does not start the provider process. When available, it resolves the Guard-owned executable, mandatory model or mode prefix, profile environment, and then runs the CLI. Callers supply resource arguments, not an arbitrary executable. Codex Spark always receives `-m gpt-5.3-codex-spark`; Junie headless execution always receives `--task`.
+
+Do not bypass this entry point after reading an evaluation result. The execution layer is the enforcement point, not an advisory message.
+
+## Configure authentication outside repositories
+
+Keep credentials in the system credential store, environment variables, or other global user configuration. Never put them in the Guard state, Repository files, chat, command history, or logs.
+
+Copilot OAuth login is stored in the system credential store and is not isolated by `COPILOT_HOME`. The default Company profile may use that stored credential. Personal requires a dedicated token under `ai-cli/copilot/personal` in Windows Credential Manager; `AI_CLI_COPILOT_PERSONAL_TOKEN` is a read-only migration fallback. Set `authenticationMode: token` for any profile that must not fall back to the stored account. The child wrapper removes inherited `GH_TOKEN` and `GITHUB_TOKEN`, maps only the selected token, and uses separate global profile directories.
+
+Use the provider-owned login scripts under `<global-root>/provider-tools/`. Login opens a visible PowerShell window and leaves account, browser profile, model, import, trust, and other provider choices to the user. Copilot Personal uses its secure token prompt. Copilot Company uses `copilot login --device-code`. Junie subscription access is interactive; headless `--task` requires `JUNIE_API_KEY` or a documented BYOK variable.
+
+## Preserve safe boundaries
+
+- Return standardized structured reasons such as `resource_state_missing`, `resource_state_stale`, `resource_hard_limit_reached`, and `usage_unknown`.
+- Keep evaluation read-only and deterministic for the selected state snapshot.
+- Do not infer quota from installation, authentication, plan names, accessible models, or a non-null amount.
+- Do not parse interactive `/usage`, TUI output, Copilot status lines, or terminal screens.
+- Log only operational allowlisted fields; never log prompts, arguments, stdout/stderr, environment values, tokens, keys, account identifiers, or raw provider responses.
+- If a resource is unavailable, return the reason to the caller. Another orchestration layer may choose a fallback, but this skill must not choose one.

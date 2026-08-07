@@ -1,6 +1,6 @@
 # Provider capabilities
 
-Verified against local `--help` where executable access was available and official documentation on 2026-08-07. Re-check the linked official documentation before changing an adapter because CLI surfaces and billing models evolve.
+Verified against local `--help` where executable access was available and official documentation on 2026-08-07. Re-check the linked official documentation before changing an adapter because CLI surfaces and billing models evolve. Paths below are relative to the installed Global Resource Guard's `provider-tools/` directory; the same layout remains available in the legacy Repository-local compatibility layer.
 
 ## Capability matrix
 
@@ -11,11 +11,11 @@ Verified against local `--help` where executable access was available and offici
 | Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Official user billing API returns monthly premium-request quantity but no compatible plan denominator; explicit private endpoint may return quota percentage | `winget install GitHub.Copilot` | `tools/copilot/personal/login.ps1`; enter the isolated token only in its secure prompt |
 | Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `ai-login.ps1 -ResourceName copilotCompany`; terminal runs `copilot login --device-code` and the user opens the URL in any browser/profile |
 | Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | `ai-login.ps1 -ResourceName agy`; user completes the official account flow |
-| Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | `ai-login.ps1 -ResourceName junie`; user makes all TUI and browser/account choices, then verifies with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
+| Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | Default is safe UNKNOWN because `/usage` is interactive; an explicitly mapped Central Console CSV export can supply aggregate amount and a compatible limit when the export scope supports it | Official Junie PowerShell installer | `tools/junie/login.ps1`; user makes all TUI and browser/account choices, then verifies with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
 
-Codex has a verified official machine-readable account `usedPercent`. Copilot Personal's official billing API supplies a usage amount but not a compatible plan denominator, so its percentage remains UNKNOWN unless the caller explicitly selects the non-public quota endpoint. Other providers remain `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit. A missing distinct Spark snapshot is also UNKNOWN and must never inherit the Main percentage.
+Codex has a verified official machine-readable account `usedPercent`. Copilot Personal's official billing API supplies a usage amount but not a compatible plan denominator, so its percentage remains UNKNOWN unless the caller explicitly selects the non-public quota endpoint. Other providers remain `unsupported` or `interactive` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit. JetBrains Central Console CSV is an explicit `csv_import` source rather than a CLI capability. A missing distinct Spark snapshot is also UNKNOWN and must never inherit the Main percentage.
 
-For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selected official CLI in one user-controlled PowerShell. It preserves Copilot Personal/Company profile environment isolation, but deliberately returns `usageKnown: false` because the visible provider output is not parsed. Copilot Personal additionally requires its dedicated token before the window can open so it cannot fall back to the Company credential-store account.
+For human review, `ai-usage.ps1 -InteractiveResourceName <name>` opens the selected official CLI in one user-controlled PowerShell. It preserves Copilot Personal/Company profile environment isolation, but deliberately returns `usageKnown: false` because the visible provider output is not parsed. Copilot Personal additionally requires its dedicated token before the window can open so it cannot fall back to the Company credential-store account. This compatibility command is not part of `EvaluateResource`; the Global Guard collector refreshes one named state and evaluation only reads that persisted snapshot.
 
 ## Provider-specific rules
 
@@ -69,15 +69,20 @@ Official sources:
 
 ### JetBrains Junie
 
+- Use `tools/junie/login.ps1`, `doctor.ps1`, and `get-usage.ps1` as the provider-owned workflow. Keep `get-usage.ps1` machine-readable and return `interactive_usage_only` with a human-review action instead of starting or scraping the TUI.
 - Verify stored JetBrains Account authentication with a minimal interactive task; avoid a second paid no-op preflight before user work.
 - Start Junie through `ai-login.ps1` and leave the entire terminal session with the user. Do not preselect a browser or profile and do not send TUI input on the user's behalf. The user selects the intended JetBrains identity and verifies it with `/account`; multiple browser profiles or already signed-in identities are not reliable account evidence by themselves.
 - Treat `JUNIE_API_KEY` as the documented headless, usage-based billing option, not as the only way to use a JetBrains subscription. In locally verified CLI 26.8.3, stored account OAuth worked interactively but did not satisfy `--task`; require `JUNIE_API_KEY` or documented BYOK evidence before a non-interactive worker call.
 - Mark `byok` verified only when a documented `JUNIE_*_API_KEY` provider variable is present.
 - Mark `jetbrains-ai` verified when `JUNIE_API_KEY` is present. Otherwise keep consumption mode unknown; a stored interactive login or custom config cannot be distinguished safely without task/config evidence.
 - `/usage` may confirm an interactive task's session cost and remaining balance, but do not scrape its TUI or map it to `usedPercent`.
+- Central Console can expose organization-level AI Credits analytics and CSV downloads, but its analytics API is not currently available. Require explicit CSV column mapping, aggregate only numeric fields, and never persist source rows or identity columns in the normalized snapshot.
+- A Central Console export may combine Junie and other JetBrains AI consumption. Apply it to the Junie resource only when the administrator exported a compatible filtered scope; otherwise the result is informational combined JetBrains AI usage and must not guard Junie alone.
 
 Official sources:
 
 - https://junie.jetbrains.com/docs/junie-cli.html
 - https://junie.jetbrains.com/docs/parameters.html
 - https://junie.jetbrains.com/docs/environment-variables.html
+- https://www.jetbrains.com/help/jetbrains-console/analytics.html
+- https://www.jetbrains.com/help/jetbrains-console/ai-credits-consumption.html
