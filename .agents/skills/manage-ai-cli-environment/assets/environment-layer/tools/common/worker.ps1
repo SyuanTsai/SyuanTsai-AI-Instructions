@@ -67,6 +67,25 @@ function Invoke-GuardedResourceCommand {
     $bootstrapAction = $null
     $authenticationAction = $null
 
+    if ($ResourceName -in @('copilotPersonal', 'copilotCompany')) {
+        $profileAuthentication = Resolve-CopilotProfileAuthentication `
+            -ResourceName $ResourceName `
+            -ResourceConfig $resourceConfig `
+            -Environment $environment
+        if (-not $profileAuthentication.ready) {
+            $blocked = New-GuardFailureResult `
+                -ResourceName $ResourceName `
+                -Reason $profileAuthentication.reason `
+                -UsageKnown $false `
+                -UsedPercent $null `
+                -HardLimitPercent $hardLimit `
+                -Warning $null `
+                -AuthenticationAction 'profile_token_required'
+            Write-AiEnvironmentLog -RepositoryRoot $RepositoryRoot -Entry $blocked
+            return $blocked
+        }
+    }
+
     if ($adapter.primaryProbe.mode -eq 'status') {
         $availability = Invoke-ResourceAvailability `
             -ResourceName $ResourceName `

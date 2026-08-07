@@ -15,12 +15,14 @@
     "copilotPersonal": {
       "enabled": true,
       "hardLimitPercent": 80,
-      "profile": "personal"
+      "profile": "personal",
+      "authenticationMode": "token"
     },
     "copilotCompany": {
       "enabled": true,
       "hardLimitPercent": 100,
-      "profile": "company"
+      "profile": "company",
+      "authenticationMode": "stored"
     },
     "agy": {
       "enabled": true,

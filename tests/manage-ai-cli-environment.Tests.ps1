@@ -22,8 +22,8 @@ function New-TestAiConfiguration {
         resources = [pscustomobject]@{
             codexMain = [pscustomobject]@{ enabled = $true; hardLimitPercent = 90 }
             codexSpark = [pscustomobject]@{ enabled = $true; hardLimitPercent = 100; model = 'gpt-5.3-codex-spark' }
-            copilotPersonal = [pscustomobject]@{ enabled = $true; hardLimitPercent = 80; profile = 'personal' }
-            copilotCompany = [pscustomobject]@{ enabled = $true; hardLimitPercent = 100; profile = 'company' }
+            copilotPersonal = [pscustomobject]@{ enabled = $true; hardLimitPercent = 80; profile = 'personal'; authenticationMode = 'token' }
+            copilotCompany = [pscustomobject]@{ enabled = $true; hardLimitPercent = 100; profile = 'company'; authenticationMode = 'stored' }
             agy = [pscustomobject]@{ enabled = $AgyEnabled; hardLimitPercent = $AgyHardLimitPercent }
             junie = [pscustomobject]@{ enabled = $true; hardLimitPercent = 100 }
         }
@@ -347,6 +347,37 @@ Describe 'Provider adapter contracts' {
         $unknown.consumptionMode | Should Be 'unknown'
         $unknown.consumptionModeVerified | Should Be $false
     }
+
+    # Scenario: Company uses the official stored credential while Personal requires its dedicated token.
+    # Purpose: Prevent both logical profiles from silently consuming the same system credential-store account.
+    It 'T040_requires_a_dedicated_token_for_the_personal_copilot_profile' {
+        # Given
+        $configuration = New-TestAiConfiguration
+        $personalEnvironment = @{}
+        $companyEnvironment = @{}
+
+        # When
+        $personal = Resolve-CopilotProfileAuthentication `
+            -ResourceName 'copilotPersonal' `
+            -ResourceConfig $configuration.resources.copilotPersonal `
+            -Environment $personalEnvironment
+        $company = Resolve-CopilotProfileAuthentication `
+            -ResourceName 'copilotCompany' `
+            -ResourceConfig $configuration.resources.copilotCompany `
+            -Environment $companyEnvironment
+        $personalWithToken = Resolve-CopilotProfileAuthentication `
+            -ResourceName 'copilotPersonal' `
+            -ResourceConfig $configuration.resources.copilotPersonal `
+            -Environment @{ COPILOT_GITHUB_TOKEN = 'test-token-value' }
+
+        # Then
+        $personal.ready | Should Be $false
+        $personal.reason | Should Be 'authentication_required'
+        $company.ready | Should Be $true
+        $company.source | Should Be 'stored'
+        $personalWithToken.ready | Should Be $true
+        $personalWithToken.source | Should Be 'token'
+    }
 }
 
 Describe 'AI CLI environment installer' {
@@ -392,11 +423,42 @@ Describe 'AI CLI environment installer' {
         }
 
         # When
-        $result = Invoke-GuardedResourceCommand -ResourceName 'copilotPersonal' -RepositoryRoot $targetRoot -Arguments @('test') -ProcessRunner $processRunner -NoRepair
+        $result = Invoke-GuardedResourceCommand -ResourceName 'copilotCompany' -RepositoryRoot $targetRoot -Arguments @('test') -ProcessRunner $processRunner -NoRepair
 
         # Then
         $result.available | Should Be $false
         $result.reason | Should Be 'usage_unknown'
         $script:taskCalls | Should Be 0
+    }
+
+    # Scenario: A provider option begins with a dash when a thin wrapper is launched as a PowerShell script.
+    # Purpose: Preserve native CLI arguments such as Copilot and Agy -p without binding them as wrapper parameters.
+    It 'T030_forwards_provider_options_without_powershell_parameter_binding_conflicts' {
+        # Given
+        $targetRoot = Join-Path $TestDrive 'argument-forwarding-repository'
+        New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+        Install-AiCliEnvironment -TargetRoot $targetRoot
+        $configPath = Join-Path $targetRoot '.ai\config.json'
+        $configuration = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
+        $configuration.resources.copilotCompany.enabled = $false
+        [System.IO.File]::WriteAllText(
+            $configPath,
+            ($configuration | ConvertTo-Json -Depth 10),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $wrapperPath = Join-Path $targetRoot 'tools\copilot-company.ps1'
+
+        # When
+        $process = Invoke-CapturedProcess `
+            -Command (Join-Path $PSHOME 'pwsh.exe') `
+            -Arguments @('-NoProfile', '-File', $wrapperPath, '-NoRepair', '-p', 'test prompt', '--allow-all-tools') `
+            -TimeoutSeconds 30
+
+        # Then
+        [string]::IsNullOrWhiteSpace($process.stdout) | Should Be $false
+        $process.stderr | Should Not Match 'parameter name.+ambiguous'
+        $payload = $process.stdout | ConvertFrom-Json
+        $payload.success | Should Be $false
+        $payload.reason | Should Be 'resource_disabled'
     }
 }

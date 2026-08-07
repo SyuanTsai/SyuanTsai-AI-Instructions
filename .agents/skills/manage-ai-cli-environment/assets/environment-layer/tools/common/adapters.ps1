@@ -120,6 +120,36 @@ function Get-ResourceEnvironment {
     return $environment
 }
 
+function Resolve-CopilotProfileAuthentication {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('copilotPersonal', 'copilotCompany')]
+        [string] $ResourceName,
+
+        [Parameter(Mandatory = $true)]
+        [psobject] $ResourceConfig,
+
+        [hashtable] $Environment = @{}
+    )
+
+    if ($ResourceConfig.authenticationMode -eq 'token') {
+        $tokenReady = $Environment.ContainsKey('COPILOT_GITHUB_TOKEN') -and
+            -not [string]::IsNullOrWhiteSpace([string] $Environment.COPILOT_GITHUB_TOKEN)
+        return [pscustomobject]@{
+            ready = $tokenReady
+            reason = if ($tokenReady) { $null } else { 'authentication_required' }
+            source = if ($tokenReady) { 'token' } else { 'profile_token_missing' }
+        }
+    }
+
+    return [pscustomobject]@{
+        ready = $true
+        reason = $null
+        source = 'stored'
+    }
+}
+
 function Get-JunieConsumptionMode {
     [CmdletBinding()]
     param(

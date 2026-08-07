@@ -46,6 +46,13 @@ function Read-AiEnvironmentConfig {
         }
     }
 
+    foreach ($resourceName in @('copilotPersonal', 'copilotCompany')) {
+        $resource = $configuration.resources.PSObject.Properties[$resourceName].Value
+        if ($resource.authenticationMode -notin @('stored', 'token')) {
+            throw "Resource '$resourceName' authenticationMode must be stored or token."
+        }
+    }
+
     return $configuration
 }
 

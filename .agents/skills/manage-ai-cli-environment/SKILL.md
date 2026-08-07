@@ -20,7 +20,7 @@ The installer copies `assets/environment-layer/` so the target repository receiv
 
 Set `enabled` and `hardLimitPercent` independently for every resource. Set `unknownUsagePolicy` to `allow`, `warn`, or `deny`. Treat a null percentage as unknown, never as zero.
 
-Keep credentials outside the repository. For strict Copilot account isolation, set `AI_CLI_COPILOT_PERSONAL_TOKEN` and `AI_CLI_COPILOT_COMPANY_TOKEN` in the user environment. The wrappers map only the selected token to the child process and also use separate `COPILOT_HOME` directories under the local AI CLI state root.
+Keep credentials outside the repository. Copilot OAuth login is stored in the system credential store and is not isolated by `COPILOT_HOME`. The default config therefore allows the Company profile to use that stored credential and requires `AI_CLI_COPILOT_PERSONAL_TOKEN` for Personal. Set `authenticationMode` to `token` for any profile that must never fall back to the stored account. The wrappers map only the selected token to the child process and use separate `COPILOT_HOME` directories for config and state.
 
 ## Run the tooling
 

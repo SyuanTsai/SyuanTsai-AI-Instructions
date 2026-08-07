@@ -1,11 +1,7 @@
 #Requires -Version 7.0
-[CmdletBinding()]
-param(
-    [switch] $NoRepair,
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]] $ResourceArguments = @()
-)
+. (Join-Path $PSScriptRoot 'common\wrapper-arguments.ps1')
+$parsedArguments = Split-AiWrapperArguments -Arguments $args
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-& (Join-Path $PSScriptRoot 'ai-resource.ps1') -ResourceName junie -RepositoryRoot $repositoryRoot -NoRepair:$NoRepair @ResourceArguments
+& (Join-Path $PSScriptRoot 'ai-resource.ps1') -ResourceName junie -RepositoryRoot $repositoryRoot -NoRepair:$parsedArguments.noRepair -ResourceArguments $parsedArguments.resourceArguments
 exit $LASTEXITCODE

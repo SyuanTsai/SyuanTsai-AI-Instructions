@@ -115,6 +115,28 @@ function Invoke-ResourceAvailability {
 
     $adapter = Get-ProviderAdapter -ResourceName $ResourceName
     $environment = Get-ResourceEnvironment -ResourceName $ResourceName -StateRoot $StateRoot
+    if ($ResourceName -in @('copilotPersonal', 'copilotCompany')) {
+        $profileAuthentication = Resolve-CopilotProfileAuthentication `
+            -ResourceName $ResourceName `
+            -ResourceConfig $resourceConfig `
+            -Environment $environment
+        if (-not $profileAuthentication.ready) {
+            return [pscustomobject]@{
+                provider = $ResourceName
+                available = $false
+                reason = $profileAuthentication.reason
+                warning = $null
+                cliReady = $null
+                authenticationReady = $false
+                authenticationSource = $profileAuthentication.source
+                usageKnown = $false
+                usedPercent = $null
+                hardLimitPercent = $hardLimitPercent
+                bootstrapAction = $null
+                authenticationAction = 'profile_token_required'
+            }
+        }
+    }
     $timeoutSeconds = if ($null -ne $Configuration.PSObject.Properties['probeTimeoutSeconds']) {
         [int] $Configuration.probeTimeoutSeconds
     }

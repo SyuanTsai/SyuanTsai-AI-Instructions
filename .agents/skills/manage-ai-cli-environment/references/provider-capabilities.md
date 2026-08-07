@@ -8,8 +8,8 @@ Verified against local `--help` where executable access was available and offici
 | --- | --- | --- | --- | --- | --- |
 | Codex Main | `codex login status` | CLI start and active authentication mode | Unsupported; `/usage` is interactive | `npm install --global @openai/codex` | `codex login` |
 | Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Unsupported; `/usage` is interactive | Same as Codex Main | `codex login` |
-| Copilot Personal | Requested task under the personal profile | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | `copilot login` under personal `COPILOT_HOME` |
-| Copilot Company | Requested task under the company profile | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `copilot login` under company `COPILOT_HOME` |
+| Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | Configure `AI_CLI_COPILOT_PERSONAL_TOKEN` |
+| Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `copilot login` for stored company auth, or configure `AI_CLI_COPILOT_COMPANY_TOKEN` |
 | Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | Start `agy` and complete the official browser flow |
 | Junie | Requested task; `junie --version` in usage/doctor diagnostics | Actual task verifies CLI/auth; version verifies executable only | Unsupported; `/usage` is session cost, not account quota | Official Junie PowerShell installer | Start `junie` and choose an official authentication option |
 
@@ -32,8 +32,9 @@ Official sources:
 
 ### GitHub Copilot
 
-- Use separate `COPILOT_HOME` values for personal and company state.
-- Prefer separate user environment token names for deterministic automation; map only the selected value to `COPILOT_GITHUB_TOKEN` in the child process.
+- Use separate `COPILOT_HOME` values for personal and company config/state, but do not treat that as authentication isolation: the official OAuth flow prefers the system credential store.
+- Require `authenticationMode: token` for a profile that must not fall back to the shared stored credential. Map only its dedicated user environment token to `COPILOT_GITHUB_TOKEN` in the child process.
+- The default config uses stored authentication for Company and requires a dedicated token for Personal.
 - Do not use `/user switch` as the daily isolation mechanism.
 - Do not parse `/usage`, the footer, or status line. Add an official billing API only when the caller provides scoped credentials, account scope, and a compatible quota denominator outside version control.
 
