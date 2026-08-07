@@ -326,7 +326,8 @@ Describe 'AI CLI process startup' {
             -Command $cliShim `
             -WorkingDirectory $TestDrive `
             -WindowTitle 'CLI interactive setup' `
-            -Instructions @('Make every interactive choice in this window.')
+            -Instructions @('Make every interactive choice in this window.') `
+            -ConfirmationPrompt 'Choose the intended browser context, then press Enter.'
         $encodedCommandIndex = [Array]::IndexOf($launch.arguments, '-EncodedCommand') + 1
         $decodedCommand = [System.Text.Encoding]::Unicode.GetString(
             [Convert]::FromBase64String($launch.arguments[$encodedCommandIndex])
@@ -338,6 +339,8 @@ Describe 'AI CLI process startup' {
         $launch.waitForExit | Should Be $false
         $decodedCommand | Should Match ([regex]::Escape($cliShim))
         $decodedCommand | Should Match 'Make every interactive choice in this window\.'
+        $decodedCommand | Should Match "Read-Host 'Choose the intended browser context, then press Enter\.'"
+        $decodedCommand.IndexOf('Read-Host') | Should BeLessThan $decodedCommand.IndexOf("& '$cliShim'")
         $decodedCommand | Should Not Match 'chrome\.exe|msedge\.exe|firefox\.exe|Start-Process\s+[^\r\n]*https?://'
     }
 
@@ -421,7 +424,21 @@ Describe 'AI CLI user-controlled login' {
         @($definitions | Where-Object { $_.interactionOwner -ne 'user' }).Count | Should Be 0
         @($definitions | Where-Object { $_.preselectBrowser }).Count | Should Be 0
         ($definitions | Where-Object resourceName -eq 'copilotPersonal').command | Should Match 'copilot-personal-token\.ps1$'
-        (($definitions | Where-Object resourceName -eq 'copilotCompany').arguments -join ' ') | Should Be 'login'
+        (($definitions | Where-Object resourceName -eq 'copilotCompany').arguments -join ' ') | Should Be 'login --device-code'
+    }
+
+    # Scenario: Copilot Company login runs on a desktop that already has a company account in the default browser.
+    # Purpose: Keep OAuth in the terminal and let the user open the device URL in any browser/profile instead of auto-opening the existing account.
+    It 'T020_uses_device_code_and_waits_in_the_terminal_for_copilot_company' {
+        # Given / When
+        $definition = Get-UserControlledLoginDefinition `
+            -ResourceName 'copilotCompany' `
+            -RepositoryRoot $TestDrive
+
+        # Then
+        ($definition.arguments -join ' ') | Should Be 'login --device-code'
+        $definition.confirmationPrompt | Should Match 'press Enter'
+        $definition.preselectBrowser | Should Be $false
     }
 }
 
@@ -652,6 +669,44 @@ Describe 'AI CLI environment installer' {
         $payload = $process.stdout | ConvertFrom-Json
         $payload.success | Should Be $false
         $payload.reason | Should Be 'resource_disabled'
+    }
+
+    # Scenario: A thin wrapper completes a successful provider task in a fresh PowerShell process.
+    # Purpose: Return clean JSON without reading an unset LASTEXITCODE after the PowerShell resource script succeeds.
+    It 'T035_returns_clean_wrapper_output_after_a_successful_provider_task' {
+        # Given
+        $targetRoot = Join-Path $TestDrive 'successful-wrapper-repository'
+        $shimRoot = Join-Path $TestDrive 'successful-wrapper-bin'
+        New-Item -ItemType Directory -Force -Path $targetRoot, $shimRoot | Out-Null
+        Install-AiCliEnvironment -TargetRoot $targetRoot
+        $copilotShim = Join-Path $shimRoot 'copilot.bat'
+        [System.IO.File]::WriteAllText(
+            $copilotShim,
+            "@echo off`r`necho COPILOT_WRAPPER_OK`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+        $wrapperPath = Join-Path $targetRoot 'tools\copilot-company.ps1'
+        $previousPath = $env:Path
+
+        try {
+            $env:Path = "$shimRoot;$previousPath"
+
+            # When
+            $process = Invoke-CapturedProcess `
+                -Command (Join-Path $PSHOME 'pwsh.exe') `
+                -Arguments @('-NoProfile', '-File', $wrapperPath, '-NoRepair', '-p', 'test prompt', '--allow-all-tools') `
+                -TimeoutSeconds 30
+        }
+        finally {
+            $env:Path = $previousPath
+        }
+
+        # Then
+        $process.exitCode | Should Be 0
+        $process.stderr | Should Not Match 'LASTEXITCODE'
+        $payload = $process.stdout | ConvertFrom-Json
+        $payload.success | Should Be $true
+        $payload.result.Trim() | Should Be 'COPILOT_WRAPPER_OK'
     }
 
     # Scenario: Junie has an interactive JetBrains Account login but no headless credential evidence.

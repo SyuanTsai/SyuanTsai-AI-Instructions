@@ -19,6 +19,7 @@ $result = Start-UserControlledPowerShellProcess `
     -WorkingDirectory $definition.workingDirectory `
     -WindowTitle $definition.windowTitle `
     -Instructions ([string[]] $definition.instructions) `
+    -ConfirmationPrompt $definition.confirmationPrompt `
     -WaitForExit
 
 $result | ConvertTo-Json -Compress

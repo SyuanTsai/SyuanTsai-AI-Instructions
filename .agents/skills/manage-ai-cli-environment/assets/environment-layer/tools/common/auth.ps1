@@ -20,6 +20,7 @@ function Get-UserControlledLoginDefinition {
 
     $command = [string] $adapter.login.command
     $arguments = [string[]] $adapter.login.arguments
+    $confirmationPrompt = 'Prepare the browser and profile you intend to use, then press Enter to start the official provider flow.'
     switch ($ResourceName) {
         'codexMain' {
             $instructions.Add('Complete the official Codex login and close this window when the CLI returns.')
@@ -30,10 +31,13 @@ function Get-UserControlledLoginDefinition {
         'copilotPersonal' {
             $command = Join-Path $toolsRoot 'copilot-personal-token.ps1'
             $arguments = @($resolvedRepositoryRoot)
+            $confirmationPrompt = $null
             $instructions.Add('Enter the dedicated Personal token only in the secure prompt in this window; it remains isolated from Company stored authentication.')
         }
         'copilotCompany' {
-            $instructions.Add('Complete the official Company account login in this window and confirm the intended GitHub identity yourself.')
+            $arguments = @('login', '--device-code')
+            $confirmationPrompt = 'Press Enter to generate a device code. Then open the displayed URL in any browser/profile you choose.'
+            $instructions.Add('Complete the official Company account login with the device URL and confirm the intended GitHub identity yourself.')
         }
         'agy' {
             $instructions.Add('Complete the official Google account flow and make all account choices yourself.')
@@ -50,6 +54,7 @@ function Get-UserControlledLoginDefinition {
         workingDirectory = $resolvedRepositoryRoot
         windowTitle = "$ResourceName interactive setup"
         instructions = $instructions.ToArray()
+        confirmationPrompt = $confirmationPrompt
         interactionOwner = 'user'
         preselectBrowser = $false
     }
@@ -76,6 +81,7 @@ function Invoke-ResourceLogin {
         -WorkingDirectory $definition.workingDirectory `
         -WindowTitle $definition.windowTitle `
         -Instructions ([string[]] $definition.instructions) `
+        -ConfirmationPrompt $definition.confirmationPrompt `
         -WaitForExit
 
     return $result.started -and $result.exitCode -eq 0

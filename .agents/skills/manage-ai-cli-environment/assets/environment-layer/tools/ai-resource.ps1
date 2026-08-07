@@ -26,3 +26,5 @@ $result | ConvertTo-Json -Depth 10
 if (-not $result.success) {
     exit 1
 }
+
+exit 0

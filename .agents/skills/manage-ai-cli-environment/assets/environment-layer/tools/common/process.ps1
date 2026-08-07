@@ -201,6 +201,8 @@ function New-UserControlledPowerShellLaunch {
 
         [string[]] $Instructions = @(),
 
+        [string] $ConfirmationPrompt,
+
         [switch] $WaitForExit
     )
 
@@ -245,6 +247,11 @@ function New-UserControlledPowerShellLaunch {
         $scriptLines.Add("Write-Host $instructionLiteral")
     }
     $scriptLines.Add("Write-Host ''")
+    if (-not [string]::IsNullOrWhiteSpace($ConfirmationPrompt)) {
+        $confirmationPromptLiteral = ConvertTo-PowerShellSingleQuotedLiteral -Value $ConfirmationPrompt
+        $scriptLines.Add("[void] (Read-Host $confirmationPromptLiteral)")
+        $scriptLines.Add("Write-Host ''")
+    }
     $scriptLines.Add('$providerExitCode = 1')
     $scriptLines.Add('try {')
     $scriptLines.Add("    & $commandLiteral$argumentText")
@@ -287,6 +294,8 @@ function Start-UserControlledPowerShellProcess {
 
         [string[]] $Instructions = @(),
 
+        [string] $ConfirmationPrompt,
+
         [switch] $WaitForExit,
 
         [scriptblock] $ProcessStarter = {
@@ -307,6 +316,7 @@ function Start-UserControlledPowerShellProcess {
             -WorkingDirectory $WorkingDirectory `
             -WindowTitle $WindowTitle `
             -Instructions $Instructions `
+            -ConfirmationPrompt $ConfirmationPrompt `
             -WaitForExit:$WaitForExit
         $process = & $ProcessStarter $launch
 
