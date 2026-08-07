@@ -6,12 +6,12 @@ Verified against local `--help` where executable access was available and offici
 
 | Resource | Daily primary probe | What it verifies | Machine-readable account usage | Install | Login |
 | --- | --- | --- | --- | --- | --- |
-| Codex Main | `codex login status` | CLI start and active authentication mode | Unsupported; `/usage` is interactive | `npm install --global @openai/codex` | `codex login` |
-| Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Unsupported; `/usage` is interactive | Same as Codex Main | `codex login` |
-| Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | Configure `AI_CLI_COPILOT_PERSONAL_TOKEN` |
-| Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `copilot login` for stored company auth, or configure `AI_CLI_COPILOT_COMPANY_TOKEN` |
-| Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | Start `agy` and complete the official browser flow |
-| Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | Start `junie`, pause before confirming JetBrains Account login, let the user activate the intended browser profile, then continue and verify with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
+| Codex Main | `codex login status` | CLI start and active authentication mode | Unsupported; `/usage` is interactive | `npm install --global @openai/codex` | `ai-login.ps1 -ResourceName codexMain`; user owns the visible PowerShell and official login choices |
+| Codex Spark | `codex login status`, then the requested task with `-m gpt-5.3-codex-spark` | CLI/auth first; actual task verifies account model access | Unsupported; `/usage` is interactive | Same as Codex Main | `ai-login.ps1 -ResourceName codexSpark`; shares Codex auth, then verify Spark with a real task |
+| Copilot Personal | Requested task with the dedicated personal token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; `/usage` is interactive/session-scoped | `winget install GitHub.Copilot` | `ai-login.ps1 -ResourceName copilotPersonal`; enter the isolated token only in its secure prompt |
+| Copilot Company | Requested task with the stored credential or dedicated company token | CLI, selected account authentication, and entitlement | Unsupported by the CLI; organization billing API needs separate permissions and does not by itself supply this wrapper's quota denominator | Same as Copilot Personal | `ai-login.ps1 -ResourceName copilotCompany`; user completes the official account flow |
+| Agy | `agy models` | CLI, Google authentication, and available model list | Unsupported by the verified CLI | Official Antigravity PowerShell installer | `ai-login.ps1 -ResourceName agy`; user completes the official account flow |
+| Junie | Interactive task for stored JetBrains Account auth; requested task for `JUNIE_API_KEY` or BYOK; `junie --version` in doctor diagnostics | Interactive task verifies subscription auth; headless task verifies the selected key mode; version verifies executable only | `/usage` shows session cost and remaining balance interactively but is not a stable machine-readable source | Official Junie PowerShell installer | `ai-login.ps1 -ResourceName junie`; user makes all TUI and browser/account choices, then verifies with `/account`; `JUNIE_API_KEY` and BYOK are headless alternatives |
 
 No listed daily probe currently returns a reliable account `usedPercent`. Keep the default `usageSource` as `unsupported` and return UNKNOWN until an official machine-readable source supplies both current usage and a compatible limit.
 
@@ -34,6 +34,7 @@ Official sources:
 
 - Use separate `COPILOT_HOME` values for personal and company config/state, but do not treat that as authentication isolation: the official OAuth flow prefers the system credential store.
 - Require `authenticationMode: token` for a profile that must not fall back to the shared stored credential. Map only its dedicated user environment token to `COPILOT_GITHUB_TOKEN` in the child process.
+- Configure Personal through the secure prompt opened by `ai-login.ps1`; do not paste the token into chat or use the Company OAuth flow for the Personal profile.
 - The default config uses stored authentication for Company and requires a dedicated token for Personal.
 - Do not use `/user switch` as the daily isolation mechanism.
 - Do not parse `/usage`, the footer, or status line. Add an official billing API only when the caller provides scoped credentials, account scope, and a compatible quota denominator outside version control.
@@ -58,7 +59,7 @@ Official sources:
 ### JetBrains Junie
 
 - Verify stored JetBrains Account authentication with a minimal interactive task; avoid a second paid no-op preflight before user work.
-- Start interactive `junie` and stop while **Continue with JetBrains account** remains selected in the terminal. Ask the user to activate the intended Chrome profile/window and wait for explicit confirmation before sending Enter. Then pause again for the user to select the intended JetBrains identity and verify it with `/account`. Multiple Chrome profiles or already signed-in identities are not reliable account evidence.
+- Start Junie through `ai-login.ps1` and leave the entire terminal session with the user. Do not preselect a browser or profile and do not send TUI input on the user's behalf. The user selects the intended JetBrains identity and verifies it with `/account`; multiple browser profiles or already signed-in identities are not reliable account evidence by themselves.
 - Treat `JUNIE_API_KEY` as the documented headless, usage-based billing option, not as the only way to use a JetBrains subscription. In locally verified CLI 26.8.3, stored account OAuth worked interactively but did not satisfy `--task`; require `JUNIE_API_KEY` or documented BYOK evidence before a non-interactive worker call.
 - Mark `byok` verified only when a documented `JUNIE_*_API_KEY` provider variable is present.
 - Mark `jetbrains-ai` verified when `JUNIE_API_KEY` is present. Otherwise keep consumption mode unknown; a stored interactive login or custom config cannot be distinguished safely without task/config evidence.

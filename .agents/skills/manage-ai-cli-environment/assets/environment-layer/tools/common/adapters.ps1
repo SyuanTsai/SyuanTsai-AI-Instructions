@@ -88,7 +88,12 @@ function Get-ResourceEnvironment {
         [ValidateSet('codexMain', 'codexSpark', 'copilotPersonal', 'copilotCompany', 'agy', 'junie')]
         [string] $ResourceName,
 
-        [string] $StateRoot
+        [string] $StateRoot,
+
+        [scriptblock] $EnvironmentReader = {
+            param($Name, $Target)
+            [Environment]::GetEnvironmentVariable($Name, $Target)
+        }
     )
 
     if ([string]::IsNullOrWhiteSpace($StateRoot)) {
@@ -111,7 +116,10 @@ function Get-ResourceEnvironment {
         else {
             'AI_CLI_COPILOT_COMPANY_TOKEN'
         }
-        $token = [Environment]::GetEnvironmentVariable($tokenVariable)
+        $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::Process)
+        if ([string]::IsNullOrWhiteSpace([string] $token)) {
+            $token = & $EnvironmentReader $tokenVariable ([EnvironmentVariableTarget]::User)
+        }
         if (-not [string]::IsNullOrWhiteSpace($token)) {
             $environment.COPILOT_GITHUB_TOKEN = $token
         }

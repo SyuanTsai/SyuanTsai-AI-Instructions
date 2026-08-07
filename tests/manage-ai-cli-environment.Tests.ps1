@@ -309,6 +309,120 @@ Describe 'AI CLI process startup' {
         # Then
         $result | Should Be $true
     }
+
+    # Scenario: Interactive CLI onboarding should be handed to a separate visible PowerShell without choosing a browser for the user.
+    # Purpose: Keep all account, browser/profile, model, import, and trust decisions inside the user-controlled terminal.
+    It 'T040_builds_a_user_controlled_cli_window_without_preselecting_a_browser' {
+        # Given
+        $cliShim = Join-Path $TestDrive 'cli-test.bat'
+        [System.IO.File]::WriteAllText(
+            $cliShim,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+
+        # When
+        $launch = New-UserControlledPowerShellLaunch `
+            -Command $cliShim `
+            -WorkingDirectory $TestDrive `
+            -WindowTitle 'CLI interactive setup' `
+            -Instructions @('Make every interactive choice in this window.')
+        $encodedCommandIndex = [Array]::IndexOf($launch.arguments, '-EncodedCommand') + 1
+        $decodedCommand = [System.Text.Encoding]::Unicode.GetString(
+            [Convert]::FromBase64String($launch.arguments[$encodedCommandIndex])
+        )
+
+        # Then
+        $launch.filePath | Should Match 'pwsh(?:\.exe)?$'
+        $launch.windowStyle | Should Be 'Normal'
+        $launch.waitForExit | Should Be $false
+        $decodedCommand | Should Match ([regex]::Escape($cliShim))
+        $decodedCommand | Should Match 'Make every interactive choice in this window\.'
+        $decodedCommand | Should Not Match 'chrome\.exe|msedge\.exe|firefox\.exe|Start-Process\s+[^\r\n]*https?://'
+    }
+
+    # Scenario: A CLI launch descriptor is handed to a process starter.
+    # Purpose: Open a normal visible PowerShell asynchronously so the user, rather than the agent, owns the TUI session.
+    It 'T050_starts_the_user_controlled_window_without_waiting_for_it_to_close' {
+        # Given
+        $cliShim = Join-Path $TestDrive 'cli-launch-test.bat'
+        [System.IO.File]::WriteAllText(
+            $cliShim,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+        $script:capturedLaunch = $null
+        $processStarter = {
+            param($Launch)
+            $script:capturedLaunch = $Launch
+            return [pscustomobject]@{ Id = 4242 }
+        }
+
+        # When
+        $result = Start-UserControlledPowerShellProcess `
+            -Command $cliShim `
+            -WorkingDirectory $TestDrive `
+            -WindowTitle 'CLI interactive setup' `
+            -Instructions @('Make every interactive choice in this window.') `
+            -ProcessStarter $processStarter
+
+        # Then
+        $result.started | Should Be $true
+        $result.processId | Should Be 4242
+        $script:capturedLaunch.windowStyle | Should Be 'Normal'
+        $script:capturedLaunch.waitForExit | Should Be $false
+    }
+
+    # Scenario: A repair flow must verify authentication only after the user closes the delegated terminal.
+    # Purpose: Allow one uninterrupted user interaction and resume automated probing without conversational key-by-key handoffs.
+    It 'T060_can_wait_for_the_user_controlled_window_before_resuming' {
+        # Given
+        $cliShim = Join-Path $TestDrive 'cli-wait-test.bat'
+        [System.IO.File]::WriteAllText(
+            $cliShim,
+            "@echo off`r`nexit /b 0`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+        $script:waitCalls = 0
+        $script:fakeProcess = [pscustomobject]@{ Id = 4343; ExitCode = 0 }
+        $script:fakeProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+            $script:waitCalls++
+        }
+
+        # When
+        $result = Start-UserControlledPowerShellProcess `
+            -Command $cliShim `
+            -WorkingDirectory $TestDrive `
+            -WindowTitle 'CLI interactive setup' `
+            -WaitForExit `
+            -ProcessStarter { param($Launch) $script:fakeProcess }
+
+        # Then
+        $result.started | Should Be $true
+        $result.exitCode | Should Be 0
+        $script:waitCalls | Should Be 1
+    }
+}
+
+Describe 'AI CLI user-controlled login' {
+    # Scenario: Every managed CLI resource requests an interactive login or setup flow.
+    # Purpose: Hand all provider choices to one visible user-owned terminal and never select a browser or profile on the user's behalf.
+    It 'T010_defines_a_user_controlled_flow_for_every_resource_without_browser_preselection' {
+        # Given
+        $resourceNames = @('codexMain', 'codexSpark', 'copilotPersonal', 'copilotCompany', 'agy', 'junie')
+
+        # When
+        $definitions = @($resourceNames | ForEach-Object {
+            Get-UserControlledLoginDefinition -ResourceName $_ -RepositoryRoot $TestDrive
+        })
+
+        # Then
+        $definitions.Count | Should Be 6
+        @($definitions | Where-Object { $_.interactionOwner -ne 'user' }).Count | Should Be 0
+        @($definitions | Where-Object { $_.preselectBrowser }).Count | Should Be 0
+        ($definitions | Where-Object resourceName -eq 'copilotPersonal').command | Should Match 'copilot-personal-token\.ps1$'
+        (($definitions | Where-Object resourceName -eq 'copilotCompany').arguments -join ' ') | Should Be 'login'
+    }
 }
 
 Describe 'AI CLI operational logging' {
@@ -385,6 +499,28 @@ Describe 'Provider adapter contracts' {
         $company.ContainsKey('COPILOT_GITHUB_TOKEN') | Should Be $false
     }
 
+    # Scenario: The delegated Copilot Personal window has just persisted a token to the user environment.
+    # Purpose: Let the parent process resume verification without requiring a restart or asking the user to repeat setup.
+    It 'T025_reads_a_new_personal_token_from_user_scope_when_process_scope_is_empty' {
+        # Given
+        $environmentReader = {
+            param($Name, $Target)
+            if ($Name -eq 'AI_CLI_COPILOT_PERSONAL_TOKEN' -and $Target -eq [EnvironmentVariableTarget]::User) {
+                return 'new-user-token'
+            }
+            return $null
+        }
+
+        # When
+        $environment = Get-ResourceEnvironment `
+            -ResourceName 'copilotPersonal' `
+            -StateRoot (Join-Path $TestDrive 'state') `
+            -EnvironmentReader $environmentReader
+
+        # Then
+        $environment.COPILOT_GITHUB_TOKEN | Should Be 'new-user-token'
+    }
+
     # Scenario: Junie is configured with a provider key, a Junie token, or neither.
     # Purpose: Verify consumption mode only when official environment evidence exists.
     It 'T030_reports_junie_consumption_mode_without_exposing_or_guessing_credentials' {
@@ -452,6 +588,8 @@ Describe 'AI CLI environment installer' {
         # Then
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\ai-usage.ps1') | Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\ai-doctor.ps1') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'tools\ai-login.ps1') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'tools\copilot-personal-token.ps1') | Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot 'tools\common\resource-policy.ps1') | Should Be $true
         (Get-Content -Raw -LiteralPath $configPath) | Should Match '"hardLimitPercent": 70'
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.gitignore')) | Should Match '\.ai/logs/'

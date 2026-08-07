@@ -1,5 +1,60 @@
 Set-StrictMode -Version Latest
 
+function Get-UserControlledLoginDefinition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('codexMain', 'codexSpark', 'copilotPersonal', 'copilotCompany', 'agy', 'junie')]
+        [string] $ResourceName,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RepositoryRoot
+    )
+
+    $resolvedRepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
+    $adapter = Get-ProviderAdapter -ResourceName $ResourceName
+    $toolsRoot = Split-Path -Parent $PSScriptRoot
+    $instructions = [System.Collections.Generic.List[string]]::new()
+    $instructions.Add('This PowerShell window is yours to control; the agent will not press keys or choose options for you.')
+    $instructions.Add('There is no need to preselect a browser. If an official sign-in page opens, choose its browser context, profile, and account yourself.')
+
+    $command = [string] $adapter.login.command
+    $arguments = [string[]] $adapter.login.arguments
+    switch ($ResourceName) {
+        'codexMain' {
+            $instructions.Add('Complete the official Codex login and close this window when the CLI returns.')
+        }
+        'codexSpark' {
+            $instructions.Add('Codex Main and Spark share Codex authentication; complete the official login, then verify Spark with a real Spark task.')
+        }
+        'copilotPersonal' {
+            $command = Join-Path $toolsRoot 'copilot-personal-token.ps1'
+            $arguments = @($resolvedRepositoryRoot)
+            $instructions.Add('Enter the dedicated Personal token only in the secure prompt in this window; it remains isolated from Company stored authentication.')
+        }
+        'copilotCompany' {
+            $instructions.Add('Complete the official Company account login in this window and confirm the intended GitHub identity yourself.')
+        }
+        'agy' {
+            $instructions.Add('Complete the official Google account flow and make all account choices yourself.')
+        }
+        'junie' {
+            $instructions.Add('Choose the JetBrains account, model, settings import, and repository trust options yourself, then verify with /account and a minimal task.')
+        }
+    }
+
+    return [pscustomobject]@{
+        resourceName = $ResourceName
+        command = $command
+        arguments = $arguments
+        workingDirectory = $resolvedRepositoryRoot
+        windowTitle = "$ResourceName interactive setup"
+        instructions = $instructions.ToArray()
+        interactionOwner = 'user'
+        preselectBrowser = $false
+    }
+}
+
 function Invoke-ResourceLogin {
     [CmdletBinding()]
     param(
@@ -12,11 +67,16 @@ function Invoke-ResourceLogin {
         [hashtable] $Environment = @{}
     )
 
-    if ($ResourceName -eq 'junie') {
-        Write-Host 'Authentication is required for Junie. Leave Continue with JetBrains account selected in the terminal, activate the intended Chrome profile, and confirm the terminal choice only after that profile is ready. Select the intended JetBrains identity yourself and verify it in /account. JUNIE_API_KEY and BYOK are headless alternatives.'
-    }
-    else {
-        Write-Host "Authentication is required for $ResourceName. Complete the official browser, OAuth, or device flow."
-    }
-    return Invoke-InteractiveProcess -Command $Adapter.login.command -Arguments ([string[]] $Adapter.login.arguments) -Environment $Environment
+    $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $definition = Get-UserControlledLoginDefinition -ResourceName $ResourceName -RepositoryRoot $repositoryRoot
+    Write-Host "Authentication is required for $ResourceName. A user-controlled PowerShell window will open; complete every choice there."
+    $result = Start-UserControlledPowerShellProcess `
+        -Command $definition.command `
+        -Arguments ([string[]] $definition.arguments) `
+        -WorkingDirectory $definition.workingDirectory `
+        -WindowTitle $definition.windowTitle `
+        -Instructions ([string[]] $definition.instructions) `
+        -WaitForExit
+
+    return $result.started -and $result.exitCode -eq 0
 }

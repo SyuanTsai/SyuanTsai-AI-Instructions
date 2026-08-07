@@ -1,4 +1,4 @@
 interface:
   display_name: "Manage AI CLI Environment"
-  short_description: "Probe and guard AI CLI resource availability"
-  default_prompt: "Use $manage-ai-cli-environment to install, diagnose, or run guarded AI CLI resources."
+  short_description: "Set up, probe, and guard AI CLI resources"
+  default_prompt: "Use $manage-ai-cli-environment to open user-controlled login flows, install, diagnose, or run guarded AI CLI resources."
