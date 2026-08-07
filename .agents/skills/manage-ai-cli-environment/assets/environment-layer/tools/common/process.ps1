@@ -74,6 +74,22 @@ function Invoke-CapturedProcess {
         $stopwatch.Stop()
         $resolvedCommand = Get-Command $Command -ErrorAction SilentlyContinue | Select-Object -First 1
         $isMissing = $null -eq $resolvedCommand
+        $resolvedSource = if ($null -ne $resolvedCommand -and $resolvedCommand.CommandType -eq 'Application') {
+            [string] $resolvedCommand.Source
+        }
+        else {
+            $null
+        }
+        if (-not $isMissing -and -not [string]::IsNullOrWhiteSpace($resolvedSource)) {
+            $suppliedPath = try { [System.IO.Path]::GetFullPath($Command) } catch { $Command }
+            if (-not $resolvedSource.Equals($suppliedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return Invoke-CapturedProcess `
+                    -Command $resolvedSource `
+                    -Arguments $Arguments `
+                    -Environment $Environment `
+                    -TimeoutSeconds $TimeoutSeconds
+            }
+        }
         $startError = if ($isMissing) { 'command_not_found' } else { $null }
         $exception = $_.Exception
         while ($null -ne $exception -and $null -eq $startError) {

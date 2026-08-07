@@ -255,6 +255,34 @@ Describe 'AI CLI process startup' {
         $result.commandNotFound | Should Be $true
         (Classify-ProbeFailure -ProcessResult $result).reason | Should Be 'command_not_found'
     }
+
+    # Scenario: A Windows provider installs a batch shim instead of a native executable.
+    # Purpose: Execute official .bat/.cmd entry points without adding a happy-path command lookup.
+    It 'T020_executes_a_batch_shim_after_direct_process_start_fails' {
+        # Given
+        $batchPath = Join-Path $TestDrive 'provider-shim.bat'
+        [System.IO.File]::WriteAllText(
+            $batchPath,
+            "@echo off`r`necho %~1`r`n",
+            [System.Text.Encoding]::ASCII
+        )
+
+        $previousPath = $env:Path
+        try {
+            $env:Path = "$TestDrive;$previousPath"
+
+            # When
+            $result = Invoke-CapturedProcess -Command 'provider-shim' -Arguments @('AI_CLI_BATCH_OK') -TimeoutSeconds 10
+        }
+        finally {
+            $env:Path = $previousPath
+        }
+
+        # Then
+        $result.started | Should Be $true
+        $result.exitCode | Should Be 0
+        $result.stdout.Trim() | Should Be 'AI_CLI_BATCH_OK'
+    }
 }
 
 Describe 'AI CLI operational logging' {
