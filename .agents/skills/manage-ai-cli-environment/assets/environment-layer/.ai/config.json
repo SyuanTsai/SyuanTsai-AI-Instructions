@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "unknownUsagePolicy": "warn",
+  "probeTimeoutSeconds": 30,
+  "resources": {
+    "codexMain": {
+      "enabled": true,
+      "hardLimitPercent": 90
+    },
+    "codexSpark": {
+      "enabled": true,
+      "hardLimitPercent": 100,
+      "model": "gpt-5.3-codex-spark"
+    },
+    "copilotPersonal": {
+      "enabled": true,
+      "hardLimitPercent": 80,
+      "profile": "personal"
+    },
+    "copilotCompany": {
+      "enabled": true,
+      "hardLimitPercent": 100,
+      "profile": "company"
+    },
+    "agy": {
+      "enabled": true,
+      "hardLimitPercent": 100
+    },
+    "junie": {
+      "enabled": true,
+      "hardLimitPercent": 100
+    }
+  }
+}
