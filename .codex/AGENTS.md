@@ -25,7 +25,6 @@
 `.agents/skills/` 提供 Codex 與 GitHub Copilot 共用的可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
 
 - 提出或更新實作計畫 → `.agents/skills/plan-production-change/SKILL.md`
-- 安裝、診斷或執行具額度 guard 的 AI CLI Resource → `.agents/skills/manage-ai-cli-environment/SKILL.md`
 - 效能改善、benchmark、query optimization 或 N+1 驗證 → `.agents/skills/verify-data-access-performance/SKILL.md`
 - 提供交給 GitHub Copilot 的實作提示詞 → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `.agents/skills/work-with-jira/SKILL.md`

@@ -25,7 +25,6 @@ If an applicable module is missing, identify the missing file and do not invent 
 `.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
 
 - Create or update an implementation plan → `.agents/skills/plan-production-change/SKILL.md`
-- Install, diagnose, or invoke an AI CLI resource with usage guards → `.agents/skills/manage-ai-cli-environment/SKILL.md`
 - Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
 - Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`

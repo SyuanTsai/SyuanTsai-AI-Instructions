@@ -220,7 +220,7 @@ Import-Module Pester
 Invoke-Pester .\tests
 ```
 
-預期結果為 `55 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新、本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移，以及 AI CLI Resource 的額度政策、probe/retry、failure classification、profile 隔離、安全 logging、native option forwarding、成功 wrapper exit code、尚未刷新 PATH 的使用者 CLI shim、Windows batch shim、六種 Resource 的使用者控制登入與人工用量檢視 PowerShell、Copilot Company device-code、Copilot Personal 額度檢視的 token 隔離、Junie 互動登入與 headless credential 分離，以及環境層安裝。
+預期結果為 `21 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。
 
 ### Smoke test
 
@@ -254,7 +254,6 @@ Invoke-Pester .\tests
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
 - `.agents/skills/`：fan-out 給 Codex 與 GitHub Copilot 共用的 Agent Skills；目錄暫時為空時可用 `.gitkeep` 保留來源目錄，bootstrap 不會同步該 placeholder。
   - `plan-production-change`：依 Scope、風險與不確定性建立實作計畫。
-  - `manage-ai-cli-environment`：安裝、診斷並以獨立額度策略保護 Codex、Copilot、Agy 與 Junie CLI Resource。
   - `verify-data-access-performance`：診斷並驗證 query 效能、query count 與 N+1。
   - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞並建議最低充分模型。
   - `work-with-jira`：依 scoped API 與授權規則安全查詢或修改 Jira Cloud。
@@ -262,4 +261,3 @@ Invoke-Pester .\tests
 - `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝按需同步 script、合併 `AGENTS.md` 與 `ai-instructions-sync.json`，並移除舊版 bootstrap `SessionStart` hook。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。
 - `tests/install-ai-instructions-bootstrap.Tests.ps1`：本機安裝腳本的 Pester tests。
-- `tests/manage-ai-cli-environment.Tests.ps1`：AI CLI Resource policy、probe、logging 與 installer 的 Pester tests。
