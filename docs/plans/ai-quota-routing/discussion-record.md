@@ -15,7 +15,7 @@
 
 ## 2. 目前目標
 
-當使用者提出問題分析或功能修改任務時，Agent 應先判定任務所屬的 quota profile，將可使用的 AI 額度限制在該 profile 內，再依任務所需能力、剩餘額度與個別重置時間，自主選擇合適的 AI 執行來源。
+當使用者提出問題分析或功能修改任務時，Agent 應先判定任務所屬的 quota profile，將可使用的 AI 額度限制在該 profile 內，保留特定 AI 不應被自主路由消耗的預留額度，再依任務所需能力、可路由額度與個別重置時間，自主選擇合適的 AI 執行來源。
 
 正常情況下，使用者不需要逐次指定 AI、模型、帳號或額度來源；無法安全判定或沒有合適額度時，Agent 不應自行跨越額度邊界。
 
@@ -34,36 +34,34 @@
 - 在合法的 quota profile 內，選擇應同時考慮任務所需能力、剩餘額度及距離重置的時間。
 - 同一類任務在不同時間執行，合理結果可能是選擇不同 AI。
 
-### 3.3 使用平台無關的 Git remote identity 分類
+### 3.3 以 Git Repository 來源判定任務歸屬
 
-- 任務歸屬的主要判定依據是目前 Git Repository 的 remote identity，不綁定 GitHub、GitLab、Bitbucket、Azure DevOps、Gitea 或其他特定供應商。
-- HTTPS、SSH、`ssh://` 與 SCP-like remote URL 應先正規化為概念上的 `<host>/<repository-path>`，再進行規則匹配。
-- 不依賴供應商專屬 API，也不從 repository 內容推測任務歸屬。
-- 規則依下列具體程度判定：
-  1. 完整 repository identity。
-  2. Namespace 或 repository path 前綴。
-  3. 完整 hostname。
-  4. 無匹配時為 `unknown`。
-- 同等具體程度的規則若互相衝突，結果為 `unknown`，不得自行猜測。
-- 預設使用 `origin` 作為 authoritative remote；fork 或其他工作流程可透過本機設定指定 `upstream` 或其他 remote。
-- 本機路徑或 `file://` remote 若沒有明確本機規則，結果為 `unknown`。
-- 分類結果為 quota profile，而不是寫死為 Git 供應商或固定的 personal/company 二元值；初期可以只有 `personal` 與 `company`，未來可增加其他組織或客戶 profile。
+- 任務歸屬以 Git Repository 的來源資訊判定，不綁定 GitHub 或其他特定 Git 平台。
+- 判定結果應對應 quota profile，讓不同組織或客戶可在未來加入，而不需更換整體判定概念。
+- 無法確認任務歸屬時，不得自行跨越 quota profile；具體 remote 解析、匹配順序與衝突處理留待行為設計階段決定。
 
 ### 3.4 真實識別資訊不得進入 Git
 
-- 真實 Git hostname、remote URL、namespace、repository、帳號、quota profile 映射與額度重置資訊，只能保存在 `~/.codex/`、環境變數或其他未受 Repository 追蹤的個人設定中。
-- 受版本控制的 schema、文件、範例與測試資料只使用 `example.com`、`example.org`、`example.test` 與中性 placeholder。
-- Remote URL 中若包含 username、token 或其他 credential，必須在比對、診斷與輸出前移除，不得記錄或顯示。
+- 真實 Git 來源、帳號、quota profile 映射與額度資訊只能保存在本機私有設定中。
+- 受版本控制的內容只能保存通用規則與去識別化範例，不得要求公開真實公司或個人識別資訊才能完成分類。
 - 功能不得要求將真實公司或個人識別資訊寫入 tracked file，才能完成分類。
+
+### 3.5 特定 AI 必須保留預留額度
+
+- 自主路由不能把某項 AI 的全部可用額度視為可消耗資源；必須能為指定 AI 保留一部分額度。
+- 預留額度用於保障不一定由自主路由發起、但會消耗相同額度的必要工作，例如個人 Copilot Review。
+- Agent 選擇 AI 時只能使用扣除預留量後的可路由額度，不能因目前任務適合該 AI 就自行侵占預留部分。
+- 預留量的表示方式、大小、調整時機與人工覆寫規則留待後續討論。
 
 ## 4. 目前概念流程
 
 ```text
-Git remote identity
+Git Repository 來源資訊
 → quota profile
 → 該 profile 允許使用的 AI 額度池
+→ 扣除特定 AI 的預留額度
 → 任務所需能力
-→ 各額度的剩餘量與重置時間
+→ 可路由額度與各自的重置時間
 → 選擇 AI 執行來源
 ```
 
@@ -74,6 +72,7 @@ Git remote identity
 - 尚不決定 CLI、背景服務、hook、skill、設定檔或其他實作形式。
 - 尚不決定支援哪些 AI 供應商、模型或帳號。
 - 尚不定義如何取得、快取或更新剩餘額度與重置時間。
+- 尚不決定預留額度使用固定值、比例、任務數量或其他表示方式。
 - 尚不設計具體的 AI 選擇演算法、權重或評分公式。
 - 尚不開始撰寫 production code、安裝腳本或測試。
 
@@ -82,25 +81,12 @@ Git remote identity
 1. 公司或客戶任務是否也只能使用對應的非個人 quota profile，或目前只有「個人任務不得使用公司額度」這一側是硬性限制？
 2. 不在 Git Repository 中、沒有 remote 或判定為 `unknown` 的任務，是否一律先詢問使用者？
 3. 同一任務同時涉及不同 quota profile 的多個 Repository 時，應拆分任務、採最嚴格邊界，還是必須詢問使用者？
-4. 在合法 profile 內選擇 AI 時，任務成功率、能力適配、剩餘額度、重置時間與預期消耗量之間的目標優先順序為何？
-5. 當首選 AI 無法執行或額度不足時，允許 Agent 在同一 profile 內自動切換到什麼程度？
-6. 使用者是否需要看到每次選擇所依據的 profile、額度狀態與簡短理由？
+4. 特定 AI 的預留額度是否為自主路由永遠不能使用的硬性下限，只有使用者明確覆寫時才能動用？
+5. 在合法 profile 內選擇 AI 時，任務成功率、能力適配、可路由額度、重置時間與預期消耗量之間的目標優先順序為何？
+6. 當首選 AI 無法執行或額度不足時，允許 Agent 在同一 profile 內自動切換到什麼程度？
+7. 使用者是否需要看到每次選擇所依據的 profile、預留額度與簡短理由？
 
-## 7. 安全範例
-
-以下只表示規則概念，不是已決定的設定格式：
-
-```text
-git.example.com/example-user/**
-→ personal
-
-git.example.org/example-organization/**
-→ company
-
-code.example.test/**
-→ example-customer
-```
-
-## 8. 更新紀錄
+## 7. 更新紀錄
 
 - 2026-08-08：建立初始紀錄；確認個人額度隔離、非平均額度規劃、平台無關 Git remote identity，以及真實映射不得進入 Git。
+- 2026-08-08：將 Git remote 的解析與匹配細節移回未來行為設計，並確認特定 AI 需要保留不供自主路由消耗的預留額度。
