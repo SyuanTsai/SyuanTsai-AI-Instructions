@@ -13,6 +13,8 @@
 - 已建立 production code：否。
 - 已確認目標形式：獨立本機 PowerShell（`pwsh`）指令；目前不建立 MCP、npm 服務或常駐服務。
 - 已確認 Codex 多額度桶行為：未指定 `limitId` 回傳全部；指定時只回傳精確相符的桶；找不到時回報可用清單且不得自動 fallback。
+- 已確認 Copilot 舊制個人來源：PowerShell 沿用 GitHub CLI 憑證查詢個人 `premium_request/usage` 專用端點；使用者目前確認為舊制 Copilot Pro，每月 300 Premium Requests，方案額度只記錄於本機並標示為使用者確認值。
+- 已確認 Junie 個人來源：第一版由 PowerShell 透過 `junie --acp true` 的 stdio JSON-RPC 執行 ACP Available Command `usage`，取得 license、剩餘 JetBrains AI Credits 與單位；月總額、重置時間及 Top-up 在沒有其他可靠來源前回報未知。
 - 現成工具結論：沒有找到同時安全、成熟且完整覆蓋 Codex、Copilot 公司／私人及 Antigravity 的 MCP。
 - caut 結論：目前不採用；先前依 README 的正面判斷已由原始碼、CI、安全與授權稽核推翻。
 - 上游依賴：`docs/plans/ai-quota-routing/` 等待本規劃提供額度狀態與可信度邊界，之後才決定未知或不可靠額度下的路由行為。
@@ -30,7 +32,8 @@
 
 ## 已查證的資料來源概況
 
-- GitHub Copilot：官方 REST Billing API 可查個人及 organization／enterprise usage；公司來源通常需要較高管理或 billing 權限。
+- GitHub Copilot：官方 REST Billing API 可查個人及 organization／enterprise usage；公司來源通常需要較高管理或 billing 權限。個人舊制來源已用專用與通用端點交叉驗證使用量一致；API 不直接回傳方案額度，因此本機保存使用者確認的方案額度，再與官方使用量分開標示並推導剩餘量。
+- JetBrains AI／Junie：第一版已確認採用本機 Junie CLI ACP。PowerShell 透過 `--acp true` 的 stdio JSON-RPC 呼叫 Available Command `usage`，取得個人 license 與剩餘 AI Credits；實測結果與 IDE Widget／人工 `/usage` 一致，且查詢 Session 未消耗模型 Token。ACP 回傳仍是 Markdown 訊息，因此必須做版本、command advertisement 與欄位格式檢查，失敗時回報未知且不得 fallback 至 ANSI TUI 解析。總額度、重置時間與 Top-up 在沒有其他可靠來源前維持未知。Junie 與 AI Assistant 共用 JetBrains AI Credits，BYOK 則歸屬底層供應商。
 - Codex：本機 CLI `0.147.0` 已驗證 app-server 的 `account/rateLimits/read`、`account/usage/read` 與限制更新通知，可透過 stdio 結構化查詢目前有效登入狀態。`rateLimitsByLimitId` 已實測能分別表達一般 Codex 與 Spark 額度桶。這些方法存在於未開啟 `--experimental` 的產生協定 schema；app-server 命令本身仍標示為 experimental，跨版本相容與多登入狀態隔離尚待確認。
 - Antigravity：官方設定與 Models & Quota 介面可見使用狀態；尚未確認公開、穩定的跨帳號 quota API 或 MCP。
 - GitHub 官方 MCP：目前公開工具未提供所需 billing quota 查詢。

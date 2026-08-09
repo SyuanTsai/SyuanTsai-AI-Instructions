@@ -18,6 +18,7 @@ Codex 在 Task Execution 準備派工時，需要知道使用者已加入的 AI 
 
 - 當前 Codex 與未來由使用者加入的其他 Codex 額度來源。
 - GitHub Copilot 公司與私人額度來源。
+- JetBrains AI／Junie 私人額度來源。
 - Google Antigravity 私人額度來源。
 - 後續由使用者加入且能以合法、可信方式取得狀態的其他 AI 額度來源。
 
@@ -92,6 +93,15 @@ GitHub 官方 REST Billing API 已提供個人與 organization／enterprise 的 
 - 公司來源需要 organization／enterprise 管理或 billing 權限。
 - 個人自行購買的 Copilot 與由公司管理、計費的 Copilot 必須查詢不同層級，不能合併成同一份個人額度。
 
+已針對使用者目前的舊制個人 Copilot Pro 完成唯讀實測並確認：
+
+- PowerShell 可沿用 GitHub CLI 保存的登入憑證，呼叫個人 `premium_request/usage` 專用端點；不得輸出登入帳號、Token、Repository 或完整帳務內容。
+- 專用端點與通用個人 Billing Usage 端點在同一月份分別回傳不同分組筆數，但彙總後的 Premium Request 使用量一致，因此第一版以語意明確的專用端點為主要來源，通用端點只作相容性或人工交叉比對。
+- 目前帳號的計量制度是舊制 `premium-requests`；使用量以所有共用該額度的相關 SKU 彙總，不得替不同模型或功能複製完整額度。
+- GitHub API 回傳實際使用與折抵資料，但不直接回傳個人方案額度。首次查詢且本機沒有設定時，由使用者確認方案；目前已確認為舊制 Copilot Pro，每月 300 Premium Requests，並以 `user-confirmed` 標示額度來源。
+- 指令由官方使用量與使用者確認的月額度推導剩餘量、已用／剩餘百分比；重置時間依官方規則推導為每月 1 日 `00:00 UTC`。推導欄位必須與官方回傳欄位區分。
+- 若 API 改回傳 `ai-credits`、查詢所用帳號改變或使用者變更方案，舊制本機設定立即失效並重新詢問，不得沿用每月 300 Requests 的假設。
+
 官方參考：<https://docs.github.com/en/rest/billing/usage>
 
 ### Codex
@@ -119,6 +129,25 @@ app-server 另有會消耗 usage limit reset credit 的寫入方法；這類操�
 Google 官方文件說明 baseline quota、五小時或每週重置行為，並表示可在設定頁查看跨模型使用狀態。Antigravity CLI 也具有 Models & Quota 使用者介面；目前尚未確認公開且穩定的跨帳號 quota API 或 MCP。
 
 官方參考：<https://antigravity.google/docs/plans?app=antigravity>
+
+### JetBrains AI／Junie
+
+已確認使用者本機存在 Junie CLI，且人工執行互動式 `/usage` 可在不產生模型 Token 使用量的工作階段中顯示目前 JetBrains AI license 與剩餘 AI Credits；IDE 的 JetBrains AI Widget 可另外顯示方案月額度、剩餘量、重置時間與 Top-up Credits。
+
+目前邊界如下：
+
+- Junie 使用 JetBrains 帳號提供的模型時，消耗的是 Junie、AI Assistant 與其他適用 JetBrains AI 功能共用的個人 AI Credits，不是各 Junie 模型獨立擁有額度。
+- 使用 BYOK 模型時不消耗 JetBrains AI Credits，額度應歸屬底層模型供應商，不得同時計入 Junie 額度來源。
+- 本機已驗證 Junie CLI 可從使用者 PATH 找到；先前只用目前 Codex process 的 `Get-Command` 得出「未安裝」是環境 PATH 差異造成的誤判，該結論已撤回。
+- 官方 CLI 參數目前未提供獨立的 quota JSON 指令，但本機套件已確認 `usage` 同時是 ACP Available Command。PowerShell 可啟動 `junie --acp true`，依序完成 `initialize`、`session/new` 與 `session/prompt("/usage")`，從 stdio JSON-RPC 的 agent message 取得 license、剩餘 balance 與 Session Token 使用量，不需要初始化 TUI 或 pseudo-console。
+- 上述 ACP 路徑已在本機 Junie CLI `26.8.3 (2548.5)` 實測成功；回傳餘額與 IDE Widget／人工 `/usage` 顯示一致，且新 Session 的總 Token 使用量為零，因此額度觀測本身不啟動模型任務。
+- ACP `/usage` 的 quota 內容仍是協定內的 Markdown 訊息，而不是獨立 quota schema。第一版採用此路徑時，必須檢查 CLI 版本、確認 `usage` command advertisement、嚴格驗證欄位並在格式不符時回報未知，不得退回解析 ANSI TUI 畫面。
+- 本機套件另包含 IDE RPC 的 `QuotaInfoResult`，可表達方案名稱、已用／總量／剩餘量與下次補充時間；但這是未公開的 IDE 內部介面，第一版不得直接綁定。獨立 ACP Session 目前只驗證可取得 license 與剩餘 balance，總額度與重置時間仍需另外確認安全來源。
+- 不得僅憑方案月額度在本機推算實際餘額，因為同一額度池可能被 IDE 內其他 JetBrains AI 功能消耗；若無法取得即時餘額，必須標示為未知或需要人工更新。
+
+官方參考：<https://junie.jetbrains.com/docs/junie-cli.html>
+
+官方額度說明：<https://www.jetbrains.com/help/ai-assistant/licensing-and-subscriptions.html>
 
 ## 6. 已確認方向：獨立 PowerShell 指令
 
@@ -148,6 +177,18 @@ Google 官方文件說明 baseline quota、五小時或每週重置行為，並�
 - `codex_bengalfox` 類供應商內部識別不得被假設永久不變；指令每次從當下回應探索可用桶，不能將目前實測清單寫死為唯一合法值。
 
 目前確認的單桶回應至少保留 `limitId`、`limitName`、`planType`、`usedPercent`、衍生的 `remainingPercent`、`windowDurationMins` 與 `resetsAt`。其他狀態欄位與輸出格式仍待後續收斂。
+
+### 6.2 Junie 個人額度 ACP 行為
+
+已確認 Junie 個人額度第一版採用 ACP 作為即時觀測來源：
+
+- PowerShell 啟動本機 `junie --acp true`，透過 stdio JSON-RPC 完成 `initialize`、確認 `usage` Available Command、建立新 Session，並以 `session/prompt` 執行 `/usage`。
+- 指令只擷取 ACP agent message 中可嚴格驗證的 license、剩餘額度、額度單位與 Session Token 使用量，完成後關閉 Junie process；不啟動互動式 TUI，也不使用 pseudo-console。
+- 查詢沿用 Junie 現有的本機登入狀態，不複製、保存或輸出 JetBrains credential 與帳號識別資訊。
+- ACP 即時回傳的剩餘額度屬於 Junie 與其他 JetBrains AI 功能共用的 JetBrains AI Credits；不得依模型建立重複額度，也不得把 BYOK 使用量算入此來源。
+- ACP 目前沒有提供月總額、已用額度、重置時間或 Top-up Credits 的獨立結構化欄位。第一版對這些欄位回報 `unknown`，不得僅憑方案名稱或本機差額估算成供應商即時資料。
+- 因 quota payload 是 ACP 內的 Markdown 訊息，指令必須做 CLI 版本與欄位格式檢查；若 `usage` 未被 advertised、回應格式改變、欄位缺失或 Session 失敗，整筆 Junie 狀態回報未知並附原因，不得自動退回 ANSI TUI 畫面解析。
+- 驗收時必須確認新建查詢 Session 沒有產生模型 Token 使用量，且 ACP 餘額與同一時間人工 `/usage` 顯示一致；若任一條件不成立，不得將該版本標示為可靠來源。
 
 MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的直接指令呼叫不足以滿足需求時，才另外評估是否包裝成 MCP。
 
