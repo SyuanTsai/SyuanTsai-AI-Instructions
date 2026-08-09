@@ -102,7 +102,19 @@ GitHub 官方 REST Billing API 已提供個人與 organization／enterprise 的 
 - 指令由官方使用量與使用者確認的月額度推導剩餘量、已用／剩餘百分比；重置時間依官方規則推導為每月 1 日 `00:00 UTC`。推導欄位必須與官方回傳欄位區分。
 - 若 API 改回傳 `ai-credits`、查詢所用帳號改變或使用者變更方案，舊制本機設定立即失效並重新詢問，不得沿用每月 300 Requests 的假設。
 
+已針對使用者目前由公司管理的 Copilot Business 登入完成唯讀實測並確認：
+
+- Copilot CLI `1.0.78` 的互動式 `/usage` 可顯示方案 AIC 總量、已用量與百分比，但第一版不解析其終端畫面。
+- Copilot CLI 的 headless JSON-RPC 可先用 `account.getCurrentAuth` 確認目前有效登入是否對應本機設定的公司資源，再用 `account.getQuota` 取得結構化 `quotaSnapshots`；驗證過程不送出模型提示，也沒有消耗 AI Units。
+- 實測 `premium_interactions` 回傳的方案總量、已用量與剩餘百分比，均與同時間互動式 `/usage` 顯示的 AIC 總量、用量及百分比一致。`chat` 與 `completions` 是其他 entitlement，不得併入或複製為 AIC 額度。
+- 回傳的 plan 與 access SKU 可用來驗證這是公司管理的 Business 額度來源；真實 login、organization、email、Token 與完整 auth payload 只可在 process 內完成比對，不得寫入一般輸出、紀錄或 Repository。
+- ACP 模式雖 advertise `usage`，但本機實測只收到 Session Usage，沒有收到互動式畫面中的 Plan quota；ACP 也未 advertise `user`，因此不得用 ACP prompt 嘗試 `/user show` 或 `/user switch`。公司額度第一版以 headless JSON-RPC 的結構化 quota 方法為主要來源。
+- `account.getQuota` 與相關 account 方法在目前 CLI schema 中仍標示為 experimental，必須做 CLI 版本、方法與回應 schema 檢查。實測 `resetDate` 尚未證明代表方案實際重置時間，因此第一版不得用它做接近重置排序，應回報未驗證或未知。
+- 目前只確認「查詢當下有效的 Copilot CLI 登入」可行；如何安全隔離並自主查詢多個 Copilot 登入仍待決定，不得把人工 `/user switch` 直接視為已完成的自動多帳號方案。
+
 官方參考：<https://docs.github.com/en/rest/billing/usage>
+
+官方 Copilot SDK headless 參考：<https://docs.github.com/en/copilot/how-tos/copilot-sdk/setup/backend-services>
 
 ### Codex
 
@@ -190,6 +202,17 @@ Google 官方文件說明 baseline quota、五小時或每週重置行為，並�
 - 因 quota payload 是 ACP 內的 Markdown 訊息，指令必須做 CLI 版本與欄位格式檢查；若 `usage` 未被 advertised、回應格式改變、欄位缺失或 Session 失敗，整筆 Junie 狀態回報未知並附原因，不得自動退回 ANSI TUI 畫面解析。
 - 驗收時必須確認新建查詢 Session 沒有產生模型 Token 使用量，且 ACP 餘額與同一時間人工 `/usage` 顯示一致；若任一條件不成立，不得將該版本標示為可靠來源。
 
+### 6.3 Copilot 公司額度行為
+
+已確認 Copilot 公司額度第一版採用目前 Copilot CLI 登入的結構化 quota 作為即時觀測來源：
+
+- PowerShell 啟動本機 Copilot CLI headless JSON-RPC，先確認目前登入符合使用者加入的安全資源名稱，再呼叫 `account.getQuota`。
+- 指令只保留 `premium_interactions` 的總量、已用量、剩餘量與百分比，以及必要的 plan／SKU 驗證結果；不得輸出或持久化 auth payload、login、organization、email 或 Token。
+- 互動式 `/usage` 只作人工交叉比對，不解析其文字、色彩或進度條。ACP `/usage` 因未穩定回傳 Plan quota，不作主要資料來源。
+- 查詢結果必須通過 CLI 版本、方法存在與 quota schema 檢查；不相容時回報未知，不得自動退回畫面解析。
+- `resetDate` 在語意完成額外驗證前回報未知；不得以目前觀測值進行重置急迫性排序。
+- 多帳號自主查詢仍是未解問題；本節只確認對目前有效登入進行唯讀查詢，不授權指令改變全域登入狀態。
+
 MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的直接指令呼叫不足以滿足需求時，才另外評估是否包裝成 MCP。
 
 這個方向的價值是讓使用者與 Codex 共用同一個可檢查、可手動執行的本機入口，同時避免常駐服務與額外工具層；代價是仍需持續追蹤各供應商介面變更，且指令本身無法補出供應商未提供的資料。
@@ -203,6 +226,7 @@ MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的
 - 來源未知或過期時，是停用自主使用、詢問使用者、接受本機估算，或採其他保守行為。
 - 本機紀錄允許保存哪些歷史與校正資訊、保存多久，以及使用者如何清除。
 - 多個官方登入狀態如何安全對應到使用者加入的資源名稱。
+- Copilot 多登入是否能以隔離的官方登入內容查詢；若只能改變全域 active user，Codex 是否允許自主切換，以及切換失敗後如何復原。
 - 指令失敗是否只回報未知，或需要影響後續 Task Execution。
 - 具體參數、程序架構、輸出 schema、快取格式、檔案位置與安裝方式。
 
