@@ -1,10 +1,10 @@
-# AI 額度觀測與本機 MCP 討論紀錄
+# AI 額度觀測與獨立 PowerShell 指令討論紀錄
 
 ## 文件定位
 
-- 狀態：已從「Codex 自主派工與 AI 額度路由」拆出，進入高階需求與行為邊界收斂；尚未確認最終技術形式，也未進入實作規劃。
+- 狀態：已從「Codex 自主派工與 AI 額度路由」拆出，並確認目前以獨立 PowerShell（`pwsh`）指令為目標產物；仍在收斂使用者可見行為，尚未進入實作規劃。
 - 工作分支：`codex/plan-ai-quota-observability-mcp`。
-- 用途：規劃如何安全取得各 AI 額度來源的剩餘量、重置時間與可信度，並評估是否以本機 MCP 提供給 Codex 使用。
+- 用途：規劃如何以獨立本機 PowerShell 指令，安全取得各 AI 額度來源的剩餘量、重置時間與可信度，供使用者或 Codex 按需呼叫。
 - 上游規劃：`docs/plans/ai-quota-routing/` 只使用額度觀測結果進行資格判斷與派工，不在該規劃實作資料取得。
 - 更新原則：只有經使用者確認的內容列為「已確認決策」；評估結論與建議在確認前保留為候選方向。
 
@@ -37,7 +37,7 @@ AI 供應商官方狀態、API、CLI 或使用者輸入
 
 - 確認各額度來源能取得哪些資料，以及資料的合法性、即時性與可信度。
 - 定義來源不可用、資訊過期、互相衝突或只能估算時的可見狀態。
-- 評估本機 PowerShell 指令、local stdio MCP 或其他最小介面的適用性。
+- 定義獨立 PowerShell 指令的使用者可見行為與完成條件。
 - 限制憑證、帳號識別、紀錄與輸出的安全範圍。
 
 本規劃不負責：
@@ -96,9 +96,23 @@ GitHub 官方 REST Billing API 已提供個人與 organization／enterprise 的 
 
 ### Codex
 
-OpenAI 官方提供 Codex usage dashboard；活動中的 Codex CLI 對話可使用 `/status` 查看剩餘限制。目前尚未確認有可供本機工具跨帳號穩定呼叫的公開額度 API，因此不能把 dashboard 或互動式 slash command 直接視為已完成的機器介面。
+OpenAI 官方提供 Codex usage dashboard；活動中的 Codex CLI 對話可使用 `/status` 查看目前執行環境與剩餘限制，`/usage` 可查看使用量歷史。這兩個互動式畫面只作為使用者檢視與人工比對，不作為自動化解析來源。
+
+已在本機 Codex CLI `0.147.0` 驗證其 app-server 提供結構化唯讀方法：
+
+- `account/rateLimits/read`：取得目前有效登入狀態的限制窗口、已使用百分比與重置時間，並可表達同一帳號下的多個計量限制。
+- `account/usage/read`：取得每日 Token 使用量及 lifetime、peak、streak 等摘要。
+- `account/rateLimits/updated`：接收限制狀態更新通知。
+
+上述方法也存在於未開啟 `--experimental` 的本機產生協定 schema；實測可在不啟動模型任務的情況下，透過本機 stdio 取得目前有效登入狀態的額度中繼資料。因此 Codex 第一版不需要解析終端畫面，也不需要先依賴第三方 quota tracker。
+
+但 `codex app-server` 命令本身仍標示為 experimental，且目前只證明「單一目前登入內容」可查詢，尚未證明跨版本相容性或多個 Codex 登入內容的安全隔離方式。後續應以版本相容檢查與方法偵測保守使用，不能把目前協定視為永久穩定的公開 API。
+
+app-server 另有會消耗 usage limit reset credit 的寫入方法；這類操作不屬於額度觀測，第一版必須排除。查詢結果也不得保存或回傳 email、session、Token 或其他不必要的帳號識別資訊。
 
 官方 dashboard：<https://chatgpt.com/codex/settings/usage>
+
+官方 CLI 指令參考：<https://learn.chatgpt.com/docs/developer-commands?surface=cli>
 
 ### Antigravity
 
@@ -106,38 +120,57 @@ Google 官方文件說明 baseline quota、五小時或每週重置行為，並�
 
 官方參考：<https://antigravity.google/docs/plans?app=antigravity>
 
-## 6. 候選方向：最小本機額度 MCP
+## 6. 已確認方向：獨立 PowerShell 指令
 
-目前建議，但尚待使用者確認：
+目前已確認：
 
-- 先以 PowerShell 建立唯讀的額度查詢核心，驗證每個官方資料來源能穩定輸出所需資訊。
-- 只有當 Codex 需要在派工前自主呼叫時，再以 local stdio MCP 提供同一份觀測能力。
-- MCP 只提供一至兩個唯讀額度查詢工具，不提供聊天、AI 執行、proxy、帳號切換、預留設定或路由功能。
-- MCP 不保存、輸出或複製供應商 Token；登入與憑證由官方 CLI、Windows Credential Manager 或其他供應商原生機制管理。
+- 目前目標產物是可由使用者或 Codex 直接執行的獨立本機 PowerShell（`pwsh`）指令，不建立 npm 服務、常駐服務或 MCP Server。
+- Codex 第一版直接以本機 app-server 的結構化唯讀方法作為主要資料來源；`/status` 與 `/usage` 只用於人工比對，不解析其視覺輸出。
+- PowerShell 指令負責啟動本機 app-server、完成唯讀查詢並輸出額度觀測結果；不自行判斷 task profile、預留額度、派工資格或資源排序。
+- 指令執行完成後即結束，不維持背景服務；Codex 需要更新額度時再按需呼叫。
+- 指令不保存、輸出或複製供應商 Token；登入與憑證沿用官方 CLI 或其他供應商原生機制。
 - 回傳內容使用使用者設定的安全資源名稱，不包含不必要的 email、organization 或真實帳號識別。
-- MCP 只在 Task Execution 準備派工、使用者明確查詢額度或需要重新整理過期資訊時啟用，避免常駐大量工具描述增加 Codex 額度消耗。
+- 指令只在 Task Execution 準備派工、使用者明確查詢額度或需要重新整理過期資訊時執行。
 - 無法從官方或已核准來源取得的狀態，不得偽裝成精確剩餘額度。
 
-這個方向的價值是讓 Codex 自主取得必要資訊，同時維持最小權限與單一決策主體；代價是需要持續追蹤各供應商介面變更，且 MCP 本身無法解決供應商未提供機器介面的問題。
+### 6.1 Codex 多額度桶選擇
+
+已確認目前可行方向：
+
+- 同一個 Codex 登入狀態可以透過 `rateLimitsByLimitId` 回傳多個獨立計量額度桶；它們可以分開觀測，但不等於不同帳號或不同訂閱。
+- 本機實測目前包含一般 Codex 額度桶 `codex`，以及 `limitName` 為 `GPT-5.3-Codex-Spark` 的額度桶 `codex_bengalfox`；兩者目前的 `planType` 都是 `pro`。
+- 指令只呼叫一次 `account/rateLimits/read` 取得完整額度桶集合，再於本機依 `limitId` 精確篩選，不為每個桶重複呼叫供應商介面。
+- 未指定 `limitId` 時，回傳目前發現的全部額度桶。
+- 指定 `limitId` 時，只回傳相符額度桶。行為可表達為 `Get-AiQuota -Provider Codex -LimitId <id>`；最終安裝方式不影響此選擇契約。
+- `limitId` 是精確選擇條件；`limitName` 用於顯示。當 `limitName` 為空時，輸出仍保留原始 `limitId`，不得捏造供應商名稱。
+- 找不到指定 `limitId` 時，回傳 `status: not_found`、原始查詢值及當下可用的 `limitId`／`limitName` 清單，並以非成功 exit code 結束。
+- 找不到時不得自動退回 `codex`、第一個額度桶或任何其他桶，避免 Codex 使用錯誤的共享額度來源。
+- `codex_bengalfox` 類供應商內部識別不得被假設永久不變；指令每次從當下回應探索可用桶，不能將目前實測清單寫死為唯一合法值。
+
+目前確認的單桶回應至少保留 `limitId`、`limitName`、`planType`、`usedPercent`、衍生的 `remainingPercent`、`windowDurationMins` 與 `resetsAt`。其他狀態欄位與輸出格式仍待後續收斂。
+
+MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的直接指令呼叫不足以滿足需求時，才另外評估是否包裝成 MCP。
+
+這個方向的價值是讓使用者與 Codex 共用同一個可檢查、可手動執行的本機入口，同時避免常駐服務與額外工具層；代價是仍需持續追蹤各供應商介面變更，且指令本身無法補出供應商未提供的資料。
 
 ## 7. 尚未確認，不得提前實作
 
-- 最終是否採用 MCP，或第一版只保留 PowerShell 查詢。
-- 第一版先支援 Copilot、Codex 或 Antigravity 的哪一個來源。
+- 指令最終安裝位置，以及是否提供人類可讀與結構化兩種輸出；`Provider` 與 `LimitId` 的選擇行為已確認。
+- Codex app-server 的最低相容版本、執行時方法偵測與版本不相容時的安全 fallback。
 - 額度狀態需要哪些最小可見資訊，以及是否顯示百分比、剩餘量、重置時間或原始值。
 - 如何區分可靠、估算、過期、未知與來源衝突。
 - 來源未知或過期時，是停用自主使用、詢問使用者、接受本機估算，或採其他保守行為。
 - 本機紀錄允許保存哪些歷史與校正資訊、保存多久，以及使用者如何清除。
 - 多個官方登入狀態如何安全對應到使用者加入的資源名稱。
-- MCP 是否預設停用、按需啟用，以及失敗時是否影響 Codex 啟動。
-- 具體 tool schema、程序架構、資料結構、快取格式、檔案位置、排程與安裝方式。
+- 指令失敗是否只回報未知，或需要影響後續 Task Execution。
+- 具體參數、程序架構、輸出 schema、快取格式、檔案位置與安裝方式。
 
 ## 8. 下一個顆粒度
 
 下一階段先定義「額度觀測的使用者可見行為與完成條件」，仍不進入程式架構：
 
-1. 確認是否接受「PowerShell 查詢核心＋按需 local MCP」作為目標形式。
-2. 決定第一個要驗證的額度來源。
+1. 多額度桶的 `Provider`／`LimitId` 選擇行為已確認；下一步收斂完整輸出欄位、格式與 exit code。
+2. Codex 已成為第一個驗證來源；下一步確認第一版只讀取目前有效登入狀態，或一開始就涵蓋多個隔離的 Codex 登入狀態。
 3. 定義一次額度查詢成功、部分成功、過期與未知時，Codex 應看到什麼結果。
 4. 確認額度資訊不足以證明不侵入預留時的安全行為。
 5. 確認不保存 Token、最小化帳號識別與本機紀錄的邊界。
