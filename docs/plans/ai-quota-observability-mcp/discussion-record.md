@@ -39,6 +39,7 @@ AI 供應商官方狀態、API、CLI 或使用者輸入
 - 確認各額度來源能取得哪些資料，以及資料的合法性、即時性與可信度。
 - 定義來源不可用、資訊過期、互相衝突或只能估算時的可見狀態。
 - 定義獨立 PowerShell 指令的使用者可見行為與完成條件。
+- 在使用者加入新來源時，依實際驗證路徑判斷是否需要隔離登入內容，並在需要時引導完成一次性的官方登入與來源確認。
 - 限制憑證、帳號識別、紀錄與輸出的安全範圍。
 
 本規劃不負責：
@@ -46,7 +47,7 @@ AI 供應商官方狀態、API、CLI 或使用者輸入
 - 判斷任務屬於公司或私人 task profile。
 - 設定或修改使用者的預留額度。
 - 選擇 AI、模型、模式或實際額度來源。
-- 自動切換帳號、執行 AI 任務、重試派工或驗收結果。
+- 改變供應商 CLI 的全域 active account、執行 AI 任務、重試派工或驗收結果；登入隔離只選擇已建立的來源內容，不執行背景 `/user switch`。
 - 展開自主派工流程、Worker 或完整 AI Router 的實作。
 
 ## 3. 已確認的上游約束
@@ -110,7 +111,7 @@ GitHub 官方 REST Billing API 已提供個人與 organization／enterprise 的 
 - 回傳的 plan 與 access SKU 可用來驗證這是公司管理的 Business 額度來源；真實 login、organization、email、Token 與完整 auth payload 只可在 process 內完成比對，不得寫入一般輸出、紀錄或 Repository。
 - ACP 模式雖 advertise `usage`，但本機實測只收到 Session Usage，沒有收到互動式畫面中的 Plan quota；ACP 也未 advertise `user`，因此不得用 ACP prompt 嘗試 `/user show` 或 `/user switch`。公司額度第一版以 headless JSON-RPC 的結構化 quota 方法為主要來源。
 - `account.getQuota` 與相關 account 方法在目前 CLI schema 中仍標示為 experimental，必須做 CLI 版本、方法與回應 schema 檢查。實測 `resetDate` 尚未證明代表方案實際重置時間，因此第一版不得用它做接近重置排序，應回報未驗證或未知。
-- 目前只確認「查詢當下有效的 Copilot CLI 登入」可行；如何安全隔離並自主查詢多個 Copilot 登入仍待決定，不得把人工 `/user switch` 直接視為已完成的自動多帳號方案。
+- 已實測 `COPILOT_HOME` 可隔離 Copilot CLI 的設定與登入選擇：預設內容解析為公司 Business，暫存隔離內容解析為 `gh` 的個人 Individual，完成隔離查詢後預設內容仍維持 Business。這證明 Codex 可藉由選擇登入內容查詢多個來源，不需要也不得自動操作 `/user switch`。
 
 官方參考：<https://docs.github.com/en/rest/billing/usage>
 
@@ -211,7 +212,35 @@ Google 官方文件說明 baseline quota、五小時或每週重置行為，並�
 - 互動式 `/usage` 只作人工交叉比對，不解析其文字、色彩或進度條。ACP `/usage` 因未穩定回傳 Plan quota，不作主要資料來源。
 - 查詢結果必須通過 CLI 版本、方法存在與 quota schema 檢查；不相容時回報未知，不得自動退回畫面解析。
 - `resetDate` 在語意完成額外驗證前回報未知；不得以目前觀測值進行重置急迫性排序。
-- 多帳號自主查詢仍是未解問題；本節只確認對目前有效登入進行唯讀查詢，不授權指令改變全域登入狀態。
+- 多帳號自主查詢採隔離登入內容，不授權指令改變全域登入狀態；各來源的首次官方登入與身分確認依下一節辦理。
+
+### 6.4 Copilot 新來源加入與登入隔離
+
+已確認把 `COPILOT_HOME` 視為 Copilot CLI 額度來源的隔離邊界，而不是交由使用者自行判斷的進階設定。當使用者要求加入新來源時，Codex 必須先辨識該來源的額度驗證路徑，再決定是否啟用隔離：
+
+- 來源需要沿用 Copilot CLI 的 OAuth／Credential Manager 登入，並要成為之後可重複自主查詢或執行的資源時，必須建立該來源專用的 `COPILOT_HOME`。公司 Business 的 `account.getQuota` 屬於此情況。
+- 來源只透過 GitHub Billing REST 與 `gh` 查詢舊制個人用量時，額度觀測本身不需要 `COPILOT_HOME`；若同一帳號之後也要成為 Copilot CLI Execution Resource，再另外引導建立隔離內容。
+- 使用者只要求一次性檢視目前有效的 Copilot CLI 登入時，可以不建立隔離內容，但該結果不能登記為可供 Codex 長期自主使用的穩定來源。
+- 非 Copilot CLI 的供應商或資料路徑不適用 `COPILOT_HOME`；必須使用該供應商自己的隔離方式，不能因為同樣是 AI 額度來源就套用 Copilot 規則。
+
+需要隔離且尚未完成設定時，Codex 自動進入引導流程：
+
+1. 說明為何此來源需要獨立登入內容，以及不會改變既有 Copilot active account。
+2. 以使用者提供的安全資源名稱建立本機隔離內容；實際目錄位於個人設定範圍，不得建立在 Repository，也不得把包含使用者路徑的絕對位置寫入一般報告。
+3. 透過該隔離內容啟動官方 `copilot login`。Codex 可以啟動與等待流程，但帳號選擇、瀏覽器授權或 device code 確認必須由使用者親自完成，不得代替使用者輸入 credential。
+4. 登入後用 `account.getCurrentAuth` 在 process 內驗證預期的 plan、SKU 與不透明帳號指紋，再用 `account.getQuota` 驗證額度可讀；無法從可靠訊號判斷公司／私人來源時，只在第一次詢問使用者並把確認結果保存在本機來源設定。
+5. 驗證隔離查詢前後，其他已建立來源與預設 Copilot CLI 的有效登入均未改變。全部成立後才能把來源標記為可自主查詢。
+
+設定完成後，Codex 只需要以安全資源名稱選擇對應的隔離內容，PowerShell 於該 child process 設定 `COPILOT_HOME`、執行唯讀 quota 查詢並關閉 process。它不列出其他帳號、不取得 `account.getAllUsers` 中可能附帶的 Token，也不修改全域 active account。
+
+安全失敗行為已確認如下：
+
+- 隔離內容不存在或尚未登入：回報 `setup_required` 並重新進入引導，不得 fallback 至預設帳號。
+- 官方登入已過期：回報 `reauth_required`，由使用者重新完成官方授權。
+- plan、SKU 或帳號指紋不符合來源設定：回報 `identity_mismatch`，不得更新綁定或改查另一帳號，必須讓使用者確認。
+- Copilot CLI 不支援必要方法或 schema 已改變：回報 `unsupported`／`unknown`，不得退回 `/usage` 畫面解析或 `/user switch`。
+
+目前已完成的隔離驗證為：在同一台 Windows 主機上，預設 Copilot 內容查得 Business，暫存 `COPILOT_HOME` 依官方 auth fallback 查得 Individual，兩者均可取得 `premium_interactions` quota，且隔離查詢沒有改變預設 Business 登入。測試產生的暫存內容未保留。正式實作仍需驗收「公司與私人各自完成一次官方登入的兩個持久隔離內容」，以排除對當下 `gh` active account 的依賴。
 
 MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的直接指令呼叫不足以滿足需求時，才另外評估是否包裝成 MCP。
 
@@ -225,8 +254,7 @@ MCP 不屬於目前目標；未來只有在獨立指令已穩定，且 Codex 的
 - 如何區分可靠、估算、過期、未知與來源衝突。
 - 來源未知或過期時，是停用自主使用、詢問使用者、接受本機估算，或採其他保守行為。
 - 本機紀錄允許保存哪些歷史與校正資訊、保存多久，以及使用者如何清除。
-- 多個官方登入狀態如何安全對應到使用者加入的資源名稱。
-- Copilot 多登入是否能以隔離的官方登入內容查詢；若只能改變全域 active user，Codex 是否允許自主切換，以及切換失敗後如何復原。
+- Copilot 隔離內容的個人設定根目錄、命名與清除行為；隔離判斷、首次引導與安全失敗狀態已確認。
 - 指令失敗是否只回報未知，或需要影響後續 Task Execution。
 - 具體參數、程序架構、輸出 schema、快取格式、檔案位置與安裝方式。
 
