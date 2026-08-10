@@ -153,6 +153,36 @@ exit 0
         $result.StandardError.Trim() | Should Be 'private stderr diagnostic'
     }
 
+    # Scenario: A FELO-compatible child process writes UTF-8 text while the parent console uses a legacy Windows code page.
+    # Purpose: Preserve multilingual stdout and stderr instead of decoding UTF-8 bytes with the parent console encoding.
+    It 'UnitT55_decodes_child_process_stdout_and_stderr_as_UTF8' {
+        # Given
+        $fakeScript = Join-Path $TestDrive 'fake-felo-utf8.ps1'
+        Set-Content -LiteralPath $fakeScript -Encoding UTF8 -Value @'
+$stdoutBytes = [System.Text.Encoding]::UTF8.GetBytes('繁體中文摘要')
+$stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
+[Console]::OpenStandardOutput().Write($stdoutBytes, 0, $stdoutBytes.Length)
+[Console]::OpenStandardError().Write($stderrBytes, 0, $stderrBytes.Length)
+'@
+        $originalOutputEncoding = [Console]::OutputEncoding
+
+        # When
+        try {
+            [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(950)
+            $result = Invoke-FeloChildProcess `
+                -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+                -ArgumentList @('-NoProfile', '-File', $fakeScript) `
+                -TimeoutSeconds 5
+        }
+        finally {
+            [Console]::OutputEncoding = $originalOutputEncoding
+        }
+
+        # Then
+        $result.StandardOutput | Should Be '繁體中文摘要'
+        $result.StandardError | Should Be '診斷訊息'
+    }
+
     # Scenario: A public user query is prepared for the FELO CLI.
     # Purpose: Apply the agreed same-language and 800-character soft limit before the hard local projection.
     It 'T060_adds_the_compact_answer_instruction_to_the_query' {
