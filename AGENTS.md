@@ -75,6 +75,8 @@ Base Agent 只描述載入條件：
 
 `.agents/skills/.gitkeep` 只用來讓來源 Repository 保留空目錄，不得 fan out 到目標 Repository。bootstrap 必須遞迴管理合法 Skill 目錄中的檔案，支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
 
+bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 的 Git ignore 規則即使排除 `AGENTS.md`、`.codex/**`、GitHub Copilot Instructions 或 `.agents/skills/**`，也不代表檔案是 customized 或 unmanaged；同步、allowlist commit 與非 allowlist `PersonalAgent` stash 都必須正確處理這些受管理路徑。
+
 ## Agent 職責拆分
 
 不得建立萬能 Agent。需要多 Agent 時，應維持單一職責：
