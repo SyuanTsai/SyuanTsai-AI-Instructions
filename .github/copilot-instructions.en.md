@@ -18,6 +18,7 @@ Read the applicable file in full only when its condition is met. Do not load unr
 - EF, SQL, database queries, or data-access performance → `.github/AI-Rules/Database.en.md`
 - Code or Pull Request review → `.github/AI-Rules/CodeReview.en.md`
 - Git commit message generation → `.github/AI-Rules/GitCommit.en.md`
+- Current, multi-source, or multilingual public external research, or use of an external search provider → `.github/AI-Rules/ExternalResearch.en.md`
 
 If an applicable module is missing, identify the missing file and do not invent its contents.
 
@@ -29,6 +30,7 @@ If an applicable module is missing, identify the missing file and do not invent 
 - Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
 - Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`
+- Search public information through FELO under the external research rules → `.agents/skills/search-with-felo/SKILL.md`
 
 Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. If an applicable Skill is missing, identify the missing file and do not invent its workflow.
 
