@@ -6,13 +6,13 @@ function New-FeloErrorResult {
         [DateTimeOffset] $AsOf,
 
         [Parameter(Mandatory = $true)]
-        [string] $Error
+        [string] $ErrorCode
     )
 
     return [pscustomobject][ordered]@{
         status = 'error'
         asOf = $AsOf.ToString('o')
-        error = $Error
+        error = $ErrorCode
     }
 }
 
@@ -114,29 +114,29 @@ function ConvertTo-FeloCompactResult {
 
     $response = ConvertFrom-FeloJsonOutput -RawOutput $RawOutput
     if ($null -eq $response) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'invalid-response'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'invalid-response'
     }
 
     $statusProperty = $response.PSObject.Properties['status']
     $dataProperty = $response.PSObject.Properties['data']
     if ($null -eq $statusProperty -or $null -eq $dataProperty -or $null -eq $dataProperty.Value) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'invalid-response'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'invalid-response'
     }
 
     $statusValue = [string] $statusProperty.Value
     if ($statusValue -notin @('200', 'ok')) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'request-failed'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'request-failed'
     }
 
     $data = $dataProperty.Value
     $answerProperty = $data.PSObject.Properties['answer']
     if ($null -eq $answerProperty) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'invalid-response'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'invalid-response'
     }
 
     $answer = [string] $answerProperty.Value
     if ([string]::IsNullOrWhiteSpace($answer)) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'invalid-response'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'invalid-response'
     }
 
     $sources = [System.Collections.Generic.List[object]]::new()
@@ -166,7 +166,7 @@ function ConvertTo-FeloCompactResult {
     }
 
     if ($sources.Count -eq 0) {
-        return New-FeloErrorResult -AsOf $AsOf -Error 'no-sources'
+        return New-FeloErrorResult -AsOf $AsOf -ErrorCode 'no-sources'
     }
 
     $summaryResult = ConvertTo-FeloTruncatedText -Text $answer.Trim() -MaximumTextElements $SummaryCharacterLimit
@@ -326,7 +326,7 @@ function Invoke-FeloSearch {
     $asOf = [DateTimeOffset]::Now
     $invocation = Resolve-FeloCliInvocation
     if ($null -eq $invocation) {
-        return New-FeloErrorResult -AsOf $asOf -Error 'cli-unavailable'
+        return New-FeloErrorResult -AsOf $asOf -ErrorCode 'cli-unavailable'
     }
 
     $feloQuery = New-FeloSearchQuery -Query $Query -SummaryCharacterLimit $SummaryCharacterLimit
@@ -345,16 +345,16 @@ function Invoke-FeloSearch {
             -TimeoutSeconds ($TimeoutSeconds + 5)
     }
     catch {
-        return New-FeloErrorResult -AsOf $asOf -Error 'cli-unavailable'
+        return New-FeloErrorResult -AsOf $asOf -ErrorCode 'cli-unavailable'
     }
 
     if ($processResult.TimedOut) {
-        return New-FeloErrorResult -AsOf $asOf -Error 'timeout'
+        return New-FeloErrorResult -AsOf $asOf -ErrorCode 'timeout'
     }
 
     if ($processResult.ExitCode -ne 0) {
         $classification = Get-FeloFailureClassification -StandardError $processResult.StandardError
-        return New-FeloErrorResult -AsOf $asOf -Error $classification
+        return New-FeloErrorResult -AsOf $asOf -ErrorCode $classification
     }
 
     return ConvertTo-FeloCompactResult `
