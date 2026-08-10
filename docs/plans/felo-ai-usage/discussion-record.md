@@ -2,8 +2,8 @@
 
 ## 文件定位
 
-- 狀態：第一階段範圍已依使用者五項回覆收斂；尚未進入 Skill 或 script 實作。
-- 工作分支：`codex/plan-felo-ai-usage`。
+- 狀態：第一版 Skill、script 與條件式規則已實作並完成驗證，待差異審查與交付。
+- 工作分支：`codex/implement-felo-ai-usage`。
 - 用途：定義何時可自動使用 FELO 搜尋，以及如何避免 FELO 的原始結果增加 Codex 上下文負擔。
 - 更新原則：只有使用者已確認的內容列入「已確認決策」；技術細節未確認前保留在「待確認設計」。
 
@@ -104,14 +104,18 @@ FELO Chat API 目前提供自由文字 `answer`、搜尋分析及來源陣列。
 }
 ```
 
-建議預設值仍待使用者確認：
+已確認的輸出限制：
 
-- 要求 FELO 以使用者語言回答，並在 query 中要求摘要不超過 800 個中文字或相近長度。
-- wrapper 對 `summary` 再執行 800 字元硬上限，並以 `truncated` 表達是否裁切。
+- 要求 FELO 以使用者語言回答，並在 query 中要求摘要不超過 800 個 Unicode 字元；這是降低原始輸出的軟限制。
+- wrapper 對 `summary` 再執行 800 個 Unicode 字元的硬上限。
 - 來源最多 5 筆，只保留 `title` 與 `url`，依正規化 URL 去除重複項目。
+- 摘要或來源超過上限時，以 `truncated` 表達已裁切。
 - 無法解析成功回應時只輸出安全錯誤分類，不輸出原始 response body 或 credential。
+- 第一版不建立本機快取，每次符合條件的查詢都重新呼叫 FELO。
 
 本機 wrapper 必須在 child process 內分別捕捉 stdout 與 stderr，再解析 JSON 並輸出 allowlist 欄位。即使 FELO CLI 先輸出 `Searching...` 等進度文字，也不得將整段輸出轉送給 Codex 後再解析。
+
+2026-08-10 已以 `felo-ai` 0.2.54 實際驗證 Windows CLI。`felo search` 支援 `--json` 與 `--timeout`；成功回應頂層包含 `code`、`data`、`request_id`、`status`，`data` 包含 `answer`、`id`、`message_id`、`query_analysis`、`resources`，來源包含 `link`、`snippet`、`title`。測試查詢回傳 20 筆來源且 CLI 同時產生多項過程輸出，確認 wrapper 必須在本機捕捉並只投影 allowlist 欄位。
 
 ## 6. 概念流程
 
@@ -139,21 +143,21 @@ Codex 視風險直接使用或核對原始權威來源
 - 第一版依使用者已確認的平均使用情況自動進行符合資格的搜尋，不為每次搜尋解析帳務頁面。
 - 若未來觀察到訂閱點數異常下降，再另行決定是否加入額度觀測、停用條件或訂閱點數預留；目前不提前實作。
 
-## 8. 待確認設計
+## 8. 已確認實作設計
 
-1. compact output 的摘要硬上限是否採 800 個中文字。
-2. 來源上限是否採 5 筆。
-3. 是否加入依查詢類型設定有效期的本機快取；第一版也可以先不快取。
-4. FELO 失敗後由 Codex 直接查詢、改用已核准 connector，或只回報搜尋不可用的 fallback 順序。
-5. 規則最終放入共通 `ExternalResearch` 條件式模組，或只由 `search-with-felo` Skill 的 description 觸發。
+1. compact output 的 `summary` 硬上限為 800 個 Unicode 字元，來源上限為 5 筆。
+2. 第一版不建立本機快取。
+3. FELO 失敗時，有適合且已核准的 connector 就使用該 connector；沒有適合的 connector 時，使用 Codex 自身的網路搜尋能力；兩者皆不可用時才回報即時查證不可用。
+4. provider-neutral 的公開性、私密資料、程式碼與高風險查證邊界放入共通 `ExternalResearch` 條件式規則；`search-with-felo` Skill 只負責 FELO CLI、compact output、錯誤分類與 fallback 指引。
+5. 第一版以 Windows 與 PowerShell 7 為主要執行環境。
 
-## 9. 下一步
+## 9. 第一版實作結果
 
-先確認第 8 節的輸出上限、來源數、快取、fallback 與載入方式。確認後才規劃：
+已依第 8 節完成：
 
-- `.agents/skills/search-with-felo/SKILL.md`
-- 跨平台或以 PowerShell 為主的本機 compact wrapper
-- 必要的 `agents/openai.yaml`
-- Base Instructions 的最小載入條件，以及兩平台／雙語條件式規則同步範圍
+- `.agents/skills/search-with-felo/SKILL.md` 與 `agents/openai.yaml`。
+- PowerShell 7 compact wrapper、projection module 與 Pester 測試。
+- Codex 與 GitHub Copilot 的繁中／英文 `ExternalResearch` 條件式規則。
+- Codex 與 GitHub Copilot Base Instructions 的最小載入條件與 Skill 入口。
 
-在上述設計確認前，不開始 Skill、script、Base Instructions 或 bootstrap 修改。
+實作採測試先行：目標測試先以 0/6 失敗確認缺少 module，再完成 production code；後續增加 schema drift 測試並確認安全失敗。最終完整 Pester 回歸為 28 passed、0 failed，Skill validator 通過，實際 FELO smoke query 只輸出 compact allowlist JSON。
