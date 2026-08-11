@@ -197,4 +197,138 @@ $stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
         $result | Should Match 'same language'
         $result | Should Match '800'
     }
+
+    # Scenario: FELO succeeds on the first child-process invocation.
+    # Purpose: Keep the normal path to one provider request while exposing compact retry metadata.
+    It 'UnitT65_returns_retried_false_when_the_first_request_succeeds' {
+        InModuleScope SearchWithFelo {
+            # Given
+            Mock Resolve-FeloCliInvocation {
+                [pscustomobject]@{ FilePath = 'node'; PrefixArguments = @('felo.js') }
+            }
+            Mock Invoke-FeloChildProcess {
+                [pscustomobject]@{
+                    ExitCode = 0
+                    TimedOut = $false
+                    StandardOutput = '{"status":200,"data":{"answer":"Answer","resources":[{"title":"Source","link":"https://example.com/source"}]}}'
+                    StandardError = ''
+                }
+            }
+            Mock Start-Sleep {}
+
+            # When
+            $result = Invoke-FeloSearch -Query 'Public query'
+
+            # Then
+            Assert-MockCalled Invoke-FeloChildProcess -Times 1 -Exactly -Scope It
+            Assert-MockCalled Start-Sleep -Times 0 -Exactly -Scope It
+            ($result.PSObject.Properties.Name -join ',') | Should Be 'status,asOf,summary,sources,truncated,retried'
+            $result.status | Should Be 'ok'
+            $result.retried | Should Be $false
+        }
+    }
+
+    # Scenario: The first FELO child process returns an unclassified request failure and the second succeeds.
+    # Purpose: Recover transient provider failures inside the wrapper without adding another Agent tool round trip.
+    It 'UnitT70_retries_request_failed_once_and_returns_the_success' {
+        InModuleScope SearchWithFelo {
+            # Given
+            $script:invocationCount = 0
+            Mock Resolve-FeloCliInvocation {
+                [pscustomobject]@{ FilePath = 'node'; PrefixArguments = @('felo.js') }
+            }
+            Mock Invoke-FeloChildProcess {
+                $script:invocationCount++
+                if ($script:invocationCount -eq 1) {
+                    return [pscustomobject]@{
+                        ExitCode = 1
+                        TimedOut = $false
+                        StandardOutput = ''
+                        StandardError = 'Temporary provider failure.'
+                    }
+                }
+
+                return [pscustomobject]@{
+                    ExitCode = 0
+                    TimedOut = $false
+                    StandardOutput = '{"status":200,"data":{"answer":"Recovered","resources":[{"title":"Source","link":"https://example.com/source"}]}}'
+                    StandardError = ''
+                }
+            }
+            Mock Start-Sleep {}
+
+            # When
+            $result = Invoke-FeloSearch -Query 'Public query'
+
+            # Then
+            Assert-MockCalled Invoke-FeloChildProcess -Times 2 -Exactly -Scope It
+            Assert-MockCalled Start-Sleep -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Milliseconds -ge 1000 -and $Milliseconds -le 2000
+            }
+            $result.status | Should Be 'ok'
+            $result.summary | Should Be 'Recovered'
+            $result.retried | Should Be $true
+        }
+    }
+
+    # Scenario: Both FELO child-process invocations return unclassified request failures.
+    # Purpose: Bound provider usage to one retry and return one compact final failure to the Agent.
+    It 'UnitT80_stops_after_one_request_failed_retry' {
+        InModuleScope SearchWithFelo {
+            # Given
+            Mock Resolve-FeloCliInvocation {
+                [pscustomobject]@{ FilePath = 'node'; PrefixArguments = @('felo.js') }
+            }
+            Mock Invoke-FeloChildProcess {
+                [pscustomobject]@{
+                    ExitCode = 1
+                    TimedOut = $false
+                    StandardOutput = ''
+                    StandardError = 'Temporary provider failure.'
+                }
+            }
+            Mock Start-Sleep {}
+
+            # When
+            $result = Invoke-FeloSearch -Query 'Public query'
+
+            # Then
+            Assert-MockCalled Invoke-FeloChildProcess -Times 2 -Exactly -Scope It
+            Assert-MockCalled Start-Sleep -Times 1 -Exactly -Scope It
+            ($result.PSObject.Properties.Name -join ',') | Should Be 'status,asOf,error,retried'
+            $result.status | Should Be 'error'
+            $result.error | Should Be 'request-failed'
+            $result.retried | Should Be $true
+        }
+    }
+
+    # Scenario: FELO rejects the request because authentication is invalid.
+    # Purpose: Avoid spending another request and delay on a non-transient classified failure.
+    It 'UnitT90_does_not_retry_a_classified_failure' {
+        InModuleScope SearchWithFelo {
+            # Given
+            Mock Resolve-FeloCliInvocation {
+                [pscustomobject]@{ FilePath = 'node'; PrefixArguments = @('felo.js') }
+            }
+            Mock Invoke-FeloChildProcess {
+                [pscustomobject]@{
+                    ExitCode = 1
+                    TimedOut = $false
+                    StandardOutput = ''
+                    StandardError = 'Unauthorized (401).'
+                }
+            }
+            Mock Start-Sleep {}
+
+            # When
+            $result = Invoke-FeloSearch -Query 'Public query'
+
+            # Then
+            Assert-MockCalled Invoke-FeloChildProcess -Times 1 -Exactly -Scope It
+            Assert-MockCalled Start-Sleep -Times 0 -Exactly -Scope It
+            $result.status | Should Be 'error'
+            $result.error | Should Be 'authentication'
+            $result.retried | Should Be $false
+        }
+    }
 }
