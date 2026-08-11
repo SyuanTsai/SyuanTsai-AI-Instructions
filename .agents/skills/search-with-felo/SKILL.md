@@ -19,7 +19,7 @@ Use FELO only as a public external search provider. Keep reasoning, source judgm
    ```
 
 5. Read only the compact JSON printed by the wrapper. Never invoke `felo search --json` directly or expose its raw stdout, stderr, identifiers, query analysis, snippets, or excess sources.
-6. Use the compact summary as a research lead rather than a final authority. Open and verify original authoritative sources when accuracy, law, contracts, security, health, finance, or another high-risk decision requires it.
+6. Use the compact summary as a research lead rather than a final authority. Judge source authority from the compact URLs first, then open only the minimum original authoritative sources needed for verification. Always verify original authoritative sources when accuracy, law, contracts, security, health, finance, or another high-risk decision requires it.
 
 ## Compact Contract
 
@@ -36,17 +36,18 @@ Successful output contains only:
       "url": "https://example.com/source"
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "retried": false
 }
 ```
 
-The wrapper limits `summary` to 800 Unicode text elements, normalizes and deduplicates HTTP(S) URLs, returns at most five sources, and sets `truncated` when either limit removes content. It does not cache results.
+The wrapper limits `summary` to 800 Unicode text elements, normalizes and deduplicates HTTP(S) URLs, returns at most five sources, and sets `truncated` when either limit removes content. `retried` reports whether the wrapper made its one permitted retry. The wrapper does not cache results.
 
-Failure output contains only `status`, `asOf`, and a safe `error` classification such as `cli-unavailable`, `authentication`, `quota-unavailable`, `timeout`, `request-failed`, `invalid-response`, or `no-sources`. Never request or reveal a credential while diagnosing an error.
+Failure output contains only `status`, `asOf`, a safe `error` classification such as `cli-unavailable`, `authentication`, `quota-unavailable`, `timeout`, `request-failed`, `invalid-response`, or `no-sources`, and `retried`. Never request or reveal a credential while diagnosing an error.
 
 ## Fallback
 
-When FELO fails, use a suitable already-approved connector when one is available. Otherwise use the calling platform's native web-search capability. Report that current verification is unavailable only when neither fallback can complete the search.
+The wrapper waits a random 1–2 seconds and retries once only when FELO returns `request-failed`. Do not issue another Agent-level FELO retry after receiving the final compact result. When the final result is still a failure, use a suitable already-approved connector when one is available. Otherwise use the calling platform's native web-search capability. Report that current verification is unavailable only when neither fallback can complete the search.
 
 ## Requirements
 

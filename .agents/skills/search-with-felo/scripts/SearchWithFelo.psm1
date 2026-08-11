@@ -309,12 +309,27 @@ function Get-FeloFailureClassification {
     return 'request-failed'
 }
 
-function Invoke-FeloSearch {
+function Add-FeloRetryMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject] $Result,
+
+        [Parameter(Mandatory = $true)]
+        [bool] $Retried
+    )
+
+    $Result | Add-Member -NotePropertyName 'retried' -NotePropertyValue $Retried
+    return $Result
+}
+
+function Invoke-FeloSearchAttempt {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string] $Query,
+        [psobject] $Invocation,
+
+        [Parameter(Mandatory = $true)]
+        [string[]] $ArgumentList,
 
         [ValidateRange(1, 600)]
         [int] $TimeoutSeconds = 60,
@@ -327,24 +342,10 @@ function Invoke-FeloSearch {
     )
 
     $asOf = [DateTimeOffset]::Now
-    $invocation = Resolve-FeloCliInvocation
-    if ($null -eq $invocation) {
-        return New-FeloErrorResult -AsOf $asOf -ErrorCode 'cli-unavailable'
-    }
-
-    $feloQuery = New-FeloSearchQuery -Query $Query -SummaryCharacterLimit $SummaryCharacterLimit
-    $arguments = @($invocation.PrefixArguments) + @(
-        'search',
-        $feloQuery,
-        '--json',
-        '--timeout',
-        [string] $TimeoutSeconds
-    )
-
     try {
         $processResult = Invoke-FeloChildProcess `
-            -FilePath $invocation.FilePath `
-            -ArgumentList $arguments `
+            -FilePath $Invocation.FilePath `
+            -ArgumentList $ArgumentList `
             -TimeoutSeconds ($TimeoutSeconds + 5)
     }
     catch {
@@ -365,6 +366,56 @@ function Invoke-FeloSearch {
         -AsOf $asOf `
         -SummaryCharacterLimit $SummaryCharacterLimit `
         -SourceLimit $SourceLimit
+}
+
+function Invoke-FeloSearch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Query,
+
+        [ValidateRange(1, 600)]
+        [int] $TimeoutSeconds = 60,
+
+        [ValidateRange(1, 10000)]
+        [int] $SummaryCharacterLimit = 800,
+
+        [ValidateRange(1, 100)]
+        [int] $SourceLimit = 5
+    )
+
+    $invocation = Resolve-FeloCliInvocation
+    if ($null -eq $invocation) {
+        $result = New-FeloErrorResult -AsOf ([DateTimeOffset]::Now) -ErrorCode 'cli-unavailable'
+        return Add-FeloRetryMetadata -Result $result -Retried $false
+    }
+
+    $feloQuery = New-FeloSearchQuery -Query $Query -SummaryCharacterLimit $SummaryCharacterLimit
+    $arguments = @($invocation.PrefixArguments) + @(
+        'search',
+        $feloQuery,
+        '--json',
+        '--timeout',
+        [string] $TimeoutSeconds
+    )
+
+    $attemptParameters = @{
+        Invocation = $invocation
+        ArgumentList = $arguments
+        TimeoutSeconds = $TimeoutSeconds
+        SummaryCharacterLimit = $SummaryCharacterLimit
+        SourceLimit = $SourceLimit
+    }
+    $result = Invoke-FeloSearchAttempt @attemptParameters
+    if ($result.status -ne 'error' -or $result.error -ne 'request-failed') {
+        return Add-FeloRetryMetadata -Result $result -Retried $false
+    }
+
+    $retryDelayMilliseconds = Get-Random -Minimum 1000 -Maximum 2001
+    Start-Sleep -Milliseconds $retryDelayMilliseconds
+    $result = Invoke-FeloSearchAttempt @attemptParameters
+    return Add-FeloRetryMetadata -Result $result -Retried $true
 }
 
 Export-ModuleMember -Function @(

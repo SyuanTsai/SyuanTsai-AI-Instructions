@@ -27,6 +27,7 @@
 
 - `summary` 硬上限為 800 個 Unicode 字元，來源上限為 5 筆；摘要或來源超限時輸出 `truncated: true`。
 - CLI query 先要求同語言短摘要，wrapper 再執行硬限制、URL 正規化與來源去重。
+- wrapper 只在 `request-failed` 時隨機等待 1～2 秒並重試一次，以 `retried` 回報是否已重試；Agent 收到最終 compact result 後不再自行重試 FELO。
 - 第一版不建立本機快取。
 - FELO 失敗時優先使用適合且已核准的 connector；沒有適合的 connector 時使用 Codex 自身的網路搜尋能力。
 - provider-neutral 安全邊界放入 `ExternalResearch` 條件式規則；`search-with-felo` Skill 負責 FELO CLI、compact output、錯誤分類與 fallback 指引。
@@ -35,11 +36,11 @@
 
 ## 驗證結果
 
-- FELO 目標 Pester 測試：7 passed、0 failed。
-- Repository 完整 Pester 回歸：28 passed、0 failed。
+- FELO 目標 Pester 測試：12 passed、0 failed。
+- Repository 完整 Pester 回歸：33 passed、0 failed。
 - Skill validator：通過。
 - PowerShell parser：0 errors；本機未安裝 PSScriptAnalyzer，因此未執行其規則檢查。
-- 實際 FELO smoke query：成功，工具輸出只包含 compact allowlist 欄位。
+- 實際 FELO smoke query：成功，工具輸出只包含 `status`、`asOf`、`summary`、`sources`、`truncated`、`retried`。
 
 ## 下一步
 

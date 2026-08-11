@@ -100,7 +100,8 @@ FELO Chat API 目前提供自由文字 `answer`、搜尋分析及來源陣列。
       "url": "https://example.com"
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "retried": false
 }
 ```
 
@@ -110,6 +111,7 @@ FELO Chat API 目前提供自由文字 `answer`、搜尋分析及來源陣列。
 - wrapper 對 `summary` 再執行 800 個 Unicode 字元的硬上限。
 - 來源最多 5 筆，只保留 `title` 與 `url`，依正規化 URL 去除重複項目。
 - 摘要或來源超過上限時，以 `truncated` 表達已裁切。
+- `request-failed` 時由 wrapper 隨機等待 1～2 秒並重試一次；`retried` 表達是否已使用這次重試，避免 Agent 產生第二次工具往返。
 - 無法解析成功回應時只輸出安全錯誤分類，不輸出原始 response body 或 credential。
 - 第一版不建立本機快取，每次符合條件的查詢都重新呼叫 FELO。
 
@@ -127,6 +129,8 @@ Codex 判斷需要外部資料
 本機 wrapper 呼叫 FELO CLI
           ↓
 wrapper 捕捉原始結果並驗證 status
+          ↓
+request-failed 時等待 1～2 秒並重試一次
           ↓
 本機裁切 answer、去重並限制來源
           ↓
@@ -150,6 +154,7 @@ Codex 視風險直接使用或核對原始權威來源
 3. FELO 失敗時，有適合且已核准的 connector 就使用該 connector；沒有適合的 connector 時，使用 Codex 自身的網路搜尋能力；兩者皆不可用時才回報即時查證不可用。
 4. provider-neutral 的公開性、私密資料、程式碼與高風險查證邊界放入共通 `ExternalResearch` 條件式規則；`search-with-felo` Skill 只負責 FELO CLI、compact output、錯誤分類與 fallback 指引。
 5. 第一版以 Windows 與 PowerShell 7 為主要執行環境。
+6. wrapper 只對 `request-failed` 隨機等待 1～2 秒並重試一次，最後以 `retried` 回報；Agent 不再自行重試 FELO，最終失敗才進入既有 fallback。
 
 ## 9. 第一版實作結果
 
@@ -161,3 +166,5 @@ Codex 視風險直接使用或核對原始權威來源
 - Codex 與 GitHub Copilot Base Instructions 的最小載入條件與 Skill 入口。
 
 實作採測試先行：目標測試先以 0/6 失敗確認缺少 module，再完成 production code；後續增加 schema drift 測試並確認安全失敗。最終完整 Pester 回歸為 28 passed、0 failed，Skill validator 通過，實際 FELO smoke query 只輸出 compact allowlist JSON。
+
+2026-08-11 依實測的間歇性 `request-failed` 與 Agent token 成本重新採用 TDD：先以 4 個失敗測試確認缺少 retry contract，再加入 wrapper 內部單次重試與 `retried`。更新後 FELO 目標測試為 12 passed、0 failed，完整 Pester 回歸為 33 passed、0 failed；Skill validator 與 live smoke 均通過，live output 僅包含新版 compact allowlist 欄位。
