@@ -19,7 +19,7 @@
 - [GitHub Copilot CLI](#2-github-copilot-cli)
 - [FELO AI CLI](#3-felo-ai-cli)
 - [Google Antigravity CLI](#4-google-antigravity-cliagy)
-- [JetBrains Junie CLI](#5-jetbrains-junie-clijnie)
+- [JetBrains Junie CLI](#5-jetbrains-junie-cli)
 - [最終整體驗證](#最終整體驗證)
 - [常見失敗分類與安全處理](#常見失敗分類與安全處理)
 - [未來 Skill 建議結構](#未來-skill-建議結構)
@@ -34,7 +34,7 @@
 | Copilot | GitHub Copilot CLI | `copilot` |
 | FELO | FELO AI CLI | `felo` |
 | AGY | Google Antigravity CLI | `agy` |
-| JNIE | JetBrains Junie CLI | `junie` |
+| Junie | JetBrains Junie CLI | `junie` |
 
 若使用者指的是其他同名產品，先停止並釐清，不得依名稱相似度安裝套件。
 
@@ -268,7 +268,7 @@ agy
 - 重新啟動 `agy` 後不再顯示未登入狀態。
 - 使用者已自行選擇工作區信任與工具權限。
 
-## 5. JetBrains Junie CLI（JNIE）
+## 5. JetBrains Junie CLI
 
 ### 官方來源
 
