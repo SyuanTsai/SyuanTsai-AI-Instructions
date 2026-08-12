@@ -29,6 +29,7 @@
 - 效能改善、benchmark、query optimization 或 N+1 驗證 → `.agents/skills/verify-data-access-performance/SKILL.md`
 - 提供交給 GitHub Copilot 的實作提示詞 → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `.agents/skills/work-with-jira/SKILL.md`
+- 查詢錯誤 LOG、調查 incident、分析 Datadog telemetry 或提供 Datadog URL → `.agents/skills/investigate-datadog-logs/SKILL.md`
 
 Jira 憑證不得輸出、記錄或寫入檔案；建立、修改、轉移或刪除 Jira 資料只在使用者明確要求時執行。若適用 Skill 不存在，指出缺少的檔案，不得臆測其流程。
 
