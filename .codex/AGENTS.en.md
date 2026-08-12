@@ -28,7 +28,7 @@ If an applicable module is missing, identify the missing file and do not invent 
 - Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
 - Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`
-- Search error logs, investigate an incident, analyze Datadog telemetry, or handle a Datadog URL → `.agents/skills/investigate-datadog-logs/SKILL.md`
+- Query or aggregate Datadog logs, analyze APM traces, handle Logs Explorer, trace, or investigation widget URLs, or investigate an incident with Datadog telemetry → `.agents/skills/investigate-datadog-logs/SKILL.md`
 
 Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. If an applicable Skill is missing, identify the missing file and do not invent its workflow.
 
