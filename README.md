@@ -29,15 +29,16 @@
    - `.github/AI-Rules/*.en.md` → 目標 Repository 的 `.github/AI-Rules/*.en.md`
 6. Codex 與 GitHub Copilot 共用 Agent Skills 的 mapping：`.agents/skills/<skill-name>/**` → 目標 Repository 的相同路徑；只同步合法命名且含 `SKILL.md` 的 Skill，來源 `.gitkeep` 不 fan out，scripts、references、assets 與其他資源以原始位元組安全同步。
 7. 使用目標 Repository 的 `.codex/ai-instructions.manifest.json` 記錄受管理檔案及最後套用的 SHA-256。
-8. 來源 Agent 或 Skill 更新後，只自動更新內容仍等於 manifest hash 且沒有 staged changes 的受管理檔案；尚未 commit 的前一次同步結果仍可繼續更新。
-9. 來源新增 rule module、Skill 或 Skill resource 時自動建立；來源移除時，只刪除未被專案修改的受管理檔案。
-10. 已由專案自行修改或原本就不受管理的 Instructions 與 Skills 不覆寫；若 Base file 不受管理，整個 instruction family 都不自動補齊，並在輸出中列出衝突路徑。
-11. 舊版 bootstrap 建立的檔案若仍與其 `chore: add shared AI instructions` 建立 commit 完全一致，會安全接管並建立 manifest。
-12. 讀取目前 Repository 的 `origin` URL 與 task 啟動目錄；若實際 Repository 位置列在個人 `~/.codex/ai-instructions-sync.json` 的 `excludedRepositoryUrls`，或啟動目錄位於 `excludedRepositoryPaths` 的 repo-relative 目錄底下，直接略過，不下載、不套用、不建立 stash 或 commit。
-13. 只有實際 Repository 位置列在 `autoCommitRepositoryUrls` 時才自動 commit。首次建立使用 `chore: add shared AI instructions`，後續更新使用 `chore: sync shared AI instructions`。
-14. 非 allowlist 且未被排除的 Repository 或目錄仍同步 Instructions、Skills 與 manifest，但不 stage、不 commit；同步結果會建立為名稱 `PersonalAgent` 的 Git stash，隨即用 `git stash apply` 抓回 working tree，stash 本身保留。
-15. 來源沒有更新時保留現有 `PersonalAgent` stash；需要更新時，先成功建立並套用新版 stash，再刪除舊的同名 stash。其他 stash 不受影響。
-16. 所有 Repository 都保留 unrelated staged/unstaged changes，而且永遠不自動 push。
+8. 目標 Repository 即使以 Git ignore（包含 `.gitignore`、`.git/info/exclude` 或 global excludes）排除 `AGENTS.md`、`.codex/**`、`.github/copilot-instructions.md`、`.github/AI-Rules/**` 或 `.agents/skills/**`，仍依 manifest 正確新增、更新或移除受管理檔案；ignore 不代表檔案是 customized 或 unmanaged，allowlist commit 與非 allowlist `PersonalAgent` stash 都必須保留這些變更。
+9. 來源 Agent 或 Skill 更新後，只自動更新內容仍等於 manifest hash 且沒有 staged changes 的受管理檔案；尚未 commit 的前一次同步結果仍可繼續更新。
+10. 來源新增 rule module、Skill 或 Skill resource 時自動建立；來源移除時，只刪除未被專案修改的受管理檔案。
+11. 已由專案自行修改或原本就不受管理的 Instructions 與 Skills 不覆寫；若 Base file 不受管理，整個 instruction family 都不自動補齊，並在輸出中列出衝突路徑。
+12. 舊版 bootstrap 建立的檔案若仍與其 `chore: add shared AI instructions` 建立 commit 完全一致，會安全接管並建立 manifest。
+13. 讀取目前 Repository 的 `origin` URL 與 task 啟動目錄；若實際 Repository 位置列在個人 `~/.codex/ai-instructions-sync.json` 的 `excludedRepositoryUrls`，或啟動目錄位於 `excludedRepositoryPaths` 的 repo-relative 目錄底下，直接略過，不下載、不套用、不建立 stash 或 commit。
+14. 只有實際 Repository 位置列在 `autoCommitRepositoryUrls` 時才自動 commit。首次建立使用 `chore: add shared AI instructions`，後續更新使用 `chore: sync shared AI instructions`。
+15. 非 allowlist 且未被排除的 Repository 或目錄仍同步 Instructions、Skills 與 manifest，但不 stage、不 commit；同步結果會建立為名稱 `PersonalAgent` 的 Git stash，隨即用 `git stash apply` 抓回 working tree，stash 本身保留。
+16. 來源沒有更新時保留現有 `PersonalAgent` stash；需要更新時，先成功建立並套用新版 stash，再刪除舊的同名 stash。其他 stash 不受影響。
+17. 所有 Repository 都保留 unrelated staged/unstaged changes，而且永遠不自動 push。
 
 ## 新電腦安裝
 
@@ -159,6 +160,7 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
 - 單純問問題、釐清需求、確認或解釋問題，以及其他尚未開始規劃 code 的工作，不得執行 bootstrap，也不得僅為這些工作將共享 Instructions 或 manifest 加入 Repository。
 - 同步完成後，先讀取 Repository 新增或更新的 `AGENTS.md` 與目前任務適用的規則模組，再提出實作計畫。
 - 以 `.codex/ai-instructions.manifest.json` 管理共享檔案；只更新未被專案修改的受管理檔案，不得覆寫 customized 或 unmanaged Instructions。
+- 目標 Repository 即使以 Git ignore（包含 `.gitignore`、`.git/info/exclude` 或 global excludes）排除 `AGENTS.md`、`.codex/**`、`.github/copilot-instructions.md`、`.github/AI-Rules/**` 或 `.agents/skills/**`，仍須依 manifest 正確新增、更新或移除受管理檔案；ignore 不代表檔案是 customized 或 unmanaged，allowlist commit 與非 allowlist `PersonalAgent` stash 都必須保留這些變更。
 - Repository 的 `origin` 實際位置列在 `~/.codex/ai-instructions-sync.json` 的 `excludedRepositoryUrls`，或 task 啟動目錄位於 `excludedRepositoryPaths` 的 repo-relative 目錄底下時，直接略過同步；不得使用本機資料夾位置判斷。
 - 只有 Repository 的 `origin` 實際位置列在 `autoCommitRepositoryUrls` 時才自動 commit。非 allowlist 且未被排除的 Repository 或目錄仍同步檔案，但不得 stage 或 commit，並以 `PersonalAgent` stash 保存後立即 apply 回 working tree。
 - 更新非 allowlist Repository 時，只能在新版 `PersonalAgent` stash 成功建立並套用後刪除舊的同名 stash；不得刪除其他 stash。
@@ -235,6 +237,7 @@ Invoke-Pester .\tests
 - 未變更來源時再執行一次，顯示 Instructions 已是最新版本且不新增 commit。
 - 使用更新過的來源 archive 做 Regression Test 時，未客製化的受管理檔案會更新，commit message 是 `chore: sync shared AI instructions`。
 - 修改一個目標 Agent 後再同步，該檔案會保留且輸出列出 customized path，其他未修改的受管理檔案仍正常更新。
+- 將上述任一受管理路徑加入 Git ignore 後，首次同步與後續來源更新仍會正確反映在 working tree；allowlist commit 或非 allowlist `PersonalAgent` stash 也包含該路徑。
 - 測試完成後只刪除可丟棄的測試 Repository，不得在正式 Repository 做清除操作。
 
 ## 維護與更新
@@ -255,7 +258,7 @@ Invoke-Pester .\tests
 - `.agents/skills/`：fan-out 給 Codex 與 GitHub Copilot 共用的 Agent Skills；目錄暫時為空時可用 `.gitkeep` 保留來源目錄，bootstrap 不會同步該 placeholder。
   - `plan-production-change`：依 Scope、風險與不確定性建立實作計畫。
   - `verify-data-access-performance`：診斷並驗證 query 效能、query count 與 N+1。
-  - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞並建議最低充分模型。
+  - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞，並以完整可選名稱建議最低充分模型。
   - `work-with-jira`：依 scoped API 與授權規則安全查詢或修改 Jira Cloud。
   - `investigate-datadog-logs`：優先使用 Datadog connector 查詢或聚合 LOG、分析 APM trace，並處理調查用 Logs Explorer、trace 或 widget URL；純 incident record、dashboard 或 notebook 管理由對應的 Datadog guide 處理。
 - `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions 與 Agent Skills，依個人排除清單跳過指定 Repository 或目錄，依 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。

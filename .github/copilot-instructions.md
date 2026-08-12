@@ -18,6 +18,7 @@
 - 涉及 EF、SQL、database query 或資料存取效能 → `.github/AI-Rules/Database.md`
 - Review 程式碼或 Pull Request → `.github/AI-Rules/CodeReview.md`
 - 產生 Git Commit Message → `.github/AI-Rules/GitCommit.md`
+- 進行公開外部資料的即時、多來源或多語言研究，或使用外部搜尋 provider → `.github/AI-Rules/ExternalResearch.md`
 
 若適用模組不存在，指出缺少的檔案，不得臆測其內容。
 
@@ -30,6 +31,7 @@
 - 提供交給 GitHub Copilot 的實作提示詞 → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `.agents/skills/work-with-jira/SKILL.md`
 - 查詢或聚合 Datadog LOG、分析 APM trace、處理 Logs Explorer／trace／investigation widget URL，或以 Datadog telemetry 調查 incident → `.agents/skills/investigate-datadog-logs/SKILL.md`
+- 透過 FELO 搜尋符合外部研究規則的公開資料 → `.agents/skills/search-with-felo/SKILL.md`
 
 Jira 憑證不得輸出、記錄或寫入檔案；建立、修改、轉移或刪除 Jira 資料只在使用者明確要求時執行。若適用 Skill 不存在，指出缺少的檔案，不得臆測其流程。
 

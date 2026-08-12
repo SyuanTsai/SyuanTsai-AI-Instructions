@@ -100,6 +100,7 @@ Describe 'install-ai-instructions-bootstrap' {
         $agents | Should Match 'excludedRepositoryPaths'
         $agents | Should Match 'Agent Skills'
         $agents | Should Match 'customized or unmanaged Instructions or Agent Skills'
+        $agents | Should Match 'Git ignore.*ignore 不代表檔案是 customized 或 unmanaged'
 
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
