@@ -187,6 +187,94 @@ Describe 'Skills Catalog contract' {
         }
     }
 
+    # Scenario: Catalog, lock, and manifest enum values differ from the schema only by letter casing.
+    # Purpose: Keep PowerShell validation as case-sensitive as the JSON Schema contract.
+    It 'UnitT56_rejects_case_variant_enum_values_across_catalog_lock_and_manifest' {
+        $cases = @(
+            @{
+                Name = 'compatibility-platform'
+                Target = 'Catalog'
+                Expected = 'Unsupported .* compatibility platform'
+                Apply = {
+                    param($document)
+                    @($document.skills)[0].compatibility.platforms = @('Any')
+                }
+            },
+            @{
+                Name = 'dependency-type'
+                Target = 'Catalog'
+                Expected = 'Unsupported dependency type'
+                Apply = {
+                    param($document)
+                    $skill = @($document.skills | Where-Object { $_.id -eq 'work-with-jira' })[0]
+                    $dependency = @($skill.dependencies | Where-Object { $_.type -eq 'conditional' })[0]
+                    $dependency.type = 'Conditional'
+                }
+            },
+            @{
+                Name = 'lifecycle-status'
+                Target = 'Catalog'
+                Expected = 'Unsupported lifecycle status'
+                Apply = {
+                    param($document)
+                    $skill = @($document.skills | Where-Object { $_.lifecycle.status -eq 'active' })[0]
+                    $skill.lifecycle.status = 'Active'
+                }
+            },
+            @{
+                Name = 'requested-ref-type'
+                Target = 'Lock'
+                Expected = 'Unsupported requestedRefType'
+                Apply = {
+                    param($document)
+                    @($document.sources)[0].requestedRefType = 'Tag'
+                }
+            },
+            @{
+                Name = 'artifact-type'
+                Target = 'Manifest'
+                Expected = 'Unsupported managed manifest artifactType'
+                Apply = {
+                    param($document)
+                    @($document.files)[0].artifactType = 'Instruction'
+                }
+            }
+        )
+
+        foreach ($case in $cases) {
+            # Given
+            $catalogPath = $script:CatalogExample
+            $lockPath = $script:LockExample
+            $manifestPath = $script:ManifestExample
+            switch ($case.Target) {
+                'Catalog' {
+                    $document = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+                    & $case.Apply $document
+                    $catalogPath = Write-TestJsonDocument -Document $document -Name "$($case.Name).json"
+                }
+                'Lock' {
+                    $document = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+                    & $case.Apply $document
+                    $lockPath = Write-TestJsonDocument -Document $document -Name "$($case.Name).json"
+                }
+                'Manifest' {
+                    $document = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+                    & $case.Apply $document
+                    $manifestPath = Write-TestJsonDocument -Document $document -Name "$($case.Name).json"
+                }
+            }
+
+            # When
+            $errorMessage = Get-ContractValidationError `
+                -CatalogPath $catalogPath `
+                -LockPath $lockPath `
+                -ManifestPath $manifestPath
+
+            # Then
+            $errorMessage | Should Match $case.Expected
+        }
+    }
+
     # Scenario: A requested ref has no immutable commit in the lock document.
     # Purpose: Prevent a mutable branch or tag from being treated as reproducible input.
     It 'UnitT60_rejects_an_unresolved_source_pin' {

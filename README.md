@@ -248,7 +248,7 @@ Invoke-Pester -Script @(
 )
 ```
 
-兩個 bootstrap test files 的預期結果為 `23 passed, 0 failed`；Catalog contract test file 的預期結果為 `16 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、只對 ignored 受管理路徑建立 allowlist commit 或非 allowlist `PersonalAgent` stash、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。Catalog tests 另外驗證 10 個 Skills／6 個 profiles、schema parsing、stable ID、rename／removal、dependency 類型、safe path、immutable pin、per-file provenance 與 sync configuration v3。
+兩個 bootstrap test files 的預期結果為 `23 passed, 0 failed`；Catalog contract test file 的預期結果為 `17 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、只對 ignored 受管理路徑建立 allowlist commit 或非 allowlist `PersonalAgent` stash、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。Catalog tests 另外驗證 10 個 Skills／6 個 profiles、schema parsing、stable ID、rename／removal、dependency 類型、safe path、immutable pin、per-file provenance 與 sync configuration v3。
 
 ### Smoke test
 

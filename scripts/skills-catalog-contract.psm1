@@ -328,7 +328,13 @@ function Assert-SkillsCatalog {
         }
 
         $compatibility = Get-RequiredProperty -Object $skill -Name 'compatibility' -Context "Skills Catalog Skill '$skillId'"
-        Assert-StringArray -Value (Get-RequiredProperty -Object $compatibility -Name 'platforms' -Context "Skills Catalog Skill '$skillId' compatibility") -Context "Skills Catalog Skill '$skillId' compatibility platforms"
+        $platforms = Get-RequiredProperty -Object $compatibility -Name 'platforms' -Context "Skills Catalog Skill '$skillId' compatibility"
+        Assert-StringArray -Value $platforms -Context "Skills Catalog Skill '$skillId' compatibility platforms"
+        foreach ($platform in @($platforms)) {
+            if (@('any', 'linux', 'macos', 'windows') -cnotcontains [string] $platform) {
+                throw "Unsupported Skills Catalog Skill '$skillId' compatibility platform '$platform'."
+            }
+        }
         Assert-StringArray -Value (Get-RequiredProperty -Object $compatibility -Name 'shells' -Context "Skills Catalog Skill '$skillId' compatibility") -Context "Skills Catalog Skill '$skillId' compatibility shells" -AllowEmpty
         $requiredCapabilities = Get-RequiredProperty -Object $compatibility -Name 'requiredCapabilities' -Context "Skills Catalog Skill '$skillId' compatibility"
         Assert-Array -Value $requiredCapabilities -Context "Skills Catalog Skill '$skillId' compatibility requiredCapabilities" -AllowEmpty
@@ -350,7 +356,7 @@ function Assert-SkillsCatalog {
             $dependencySkillId = Get-RequiredProperty -Object $dependency -Name 'skillId' -Context "Skills Catalog Skill '$skillId' dependency"
             Assert-StableId -Value $dependencySkillId -Context "Skills Catalog Skill '$skillId' dependency skillId"
             $dependencyType = Get-RequiredProperty -Object $dependency -Name 'type' -Context "Skills Catalog Skill '$skillId' dependency '$dependencySkillId'"
-            if (@('hard', 'conditional', 'recommended') -notcontains [string] $dependencyType) {
+            if (@('hard', 'conditional', 'recommended') -cnotcontains [string] $dependencyType) {
                 throw "Unsupported dependency type '$dependencyType' for Skill '$skillId'."
             }
             if ([string] $dependencySkillId -eq [string] $skillId) {
@@ -372,7 +378,7 @@ function Assert-SkillsCatalog {
 
         $lifecycle = Get-RequiredProperty -Object $skill -Name 'lifecycle' -Context "Skills Catalog Skill '$skillId'"
         $status = Get-RequiredProperty -Object $lifecycle -Name 'status' -Context "Skills Catalog Skill '$skillId' lifecycle"
-        if (@('active', 'deprecated', 'removed') -notcontains [string] $status) {
+        if (@('active', 'deprecated', 'removed') -cnotcontains [string] $status) {
             throw "Unsupported lifecycle status '$status' for Skill '$skillId'."
         }
         Assert-StringArray -Value (Get-RequiredProperty -Object $lifecycle -Name 'aliases' -Context "Skills Catalog Skill '$skillId' lifecycle") -Context "Skills Catalog Skill '$skillId' lifecycle aliases" -AllowEmpty
@@ -500,7 +506,7 @@ function Assert-SkillsCatalogLock {
         }
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $source -Name 'requestedRef' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId' requestedRef"
         $requestedRefType = Get-RequiredProperty -Object $source -Name 'requestedRefType' -Context "Skills Catalog lock source '$sourceId'"
-        if (@('branch', 'tag', 'commit') -notcontains [string] $requestedRefType) {
+        if (@('branch', 'tag', 'commit') -cnotcontains [string] $requestedRefType) {
             throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog lock source '$sourceId'."
         }
         Assert-FullCommitSha -Value (Get-RequiredProperty -Object $source -Name 'resolvedCommit' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId'"
@@ -556,7 +562,7 @@ function Assert-ManagedManifestV2 {
     $targetPaths = @{}
     foreach ($entry in @($files)) {
         $artifactType = Get-RequiredProperty -Object $entry -Name 'artifactType' -Context 'managed manifest file'
-        if (@('instruction', 'skill') -notcontains [string] $artifactType) {
+        if (@('instruction', 'skill') -cnotcontains [string] $artifactType) {
             throw "Unsupported managed manifest artifactType '$artifactType'."
         }
         $artifactId = Get-RequiredProperty -Object $entry -Name 'artifactId' -Context 'managed manifest file'
