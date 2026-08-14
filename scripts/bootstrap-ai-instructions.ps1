@@ -423,7 +423,7 @@ function Update-PersonalAgentStash {
     }
 
     Invoke-Git -Repository $Repository -Arguments (@(
-        'stash', 'push', '--include-untracked', '--quiet', '-m', 'PersonalAgent', '--'
+        'stash', 'push', '--all', '--quiet', '-m', 'PersonalAgent', '--'
     ) + $Paths) | Out-Null
 
     $newStashHash = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', 'stash@{0}') | Select-Object -First 1).Trim()
@@ -1024,7 +1024,7 @@ try {
         return
     }
 
-    Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--') + $pathArguments) | Out-Null
+    Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--force', '--') + $pathArguments) | Out-Null
     Invoke-Git -Repository $targetRootPath -Arguments (@('diff', '--cached', '--check', '--') + $pathArguments) | Out-Null
 
     $isInitialBootstrap = -not $manifestExists -and

@@ -1,4 +1,4 @@
-$script:InstallScript = Join-Path $PSScriptRoot '..\scripts\install-ai-instructions-bootstrap.ps1'
+﻿$script:InstallScript = Join-Path $PSScriptRoot '..\scripts\install-ai-instructions-bootstrap.ps1'
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
 
 function Invoke-InstallScript {
@@ -91,7 +91,7 @@ Describe 'install-ai-instructions-bootstrap' {
         @($configuration.excludedRepositoryUrls).Count | Should Be 0
         @($configuration.excludedRepositoryPaths).Count | Should Be 0
 
-        $agents = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'AGENTS.md')
+        $agents = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'AGENTS.md')
         $agents | Should Match 'Repository Instructions Bootstrap'
         $agents | Should Match 'production code'
         $agents | Should Match '問問題'
@@ -100,7 +100,7 @@ Describe 'install-ai-instructions-bootstrap' {
         $agents | Should Match 'excludedRepositoryPaths'
         $agents | Should Match 'Agent Skills'
         $agents | Should Match 'customized or unmanaged Instructions or Agent Skills'
-        $agents | Should Match 'Git ignore.*ignore 不代表檔案是 customized 或 unmanaged'
+        $agents | Should Match 'Git ignore.*精確的受管理檔案與 manifest'
 
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
@@ -156,7 +156,7 @@ Keep this section too.
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
-        $agents = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'AGENTS.md')
+        $agents = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'AGENTS.md')
         $agents | Should Match 'Keep this personal note'
         $agents | Should Match 'Keep this section too'
         $agents | Should Not Match 'old bootstrap text'
