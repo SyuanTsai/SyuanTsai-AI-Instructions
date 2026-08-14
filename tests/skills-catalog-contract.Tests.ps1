@@ -33,6 +33,21 @@ function Get-ContractValidationError {
     }
 }
 
+function Write-TestJsonDocument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Document,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Name
+    )
+
+    $path = Join-Path $TestDrive $Name
+    $json = ConvertTo-Json -InputObject $Document -Depth 100
+    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    return $path
+}
+
 Describe 'Skills Catalog contract' {
     # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
     # Purpose: Detect malformed schema artifacts before downstream tools depend on them.
@@ -120,6 +135,58 @@ Describe 'Skills Catalog contract' {
         $errorMessage | Should Match 'Unsupported dependency type'
     }
 
+    # Scenario: Capability declarations violate the stable kind, ID, or state vocabulary.
+    # Purpose: Keep the executable validator aligned with the capability object in the JSON Schema.
+    It 'UnitT52_rejects_invalid_required_and_alternative_capability_declarations' {
+        $cases = @(
+            @{ Name = 'required-kind'; Collection = 'requiredCapabilities'; Index = 0; Property = 'kind'; Value = 'COMMAND'; Expected = 'Unsupported .* compatibility requirement kind' },
+            @{ Name = 'required-id'; Collection = 'requiredCapabilities'; Index = 0; Property = 'id'; Value = 'Git Command'; Expected = 'compatibility requirement id must be lowercase kebab-case' },
+            @{ Name = 'required-state'; Collection = 'requiredCapabilities'; Index = 0; Property = 'state'; Value = 'AVAILABLE'; Expected = 'Unsupported .* compatibility requirement state' },
+            @{ Name = 'alternative-kind'; Collection = 'anyOfCapabilities'; Index = 0; Property = 'kind'; Value = 'CONNECTOR'; Expected = 'Unsupported .* compatibility alternative kind' }
+        )
+
+        foreach ($case in $cases) {
+            $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+            $skill = @($catalog.skills | Where-Object { $_.id -eq 'review-bitbucket-pull-request' })[0]
+            if ($case.Collection -eq 'requiredCapabilities') {
+                $capability = @($skill.compatibility.requiredCapabilities)[$case.Index]
+            }
+            else {
+                $capability = @(@($skill.compatibility.anyOfCapabilities)[0])[$case.Index]
+            }
+            $capability.PSObject.Properties[$case.Property].Value = $case.Value
+            $catalogPath = Write-TestJsonDocument -Document $catalog -Name "$($case.Name).json"
+
+            $errorMessage = Get-ContractValidationError -CatalogPath $catalogPath
+
+            $errorMessage | Should Match $case.Expected
+        }
+    }
+
+    # Scenario: A conditional dependency uses an unstable capability ID, unknown operator, or missing fallback explanation.
+    # Purpose: Ensure conditional dependency behavior cannot bypass the JSON Schema contract.
+    It 'UnitT54_rejects_invalid_conditional_dependency_contracts' {
+        $cases = @(
+            @{ Name = 'condition-capability'; Target = 'condition'; Property = 'capability'; Value = 'Jira Cloud API'; Expected = 'condition capability must be lowercase kebab-case' },
+            @{ Name = 'condition-operator'; Target = 'condition'; Property = 'operator'; Value = 'MISSING'; Expected = 'Unsupported conditional dependency operator' },
+            @{ Name = 'fallback-capability'; Target = 'fallback'; Property = 'capability'; Value = 'Jira Cloud Connector'; Expected = 'fallback capability must be lowercase kebab-case' },
+            @{ Name = 'fallback-description'; Target = 'fallback'; Property = 'description'; Value = ''; Expected = 'fallback description must be a non-empty string' }
+        )
+
+        foreach ($case in $cases) {
+            $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+            $skill = @($catalog.skills | Where-Object { $_.id -eq 'work-with-jira' })[0]
+            $dependency = @($skill.dependencies | Where-Object { $_.type -eq 'conditional' })[0]
+            $target = $dependency.PSObject.Properties[$case.Target].Value
+            $target.PSObject.Properties[$case.Property].Value = $case.Value
+            $catalogPath = Write-TestJsonDocument -Document $catalog -Name "$($case.Name).json"
+
+            $errorMessage = Get-ContractValidationError -CatalogPath $catalogPath
+
+            $errorMessage | Should Match $case.Expected
+        }
+    }
+
     # Scenario: A requested ref has no immutable commit in the lock document.
     # Purpose: Prevent a mutable branch or tag from being treated as reproducible input.
     It 'UnitT60_rejects_an_unresolved_source_pin' {
@@ -178,6 +245,28 @@ Describe 'Skills Catalog contract' {
         @($configuration.catalog.profiles).Count | Should BeGreaterThan 0
         ($configuration.catalog.PSObject.Properties.Name -contains 'includeSkills') | Should Be $true
         ($configuration.catalog.PSObject.Properties.Name -contains 'excludeSkills') | Should Be $true
+    }
+
+    # Scenario: A personal selection differs from a known stable ID only by invalid casing.
+    # Purpose: Prevent PowerShell's case-insensitive lookup from accepting values rejected by the JSON Schema.
+    It 'UnitT93_rejects_non_stable_profile_and_skill_selection_ids' {
+        $cases = @(
+            @{ Name = 'profile'; Property = 'profiles'; Value = 'CORE' },
+            @{ Name = 'include-skill'; Property = 'includeSkills'; Value = 'Work-With-Jira' },
+            @{ Name = 'exclude-skill'; Property = 'excludeSkills'; Value = 'Capture-Private-Course-Knowledge' }
+        )
+
+        foreach ($case in $cases) {
+            $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
+            $configuration.catalog.PSObject.Properties[$case.Property].Value = @($case.Value)
+            $configurationPath = Write-TestJsonDocument -Document $configuration -Name "$($case.Name).json"
+
+            $errorMessage = Get-ContractValidationError `
+                -CatalogPath $script:CatalogExample `
+                -ConfigurationPath $configurationPath
+
+            $errorMessage | Should Match "catalog $($case.Property) item must be lowercase kebab-case"
+        }
     }
 
     # Scenario: Every current Skill remains a flat, client-discoverable directory regardless of profile grouping.

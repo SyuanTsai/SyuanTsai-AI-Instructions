@@ -72,7 +72,7 @@ function Assert-StableId {
     )
 
     Assert-NonEmptyString -Value $Value -Context $Context
-    if ([string] $Value -notmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
+    if ([string] $Value -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
         throw "$Context must be lowercase kebab-case and at most 64 characters: $Value"
     }
 }
@@ -101,6 +101,40 @@ function Assert-StringArray {
             throw "$Context contains duplicate value '$item'."
         }
         $seen[$key] = $true
+    }
+}
+
+function Assert-StableIdArray {
+    param(
+        [object] $Value,
+        [string] $Context,
+        [switch] $AllowEmpty
+    )
+
+    Assert-StringArray -Value $Value -Context $Context -AllowEmpty:$AllowEmpty
+    foreach ($item in @($Value)) {
+        Assert-StableId -Value $item -Context "$Context item"
+    }
+}
+
+function Assert-Capability {
+    param(
+        [object] $Capability,
+        [string] $Context
+    )
+
+    $kind = Get-RequiredProperty -Object $Capability -Name 'kind' -Context $Context
+    Assert-NonEmptyString -Value $kind -Context "$Context kind"
+    if (@('command', 'connector', 'environment') -cnotcontains [string] $kind) {
+        throw "Unsupported $Context kind '$kind'."
+    }
+
+    Assert-StableId -Value (Get-RequiredProperty -Object $Capability -Name 'id' -Context $Context) -Context "$Context id"
+
+    $state = Get-RequiredProperty -Object $Capability -Name 'state' -Context $Context
+    Assert-NonEmptyString -Value $state -Context "$Context state"
+    if (@('available', 'authenticated', 'configured') -cnotcontains [string] $state) {
+        throw "Unsupported $Context state '$state'."
     }
 }
 
@@ -299,18 +333,14 @@ function Assert-SkillsCatalog {
         $requiredCapabilities = Get-RequiredProperty -Object $compatibility -Name 'requiredCapabilities' -Context "Skills Catalog Skill '$skillId' compatibility"
         Assert-Array -Value $requiredCapabilities -Context "Skills Catalog Skill '$skillId' compatibility requiredCapabilities" -AllowEmpty
         foreach ($requirement in @($requiredCapabilities)) {
-            Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'kind' -Context "Skills Catalog Skill '$skillId' compatibility requirement") -Context "Skills Catalog Skill '$skillId' compatibility requirement kind"
-            Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'id' -Context "Skills Catalog Skill '$skillId' compatibility requirement") -Context "Skills Catalog Skill '$skillId' compatibility requirement id"
-            Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'state' -Context "Skills Catalog Skill '$skillId' compatibility requirement") -Context "Skills Catalog Skill '$skillId' compatibility requirement state"
+            Assert-Capability -Capability $requirement -Context "Skills Catalog Skill '$skillId' compatibility requirement"
         }
         $anyOfCapabilities = Get-RequiredProperty -Object $compatibility -Name 'anyOfCapabilities' -Context "Skills Catalog Skill '$skillId' compatibility"
         Assert-Array -Value $anyOfCapabilities -Context "Skills Catalog Skill '$skillId' compatibility anyOfCapabilities" -AllowEmpty
         foreach ($alternativeSet in @($anyOfCapabilities)) {
             Assert-Array -Value $alternativeSet -Context "Skills Catalog Skill '$skillId' compatibility alternative set"
             foreach ($requirement in @($alternativeSet)) {
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'kind' -Context "Skills Catalog Skill '$skillId' compatibility alternative") -Context "Skills Catalog Skill '$skillId' compatibility alternative kind"
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'id' -Context "Skills Catalog Skill '$skillId' compatibility alternative") -Context "Skills Catalog Skill '$skillId' compatibility alternative id"
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $requirement -Name 'state' -Context "Skills Catalog Skill '$skillId' compatibility alternative") -Context "Skills Catalog Skill '$skillId' compatibility alternative state"
+                Assert-Capability -Capability $requirement -Context "Skills Catalog Skill '$skillId' compatibility alternative"
             }
         }
 
@@ -328,10 +358,15 @@ function Assert-SkillsCatalog {
             }
             if ([string] $dependencyType -eq 'conditional') {
                 $condition = Get-RequiredProperty -Object $dependency -Name 'condition' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $condition -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition capability"
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $condition -Name 'operator' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition operator"
+                Assert-StableId -Value (Get-RequiredProperty -Object $condition -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition capability"
+                $operator = Get-RequiredProperty -Object $condition -Name 'operator' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
+                Assert-NonEmptyString -Value $operator -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition operator"
+                if (@('available', 'missing', 'missing-or-invalid', 'unavailable') -cnotcontains [string] $operator) {
+                    throw "Unsupported conditional dependency operator '$operator' for Skill '$skillId'."
+                }
                 $fallback = Get-RequiredProperty -Object $dependency -Name 'fallback' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
-                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $fallback -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback capability"
+                Assert-StableId -Value (Get-RequiredProperty -Object $fallback -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback capability"
+                Assert-NonEmptyString -Value (Get-RequiredProperty -Object $fallback -Name 'description' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback description"
             }
         }
 
@@ -570,9 +605,9 @@ function Assert-SyncConfigurationV3 {
     $selection = Get-RequiredProperty -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'
     Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog repository'
     Assert-NonEmptyString -Value (Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog ref'
-    Assert-StringArray -Value (Get-RequiredProperty -Object $selection -Name 'profiles' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog profiles' -AllowEmpty
-    Assert-StringArray -Value (Get-RequiredProperty -Object $selection -Name 'includeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog includeSkills' -AllowEmpty
-    Assert-StringArray -Value (Get-RequiredProperty -Object $selection -Name 'excludeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog excludeSkills' -AllowEmpty
+    Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'profiles' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog profiles' -AllowEmpty
+    Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'includeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog includeSkills' -AllowEmpty
+    Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'excludeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog excludeSkills' -AllowEmpty
 
     $profileIds = @{}
     foreach ($profile in @($Catalog.profiles)) {
