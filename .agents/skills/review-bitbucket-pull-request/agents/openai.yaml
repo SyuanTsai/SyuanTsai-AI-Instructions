@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Bitbucket Pull Request"
+  short_description: "Review PRs and deliver scoped Bitbucket feedback"
+  default_prompt: "Use $review-bitbucket-pull-request to review this Bitbucket pull request and prepare evidence-based feedback."

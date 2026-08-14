@@ -7,6 +7,8 @@ description: Safely read, search, create, comment on, assign, edit, or transitio
 
 ## Access
 
+If Jira API access is missing, invalid, or not yet verified, use `configure-jira-api-access` to guide setup and read-only validation before continuing.
+
 1. Read `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_CLOUD_ID`, and `JIRA_API_BASE_URL` only from environment variables or an approved secret store.
 2. Base every `/rest/api/3/...` and `/rest/agile/1.0/...` request on `JIRA_API_BASE_URL`; never call those REST endpoints through `JIRA_BASE_URL`.
 3. If `JIRA_CLOUD_ID` or `JIRA_API_BASE_URL` is missing, use a read-only request to `${JIRA_BASE_URL}/_edge/tenant_info` to obtain the Cloud ID, then construct `https://api.atlassian.com/ex/jira/{cloudId}`. Stop and report missing inputs if this cannot be done safely; do not guess.
