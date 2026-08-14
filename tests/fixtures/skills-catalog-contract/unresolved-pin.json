@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "example-agent-skills",
+  "catalogSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sources": [
+    {
+      "id": "agent-skills",
+      "repository": "https://example.org/acme/agent-skills-catalog.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "main",
+      "resolvedVersion": "unresolved",
+      "archiveSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "skills": []
+}

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "example-agent-skills",
+  "catalogSha256": "a048457cc1adc7096464e19fc25f994ad7d2278cea3f038ed795479c31fd8906",
+  "sources": [
+    {
+      "id": "agent-skills",
+      "repository": "https://example.org/acme/agent-skills-catalog.git",
+      "requestedRef": "v1.0.0",
+      "requestedRefType": "tag",
+      "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+      "resolvedVersion": "1.0.0",
+      "archiveSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "skills": [
+    {
+      "id": "capture-private-course-knowledge",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/capture-private-course-knowledge",
+      "contentSha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "configure-jira-api-access",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/configure-jira-api-access",
+      "contentSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "id": "investigate-datadog-logs",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/investigate-datadog-logs",
+      "contentSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "id": "plan-production-change",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/plan-production-change",
+      "contentSha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "id": "publish-requirements-to-confluence",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/publish-requirements-to-confluence",
+      "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "id": "review-bitbucket-pull-request",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/review-bitbucket-pull-request",
+      "contentSha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "id": "search-with-felo",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/search-with-felo",
+      "contentSha256": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "id": "verify-data-access-performance",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/verify-data-access-performance",
+      "contentSha256": "8888888888888888888888888888888888888888888888888888888888888888"
+    },
+    {
+      "id": "work-with-jira",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/work-with-jira",
+      "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "id": "write-copilot-implementation-prompt",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/write-copilot-implementation-prompt",
+      "contentSha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    }
+  ]
+}

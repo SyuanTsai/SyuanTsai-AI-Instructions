@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "fixture-catalog",
+  "sources": [
+    {
+      "id": "fixture-source",
+      "repository": "https://example.test/acme/skills.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "fixture",
+      "description": "Fixture profile.",
+      "default": true,
+      "includes": [
+        "dependent-skill"
+      ],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "dependent-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": ".agents/skills/dependent-skill"
+      },
+      "profiles": [
+        "fixture"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [
+        {
+          "skillId": "another-skill",
+          "type": "optional-magic"
+        }
+      ],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    }
+  ]
+}

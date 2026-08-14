@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 3,
+  "autoCommitRepositoryUrls": [
+    "https://example.com/acme/owned-project.git"
+  ],
+  "excludedRepositoryUrls": [
+    "https://example.org/acme/planning-only-project.git"
+  ],
+  "excludedRepositoryPaths": [
+    "docs/architecture-planning"
+  ],
+  "catalog": {
+    "repository": "https://example.org/acme/agent-skills-catalog.git",
+    "ref": "v1.0.0",
+    "profiles": [
+      "core"
+    ],
+    "includeSkills": [
+      "work-with-jira"
+    ],
+    "excludeSkills": [
+      "capture-private-course-knowledge"
+    ]
+  }
+}
