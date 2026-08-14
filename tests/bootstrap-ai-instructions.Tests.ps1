@@ -190,6 +190,26 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\.gitkeep') | Should Be $false
     }
 
+    It 'commits exact managed files when instruction paths are ignored' {
+        Set-TestText -Path (Join-Path $targetRoot '.gitignore') -Value ".agents/`n.codex/`n.github/`n/AGENTS.md"
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot '.codex\personal-settings.json') -Value '{ "personal": true }'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', '.gitignore') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'ignore personal agent files') | Out-Null
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
+        $committedFiles.Count | Should Be 5
+        ($committedFiles -contains 'AGENTS.md') | Should Be $true
+        ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
+        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+        ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
+        ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+        ($committedFiles -contains '.codex/personal-settings.json') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\personal-settings.json') | Should Be $true
+    }
+
     It 'recursively syncs shared Agent Skill files and removes managed resources deleted from the source' {
         # Given
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\write-project-prompt'
@@ -454,6 +474,32 @@ Describe 'bootstrap-ai-instructions' {
         $personalAgentStashes.Count | Should Be 1
         ($output -join [Environment]::NewLine) | Should Match 'without commit'
         ($output -join [Environment]::NewLine) | Should Match 'PersonalAgent stash'
+    }
+
+    It 'stashes exact managed files when instruction paths are ignored in a non-allowlisted repository' {
+        Set-TestText -Path (Join-Path $targetRoot '.gitignore') -Value ".agents/`n.codex/`n.github/`n/AGENTS.md"
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot '.codex\personal-settings.json') -Value '{ "personal": true }'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', '.gitignore') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'ignore personal agent files') | Out-Null
+        $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff', '--cached', '--name-only')).Count | Should Be 0
+        $personalAgentStashes = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs') | Where-Object { $_ -match 'PersonalAgent$' })
+        $personalAgentStashes.Count | Should Be 1
+        $stashFiles = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'show', '--name-only', '--include-untracked', 'stash@{0}'))
+        ($stashFiles -contains 'AGENTS.md') | Should Be $true
+        ($stashFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
+        ($stashFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+        ($stashFiles -contains '.github/copilot-instructions.md') | Should Be $true
+        ($stashFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+        ($stashFiles -contains '.codex/personal-settings.json') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\personal-settings.json') | Should Be $true
     }
 
     It 'continues refreshing managed files while prior sync changes remain uncommitted' {
