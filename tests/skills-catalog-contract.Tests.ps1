@@ -309,6 +309,26 @@ Describe 'Skills Catalog contract' {
         }
     }
 
+    # Scenario: A lock Skill entry omits one of the fields that identifies its catalog source.
+    # Purpose: Return the standard contract error instead of leaking a StrictMode property access exception.
+    It 'UnitT82_rejects_lock_skill_entries_missing_required_source_fields' {
+        foreach ($propertyName in @('sourceId', 'sourcePath')) {
+            # Given
+            $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+            $skill = @($lock.skills)[0]
+            $skill.PSObject.Properties.Remove($propertyName)
+            $lockPath = Write-TestJsonDocument -Document $lock -Name "missing-lock-skill-$propertyName.json"
+
+            # When
+            $errorMessage = Get-ContractValidationError `
+                -CatalogPath $script:CatalogExample `
+                -LockPath $lockPath
+
+            # Then
+            $errorMessage | Should Match "Skills Catalog lock Skill '.*' is missing required property '$propertyName'"
+        }
+    }
+
     # Scenario: A managed file is reconstructed from its target manifest entry.
     # Purpose: Preserve per-file provenance across independent Instructions and Skill sources.
     It 'UnitT90_records_per_file_source_skill_version_commit_and_hash_provenance' {

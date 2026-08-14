@@ -537,8 +537,10 @@ function Assert-SkillsCatalogLock {
             throw "Skills Catalog lock references unknown or removed Skill '$skillId'."
         }
         $lockedSkills[[string] $skillId] = $skill
-        if ([string] $skill.sourceId -ne [string] $catalogSkills[[string] $skillId].source.sourceId -or
-            [string] $skill.sourcePath -ne [string] $catalogSkills[[string] $skillId].source.path) {
+        $sourceId = Get-RequiredProperty -Object $skill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'"
+        $sourcePath = Get-RequiredProperty -Object $skill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'"
+        if ([string] $sourceId -ne [string] $catalogSkills[[string] $skillId].source.sourceId -or
+            [string] $sourcePath -ne [string] $catalogSkills[[string] $skillId].source.path) {
             throw "Skills Catalog lock source does not match catalog Skill '$skillId'."
         }
         Assert-Sha256 -Value (Get-RequiredProperty -Object $skill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'") -Context "Skills Catalog lock Skill '$skillId' contentSha256"

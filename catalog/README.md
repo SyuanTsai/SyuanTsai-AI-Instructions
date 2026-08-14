@@ -17,7 +17,7 @@
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
 - Group 與 profile 只是 metadata，不是 Skill identity；實體來源永遠維持 `.agents/skills/<skill-id>/**` 平面結構。
-- Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 可在 `aliases` 記錄舊 ID以支援一次性設定遷移。alias 不得成為安裝後的實體目錄名稱。
+- Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 可在 `aliases` 記錄舊 ID 以支援一次性設定遷移。alias 不得成為安裝後的實體目錄名稱。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`。Removed Skill 不得被 profile include，也不需要出現在新 lock 的 Skill entries。
 - Stable ID、source ID、profile ID、target path 或 alias 衝突都必須停止；不得使用 first-wins 或 last-wins。
 
