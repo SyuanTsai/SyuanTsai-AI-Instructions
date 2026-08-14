@@ -11,7 +11,7 @@ Read [references/configuration.md](references/configuration.md) before proposing
 
 ## Workflow
 
-1. Establish the intended Jira operation and whether the token is scoped. Prefer a scoped token with only the permissions required by that operation.
+1. Establish the intended Jira operation and whether the token is scoped. Before the user creates or rotates a token, build the minimum scope list for that operation and include the identity-validation scope required by `/rest/api/3/myself`: classic `read:jira-user`, or all granular scopes `read:application-role:jira`, `read:group:jira`, `read:user:jira`, and `read:avatar:jira`.
 2. Inspect only whether the five required environment variables are present and where they are defined. Validate their shapes in memory; never print their values, lengths, hashes, encoded forms, or complete URLs containing private tenant details.
 3. Report a redacted inventory with one row per variable: purpose, presence, source scope, and validation result. Distinguish Process, User, Machine, secret-store injection, and unknown sources. Do not claim persistence when a value exists only in the current process.
 4. Resolve missing or invalid settings in dependency order:
@@ -20,7 +20,7 @@ Read [references/configuration.md](references/configuration.md) before proposing
    - `JIRA_API_TOKEN`
    - `JIRA_CLOUD_ID`
    - `JIRA_API_BASE_URL`
-5. Ask for at most one missing user decision or user-supplied setting at a time. Never ask the user to paste a token into chat. Direct token creation or rotation through Atlassian's account UI, then let the user inject it privately into the environment or an approved secret store.
+5. Ask for at most one missing user decision or user-supplied setting at a time. Before directing the user to create the token, show the complete required scope checklist, including the `/myself` scope above, and have the user select those permissions in Atlassian's account UI. Never ask the user to paste a token into chat; let the user inject it privately into the environment or an approved secret store.
 6. Before persisting or replacing any setting, explain the target scope and obtain explicit authorization. Prefer session-only injection or an approved secret manager. Never write credentials to a repository, shell history, profile, transcript, or ordinary config file.
 7. If `JIRA_CLOUD_ID` is absent, make the unauthenticated read-only request `${JIRA_BASE_URL}/_edge/tenant_info`, extract only `cloudId`, verify it is a UUID, and construct `JIRA_API_BASE_URL` as `https://api.atlassian.com/ex/jira/{cloudId}`. Do not guess either value.
 8. Check that all values are coherent, then offer a read-only authenticated request to `${JIRA_API_BASE_URL}/rest/api/3/myself`. Build Basic authentication from `JIRA_EMAIL:JIRA_API_TOKEN` only in memory and discard temporary credential data afterward.

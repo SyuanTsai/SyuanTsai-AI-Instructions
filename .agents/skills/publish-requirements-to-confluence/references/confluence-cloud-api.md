@@ -41,6 +41,7 @@ Prefix the following paths with `CONFLUENCE_API_BASE_URL`:
 | Resolve a space key | `GET /wiki/api/v2/spaces?keys={spaceKey}` |
 | Search a page by title and space | `GET /wiki/api/v2/pages?space-id={spaceId}&title={title}&status=current` |
 | Read current body and version | `GET /wiki/api/v2/pages/{pageId}?body-format=storage` |
+| Read the current page with its draft view | `GET /wiki/api/v2/pages/{pageId}?body-format=storage&get-draft=true` |
 
 Follow pagination and require an exact target. Do not select the first result when multiple pages match.
 
@@ -65,7 +66,9 @@ Omit `parentId` only when the user has approved a root-level page. A published p
 
 ## Update a page
 
-Read the latest page immediately before updating. Use `PUT /wiki/api/v2/pages/{pageId}` with the full approved latest body and an incremented version:
+Read both the latest published page and the `get-draft=true` view before building an update. Compare status, version, and storage body. If the draft view differs from the published page, treat it as unpublished collaborative work: stop, summarize the divergence without exposing unrelated content, and obtain explicit authorization for a user-approved merge or preservation plan. Never overwrite or automatically reconcile a diverged draft.
+
+Immediately before writing, repeat both reads. If either view changed after preview or authorization, stop and rebuild the update. Only then use `PUT /wiki/api/v2/pages/{pageId}` with the full approved latest body and an incremented version:
 
 ```json
 {
@@ -83,6 +86,6 @@ Read the latest page immediately before updating. Use `PUT /wiki/api/v2/pages/{p
 }
 ```
 
-Replace the example version with the latest page version plus one. Confluence can reconcile the update with an existing draft, but significantly diverged content may be overwritten. Never update from a stale version or partial body.
+Replace the example version with the latest published page version plus one. Never update from a stale version, partial body, or unresolved draft.
 
 Confirm request and response shapes against the [official Confluence REST v2 page reference](https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-page/) before publishing. On an uncertain timeout, search or read the target before retrying to avoid duplicate pages or duplicate versions.

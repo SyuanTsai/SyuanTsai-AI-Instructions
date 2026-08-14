@@ -22,7 +22,12 @@ Validate URLs with a URI parser and compare normalized scheme, host, and path co
 
 ## Token creation and injection
 
-Have the user create or rotate a scoped API token in [Atlassian account security settings](https://id.atlassian.com/manage-profile/security/api-tokens). Select the minimum scopes needed for the intended Jira operations and save the token in an approved password or secret manager. The token cannot be recovered later. Use Atlassian's [API token guidance](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/) when the UI or token behavior has changed.
+Before token creation, prepare one complete permission checklist. Include the minimum scopes for the intended Jira operations plus the scope required by this skill's identity check:
+
+- classic scope: `read:jira-user`; or
+- granular scopes: `read:application-role:jira`, `read:group:jira`, `read:user:jira`, and `read:avatar:jira`.
+
+Have the user create or rotate a scoped API token in [Atlassian account security settings](https://id.atlassian.com/manage-profile/security/api-tokens) and select every scope on that checklist. Do not create a token without the identity-check scope and then diagnose `/myself` as a credential failure. Save the token in an approved password or secret manager; it cannot be recovered later. Use Atlassian's [API token guidance](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/) when the UI or token behavior has changed.
 
 Do not accept the token in chat. If interactive session injection is appropriate, read it without terminal echo and place it only in the current process environment. Clear temporary variables after assignment. Do not persist it to User or Machine environment storage unless the user explicitly authorizes that security tradeoff.
 
@@ -64,7 +69,7 @@ Interpret results conservatively:
 | `200` | Authentication and this endpoint are valid; separately verify scopes needed by the intended operation |
 | `400` | Check URL construction and request format without exposing inputs |
 | `401` | Check token type, account email, expiration or revocation, and use of the scoped-token base URL |
-| `403` | Authentication may work, but the account, product access, project permissions, or token scopes are insufficient |
+| `403` | Authentication may work; verify that the token was created with `read:jira-user` or all four documented granular `/myself` scopes, then check product access and account permissions |
 | `404` | Check Cloud ID, API base path, and resource path |
 | `429` | Respect `Retry-After`; do not loop aggressively |
 | Network/TLS failure | Separate local network or proxy failure from Jira credential failure |
