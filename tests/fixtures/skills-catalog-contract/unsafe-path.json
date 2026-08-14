@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "fixture-catalog",
+  "sources": [
+    {
+      "id": "fixture-source",
+      "repository": "https://example.test/acme/skills.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "fixture",
+      "description": "Fixture profile.",
+      "default": true,
+      "includes": [
+        "unsafe-skill"
+      ],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "unsafe-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": "../unsafe-skill"
+      },
+      "profiles": [
+        "fixture"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    }
+  ]
+}

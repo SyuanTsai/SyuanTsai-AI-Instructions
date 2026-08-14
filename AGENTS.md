@@ -12,11 +12,14 @@
 - `.github/AI-Rules/<rule>.md` 與 `.github/AI-Rules/<rule>.en.md`：GitHub Copilot 繁體中文與英文條件式規則模組。
 - `.agents/skills/<skill-name>/SKILL.md`：Codex 與 GitHub Copilot 共用的 Agent Skill；其 scripts、references、assets 與其他必要資源維持在同一個 Skill 目錄。
 - `.agents/skills/<skill-name>/agents/openai.yaml`：Skill 的 OpenAI interface metadata；存在時必須與 `SKILL.md` 的能力及觸發情境一致。
+- `catalog/schemas/*.schema.json`、`catalog/examples/*.json` 與 `scripts/skills-catalog-contract.psm1`：獨立 Agent Skills Catalog、版本 lock、managed manifest 與個人選擇設定的跨 Repository 契約；schema、去識別化 example、parser 與 tests 必須同步。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
 
 繁體中文版本是 Base Instructions 與條件式規則模組的主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
 
 Agent Skill 是兩平台共用的單一產物，不建立平台或翻譯副本。Skill 應使用平台中立且可跨專案理解的描述與流程，並依使用者語言產出結果；需要平台專屬工具時，在同一個 Skill 中提供清楚的選擇條件與安全 fallback。
+
+Skills Catalog 的 group 與 profile 只存在 metadata；不得改變 `.agents/skills/<skill-name>/**` 的平面來源格式。Stable Skill ID、source pin、compatibility、dependency、rename／removal 與 per-file provenance 依 `catalog/README.md` 的版本化契約維護；未知 schema、重複 ID、unsafe path 或無法解析的 pin 必須停止，不得猜測或靜默選擇。
 
 ## Base Agent 設計原則
 
@@ -104,7 +107,8 @@ bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標
 3. 先修改繁體中文來源，再同步適用的平台與英文版本。
 4. 確認各版本的規則、例外與載入條件一致。
 5. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
-6. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
-7. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
+6. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
+7. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
+8. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
 
 純 Markdown Instructions 修改不需要單元測試。若新舊要求衝突，或 fan-out 範圍不明且會影響產物，停止修改並詢問使用者。

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "fixture-catalog",
+  "sources": [
+    {
+      "id": "fixture-source",
+      "repository": "https://example.test/acme/skills.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "fixture",
+      "description": "Fixture profile.",
+      "default": true,
+      "includes": [
+        "duplicate-skill"
+      ],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "duplicate-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": ".agents/skills/duplicate-skill"
+      },
+      "profiles": [
+        "fixture"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "duplicate-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": ".agents/skills/duplicate-skill"
+      },
+      "profiles": [
+        "fixture"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    }
+  ]
+}

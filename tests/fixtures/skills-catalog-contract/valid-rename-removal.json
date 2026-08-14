@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "fixture-catalog",
+  "sources": [
+    {
+      "id": "fixture-source",
+      "repository": "https://example.test/acme/skills.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "fixture",
+      "description": "Fixture profile.",
+      "default": true,
+      "includes": [
+        "new-skill"
+      ],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "old-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": ".agents/skills/old-skill"
+      },
+      "profiles": [],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "removed",
+        "aliases": [],
+        "replacementId": "new-skill"
+      }
+    },
+    {
+      "id": "new-skill",
+      "group": "fixture-group",
+      "source": {
+        "sourceId": "fixture-source",
+        "path": ".agents/skills/new-skill"
+      },
+      "profiles": [
+        "fixture"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": [
+          "old-skill"
+        ]
+      }
+    }
+  ]
+}

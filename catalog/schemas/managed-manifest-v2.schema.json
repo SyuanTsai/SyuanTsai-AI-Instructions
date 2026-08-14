@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/managed-manifest-v2.schema.json",
+  "title": "Managed AI Instructions manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogId",
+    "lockSha256",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "catalogId": {
+      "$ref": "#/$defs/stableId"
+    },
+    "lockSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifactType",
+          "artifactId",
+          "sourceId",
+          "sourceRepository",
+          "sourceRef",
+          "sourceCommit",
+          "sourceVersion",
+          "sourcePath",
+          "targetPath",
+          "sha256"
+        ],
+        "properties": {
+          "artifactType": {
+            "type": "string",
+            "enum": [
+              "instruction",
+              "skill"
+            ]
+          },
+          "artifactId": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sourceId": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sourceRepository": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://"
+          },
+          "sourceRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceCommit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "sourceVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourcePath": {
+            "$ref": "#/$defs/repositoryPath"
+          },
+          "targetPath": {
+            "$ref": "#/$defs/repositoryPath"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    },
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

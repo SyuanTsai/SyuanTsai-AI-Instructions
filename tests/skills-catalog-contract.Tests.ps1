@@ -1,0 +1,193 @@
+$script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$script:ContractModule = Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
+$script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog.example.json'
+$script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
+$script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
+$script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v3.example.json'
+$script:FixtureRoot = Join-Path $PSScriptRoot 'fixtures\skills-catalog-contract'
+
+Import-Module $script:ContractModule -Force
+
+function Get-ContractValidationError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CatalogPath,
+
+        [string] $LockPath = $script:LockExample,
+
+        [string] $ManifestPath = $script:ManifestExample,
+
+        [string] $ConfigurationPath = $script:ConfigurationExample
+    )
+
+    try {
+        Test-SkillsCatalogContract `
+            -CatalogPath $CatalogPath `
+            -LockPath $LockPath `
+            -ManifestPath $ManifestPath `
+            -ConfigurationPath $ConfigurationPath | Out-Null
+        return $null
+    }
+    catch {
+        return $_.Exception.Message
+    }
+}
+
+Describe 'Skills Catalog contract' {
+    # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
+    # Purpose: Detect malformed schema artifacts before downstream tools depend on them.
+    It 'UnitT05_parses_every_checked_in_json_schema_document' {
+        $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
+        $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
+
+        $schemaFiles.Count | Should Be 4
+        foreach ($schemaFile in $schemaFiles) {
+            $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
+            $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
+            $schema.type | Should Be 'object'
+        }
+    }
+
+    # Scenario: The checked-in examples describe the complete current catalog and all persisted contracts.
+    # Purpose: Protect the executable contract used by later resolver, downloader, and migration tasks.
+    It 'UnitT10_validates_the_complete_catalog_lock_manifest_and_configuration_examples' {
+        $result = Test-SkillsCatalogContract `
+            -CatalogPath $script:CatalogExample `
+            -LockPath $script:LockExample `
+            -ManifestPath $script:ManifestExample `
+            -ConfigurationPath $script:ConfigurationExample
+
+        $result.SkillCount | Should Be 10
+        $result.ProfileCount | Should Be 6
+        $result.SourceCount | Should Be 1
+        $result.ManifestFileCount | Should Be 2
+
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+        $actualSkillIds = @(
+            Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot '.agents\skills') -Directory |
+                Select-Object -ExpandProperty Name |
+                Sort-Object
+        )
+        $catalogSkillIds = @($catalog.skills | Select-Object -ExpandProperty id | Sort-Object)
+        ($catalogSkillIds -join "`n") | Should Be ($actualSkillIds -join "`n")
+
+        $expectedProfileIds = @('atlassian', 'code-collaboration', 'core', 'external-research', 'knowledge-capture', 'observability')
+        $catalogProfileIds = @($catalog.profiles | Select-Object -ExpandProperty id | Sort-Object)
+        ($catalogProfileIds -join "`n") | Should Be ($expectedProfileIds -join "`n")
+    }
+
+    # Scenario: A Skill is renamed while its immutable old ID remains as a removed tombstone.
+    # Purpose: Prove that profile resolution can migrate an alias without reusing or losing the old identity.
+    It 'UnitT15_accepts_a_rename_with_a_removed_tombstone_and_replacement_alias' {
+        $catalog = Test-SkillsCatalogDocument -CatalogPath (Join-Path $script:FixtureRoot 'valid-rename-removal.json')
+        $oldSkill = @($catalog.skills | Where-Object { $_.id -eq 'old-skill' })[0]
+        $newSkill = @($catalog.skills | Where-Object { $_.id -eq 'new-skill' })[0]
+
+        $oldSkill.lifecycle.status | Should Be 'removed'
+        $oldSkill.lifecycle.replacementId | Should Be 'new-skill'
+        @($newSkill.lifecycle.aliases)[0] | Should Be 'old-skill'
+    }
+
+    # Scenario: A catalog uses a schema version that this implementation does not understand.
+    # Purpose: Prevent newer or incompatible metadata from being interpreted with older rules.
+    It 'UnitT20_rejects_an_unknown_catalog_schema_version' {
+        $errorMessage = Get-ContractValidationError -CatalogPath (Join-Path $script:FixtureRoot 'unknown-schema.json')
+
+        $errorMessage | Should Match 'Unsupported Skills Catalog schemaVersion'
+    }
+
+    # Scenario: Two catalog entries claim the same stable Skill ID.
+    # Purpose: Prevent first-wins or last-wins resolution from silently selecting the wrong Skill.
+    It 'UnitT30_rejects_duplicate_stable_skill_ids' {
+        $errorMessage = Get-ContractValidationError -CatalogPath (Join-Path $script:FixtureRoot 'duplicate-stable-id.json')
+
+        $errorMessage | Should Match 'Duplicate stable Skill ID'
+    }
+
+    # Scenario: A catalog source path escapes or bypasses the flat .agents/skills layout.
+    # Purpose: Protect target repositories from traversal and unexpected fan-out locations.
+    It 'UnitT40_rejects_unsafe_or_non_flat_skill_paths' {
+        $errorMessage = Get-ContractValidationError -CatalogPath (Join-Path $script:FixtureRoot 'unsafe-path.json')
+
+        $errorMessage | Should Match 'Unsafe Skill source path'
+    }
+
+    # Scenario: A dependency declares a type outside the stable hard, conditional, and recommended set.
+    # Purpose: Ensure dependency semantics never degrade to an unvalidated default.
+    It 'UnitT50_rejects_an_unknown_dependency_type' {
+        $errorMessage = Get-ContractValidationError -CatalogPath (Join-Path $script:FixtureRoot 'invalid-dependency.json')
+
+        $errorMessage | Should Match 'Unsupported dependency type'
+    }
+
+    # Scenario: A requested ref has no immutable commit in the lock document.
+    # Purpose: Prevent a mutable branch or tag from being treated as reproducible input.
+    It 'UnitT60_rejects_an_unresolved_source_pin' {
+        $errorMessage = Get-ContractValidationError `
+            -CatalogPath $script:CatalogExample `
+            -LockPath (Join-Path $script:FixtureRoot 'unresolved-pin.json')
+
+        $errorMessage | Should Match 'resolvedCommit must be a full 40-character commit SHA'
+    }
+
+    # Scenario: Jira API setup is needed only when the Jira workflow cannot use a configured connector.
+    # Purpose: Preserve work-with-jira's conditional fallback without forcing an unnecessary hard dependency.
+    It 'UnitT70_models_the_jira_api_setup_skill_as_a_conditional_fallback_dependency' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+        $jiraSkill = @($catalog.skills | Where-Object { $_.id -eq 'work-with-jira' })[0]
+        $dependency = @($jiraSkill.dependencies | Where-Object { $_.skillId -eq 'configure-jira-api-access' })[0]
+
+        $dependency.type | Should Be 'conditional'
+        $dependency.condition.capability | Should Be 'jira-cloud-api'
+        $dependency.fallback.capability | Should Be 'jira-cloud-connector'
+    }
+
+    # Scenario: The catalog source uses a human-selected ref that is resolved in the lock document.
+    # Purpose: Make every installation reproducible without requiring Git submodules.
+    It 'UnitT80_resolves_each_requested_ref_to_an_immutable_commit_and_content_hash' {
+        $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+
+        foreach ($source in @($lock.sources)) {
+            $source.requestedRef | Should Not BeNullOrEmpty
+            $source.resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            $source.archiveSha256 | Should Match '^[0-9a-f]{64}$'
+        }
+    }
+
+    # Scenario: A managed file is reconstructed from its target manifest entry.
+    # Purpose: Preserve per-file provenance across independent Instructions and Skill sources.
+    It 'UnitT90_records_per_file_source_skill_version_commit_and_hash_provenance' {
+        $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+        $skillEntry = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
+
+        $skillEntry.artifactId | Should Be 'work-with-jira'
+        $skillEntry.sourceRepository | Should Match '^https://example\.(com|org|test)/'
+        $skillEntry.sourceVersion | Should Not BeNullOrEmpty
+        $skillEntry.sourceCommit | Should Match '^[0-9a-f]{40}$'
+        $skillEntry.sourcePath | Should Be '.agents/skills/work-with-jira/SKILL.md'
+        $skillEntry.targetPath | Should Be '.agents/skills/work-with-jira/SKILL.md'
+        $skillEntry.sha256 | Should Match '^[0-9a-f]{64}$'
+    }
+
+    # Scenario: The personal sync configuration selects profiles and explicit per-Skill overrides.
+    # Purpose: Keep user selection separate from catalog availability and the resolved lock.
+    It 'UnitT92_keeps_profile_and_include_exclude_selection_in_sync_configuration_v3' {
+        $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
+
+        $configuration.schemaVersion | Should Be 3
+        @($configuration.catalog.profiles).Count | Should BeGreaterThan 0
+        ($configuration.catalog.PSObject.Properties.Name -contains 'includeSkills') | Should Be $true
+        ($configuration.catalog.PSObject.Properties.Name -contains 'excludeSkills') | Should Be $true
+    }
+
+    # Scenario: Every current Skill remains a flat, client-discoverable directory regardless of profile grouping.
+    # Purpose: Ensure metadata grouping does not introduce nested packages or Git submodule requirements.
+    It 'UnitT94_preserves_the_flat_agents_skills_layout_without_submodule_metadata' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+
+        foreach ($skill in @($catalog.skills)) {
+            $skill.source.path | Should Be ".agents/skills/$($skill.id)"
+        }
+        Test-Path -LiteralPath (Join-Path $script:RepositoryRoot '.gitmodules') | Should Be $false
+    }
+}

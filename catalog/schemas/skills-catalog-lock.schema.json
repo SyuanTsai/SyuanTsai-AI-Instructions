@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/skills-catalog-lock.schema.json",
+  "title": "Agent Skills Catalog lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogId",
+    "catalogSha256",
+    "sources",
+    "skills"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "catalogId": {
+      "$ref": "#/$defs/stableId"
+    },
+    "catalogSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "repository",
+          "requestedRef",
+          "requestedRefType",
+          "resolvedCommit",
+          "resolvedVersion",
+          "archiveSha256"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/stableId"
+          },
+          "repository": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://"
+          },
+          "requestedRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestedRefType": {
+            "type": "string",
+            "enum": [
+              "branch",
+              "tag",
+              "commit"
+            ]
+          },
+          "resolvedCommit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "resolvedVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "archiveSha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sourceId",
+          "sourcePath",
+          "contentSha256"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sourceId": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sourcePath": {
+            "type": "string",
+            "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+          },
+          "contentSha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -2,6 +2,28 @@
 
 這個 Repository 是個人 Codex、GitHub Copilot Instructions 與兩平台共用 Agent Skills 的唯一來源。換電腦後，只要讓 Codex 完整讀取本檔案並依照「新電腦安裝」執行，即可重建目前的按需 bootstrap 設定。
 
+## Agent Skills Catalog P0 契約
+
+為了將 Agent Skills 拆到獨立 Catalog monorepo，同時保留選擇性安裝、版本鎖定與安全同步，本 Repository 已建立下一版跨 Repository 契約：
+
+- Skills Catalog schema 1：stable Skill ID、group、profiles、compatibility、hard／conditional／recommended dependencies 與 lifecycle。
+- Catalog lock schema 1：將 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash 與每個 Skill 的 deterministic content hash。
+- Managed manifest schema 2：每個目標檔案各自記錄 source Repository、ref、commit、version、Skill identity、source／target path 與 hash。
+- 個人 sync configuration schema 3：在既有 allowlist／exclusions 之外，新增 Catalog ref、profiles 與 individual include／exclude。
+
+完整規則、升級行為、去識別化 examples 與 executable schemas 請見 [`catalog/README.md`](catalog/README.md)。契約 validator 可用下列方式執行：
+
+```powershell
+Import-Module .\scripts\skills-catalog-contract.psm1 -Force
+Test-SkillsCatalogContract `
+  -CatalogPath .\catalog\examples\skills-catalog.example.json `
+  -LockPath .\catalog\examples\skills-catalog-lock.example.json `
+  -ManifestPath .\catalog\examples\managed-manifest-v2.example.json `
+  -ConfigurationPath .\catalog\examples\ai-instructions-sync-v3.example.json
+```
+
+這是後續 P0 resolver、下載、manifest migration 與 installer 的穩定輸入；現行 bootstrap 仍使用單一來源與 manifest v1，直到後續任務完成整合。此階段不使用 Git submodule、不建立外部 Repository，也不搬移 `.agents/skills/<skill-name>/**`。
+
 ## 給新電腦 Codex 的指示
 
 在這個 Repository 根目錄開啟 Codex，貼上以下內容：
@@ -222,10 +244,11 @@ Import-Module Pester
 Invoke-Pester -Script @(
     '.\tests\bootstrap-ai-instructions.Tests.ps1'
     '.\tests\install-ai-instructions-bootstrap.Tests.ps1'
+    '.\tests\skills-catalog-contract.Tests.ps1'
 )
 ```
 
-這兩個 bootstrap test files 的預期結果為 `23 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、只對 ignored 受管理路徑建立 allowlist commit 或非 allowlist `PersonalAgent` stash、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。
+兩個 bootstrap test files 的預期結果為 `23 passed, 0 failed`；Catalog contract test file 的預期結果為 `13 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、只對 ignored 受管理路徑建立 allowlist commit 或非 allowlist `PersonalAgent` stash、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。Catalog tests 另外驗證 10 個 Skills／6 個 profiles、schema parsing、stable ID、rename／removal、dependency 類型、safe path、immutable pin、per-file provenance 與 sync configuration v3。
 
 ### Smoke test
 
@@ -264,7 +287,10 @@ Invoke-Pester -Script @(
   - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞，並以完整可選名稱建議最低充分模型。
   - `work-with-jira`：依 scoped API 與授權規則安全查詢或修改 Jira Cloud。
   - `investigate-datadog-logs`：優先使用 Datadog connector 查詢或聚合 LOG、分析 APM trace，並處理調查用 Logs Explorer、trace 或 widget URL；純 incident record、dashboard 或 notebook 管理由對應的 Datadog guide 處理。
+- `catalog/`：Skills Catalog、lock、managed manifest v2 與個人 sync configuration v3 的 schemas、去識別化 examples 及跨 Repository 契約。
 - `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions 與 Agent Skills，依個人排除清單跳過指定 Repository 或目錄，依 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。
 - `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝按需同步 script、合併 `AGENTS.md` 與 `ai-instructions-sync.json`，並移除舊版 bootstrap `SessionStart` hook。
+- `scripts/skills-catalog-contract.psm1`：以 Windows PowerShell 5.1 相容方式驗證 Catalog、lock、manifest 與個人設定的 schema version、cross-reference、pin、hash 與安全路徑。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。
 - `tests/install-ai-instructions-bootstrap.Tests.ps1`：本機安裝腳本的 Pester tests。
+- `tests/skills-catalog-contract.Tests.ps1`：Catalog P0 契約的 Pester tests 與 invalid fixtures 驗證。
