@@ -502,6 +502,31 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\personal-settings.json') | Should Be $true
     }
 
+    # Scenario: A non-PersonalAgent stash exists before a non-allowlisted repository is synchronized.
+    # Purpose: Ensure refreshing PersonalAgent state never deletes unrelated user stashes.
+    It 'InterT75_preserves an unrelated stash when creating a PersonalAgent stash' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
+            -ConfigurationPath $noCommitConfigurationPath
+
+        # Then
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object {
+            $_ -match "^$([regex]::Escape($unrelatedStashHash))`t.*ProjectWork$"
+        }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
     It 'continues refreshing managed files while prior sync changes remain uncommitted' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $committedHead = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')

@@ -105,6 +105,25 @@ Describe 'install-ai-instructions-bootstrap' {
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
 
+    # Scenario: CodexHome already contains a bootstrap hook that uses --include-untracked.
+    # Purpose: Ensure every installation replaces stale hook logic with the repository version.
+    It 'InterT15_overwrites a stale bootstrap hook with the repository version' {
+        # Given
+        $installedHookScript = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        Set-TestText -Path $installedHookScript -Value @'
+git stash push --include-untracked --quiet -m PersonalAgent -- AGENTS.md
+'@
+
+        # When
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        # Then
+        $installedHook = Get-Content -Raw -LiteralPath $installedHookScript
+        $installedHook | Should Be (Get-Content -Raw -LiteralPath $script:BootstrapScript)
+        $installedHook | Should Match "'stash', 'push', '--all'"
+        $installedHook | Should Not Match "'stash', 'push', '--include-untracked'"
+    }
+
     It 'preserves personal content and unrelated hooks while removing the bootstrap SessionStart entry' {
         Set-TestText -Path (Join-Path $codexHome 'AGENTS.md') -Value @'
 # Personal Codex Rules
