@@ -48,6 +48,11 @@ function Resolve-SkillsSelection {
         }
     }
 
+    # Profile excludes are resolved inside the profile layer. Personal includeSkills may opt back in.
+    foreach ($skillId in @($profileExcludes.Keys)) {
+        $selected.Remove($skillId)
+    }
+
     foreach ($skillIdValue in @($Selection.includeSkills)) {
         $skillId = [string]$skillIdValue
         if (-not $skillsById.ContainsKey($skillId)) {
@@ -56,10 +61,7 @@ function Resolve-SkillsSelection {
         $selected[$skillId] = $true
     }
 
-    foreach ($skillId in @($profileExcludes.Keys)) {
-        $selected.Remove($skillId)
-    }
-
+    # Explicit personal excludes always win.
     foreach ($skillIdValue in @($Selection.excludeSkills)) {
         $skillId = [string]$skillIdValue
         if (-not $skillsById.ContainsKey($skillId)) {
