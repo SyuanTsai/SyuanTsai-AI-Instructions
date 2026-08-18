@@ -5,6 +5,10 @@
     {
       "id": "agent-skills",
       "repository": "https://example.org/acme/agent-skills-catalog.git"
+    },
+    {
+      "id": "atlassian-work-management",
+      "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Management.git"
     }
   ],
   "profiles": [
@@ -12,58 +16,42 @@
       "id": "core",
       "description": "Core engineering planning and data-access verification workflows.",
       "default": true,
-      "includes": [
-        "plan-production-change",
-        "verify-data-access-performance"
-      ],
+      "includes": ["plan-production-change", "verify-data-access-performance"],
       "excludes": []
     },
     {
       "id": "code-collaboration",
       "description": "Code delegation and pull-request collaboration workflows.",
       "default": false,
-      "includes": [
-        "review-bitbucket-pull-request",
-        "write-copilot-implementation-prompt"
-      ],
+      "includes": ["review-bitbucket-pull-request", "write-copilot-implementation-prompt"],
       "excludes": []
     },
     {
       "id": "atlassian",
       "description": "Jira and Confluence work-management workflows.",
       "default": false,
-      "includes": [
-        "configure-jira-api-access",
-        "publish-requirements-to-confluence",
-        "work-with-jira"
-      ],
+      "includes": ["configure-jira-api-access", "publish-requirements-to-confluence", "work-with-jira"],
       "excludes": []
     },
     {
       "id": "observability",
       "description": "Telemetry and incident-investigation workflows.",
       "default": false,
-      "includes": [
-        "investigate-datadog-logs"
-      ],
+      "includes": ["investigate-datadog-logs"],
       "excludes": []
     },
     {
       "id": "external-research",
       "description": "Current public external-research workflows.",
       "default": false,
-      "includes": [
-        "search-with-felo"
-      ],
+      "includes": ["search-with-felo"],
       "excludes": []
     },
     {
       "id": "knowledge-capture",
       "description": "Authorized course and durable knowledge-capture workflows.",
       "default": false,
-      "includes": [
-        "capture-private-course-knowledge"
-      ],
+      "includes": ["capture-private-course-knowledge"],
       "excludes": []
     }
   ],
@@ -71,301 +59,128 @@
     {
       "id": "plan-production-change",
       "group": "core-engineering",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/plan-production-change"
-      },
-      "profiles": [
-        "core"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/plan-production-change"},
+      "profiles": ["core"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "verify-data-access-performance",
       "group": "core-engineering",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/verify-data-access-performance"
-      },
-      "profiles": [
-        "core"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/verify-data-access-performance"},
+      "profiles": ["core"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "write-copilot-implementation-prompt",
       "group": "code-collaboration",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/write-copilot-implementation-prompt"
-      },
-      "profiles": [
-        "code-collaboration"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/write-copilot-implementation-prompt"},
+      "profiles": ["code-collaboration"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "review-bitbucket-pull-request",
       "group": "code-collaboration",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/review-bitbucket-pull-request"
-      },
-      "profiles": [
-        "code-collaboration"
-      ],
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/review-bitbucket-pull-request"},
+      "profiles": ["code-collaboration"],
       "compatibility": {
-        "platforms": [
-          "any"
-        ],
+        "platforms": ["any"],
         "shells": [],
-        "requiredCapabilities": [
-          {
-            "kind": "command",
-            "id": "git",
-            "state": "available"
-          }
-        ],
-        "anyOfCapabilities": [
-          [
-            {
-              "kind": "connector",
-              "id": "bitbucket-cloud",
-              "state": "configured"
-            },
-            {
-              "kind": "environment",
-              "id": "bitbucket-cloud-api",
-              "state": "configured"
-            }
-          ]
-        ]
+        "requiredCapabilities": [{"kind": "command", "id": "git", "state": "available"}],
+        "anyOfCapabilities": [[
+          {"kind": "connector", "id": "bitbucket-cloud", "state": "configured"},
+          {"kind": "environment", "id": "bitbucket-cloud-api", "state": "configured"}
+        ]]
       },
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "configure-jira-api-access",
       "group": "atlassian-work-management",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/configure-jira-api-access"
-      },
-      "profiles": [
-        "atlassian"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "atlassian-work-management", "path": ".agents/skills/configure-jira-api-access"},
+      "profiles": ["atlassian"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "work-with-jira",
       "group": "atlassian-work-management",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/work-with-jira"
-      },
-      "profiles": [
-        "atlassian"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "atlassian-work-management", "path": ".agents/skills/work-with-jira"},
+      "profiles": ["atlassian"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [
         {
           "skillId": "configure-jira-api-access",
           "type": "conditional",
-          "condition": {
-            "capability": "jira-cloud-api",
-            "operator": "missing-or-invalid"
-          },
+          "condition": {"capability": "jira-cloud-api", "operator": "missing-or-invalid"},
           "fallback": {
             "capability": "jira-cloud-connector",
             "description": "Use an approved configured Jira connector when API-token setup is not required."
           }
         }
       ],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "publish-requirements-to-confluence",
       "group": "atlassian-work-management",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/publish-requirements-to-confluence"
-      },
-      "profiles": [
-        "atlassian"
-      ],
+      "source": {"sourceId": "atlassian-work-management", "path": ".agents/skills/publish-requirements-to-confluence"},
+      "profiles": ["atlassian"],
       "compatibility": {
-        "platforms": [
-          "any"
-        ],
+        "platforms": ["any"],
         "shells": [],
         "requiredCapabilities": [],
-        "anyOfCapabilities": [
-          [
-            {
-              "kind": "connector",
-              "id": "confluence-cloud",
-              "state": "configured"
-            },
-            {
-              "kind": "environment",
-              "id": "confluence-cloud-api",
-              "state": "configured"
-            }
-          ]
-        ]
+        "anyOfCapabilities": [[
+          {"kind": "connector", "id": "confluence-cloud", "state": "configured"},
+          {"kind": "environment", "id": "confluence-cloud-api", "state": "configured"}
+        ]]
       },
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "investigate-datadog-logs",
       "group": "observability",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/investigate-datadog-logs"
-      },
-      "profiles": [
-        "observability"
-      ],
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/investigate-datadog-logs"},
+      "profiles": ["observability"],
       "compatibility": {
-        "platforms": [
-          "any"
-        ],
+        "platforms": ["any"],
         "shells": [],
-        "requiredCapabilities": [
-          {
-            "kind": "connector",
-            "id": "datadog",
-            "state": "configured"
-          }
-        ],
+        "requiredCapabilities": [{"kind": "connector", "id": "datadog", "state": "configured"}],
         "anyOfCapabilities": []
       },
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "search-with-felo",
       "group": "external-research",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/search-with-felo"
-      },
-      "profiles": [
-        "external-research"
-      ],
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/search-with-felo"},
+      "profiles": ["external-research"],
       "compatibility": {
-        "platforms": [
-          "windows"
-        ],
-        "shells": [
-          "pwsh>=7"
-        ],
-        "requiredCapabilities": [
-          {
-            "kind": "command",
-            "id": "felo-ai",
-            "state": "authenticated"
-          }
-        ],
+        "platforms": ["windows"],
+        "shells": ["pwsh>=7"],
+        "requiredCapabilities": [{"kind": "command", "id": "felo-ai", "state": "authenticated"}],
         "anyOfCapabilities": []
       },
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     },
     {
       "id": "capture-private-course-knowledge",
       "group": "knowledge-capture",
-      "source": {
-        "sourceId": "agent-skills",
-        "path": ".agents/skills/capture-private-course-knowledge"
-      },
-      "profiles": [
-        "knowledge-capture"
-      ],
-      "compatibility": {
-        "platforms": [
-          "any"
-        ],
-        "shells": [],
-        "requiredCapabilities": [],
-        "anyOfCapabilities": []
-      },
+      "source": {"sourceId": "agent-skills", "path": ".agents/skills/capture-private-course-knowledge"},
+      "profiles": ["knowledge-capture"],
+      "compatibility": {"platforms": ["any"], "shells": [], "requiredCapabilities": [], "anyOfCapabilities": []},
       "dependencies": [],
-      "lifecycle": {
-        "status": "active",
-        "aliases": []
-      }
+      "lifecycle": {"status": "active", "aliases": []}
     }
   ]
 }
