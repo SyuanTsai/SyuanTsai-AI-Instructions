@@ -58,10 +58,10 @@ try {
         throw "Instruction source archive must contain exactly one repository root; found $($instructionRoots.Count)."
     }
 
-    $composition = New-ComposedBootstrapSource `
+    New-ComposedBootstrapSource `
         -InstructionSourceRoot $instructionRoots[0].FullName `
         -ResolvedSkills $resolved.Skills `
-        -DestinationRoot $composedRoot
+        -DestinationRoot $composedRoot | Out-Null
 
     Compress-Archive -LiteralPath $composedRoot -DestinationPath $composedArchive -CompressionLevel Optimal
 
