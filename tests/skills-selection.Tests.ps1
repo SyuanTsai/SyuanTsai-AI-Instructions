@@ -23,16 +23,22 @@ Describe 'Skills selection resolver' {
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-a')
     }
 
-    It 'unions profile includes with explicit includes and applies excludes last' {
+    It 'unions profile includes with explicit includes and applies personal excludes last' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@('skill-a'); excludeSkills=@('skill-b') }
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-a')
     }
 
-    It 'applies profile excludes without domain specific behavior' {
+    It 'applies profile excludes inside the profile layer' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@(); excludeSkills=@() }
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-b')
+    }
+
+    It 'allows personal includeSkills to opt back into a profile-excluded Skill' {
+        $catalog = New-SelectionCatalog
+        $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@('skill-c'); excludeSkills=@() }
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-b','skill-c')
     }
 
     It 'fails closed on an unknown profile' {
