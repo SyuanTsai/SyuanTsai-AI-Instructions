@@ -11,6 +11,15 @@
       "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
       "resolvedVersion": "1.0.0",
       "archiveSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "atlassian-work-management",
+      "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Management.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "ef6ee323e2f5a40c905859e474d7ce74b1ec7db9",
+      "resolvedVersion": "0.1.0",
+      "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   ],
   "skills": [
@@ -22,7 +31,7 @@
     },
     {
       "id": "configure-jira-api-access",
-      "sourceId": "agent-skills",
+      "sourceId": "atlassian-work-management",
       "sourcePath": ".agents/skills/configure-jira-api-access",
       "contentSha256": "2222222222222222222222222222222222222222222222222222222222222222"
     },
@@ -40,7 +49,7 @@
     },
     {
       "id": "publish-requirements-to-confluence",
-      "sourceId": "agent-skills",
+      "sourceId": "atlassian-work-management",
       "sourcePath": ".agents/skills/publish-requirements-to-confluence",
       "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
@@ -64,7 +73,7 @@
     },
     {
       "id": "work-with-jira",
-      "sourceId": "agent-skills",
+      "sourceId": "atlassian-work-management",
       "sourcePath": ".agents/skills/work-with-jira",
       "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
     },
