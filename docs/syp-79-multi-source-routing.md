@@ -1,38 +1,52 @@
-# SYP-79 Multi-Source Routing
+# SYP-79 Multi-Source Skills Routing
 
 ## Goal
 
-Make Skills source acquisition data-driven from `catalog.sources[]` and Skill `source.sourceId/path`, without hard-coded domain routing.
+Decouple Agent Skills acquisition from the AI-Instructions repository while keeping the existing instruction mutation semantics intact.
 
-## First vertical slice
+## Runtime flow
 
-The first slice is intentionally split into two pre-mutation stages:
+1. Load and validate the Skills Catalog.
+2. Resolve selected Skill IDs to `sourceId/sourcePath` using Catalog + Lock.
+3. Prune sources that are not used by the selected Skill set.
+4. Validate every required source archive against its pinned SHA-256.
+5. Stage every required source independently.
+6. Validate every selected Skill root and `SKILL.md`.
+7. Expand the AI-Instructions archive separately.
+8. Compose a synthetic bootstrap source:
+   - Instructions and Rules come from AI-Instructions.
+   - `.agents/skills` from the instruction archive is discarded.
+   - Only validated selected Skills are copied back into `.agents/skills/<stable-id>`.
+9. Only after all preflight work succeeds, invoke the existing bootstrap mutation engine using the synthetic source archive.
 
-1. `Resolve-SkillsSourcePlan`
-   - accepts Catalog, Lock, and the selected stable Skill IDs;
-   - resolves each selected Skill to its declared source ID and repository-relative path;
-   - returns only sources required by the selected Skills;
-   - verifies Catalog/Lock routing agreement;
-   - fails closed for unknown Skills, unknown sources, removed Skills, missing lock entries, and unsafe paths.
+This preserves existing customized/unmanaged-file protection, PersonalAgent stash behavior, manifest handling, and commit behavior without duplicating that mutation logic.
 
-2. `Expand-ValidatedSkillsSourceArchives`
-   - accepts the routing plan plus local archive fixtures;
-   - validates the pinned archive SHA-256 before extraction;
-   - stages every selected source independently;
-   - verifies each selected Skill directory and `SKILL.md` exist inside its routed source;
-   - returns staged source/Skill roots for desired-set composition.
+## Fail-closed boundary
 
-No target repository mutation occurs in either stage.
+No target repository mutation occurs until routing, archive validation, source staging, Skill-path validation, and desired-source composition have all completed successfully.
 
-## Current boundary
+Failures include:
 
-This slice establishes generic N-source planning and safe local archive staging. The existing `bootstrap-ai-instructions.ps1` still owns the legacy single instruction archive and target mutation flow. The next integration step is to feed the staged Skill roots into bootstrap desired-set composition while keeping Base Instructions/Rules sourced from `AI-Instructions`.
+- unknown or duplicate source IDs;
+- unknown selected Skill IDs;
+- Catalog/Lock routing mismatch;
+- unsafe source paths;
+- missing source archive;
+- source archive SHA-256 mismatch;
+- malformed source archive root;
+- missing selected Skill directory or `SKILL.md`;
+- duplicate selected Skill IDs during composition.
 
-## Invariants
+## Current vertical-slice boundary
 
-- Source IDs are data, not domain-specific branches.
-- Unused sources are omitted from the acquisition plan.
-- Every selected source is independently pinned and validated.
-- A required source failure prevents desired-set composition.
-- Skill paths remain repository-relative and cannot traverse outside the staged source root.
-- Instruction-only synchronization may produce an empty Skills source plan.
+The new entry point is `scripts/bootstrap-ai-instructions-multisource.ps1`.
+
+For this slice, callers provide:
+
+- Catalog path;
+- Lock path;
+- selected Skill IDs;
+- local source archive paths keyed by source ID;
+- the AI-Instructions source archive.
+
+Remote archive download/resolution, profile selection wiring, installer migration, and replacing the legacy entry point are intentionally deferred to later SYP-79 slices.
