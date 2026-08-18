@@ -18,6 +18,52 @@ function Get-ArchiveSha256 {
     }
 }
 
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    return Get-ArchiveSha256 -Path $Path
+}
+
+function Get-SkillInventorySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $SkillRoot
+    )
+
+    $repositoryRootPath = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([char[]]@('\', '/'))
+    $skillRootPath = [System.IO.Path]::GetFullPath($SkillRoot).TrimEnd([char[]]@('\', '/'))
+    $repositoryPrefix = $repositoryRootPath + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $skillRootPath.StartsWith($repositoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Skill root is outside repository root: $skillRootPath"
+    }
+
+    $inventoryLines = New-Object System.Collections.Generic.List[string]
+    $files = @(Get-ChildItem -LiteralPath $skillRootPath -Recurse -File)
+    $paths = New-Object System.Collections.Generic.List[string]
+    $filesByPath = @{}
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($repositoryRootPath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+        $paths.Add($relativePath)
+        $filesByPath[$relativePath] = $file.FullName
+    }
+
+    $orderedPaths = $paths.ToArray()
+    [System.Array]::Sort($orderedPaths, [System.StringComparer]::Ordinal)
+    foreach ($relativePath in $orderedPaths) {
+        $inventoryLines.Add("$relativePath`t$(Get-FileSha256 -Path $filesByPath[$relativePath])`n")
+    }
+
+    $inventoryText = [string]::Concat($inventoryLines.ToArray())
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    $bytes = $utf8WithoutBom.GetBytes($inventoryText)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 function Get-SafeSourceStagingPath {
     param(
         [Parameter(Mandatory = $true)][string] $WorkingRoot,
@@ -162,12 +208,22 @@ function Expand-ValidatedSkillsSourceArchives {
             throw "Selected Skill '$skillId' is missing SKILL.md in source '$sourceId'."
         }
 
+        $expectedContentHash = [string]$skill.contentSha256
+        if ($expectedContentHash -notmatch '^[0-9a-f]{64}$') {
+            throw "Selected Skill '$skillId' has an invalid content SHA-256 lock."
+        }
+        $actualContentHash = Get-SkillInventorySha256 -RepositoryRoot $sourceRoot -SkillRoot $skillRoot
+        if ($actualContentHash -ne $expectedContentHash) {
+            throw "Selected Skill '$skillId' content SHA-256 mismatch. Expected $expectedContentHash; actual $actualContentHash."
+        }
+
         $resolvedSkills.Add([pscustomobject][ordered]@{
             id = $skillId
             sourceId = $sourceId
             sourcePath = $sourcePath
             sourceRootPath = $sourceRoot
             skillRootPath = $skillRoot
+            contentSha256 = $actualContentHash
         })
     }
 
@@ -177,4 +233,4 @@ function Expand-ValidatedSkillsSourceArchives {
     }
 }
 
-Export-ModuleMember -Function Expand-ValidatedSkillsSourceArchives
+Export-ModuleMember -Function Expand-ValidatedSkillsSourceArchives, Get-SkillInventorySha256
