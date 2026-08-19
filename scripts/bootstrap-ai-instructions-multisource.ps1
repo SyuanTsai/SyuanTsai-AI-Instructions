@@ -70,7 +70,12 @@ function Get-RequiredPropertyValue {
         throw "$Context is missing required property '$Name'."
     }
 
-    Write-Output -NoEnumerate $property.Value
+    $value = $property.Value
+    if ($value -is [System.Array]) {
+        return ,$value
+    }
+
+    return $value
 }
 
 function Assert-StringArrayValue {
@@ -329,7 +334,7 @@ Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
 $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog)
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
-$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
+$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\\', '/'))
 $workingRoot = Join-Path $tempRoot ('syp79-multisource-' + [Guid]::NewGuid().ToString('N'))
 $instructionExtract = Join-Path $workingRoot 'instruction-source'
 $instructionArchiveDownload = Join-Path $workingRoot 'instruction-source.zip'
