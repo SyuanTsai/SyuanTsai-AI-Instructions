@@ -47,11 +47,12 @@ function Get-RequiredProperty {
         [string] $Context
     )
 
-    if (-not (Test-HasProperty -Object $Object -Name $Name)) {
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
         throw "$Context is missing required property '$Name'."
     }
 
-    Write-Output -NoEnumerate $Object.$Name
+    Write-Output -NoEnumerate $property.Value
 }
 
 function Assert-NonEmptyString {
