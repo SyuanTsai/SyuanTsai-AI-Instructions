@@ -64,6 +64,50 @@ function Get-SkillInventorySha256 {
     }
 }
 
+function Assert-SkillDefinition {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillDefinitionPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedSkillId
+    )
+
+    $content = [System.IO.File]::ReadAllText([System.IO.Path]::GetFullPath($SkillDefinitionPath))
+    $normalized = $content.Replace("`r`n", "`n").Replace("`r", "`n")
+    if (-not $normalized.StartsWith("---`n", [System.StringComparison]::Ordinal)) {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md must start with YAML frontmatter."
+    }
+
+    $closingMarker = "`n---`n"
+    $closingIndex = $normalized.IndexOf($closingMarker, 4, [System.StringComparison]::Ordinal)
+    if ($closingIndex -lt 0) {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md has unterminated YAML frontmatter."
+    }
+
+    $frontmatter = $normalized.Substring(4, $closingIndex - 4)
+    $name = $null
+    $description = $null
+    foreach ($line in $frontmatter.Split("`n")) {
+        if ($line -match '^name\s*:\s*(.+?)\s*$') {
+            $name = $Matches[1].Trim().Trim('"', "'")
+        }
+        elseif ($line -match '^description\s*:\s*(.+?)\s*$') {
+            $description = $Matches[1].Trim().Trim('"', "'")
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter is missing name."
+    }
+    if ($name -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md name must be a lowercase stable ID."
+    }
+    if ($name -ne $ExpectedSkillId) {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md name '$name' does not match its stable Skill ID."
+    }
+    if ([string]::IsNullOrWhiteSpace($description)) {
+        throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter is missing description."
+    }
+}
+
 function Get-SafeSourceStagingPath {
     param(
         [Parameter(Mandatory = $true)][string] $WorkingRoot,
@@ -207,6 +251,7 @@ function Expand-ValidatedSkillsSourceArchives {
         if (-not (Test-Path -LiteralPath $skillDefinition -PathType Leaf)) {
             throw "Selected Skill '$skillId' is missing SKILL.md in source '$sourceId'."
         }
+        Assert-SkillDefinition -SkillDefinitionPath $skillDefinition -ExpectedSkillId $skillId
 
         $expectedContentHash = [string]$skill.contentSha256
         if ($expectedContentHash -notmatch '^[0-9a-f]{64}$') {
@@ -233,4 +278,4 @@ function Expand-ValidatedSkillsSourceArchives {
     }
 }
 
-Export-ModuleMember -Function Expand-ValidatedSkillsSourceArchives, Get-SkillInventorySha256
+Export-ModuleMember -Function Expand-ValidatedSkillsSourceArchives, Get-SkillInventorySha256, Assert-SkillDefinition
