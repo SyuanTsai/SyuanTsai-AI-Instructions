@@ -69,12 +69,12 @@ function Get-RequiredPropertyValue {
     if ($null -eq $property) {
         throw "$Context is missing required property '$Name'."
     }
-    return $property.Value
+    Write-Output -NoEnumerate $property.Value
 }
 
 function Assert-StringArrayValue {
     param(
-        [Parameter(Mandatory = $true)][object] $Value,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object] $Value,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
