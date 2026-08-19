@@ -76,7 +76,7 @@ function ConvertFrom-FeloJsonOutput {
     }
 
     try {
-        return $trimmedOutput | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+        return $trimmedOutput | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
         $firstBrace = $trimmedOutput.IndexOf('{')
@@ -87,7 +87,7 @@ function ConvertFrom-FeloJsonOutput {
 
         try {
             $jsonCandidate = $trimmedOutput.Substring($firstBrace, $lastBrace - $firstBrace + 1)
-            return $jsonCandidate | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+            return $jsonCandidate | ConvertFrom-Json -ErrorAction Stop
         }
         catch {
             return $null
@@ -182,6 +182,46 @@ function ConvertTo-FeloCompactResult {
     }
 }
 
+function ConvertTo-FeloProcessArgument {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Argument)
+
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $builder = New-Object System.Text.StringBuilder
+    [void] $builder.Append('"')
+    $backslashCount = 0
+
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+
+        if ($character -eq '"') {
+            if ($backslashCount -gt 0) {
+                [void] $builder.Append(('\' * ($backslashCount * 2)))
+                $backslashCount = 0
+            }
+            [void] $builder.Append('\"')
+            continue
+        }
+
+        if ($backslashCount -gt 0) {
+            [void] $builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+        [void] $builder.Append($character)
+    }
+
+    if ($backslashCount -gt 0) {
+        [void] $builder.Append(('\' * ($backslashCount * 2)))
+    }
+    [void] $builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-FeloChildProcess {
     [CmdletBinding()]
     param(
@@ -204,8 +244,14 @@ function Invoke-FeloChildProcess {
     $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = $utf8Encoding
     $startInfo.StandardErrorEncoding = $utf8Encoding
-    foreach ($argument in $ArgumentList) {
-        $startInfo.ArgumentList.Add($argument)
+
+    if ($null -ne $startInfo.PSObject.Properties['ArgumentList']) {
+        foreach ($argument in $ArgumentList) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+    }
+    else {
+        $startInfo.Arguments = (@($ArgumentList | ForEach-Object { ConvertTo-FeloProcessArgument -Argument $_ }) -join ' ')
     }
 
     $process = [System.Diagnostics.Process]::new()
@@ -220,7 +266,7 @@ function Invoke-FeloChildProcess {
         $standardErrorTask = $process.StandardError.ReadToEndAsync()
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
         if ($timedOut) {
-            $process.Kill($true)
+            $process.Kill()
             $process.WaitForExit()
         }
 
@@ -277,7 +323,7 @@ function Resolve-FeloCliInvocation {
     }
 
     try {
-        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json -ErrorAction Stop
         $relativeCliPath = [string] $package.bin.felo
         $cliPath = Join-Path $packageRoot $relativeCliPath
     }
