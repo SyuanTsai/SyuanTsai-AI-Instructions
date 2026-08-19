@@ -53,7 +53,8 @@ Searching...
     # Purpose: Prevent invalid Unicode and guarantee the hard summary limit without splitting a user-visible character.
     It 'T020_truncates_summary_by_Unicode_text_elements' {
         # Given
-        $answer = ('a' * 799) + "👩‍💻" + 'tail'
+        $emoji = [char]::ConvertFromUtf32(0x1F469) + [char]0x200D + [char]::ConvertFromUtf32(0x1F4BB)
+        $answer = ('a' * 799) + $emoji + 'tail'
         $rawResponse = [ordered]@{
             status = 200
             data = [ordered]@{
@@ -68,7 +69,7 @@ Searching...
 
         # Then
         $textElementCount | Should Be 800
-        $result.summary.EndsWith("👩‍💻") | Should Be $true
+        $result.summary.EndsWith($emoji) | Should Be $true
         $result.summary | Should Not Match 'tail'
         $result.truncated | Should Be $true
     }
