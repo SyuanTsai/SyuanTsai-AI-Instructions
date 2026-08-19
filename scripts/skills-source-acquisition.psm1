@@ -64,6 +64,44 @@ function Get-SkillInventorySha256 {
     }
 }
 
+function Get-YamlScalarValue {
+    param(
+        [Parameter(Mandatory = $true)][string] $RawValue,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $value = $RawValue.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return ''
+    }
+
+    if ($value.StartsWith('[') -and -not $value.EndsWith(']')) {
+        throw "$Context contains malformed YAML flow-sequence syntax."
+    }
+    if ($value.StartsWith('{') -and -not $value.EndsWith('}')) {
+        throw "$Context contains malformed YAML flow-mapping syntax."
+    }
+    if ($value.StartsWith('"')) {
+        if ($value.Length -lt 2 -or -not $value.EndsWith('"')) {
+            throw "$Context contains an unterminated double-quoted YAML scalar."
+        }
+        return $value.Substring(1, $value.Length - 2)
+    }
+    if ($value.StartsWith("'")) {
+        if ($value.Length -lt 2 -or -not $value.EndsWith("'")) {
+            throw "$Context contains an unterminated single-quoted YAML scalar."
+        }
+        return $value.Substring(1, $value.Length - 2).Replace("''", "'")
+    }
+
+    # Required Agent Skill fields are scalar values. Reject collection/block markers here
+    # instead of accepting malformed YAML that a standards-compliant validator rejects.
+    if ($value -match '^[\[\{\|>]') {
+        throw "$Context must be a scalar YAML value."
+    }
+    return $value
+}
+
 function Assert-SkillDefinition {
     param(
         [Parameter(Mandatory = $true)][string] $SkillDefinitionPath,
@@ -79,31 +117,49 @@ function Assert-SkillDefinition {
     $closingMarker = "`n---`n"
     $closingIndex = $normalized.IndexOf($closingMarker, 4, [System.StringComparison]::Ordinal)
     if ($closingIndex -lt 0) {
-        throw "Selected Skill '$ExpectedSkillId' SKILL.md has unterminated YAML frontmatter."
+        # Also allow a closing delimiter at EOF.
+        if ($normalized.EndsWith("`n---", [System.StringComparison]::Ordinal)) {
+            $closingIndex = $normalized.Length - 4
+        }
+        else {
+            throw "Selected Skill '$ExpectedSkillId' SKILL.md has unterminated YAML frontmatter."
+        }
     }
 
     $frontmatter = $normalized.Substring(4, $closingIndex - 4)
-    $name = $null
-    $description = $null
+    $properties = @{}
+    $lineNumber = 0
     foreach ($line in $frontmatter.Split("`n")) {
-        if ($line -match '^name\s*:\s*(.+?)\s*$') {
-            $name = $Matches[1].Trim().Trim('"', "'")
+        $lineNumber++
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) {
+            continue
         }
-        elseif ($line -match '^description\s*:\s*(.+?)\s*$') {
-            $description = $Matches[1].Trim().Trim('"', "'")
+        if ($line.Contains("`t")) {
+            throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter line $lineNumber contains a tab, which is invalid YAML indentation."
         }
+        if ($line -notmatch '^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$') {
+            throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter line $lineNumber is not valid top-level YAML mapping syntax."
+        }
+
+        $key = $Matches[1]
+        $rawValue = $Matches[2]
+        if ($properties.ContainsKey($key)) {
+            throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter contains duplicate key '$key'."
+        }
+        $properties[$key] = Get-YamlScalarValue -RawValue $rawValue -Context "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter '$key'"
     }
 
-    if ([string]::IsNullOrWhiteSpace($name)) {
+    if (-not $properties.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$properties['name'])) {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter is missing name."
     }
+    $name = [string]$properties['name']
     if ($name -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md name must be a lowercase stable ID."
     }
     if ($name -ne $ExpectedSkillId) {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md name '$name' does not match its stable Skill ID."
     }
-    if ([string]::IsNullOrWhiteSpace($description)) {
+    if (-not $properties.ContainsKey('description') -or [string]::IsNullOrWhiteSpace([string]$properties['description'])) {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md frontmatter is missing description."
     }
 }
@@ -178,7 +234,7 @@ function Expand-ValidatedSkillsSourceArchives {
         $sourcePlansById[$sourceId] = $source
     }
 
-    $stagedSources = New-Object System.Collections.Generic.List[object]
+    $stagedSources = @()
     foreach ($sourceId in @($sourcePlansById.Keys | Sort-Object)) {
         if (-not $SourceArchivePaths.ContainsKey($sourceId)) {
             throw "Selected source '$sourceId' has no archive input."
@@ -212,13 +268,13 @@ function Expand-ValidatedSkillsSourceArchives {
             throw "Selected source '$sourceId' archive must contain exactly one repository root; found $($archiveRoots.Count)."
         }
 
-        $stagedSources.Add([pscustomobject][ordered]@{
+        $stagedSources += [pscustomobject][ordered]@{
             id = $sourceId
             rootPath = $archiveRoots[0].FullName
             archivePath = $archivePath
             archiveSha256 = $actualArchiveHash
             resolvedCommit = [string] $sourcePlan.resolvedCommit
-        })
+        }
     }
 
     $stagedSourcesById = @{}
@@ -226,7 +282,7 @@ function Expand-ValidatedSkillsSourceArchives {
         $stagedSourcesById[[string] $source.id] = $source
     }
 
-    $resolvedSkills = New-Object System.Collections.Generic.List[object]
+    $resolvedSkills = @()
     foreach ($skill in @($planSkills | Sort-Object id)) {
         $skillId = [string] $skill.id
         $sourceId = [string] $skill.sourceId
@@ -262,19 +318,19 @@ function Expand-ValidatedSkillsSourceArchives {
             throw "Selected Skill '$skillId' content SHA-256 mismatch. Expected $expectedContentHash; actual $actualContentHash."
         }
 
-        $resolvedSkills.Add([pscustomobject][ordered]@{
+        $resolvedSkills += [pscustomobject][ordered]@{
             id = $skillId
             sourceId = $sourceId
             sourcePath = $sourcePath
             sourceRootPath = $sourceRoot
             skillRootPath = $skillRoot
             contentSha256 = $actualContentHash
-        })
+        }
     }
 
     return [pscustomobject][ordered]@{
-        Sources = @($stagedSources)
-        Skills = @($resolvedSkills)
+        Sources = $stagedSources
+        Skills = $resolvedSkills
     }
 }
 
