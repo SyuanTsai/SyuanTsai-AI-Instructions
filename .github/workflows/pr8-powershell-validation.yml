@@ -101,6 +101,25 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Diagnose catalog property access
+        shell: pwsh
+        run: |
+          $catalogPath = (Resolve-Path './catalog/examples/skills-catalog.example.json').Path
+          $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath | ConvertFrom-Json
+          $direct = $catalog.catalogId
+          $directType = if ($null -eq $direct) { '<null>' } else { $direct.GetType().FullName }
+          $property = $catalog.PSObject.Properties['catalogId']
+          $propertyExists = $null -ne $property
+          $propertyValue = if ($propertyExists) { $property.Value } else { $null }
+          $propertyValueType = if ($null -eq $propertyValue) { '<null>' } else { $propertyValue.GetType().FullName }
+          Write-Host "Direct catalogId: '$direct' type=$directType"
+          Write-Host "Property exists: $propertyExists"
+          Write-Host "Property.Value: '$propertyValue' type=$propertyValueType"
+          $module = Import-Module ./scripts/skills-catalog-contract.psm1 -Force -PassThru
+          $resolved = & $module { param($inputCatalog) Get-RequiredProperty -Object $inputCatalog -Name 'catalogId' -Context 'diagnostic' } $catalog
+          $resolvedType = if ($null -eq $resolved) { '<null>' } else { $resolved.GetType().FullName }
+          Write-Host "Get-RequiredProperty: '$resolved' type=$resolvedType"
+
       - name: Run full Pester suite
         shell: pwsh
         run: |
