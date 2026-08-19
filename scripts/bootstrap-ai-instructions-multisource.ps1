@@ -40,6 +40,139 @@ function Read-JsonDocument {
     }
 }
 
+function Get-RawFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($Path))
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-RequiredPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)][object] $Object,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        throw "$Context is missing required property '$Name'."
+    }
+    return $property.Value
+}
+
+function Assert-StringArrayValue {
+    param(
+        [Parameter(Mandatory = $true)][object] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [System.Array]) {
+        throw "$Context must be an array."
+    }
+    foreach ($item in @($Value)) {
+        if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $item)) {
+            throw "$Context must contain only non-empty strings."
+        }
+    }
+}
+
+function Assert-MultiSourceConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][object] $Configuration,
+        [Parameter(Mandatory = $true)][object] $Catalog
+    )
+
+    $schemaVersion = Get-RequiredPropertyValue -Object $Configuration -Name 'schemaVersion' -Context 'AI instruction sync configuration'
+    if ($schemaVersion -ne 3) {
+        throw "Multi-source bootstrap requires AI instruction sync configuration schemaVersion 3; actual: $schemaVersion"
+    }
+
+    foreach ($propertyName in @('autoCommitRepositoryUrls', 'excludedRepositoryUrls', 'excludedRepositoryPaths')) {
+        Assert-StringArrayValue `
+            -Value (Get-RequiredPropertyValue -Object $Configuration -Name $propertyName -Context 'AI instruction sync configuration') `
+            -Context "AI instruction sync configuration $propertyName"
+    }
+
+    $selection = Get-RequiredPropertyValue -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'
+    foreach ($propertyName in @('repository', 'ref')) {
+        $value = Get-RequiredPropertyValue -Object $selection -Name $propertyName -Context 'AI instruction sync configuration catalog'
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $value)) {
+            throw "AI instruction sync configuration catalog $propertyName must be a non-empty string."
+        }
+    }
+    foreach ($propertyName in @('profiles', 'includeSkills', 'excludeSkills')) {
+        Assert-StringArrayValue `
+            -Value (Get-RequiredPropertyValue -Object $selection -Name $propertyName -Context 'AI instruction sync configuration catalog') `
+            -Context "AI instruction sync configuration catalog $propertyName"
+    }
+
+    $profileIds = @{}
+    foreach ($profile in @($Catalog.profiles)) {
+        $profileIds[[string]$profile.id] = $true
+    }
+    $skillIds = @{}
+    foreach ($skill in @($Catalog.skills)) {
+        $skillIds[[string]$skill.id] = $true
+    }
+    foreach ($profileId in @($selection.profiles)) {
+        if (-not $profileIds.ContainsKey([string]$profileId)) {
+            throw "AI instruction sync configuration references unknown profile '$profileId'."
+        }
+    }
+    foreach ($skillId in @($selection.includeSkills) + @($selection.excludeSkills)) {
+        if (-not $skillIds.ContainsKey([string]$skillId)) {
+            throw "AI instruction sync configuration references unknown Skill '$skillId'."
+        }
+    }
+    foreach ($skillId in @($selection.includeSkills)) {
+        if (@($selection.excludeSkills) -contains [string]$skillId) {
+            throw "AI instruction sync configuration both includes and excludes Skill '$skillId'."
+        }
+    }
+}
+
+function Assert-MultiSourceLockIdentity {
+    param(
+        [Parameter(Mandatory = $true)][object] $Lock,
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][string] $CatalogFilePath
+    )
+
+    $schemaVersion = Get-RequiredPropertyValue -Object $Lock -Name 'schemaVersion' -Context 'Skills Catalog lock'
+    if ($schemaVersion -ne 1) {
+        throw "Unsupported Skills Catalog lock schemaVersion '$schemaVersion'; expected 1."
+    }
+
+    $catalogId = [string](Get-RequiredPropertyValue -Object $Lock -Name 'catalogId' -Context 'Skills Catalog lock')
+    if ($catalogId -ne [string]$Catalog.catalogId) {
+        throw 'Skills Catalog lock catalogId does not match the Skills Catalog.'
+    }
+
+    $catalogSha256 = [string](Get-RequiredPropertyValue -Object $Lock -Name 'catalogSha256' -Context 'Skills Catalog lock')
+    if ($catalogSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'Skills Catalog lock catalogSha256 must be a lowercase 64-character SHA-256 hash.'
+    }
+    $actualCatalogSha256 = Get-RawFileSha256 -Path $CatalogFilePath
+    if ($catalogSha256 -ne $actualCatalogSha256) {
+        throw "Skills Catalog lock catalogSha256 does not match the Catalog file: expected $actualCatalogSha256."
+    }
+
+    $null = Get-RequiredPropertyValue -Object $Lock -Name 'sources' -Context 'Skills Catalog lock'
+    $null = Get-RequiredPropertyValue -Object $Lock -Name 'skills' -Context 'Skills Catalog lock'
+}
+
 function Get-InstructionArchive {
     param(
         [string] $ProvidedArchivePath,
@@ -72,17 +205,13 @@ $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
 $lock = Read-JsonDocument -Path $LockPath -Name 'Skills Catalog lock'
 $configuration = Read-JsonDocument -Path $ConfigurationPath -Name 'AI instruction sync configuration'
 
-if ($configuration.schemaVersion -ne 3) {
-    throw "Multi-source bootstrap requires AI instruction sync configuration schemaVersion 3; actual: $($configuration.schemaVersion)"
-}
-if ($null -eq $configuration.PSObject.Properties['catalog']) {
-    throw 'AI instruction sync configuration is missing catalog selection.'
-}
+Assert-MultiSourceLockIdentity -Lock $lock -Catalog $catalog -CatalogFilePath $CatalogPath
+Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
 
 $selectedSkillIds = Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
-$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\\', '/'))
+$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
 $workingRoot = Join-Path $tempRoot ('syp79-multisource-' + [Guid]::NewGuid().ToString('N'))
 $instructionExtract = Join-Path $workingRoot 'instruction-source'
 $instructionArchiveDownload = Join-Path $workingRoot 'instruction-source.zip'
