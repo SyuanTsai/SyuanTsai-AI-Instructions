@@ -69,6 +69,7 @@ function Get-RequiredPropertyValue {
     if ($null -eq $property) {
         throw "$Context is missing required property '$Name'."
     }
+
     Write-Output -NoEnumerate $property.Value
 }
 
@@ -115,15 +116,13 @@ function Assert-MultiSourceConfiguration {
     }
 
     foreach ($name in @('autoCommitRepositoryUrls', 'excludedRepositoryUrls', 'excludedRepositoryPaths')) {
-        Assert-StringArrayValue `
-            -Value (Get-RequiredPropertyValue -Object $Configuration -Name $name -Context 'AI instruction sync configuration') `
-            -Context "AI instruction sync configuration $name"
+        $value = Get-RequiredPropertyValue -Object $Configuration -Name $name -Context 'AI instruction sync configuration'
+        Assert-StringArrayValue -Value $value -Context "AI instruction sync configuration $name"
     }
 
     $selection = Get-RequiredPropertyValue -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'
-    Assert-HttpsUrl `
-        -Value (Get-RequiredPropertyValue -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') `
-        -Context 'AI instruction sync configuration catalog repository'
+    $catalogRepository = Get-RequiredPropertyValue -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog'
+    Assert-HttpsUrl -Value $catalogRepository -Context 'AI instruction sync configuration catalog repository'
 
     $ref = Get-RequiredPropertyValue -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'
     if ($ref -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $ref)) {
@@ -131,9 +130,8 @@ function Assert-MultiSourceConfiguration {
     }
 
     foreach ($name in @('profiles', 'includeSkills', 'excludeSkills')) {
-        Assert-StringArrayValue `
-            -Value (Get-RequiredPropertyValue -Object $selection -Name $name -Context 'AI instruction sync configuration catalog') `
-            -Context "AI instruction sync configuration catalog $name"
+        $value = Get-RequiredPropertyValue -Object $selection -Name $name -Context 'AI instruction sync configuration catalog'
+        Assert-StringArrayValue -Value $value -Context "AI instruction sync configuration catalog $name"
     }
 
     $profileIds = @{}
@@ -193,8 +191,15 @@ function Assert-MultiSourceLockContract {
         $catalogSources[[string] $source.id] = $source
     }
 
+    # Keep the JSON array object intact when reading the property, then enumerate it explicitly.
+    # PowerShell 5.1 otherwise treats @(Write-Output -NoEnumerate <array>) as a single array object.
+    $lockSources = Get-RequiredPropertyValue -Object $Lock -Name 'sources' -Context 'Skills Catalog lock'
+    if ($lockSources -isnot [System.Array]) {
+        throw 'Skills Catalog lock sources must be an array.'
+    }
+
     $lockedSources = @{}
-    foreach ($source in @(Get-RequiredPropertyValue -Object $Lock -Name 'sources' -Context 'Skills Catalog lock')) {
+    foreach ($source in $lockSources) {
         $id = [string] (Get-RequiredPropertyValue -Object $source -Name 'id' -Context 'Skills Catalog lock source')
         if ($lockedSources.ContainsKey($id)) {
             throw "Duplicate Skills Catalog lock source ID: $id"
@@ -250,8 +255,13 @@ function Assert-MultiSourceLockContract {
         }
     }
 
+    $lockSkills = Get-RequiredPropertyValue -Object $Lock -Name 'skills' -Context 'Skills Catalog lock'
+    if ($lockSkills -isnot [System.Array]) {
+        throw 'Skills Catalog lock skills must be an array.'
+    }
+
     $lockedSkills = @{}
-    foreach ($skill in @(Get-RequiredPropertyValue -Object $Lock -Name 'skills' -Context 'Skills Catalog lock')) {
+    foreach ($skill in $lockSkills) {
         $id = [string] (Get-RequiredPropertyValue -Object $skill -Name 'id' -Context 'Skills Catalog lock Skill')
         if ($lockedSkills.ContainsKey($id)) {
             throw "Duplicate Skills Catalog lock Skill ID: $id"
