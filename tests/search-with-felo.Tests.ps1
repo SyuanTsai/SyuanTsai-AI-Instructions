@@ -58,11 +58,12 @@ Searching...
     }
 
     # Scenario: FELO returns a summary longer than the configured limit and the boundary contains a multi-code-point emoji.
-    # Purpose: Prevent invalid Unicode and guarantee the hard summary limit without splitting a user-visible character.
+    # Purpose: Preserve one user-visible ZWJ emoji at the boundary consistently across Windows PowerShell 5.1 and PowerShell 7.
     It 'T020_truncates_summary_by_Unicode_text_elements' {
         # Given
         $emoji = [char]::ConvertFromUtf32(0x1F469) + [char]0x200D + [char]::ConvertFromUtf32(0x1F4BB)
         $answer = ('a' * 799) + $emoji + 'tail'
+        $expectedSummary = ('a' * 799) + $emoji
         $rawResponse = [ordered]@{
             status = 200
             data = [ordered]@{
@@ -73,10 +74,9 @@ Searching...
 
         # When
         $result = ConvertTo-FeloCompactResult -RawOutput $rawResponse -AsOf ([DateTimeOffset]::UtcNow)
-        $textElementCount = [System.Globalization.StringInfo]::ParseCombiningCharacters($result.summary).Count
 
         # Then
-        $textElementCount | Should Be 800
+        $result.summary | Should Be $expectedSummary
         $result.summary.EndsWith($emoji) | Should Be $true
         $result.summary | Should Not Match 'tail'
         $result.truncated | Should Be $true
