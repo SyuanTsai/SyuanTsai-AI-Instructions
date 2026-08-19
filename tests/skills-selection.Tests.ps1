@@ -1,6 +1,15 @@
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-selection.psm1') -Force
 
+function Assert-ThrowsMessage {
+    param([scriptblock] $Action, [string] $Pattern)
+    $thrown = $false
+    $message = $null
+    try { & $Action } catch { $thrown = $true; $message = $_.Exception.Message }
+    $thrown | Should Be $true
+    $message | Should Match $Pattern
+}
+
 function New-SelectionCatalog {
     return [pscustomobject]@{
         profiles = @(
@@ -44,12 +53,12 @@ Describe 'Skills selection resolver' {
     It 'fails closed on an unknown profile' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('missing'); includeSkills=@(); excludeSkills=@() }
-        { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } | Should Throw '*Unknown Skills Catalog profile*'
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } 'Unknown Skills Catalog profile'
     }
 
     It 'fails closed when explicit selection references unknown or removed Skills' {
         $catalog = New-SelectionCatalog
-        { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('missing'); excludeSkills=@() }) } | Should Throw '*does not exist*'
-        { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('skill-old'); excludeSkills=@() }) } | Should Throw '*is removed*'
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('missing'); excludeSkills=@() }) } 'does not exist'
+        Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('skill-old'); excludeSkills=@() }) } 'is removed'
     }
 }
