@@ -21,6 +21,15 @@ function Get-TestFileSha256 {
     }
 }
 
+function New-TestSkillText {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [string] $Description = 'Test skill description.'
+    )
+
+    return "---`nname: $SkillId`ndescription: $Description`n---`n`n# $SkillId`n"
+}
+
 function New-TestSkillSourceArchive {
     param(
         [string] $Name,
@@ -83,8 +92,8 @@ function New-TestAcquisitionPlan {
 
 Describe 'Skills source archive acquisition' {
     It 'UnitT10_stages_two_independent_selected_sources_and_validates_skill_content_locks' {
-        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText '# Skill A'
-        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText '# Skill B'
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
         $plan = New-TestAcquisitionPlan `
             -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) `
             -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) `
@@ -103,8 +112,8 @@ Describe 'Skills source archive acquisition' {
     }
 
     It 'UnitT20_rejects_an_archive_hash_mismatch' {
-        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText '# Skill A'
-        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText '# Skill B'
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
         $plan = New-TestAcquisitionPlan -AlphaArchiveHash ('0' * 64) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash $alpha.ContentHash -BetaContentHash $beta.ContentHash
 
         { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
@@ -112,8 +121,8 @@ Describe 'Skills source archive acquisition' {
     }
 
     It 'UnitT30_rejects_a_missing_selected_source_archive' {
-        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText '# Skill A'
-        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText '# Skill B'
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
         $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash $alpha.ContentHash -BetaContentHash $beta.ContentHash
 
         { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
@@ -121,8 +130,8 @@ Describe 'Skills source archive acquisition' {
     }
 
     It 'UnitT40_rejects_a_missing_skill_in_a_selected_source' {
-        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'different-skill' -SkillText '# Other'
-        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText '# Skill B'
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'different-skill' -SkillText (New-TestSkillText -SkillId 'different-skill')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
         $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash ('0' * 64) -BetaContentHash $beta.ContentHash
 
         { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
@@ -130,11 +139,39 @@ Describe 'Skills source archive acquisition' {
     }
 
     It 'UnitT50_rejects_a_skill_content_hash_mismatch' {
-        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText '# Skill A'
-        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText '# Skill B'
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
         $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash ('0' * 64) -BetaContentHash $beta.ContentHash
 
         { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
             Should Throw '*content SHA-256 mismatch*'
+    }
+
+    It 'UnitT60_rejects_SKILL_md_without_frontmatter' {
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText '# Skill A'
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
+        $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash $alpha.ContentHash -BetaContentHash $beta.ContentHash
+
+        { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
+            Should Throw '*must start with YAML frontmatter*'
+    }
+
+    It 'UnitT70_rejects_SKILL_md_name_that_does_not_match_stable_id' {
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'different-skill')
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
+        $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash $alpha.ContentHash -BetaContentHash $beta.ContentHash
+
+        { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
+            Should Throw '*does not match its stable Skill ID*'
+    }
+
+    It 'UnitT80_rejects_SKILL_md_without_description' {
+        $alphaText = "---`nname: skill-a`n---`n`n# skill-a`n"
+        $alpha = New-TestSkillSourceArchive -Name 'alpha' -SkillId 'skill-a' -SkillText $alphaText
+        $beta = New-TestSkillSourceArchive -Name 'beta' -SkillId 'skill-b' -SkillText (New-TestSkillText -SkillId 'skill-b')
+        $plan = New-TestAcquisitionPlan -AlphaArchiveHash (Get-TestFileSha256 -Path $alpha.ArchivePath) -BetaArchiveHash (Get-TestFileSha256 -Path $beta.ArchivePath) -AlphaContentHash $alpha.ContentHash -BetaContentHash $beta.ContentHash
+
+        { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } |
+            Should Throw '*frontmatter is missing description*'
     }
 }
