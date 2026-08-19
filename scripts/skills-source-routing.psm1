@@ -29,12 +29,12 @@ function Assert-RoutingSafeRepositoryPath {
         $path.Contains('\') -or
         $path.Contains('//') -or
         $path.Contains(':')) {
-        throw "Unsafe repository path for $Context: $path"
+        throw "Unsafe repository path for ${Context}: $path"
     }
 
     foreach ($segment in $path.Split('/')) {
         if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq '.' -or $segment -eq '..') {
-            throw "Unsafe repository path for $Context: $path"
+            throw "Unsafe repository path for ${Context}: $path"
         }
     }
 }
@@ -104,7 +104,7 @@ function Resolve-SkillsSourcePlan {
         $lockedSkillsById[$skillId] = $skill
     }
 
-    $requestedSkillIds = New-Object System.Collections.Generic.List[string]
+    $requestedSkillIds = @()
     $seenSkillIds = @{}
     foreach ($skillIdValue in @($SkillIds)) {
         $skillId = [string] $skillIdValue
@@ -113,10 +113,10 @@ function Resolve-SkillsSourcePlan {
             continue
         }
         $seenSkillIds[$skillId] = $true
-        $requestedSkillIds.Add($skillId)
+        $requestedSkillIds += $skillId
     }
 
-    $selectedSkills = New-Object System.Collections.Generic.List[object]
+    $selectedSkills = @()
     $requiredSourceIds = @{}
 
     foreach ($skillId in @($requestedSkillIds | Sort-Object)) {
@@ -154,15 +154,15 @@ function Resolve-SkillsSourcePlan {
         }
 
         $requiredSourceIds[$sourceId] = $true
-        $selectedSkills.Add([pscustomobject][ordered]@{
+        $selectedSkills += [pscustomobject][ordered]@{
             id = $skillId
             sourceId = $sourceId
             sourcePath = $sourcePath
             contentSha256 = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'")
-        })
+        }
     }
 
-    $requiredSources = New-Object System.Collections.Generic.List[object]
+    $requiredSources = @()
     foreach ($sourceId in @($requiredSourceIds.Keys | Sort-Object)) {
         $catalogSource = $catalogSourcesById[$sourceId]
         $lockedSource = $lockedSourcesById[$sourceId]
@@ -172,7 +172,7 @@ function Resolve-SkillsSourcePlan {
             throw "Skills Catalog lock source '$sourceId' repository does not match the catalog."
         }
 
-        $requiredSources.Add([pscustomobject][ordered]@{
+        $requiredSources += [pscustomobject][ordered]@{
             id = $sourceId
             repository = $lockedRepository
             requestedRef = [string] (Get-RoutingProperty -Object $lockedSource -Name 'requestedRef' -Context "Skills Catalog lock source '$sourceId'")
@@ -180,12 +180,12 @@ function Resolve-SkillsSourcePlan {
             resolvedCommit = [string] (Get-RoutingProperty -Object $lockedSource -Name 'resolvedCommit' -Context "Skills Catalog lock source '$sourceId'")
             resolvedVersion = [string] (Get-RoutingProperty -Object $lockedSource -Name 'resolvedVersion' -Context "Skills Catalog lock source '$sourceId'")
             archiveSha256 = [string] (Get-RoutingProperty -Object $lockedSource -Name 'archiveSha256' -Context "Skills Catalog lock source '$sourceId'")
-        })
+        }
     }
 
     return [pscustomobject][ordered]@{
-        Sources = @($requiredSources)
-        Skills = @($selectedSkills)
+        Sources = $requiredSources
+        Skills = $selectedSkills
     }
 }
 
