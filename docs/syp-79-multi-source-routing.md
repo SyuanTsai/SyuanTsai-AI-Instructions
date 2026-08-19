@@ -28,6 +28,8 @@ The multi-source wrapper consumes schema v3 selection, then derives a temporary 
 
 The legacy single-source entry point remains unchanged for regression compatibility during migration.
 
+The composed handoff archive is created with the .NET ZIP API so `.codex`, `.github`, `.agents`, and other hidden or dot-prefixed managed content remain present on Windows, Linux, and macOS. Skill inventory hashing likewise includes hidden resources and uses ordinal case-sensitive path keys before the platform-specific mutation handoff.
+
 ## Domain independence
 
 No runtime branch checks `general`, `code-collaboration`, `knowledge-content`, `atlassian-work-management`, or any future source ID. Source IDs are stable data keys only.

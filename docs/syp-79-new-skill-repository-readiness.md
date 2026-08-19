@@ -83,6 +83,8 @@ Every active Skill must also have `contentSha256` calculated from the determinis
 
 Inventory paths are forward-slash repository-relative paths sorted with ordinal ordering. The concatenated UTF-8/no-BOM inventory is SHA-256 hashed.
 
+Every regular file under the Skill root participates in that inventory, including hidden and dot-prefixed resources. Path identity is ordinal and case-sensitive so repositories that support case-distinct names produce deterministic hashes without collisions.
+
 ## Runtime guarantees already implemented
 
 Before target mutation starts, the multi-source path now performs:

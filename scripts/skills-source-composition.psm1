@@ -16,6 +16,44 @@ function Copy-DirectoryContents {
     }
 }
 
+function New-ComposedBootstrapArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $SourceRoot,
+        [Parameter(Mandatory = $true)][string] $DestinationPath
+    )
+
+    $source = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\', '/'))
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "Composition archive source does not exist: $source"
+    }
+
+    $destination = [System.IO.Path]::GetFullPath($DestinationPath)
+    if (Test-Path -LiteralPath $destination) {
+        throw "Composition archive destination already exists: $destination"
+    }
+
+    $sourcePrefix = $source + [System.IO.Path]::DirectorySeparatorChar
+    if ($destination.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Composition archive destination must be outside its source: $destination"
+    }
+
+    $destinationParent = [System.IO.Path]::GetDirectoryName($destination)
+    if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $destinationParent | Out-Null
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $source,
+        $destination,
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $true
+    )
+
+    return $destination
+}
+
 function New-ComposedBootstrapSource {
     [CmdletBinding()]
     param(
@@ -63,7 +101,7 @@ function New-ComposedBootstrapSource {
         }
 
         $targetSkillRoot = Join-Path $skillsRoot $skillId
-        Copy-Item -LiteralPath $skillRoot -Destination $targetSkillRoot -Recurse
+        Copy-Item -LiteralPath $skillRoot -Destination $targetSkillRoot -Recurse -Force
     }
 
     return [pscustomobject][ordered]@{
@@ -72,4 +110,4 @@ function New-ComposedBootstrapSource {
     }
 }
 
-Export-ModuleMember -Function New-ComposedBootstrapSource
+Export-ModuleMember -Function New-ComposedBootstrapArchive, New-ComposedBootstrapSource

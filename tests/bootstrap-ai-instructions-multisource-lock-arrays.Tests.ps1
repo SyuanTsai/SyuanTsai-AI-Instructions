@@ -131,7 +131,11 @@ function Write-LockArrayFixture {
 function Invoke-LockFixtureBootstrap {
     param([object] $Fixture)
     $missingInstructionArchive = Join-Path $TestDrive 'missing-instruction.zip'
-    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
+    $powerShellHost = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ([string]::IsNullOrWhiteSpace($powerShellHost) -or -not (Test-Path -LiteralPath $powerShellHost -PathType Leaf)) {
+        throw 'No PowerShell executable is available for the lock-array integration test.'
+    }
+    $output = & $powerShellHost -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
         -CatalogPath $Fixture.CatalogPath `
         -LockPath $Fixture.LockPath `
         -ConfigurationPath $Fixture.ConfigurationPath `
@@ -140,7 +144,9 @@ function Invoke-LockFixtureBootstrap {
 }
 
 Describe 'bootstrap-ai-instructions-multisource lock array enumeration' {
-    It 'LockArrayT10_enumerates_a_single_source_and_skill_lock_entry' {
+    # Scenario: The Catalog Lock contains exactly one source and one Skill entry under Windows PowerShell array semantics.
+    # Purpose: Preserve each JSON array as an enumerable collection instead of treating the whole array as one lock object.
+    It 'InterT10_enumerates_single_source_and_skill_lock_arrays' {
         $fixture = Write-LockArrayFixture -Root (Join-Path $TestDrive 'single') -SourceCount 1
         $result = Invoke-LockFixtureBootstrap -Fixture $fixture
 
@@ -149,7 +155,9 @@ Describe 'bootstrap-ai-instructions-multisource lock array enumeration' {
         $result.Output | Should Not Match "missing required property 'id'"
     }
 
-    It 'LockArrayT20_enumerates_multiple_source_and_skill_lock_entries' {
+    # Scenario: The Catalog Lock contains multiple source and Skill entries.
+    # Purpose: Validate every entry without collapsing or nesting the arrays differently across PowerShell runtimes.
+    It 'InterT20_enumerates_multiple_source_and_skill_lock_entries' {
         $fixture = Write-LockArrayFixture -Root (Join-Path $TestDrive 'multiple') -SourceCount 2
         $result = Invoke-LockFixtureBootstrap -Fixture $fixture
 
@@ -158,7 +166,9 @@ Describe 'bootstrap-ai-instructions-multisource lock array enumeration' {
         $result.Output | Should Not Match "missing required property 'id'"
     }
 
-    It 'LockArrayT30_handles_empty_lock_arrays_without_treating_the_array_as_a_lock_entry' {
+    # Scenario: The Catalog has an active source while the corresponding Lock arrays are empty.
+    # Purpose: Report the missing lock entry rather than attempting to read properties from the empty array object.
+    It 'InterT30_handles_empty_lock_arrays_as_empty_collections' {
         $fixture = Write-LockArrayFixture -Root (Join-Path $TestDrive 'empty') -SourceCount 1 -EmptyLockArrays
         $result = Invoke-LockFixtureBootstrap -Fixture $fixture
 

@@ -23,6 +23,11 @@ function Get-FileSha256 {
     return Get-ArchiveSha256 -Path $Path
 }
 
+function New-SkillInventoryPathMap {
+    $pathMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    return ,$pathMap
+}
+
 function Get-SkillInventorySha256 {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -37,9 +42,9 @@ function Get-SkillInventorySha256 {
     }
 
     $inventoryLines = New-Object System.Collections.Generic.List[string]
-    $files = @(Get-ChildItem -LiteralPath $skillRootPath -Recurse -File)
+    $files = @(Get-ChildItem -LiteralPath $skillRootPath -Recurse -File -Force)
     $paths = New-Object System.Collections.Generic.List[string]
-    $filesByPath = @{}
+    $filesByPath = New-SkillInventoryPathMap
     foreach ($file in $files) {
         $relativePath = $file.FullName.Substring($repositoryRootPath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
         $paths.Add($relativePath)
@@ -261,9 +266,9 @@ function Expand-ValidatedSkillsSourceArchives {
             Remove-Item -LiteralPath $sourceStagingPath -Recurse -Force
         }
         New-Item -ItemType Directory -Path $sourceStagingPath | Out-Null
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $sourceStagingPath
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $sourceStagingPath -ErrorAction Stop
 
-        $archiveRoots = @(Get-ChildItem -LiteralPath $sourceStagingPath -Directory)
+        $archiveRoots = @(Get-ChildItem -LiteralPath $sourceStagingPath -Directory -Force)
         if ($archiveRoots.Count -ne 1) {
             throw "Selected source '$sourceId' archive must contain exactly one repository root; found $($archiveRoots.Count)."
         }

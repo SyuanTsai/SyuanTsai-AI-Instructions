@@ -320,6 +320,8 @@ function Get-InstructionArchive {
     $repo = [System.Uri]::EscapeDataString($parts[1])
     $escapedRef = [System.Uri]::EscapeDataString($Ref)
     $uri = "https://github.com/$owner/$repo/archive/refs/heads/$escapedRef.zip"
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -UseBasicParsing -Uri $uri -Headers @{ 'User-Agent'='Codex-AI-Instructions-MultiSource-Bootstrap' } -OutFile $DestinationPath
     return $DestinationPath
 }
@@ -364,8 +366,8 @@ try {
         -Ref $SourceRef `
         -DestinationPath $instructionArchiveDownload
 
-    Expand-Archive -LiteralPath $instructionArchive -DestinationPath $instructionExtract
-    $instructionRoots = @(Get-ChildItem -LiteralPath $instructionExtract -Directory)
+    Expand-Archive -LiteralPath $instructionArchive -DestinationPath $instructionExtract -ErrorAction Stop
+    $instructionRoots = @(Get-ChildItem -LiteralPath $instructionExtract -Directory -Force)
     if ($instructionRoots.Count -ne 1) {
         throw "Instruction source archive must contain exactly one repository root; found $($instructionRoots.Count)."
     }
@@ -375,7 +377,7 @@ try {
         -ResolvedSkills $resolved.Skills `
         -DestinationRoot $composedRoot | Out-Null
 
-    Compress-Archive -LiteralPath $composedRoot -DestinationPath $composedArchive -CompressionLevel Optimal
+    New-ComposedBootstrapArchive -SourceRoot $composedRoot -DestinationPath $composedArchive | Out-Null
 
     $legacyConfiguration = [ordered]@{
         schemaVersion = 2

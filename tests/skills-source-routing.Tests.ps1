@@ -50,6 +50,8 @@ function New-MultiSourceFixture {
 }
 
 Describe 'Skills source routing plan' {
+    # Scenario: Selected Skills belong to two independent Catalog sources.
+    # Purpose: Produce one deterministic plan containing both routed Skills and both required sources.
     It 'UnitT10_routes_selected_skills_to_two_independent_sources' {
         $fixture=New-MultiSourceFixture
         $plan=Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-beta','skill-alpha')
@@ -58,12 +60,16 @@ Describe 'Skills source routing plan' {
         @($plan.Skills).Count | Should Be 2
         (@($plan.Skills|ForEach-Object{"$($_.id):$($_.sourceId)"})-join ',') | Should Be 'skill-alpha:alpha-source,skill-beta:beta-source'
     }
+    # Scenario: The Catalog and Lock contain an additional source not referenced by the selected Skills.
+    # Purpose: Prune unused sources before retrieval and validation.
     It 'UnitT20_excludes_unused_sources_from_the_acquisition_plan' {
         $fixture=New-MultiSourceFixture
         $plan=Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha')
         @($plan.Sources).Count | Should Be 1
         @($plan.Sources)[0].id | Should Be 'alpha-source'
     }
+    # Scenario: A valid source uses a previously unseen stable source ID.
+    # Purpose: Protect data-driven routing from domain-specific source-name branches.
     It 'UnitT30_routes_arbitrary_source_ids_without_domain_specific_logic' {
         $fixture=New-MultiSourceFixture
         $fixture.Catalog.sources[0].id='custom-x'; $fixture.Catalog.skills[0].source.sourceId='custom-x'; $fixture.Lock.sources[0].id='custom-x'; $fixture.Lock.skills[0].sourceId='custom-x'
@@ -71,22 +77,32 @@ Describe 'Skills source routing plan' {
         @($plan.Sources)[0].id | Should Be 'custom-x'
         @($plan.Skills)[0].sourceId | Should Be 'custom-x'
     }
+    # Scenario: Selection requests a Skill absent from the Catalog.
+    # Purpose: Fail closed instead of producing a partial routing plan.
     It 'UnitT40_rejects_an_unknown_selected_skill' {
         $fixture=New-MultiSourceFixture
         Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('missing-skill') } 'does not exist in the Skills Catalog'
     }
+    # Scenario: A Catalog Skill references a source absent from the Catalog source collection.
+    # Purpose: Prevent routing to an undefined acquisition endpoint.
     It 'UnitT50_rejects_an_unknown_source_id' {
         $fixture=New-MultiSourceFixture; $fixture.Catalog.skills[0].source.sourceId='missing-source'; $fixture.Lock.skills[0].sourceId='missing-source'
         Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'references unknown source'
     }
+    # Scenario: The Catalog and immutable Lock disagree about a selected Skill's source.
+    # Purpose: Reject routing metadata that is not bound by the validated Lock.
     It 'UnitT60_rejects_catalog_lock_routing_mismatch' {
         $fixture=New-MultiSourceFixture; $fixture.Lock.skills[0].sourceId='beta-source'
         Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'lock source does not match catalog Skill'
     }
+    # Scenario: A selected Skill source path attempts to traverse above its repository root.
+    # Purpose: Stop unsafe paths before archive acquisition or target mutation.
     It 'UnitT70_rejects_unsafe_selected_skill_source_paths' {
         $fixture=New-MultiSourceFixture; $fixture.Catalog.skills[0].source.path='../skill-alpha'; $fixture.Lock.skills[0].sourcePath='../skill-alpha'
         Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'Unsafe repository path'
     }
+    # Scenario: Selection resolves to no Skills.
+    # Purpose: Support instruction-only composition without retrieving any Skill source.
     It 'UnitT80_returns_an_empty_source_plan_when_no_skills_are_selected' {
         $fixture=New-MultiSourceFixture
         $plan=Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @()
