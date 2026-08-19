@@ -326,7 +326,7 @@ $configuration = Read-JsonDocument -Path $ConfigurationPath -Name 'AI instructio
 Assert-MultiSourceLockContract -Lock $lock -Catalog $catalog -CatalogFilePath $CatalogPath
 Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
 
-$selectedSkillIds = Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog
+$selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog)
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
