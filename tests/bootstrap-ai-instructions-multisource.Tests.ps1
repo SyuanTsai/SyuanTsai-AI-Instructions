@@ -1,206 +1,97 @@
-$script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions-multisource.ps1'
+$script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$script:BootstrapScript = Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-multisource.ps1'
 $script:TestRepositoryUrl = 'git@example.com:team/multisource-bootstrap-test.git'
+Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisition.psm1') -Force
 
 function Invoke-TestGit {
-    param(
-        [Parameter(Mandatory = $true)][string] $Repository,
-        [Parameter(Mandatory = $true)][string[]] $Arguments
-    )
-
-    $output = & git -C $Repository @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
-    }
+    param([string]$Repository,[string[]]$Arguments)
+    $output=& git -C $Repository @Arguments 2>&1
+    if($LASTEXITCODE-ne0){throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"}
     return $output
 }
-
 function Set-TestUtf8Text {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string] $Value
-    )
-
-    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Value, $utf8WithoutBom)
+    param([string]$Path,[string]$Value)
+    [System.IO.File]::WriteAllText($Path,$Value,(New-Object System.Text.UTF8Encoding($false)))
 }
-
 function Get-TestFileSha256 {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    $stream = [System.IO.File]::OpenRead($Path)
-    try {
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
-        }
-        finally {
-            $sha256.Dispose()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
+    param([string]$Path)
+    $stream=[System.IO.File]::OpenRead($Path);try{$sha=[System.Security.Cryptography.SHA256]::Create();try{return([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}}finally{$stream.Dispose()}
 }
-
 function New-TestInstructionArchive {
-    param(
-        [Parameter(Mandatory = $true)][string] $Root,
-        [Parameter(Mandatory = $true)][string] $ArchivePath
-    )
-
-    $repositoryRoot = Join-Path $Root 'SyuanTsai-AI-Instructions-main'
-    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.codex\AI-Rules') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.github\AI-Rules') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.agents\skills\legacy-skill') | Out-Null
-    Set-TestUtf8Text -Path (Join-Path $repositoryRoot '.codex\AGENTS.en.md') -Value "# Codex Base`n"
-    Set-TestUtf8Text -Path (Join-Path $repositoryRoot '.codex\AI-Rules\core.en.md') -Value "# Codex Rule`n"
-    Set-TestUtf8Text -Path (Join-Path $repositoryRoot '.github\copilot-instructions.en.md') -Value "# Copilot Base`n"
-    Set-TestUtf8Text -Path (Join-Path $repositoryRoot '.github\AI-Rules\core.en.md') -Value "# Copilot Rule`n"
-    Set-TestUtf8Text -Path (Join-Path $repositoryRoot '.agents\skills\legacy-skill\SKILL.md') -Value "---`nname: legacy-skill`ndescription: Legacy fixture skill.`n---`n"
+    param([string]$Root,[string]$ArchivePath)
+    $repositoryRoot=Join-Path $Root 'SyuanTsai-AI-Instructions-main'
+    Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Join-Path $repositoryRoot '.codex\AI-Rules'),(Join-Path $repositoryRoot '.github\AI-Rules'),(Join-Path $repositoryRoot '.agents\skills\legacy-skill')|Out-Null
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.codex\AGENTS.en.md') "# Codex Base`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.codex\AI-Rules\core.en.md') "# Codex Rule`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.github\copilot-instructions.en.md') "# Copilot Base`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.github\AI-Rules\core.en.md') "# Copilot Rule`n"
+    Set-TestUtf8Text (Join-Path $repositoryRoot '.agents\skills\legacy-skill\SKILL.md') "---`nname: legacy-skill`ndescription: Legacy fixture skill.`n---`n"
     Compress-Archive -Path $repositoryRoot -DestinationPath $ArchivePath
 }
-
+function New-TestSkillArchive {
+    param([string]$Root,[string]$ArchivePath)
+    $repositoryRoot=Join-Path $Root 'external-skills-aaaaaaaa'
+    $skillRoot=Join-Path $repositoryRoot '.agents\skills\skill-a'
+    Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $skillRoot|Out-Null
+    Set-TestUtf8Text (Join-Path $skillRoot 'SKILL.md') "---`nname: skill-a`ndescription: Selected external fixture skill.`n---`n`n# Skill A`n"
+    $contentHash=Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
+    Compress-Archive -Path $repositoryRoot -DestinationPath $ArchivePath
+    return [pscustomobject]@{ArchivePath=$ArchivePath;ArchiveSha256=(Get-TestFileSha256 $ArchivePath);ContentSha256=$contentHash}
+}
 function New-TestTargetRepository {
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    New-Item -ItemType Directory -Force -Path $Path | Out-Null
-    Invoke-TestGit -Repository $Path -Arguments @('init', '--quiet') | Out-Null
-    Invoke-TestGit -Repository $Path -Arguments @('config', 'user.name', 'Multisource Bootstrap Test') | Out-Null
-    Invoke-TestGit -Repository $Path -Arguments @('config', 'user.email', 'multisource@example.test') | Out-Null
-    Invoke-TestGit -Repository $Path -Arguments @('remote', 'add', 'origin', $script:TestRepositoryUrl) | Out-Null
-    Set-TestUtf8Text -Path (Join-Path $Path 'README.md') -Value "# Test Repository`n"
-    Invoke-TestGit -Repository $Path -Arguments @('add', '--', 'README.md') | Out-Null
-    Invoke-TestGit -Repository $Path -Arguments @('commit', '--quiet', '-m', 'initial commit') | Out-Null
+    param([string]$Path)
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $Path|Out-Null
+    Invoke-TestGit $Path @('init','--quiet')|Out-Null;Invoke-TestGit $Path @('config','user.name','Multisource Bootstrap Test')|Out-Null;Invoke-TestGit $Path @('config','user.email','multisource@example.test')|Out-Null;Invoke-TestGit $Path @('remote','add','origin',$script:TestRepositoryUrl)|Out-Null
+    Set-TestUtf8Text (Join-Path $Path 'README.md') "# Test Repository`n";Invoke-TestGit $Path @('add','--','README.md')|Out-Null;Invoke-TestGit $Path @('commit','--quiet','-m','initial commit')|Out-Null
+}
+function New-TestDocuments {
+    param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[object]$SkillArchive,[switch]$MissingSelectionArrays)
+    $catalog=[ordered]@{
+        schemaVersion=1;catalogId='multisource-smoke'
+        sources=@([ordered]@{id='source-a';repository='https://github.com/example/source-a.git'})
+        profiles=@([ordered]@{id='core';description='Core fixture profile.';default=$false;includes=@('skill-a');excludes=@()})
+        skills=@([ordered]@{id='skill-a';group='fixture';source=[ordered]@{sourceId='source-a';path='.agents/skills/skill-a'};profiles=@('core');compatibility=[ordered]@{platforms=@('any');shells=@();requiredCapabilities=@();anyOfCapabilities=@()};dependencies=@();lifecycle=[ordered]@{status='active';aliases=@()}})
+    }
+    Set-TestUtf8Text $CatalogPath (($catalog|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+    $lock=[ordered]@{
+        schemaVersion=1;catalogId='multisource-smoke';catalogSha256=(Get-TestFileSha256 $CatalogPath)
+        sources=@([ordered]@{id='source-a';repository='https://github.com/example/source-a.git';requestedRef='main';requestedRefType='branch';resolvedCommit=('a'*40);resolvedVersion='test';archiveSha256=$SkillArchive.ArchiveSha256})
+        skills=@([ordered]@{id='skill-a';sourceId='source-a';sourcePath='.agents/skills/skill-a';contentSha256=$SkillArchive.ContentSha256})
+    }
+    Set-TestUtf8Text $LockPath (($lock|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+    if($MissingSelectionArrays){$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref='main';profiles=@()}}
+    else{$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref='main';profiles=@();includeSkills=@('skill-a');excludeSkills=@()}}
+    $configuration=[ordered]@{schemaVersion=3;autoCommitRepositoryUrls=@($script:TestRepositoryUrl);excludedRepositoryUrls=@();excludedRepositoryPaths=@();catalog=$catalogSelection}
+    Set-TestUtf8Text $ConfigurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
-    It 'SmokeT10_executes_the_local_instruction_only_path_end_to_end' {
-        $catalogPath = Join-Path $TestDrive 'catalog.json'
-        $lockPath = Join-Path $TestDrive 'catalog.lock.json'
-        $configurationPath = Join-Path $TestDrive 'sync-config.json'
-        $instructionRoot = Join-Path $TestDrive 'instruction-archive-root'
-        $instructionArchive = Join-Path $TestDrive 'instruction-source.zip'
-        $targetRoot = Join-Path $TestDrive 'target'
+    It 'SmokeT10_executes_a_selected_skill_local_source_end_to_end' {
+        $catalogPath=Join-Path $TestDrive 'catalog.json';$lockPath=Join-Path $TestDrive 'catalog.lock.json';$configurationPath=Join-Path $TestDrive 'sync-config.json';$instructionArchive=Join-Path $TestDrive 'instruction-source.zip';$skillArchivePath=Join-Path $TestDrive 'source-a.zip';$targetRoot=Join-Path $TestDrive 'target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'skill-root') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        New-TestTargetRepository $targetRoot
 
-        $catalog = [ordered]@{
-            schemaVersion = 1
-            catalogId = 'multisource-smoke'
-            sources = @(
-                [ordered]@{
-                    id = 'unused-source'
-                    repository = 'https://github.com/example/unused-source.git'
-                }
-            )
-            profiles = @(
-                [ordered]@{
-                    id = 'optional'
-                    description = 'Optional fixture profile.'
-                    default = $false
-                    includes = @('unused-skill')
-                    excludes = @()
-                }
-            )
-            skills = @(
-                [ordered]@{
-                    id = 'unused-skill'
-                    group = 'fixture'
-                    source = [ordered]@{
-                        sourceId = 'unused-source'
-                        path = '.agents/skills/unused-skill'
-                    }
-                    profiles = @('optional')
-                    compatibility = [ordered]@{
-                        platforms = @('any')
-                        shells = @()
-                        requiredCapabilities = @()
-                        anyOfCapabilities = @()
-                    }
-                    dependencies = @()
-                    lifecycle = [ordered]@{
-                        status = 'active'
-                        aliases = @()
-                    }
-                }
-            )
-        }
-        $catalogJson = ($catalog | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
-        Set-TestUtf8Text -Path $catalogPath -Value $catalogJson
+        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
 
-        $lock = [ordered]@{
-            schemaVersion = 1
-            catalogId = 'multisource-smoke'
-            catalogSha256 = Get-TestFileSha256 -Path $catalogPath
-            sources = @()
-            skills = @()
-        }
-        Set-TestUtf8Text -Path $lockPath -Value (($lock | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n")
-
-        $configuration = [ordered]@{
-            schemaVersion = 3
-            autoCommitRepositoryUrls = @($script:TestRepositoryUrl)
-            excludedRepositoryUrls = @()
-            excludedRepositoryPaths = @()
-            catalog = [ordered]@{
-                repository = 'https://github.com/example/catalog.git'
-                ref = 'main'
-                profiles = @()
-                includeSkills = @()
-                excludeSkills = @()
-            }
-        }
-        Set-TestUtf8Text -Path $configurationPath -Value (($configuration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n")
-
-        New-TestInstructionArchive -Root $instructionRoot -ArchivePath $instructionArchive
-        New-TestTargetRepository -Path $targetRoot
-
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
-            -CatalogPath $catalogPath `
-            -LockPath $lockPath `
-            -ConfigurationPath $configurationPath `
-            -InstructionSourceArchivePath $instructionArchive `
-            -TargetRoot $targetRoot 2>&1
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Multi-source bootstrap failed: $($output -join [Environment]::NewLine)"
-        }
-
-        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex Base'
-        (Get-Content -Raw (Join-Path $targetRoot '.github\copilot-instructions.md')).Trim() | Should Be '# Copilot Base'
-        Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\legacy-skill') | Should Be $false
-        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json') | Should Be $true
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim()|Should Be '# Codex Base'
+        Test-Path (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md')|Should Be $true
+        Test-Path (Join-Path $targetRoot '.agents\skills\legacy-skill')|Should Be $false
+        (Get-Content -Raw (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md'))|Should Match 'Selected external fixture skill'
+        Test-Path (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $true
     }
 
     It 'SmokeT20_fails_with_an_actionable_error_when_selection_arrays_are_missing' {
-        $catalogPath = Join-Path $TestDrive 'catalog.json'
-        $lockPath = Join-Path $TestDrive 'catalog.lock.json'
-        $configurationPath = Join-Path $TestDrive 'bad-sync-config.json'
-
-        $catalog = [ordered]@{
-            schemaVersion = 1
-            catalogId = 'config-validation'
-            sources = @([ordered]@{ id='source-a'; repository='https://github.com/example/source-a.git' })
-            profiles = @([ordered]@{ id='core'; description='Core'; default=$false; includes=@('skill-a'); excludes=@() })
-            skills = @([ordered]@{
-                id='skill-a'; group='fixture';
-                source=[ordered]@{ sourceId='source-a'; path='.agents/skills/skill-a' };
-                profiles=@('core');
-                compatibility=[ordered]@{ platforms=@('any'); shells=@(); requiredCapabilities=@(); anyOfCapabilities=@() };
-                dependencies=@(); lifecycle=[ordered]@{ status='active'; aliases=@() }
-            })
-        }
-        Set-TestUtf8Text -Path $catalogPath -Value (($catalog | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n")
-        $lock = [ordered]@{ schemaVersion=1; catalogId='config-validation'; catalogSha256=(Get-TestFileSha256 -Path $catalogPath); sources=@(); skills=@() }
-        Set-TestUtf8Text -Path $lockPath -Value (($lock | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n")
-        $configuration = [ordered]@{
-            schemaVersion=3; autoCommitRepositoryUrls=@(); excludedRepositoryUrls=@(); excludedRepositoryPaths=@();
-            catalog=[ordered]@{ repository='https://github.com/example/catalog.git'; ref='main'; profiles=@() }
-        }
-        Set-TestUtf8Text -Path $configurationPath -Value (($configuration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n")
-
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
-            -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath 2>&1
-
-        $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match "missing required property 'includeSkills'"
+        $catalogPath=Join-Path $TestDrive 'bad-catalog.json';$lockPath=Join-Path $TestDrive 'bad-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'bad-sync-config.json';$skillArchivePath=Join-Path $TestDrive 'bad-source-a.zip'
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'bad-skill-root') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive -MissingSelectionArrays
+        $thrown=$false;$message=$null
+        try{& $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath}catch{$thrown=$true;$message=$_.Exception.Message}
+        $thrown|Should Be $true
+        $message|Should Match "missing required property 'includeSkills'"
     }
 }
