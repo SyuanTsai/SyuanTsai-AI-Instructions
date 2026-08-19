@@ -16,6 +16,73 @@ function New-FeloErrorResult {
     }
 }
 
+function Get-FeloCodePointAt {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Index
+    )
+
+    $character = $Text[$Index]
+    if ([char]::IsHighSurrogate($character) -and
+        $Index + 1 -lt $Text.Length -and
+        [char]::IsLowSurrogate($Text[$Index + 1])) {
+        return [char]::ConvertToUtf32($character, $Text[$Index + 1])
+    }
+
+    return [int] $character
+}
+
+function Get-FeloStableTextElementIndexes {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $rawIndexes = [System.Globalization.StringInfo]::ParseCombiningCharacters($Text)
+    if ($rawIndexes.Count -le 1) {
+        return $rawIndexes
+    }
+
+    # Older .NET Framework versions do not treat emoji ZWJ sequences as one text element.
+    # Normalize those legacy boundaries, plus common emoji extenders, so truncation is
+    # consistent between Windows PowerShell 5.1 and modern PowerShell/.NET runtimes.
+    $stableIndexes = New-Object 'System.Collections.Generic.List[int]'
+    $joinNext = $false
+
+    for ($i = 0; $i -lt $rawIndexes.Count; $i++) {
+        $start = $rawIndexes[$i]
+        $end = if ($i + 1 -lt $rawIndexes.Count) { $rawIndexes[$i + 1] } else { $Text.Length }
+        $firstCodePoint = Get-FeloCodePointAt -Text $Text -Index $start
+        $category = [char]::GetUnicodeCategory($Text, $start)
+
+        $isJoiner = $firstCodePoint -eq 0x200D
+        $isEmojiModifier = $firstCodePoint -ge 0x1F3FB -and $firstCodePoint -le 0x1F3FF
+        $isVariationSelector =
+            ($firstCodePoint -ge 0xFE00 -and $firstCodePoint -le 0xFE0F) -or
+            ($firstCodePoint -ge 0xE0100 -and $firstCodePoint -le 0xE01EF)
+        $isEmojiTag = $firstCodePoint -ge 0xE0020 -and $firstCodePoint -le 0xE007F
+        $isCombiningMark = $category -in @(
+            [System.Globalization.UnicodeCategory]::NonSpacingMark,
+            [System.Globalization.UnicodeCategory]::SpacingCombiningMark,
+            [System.Globalization.UnicodeCategory]::EnclosingMark
+        )
+
+        $mergeWithPrevious = $stableIndexes.Count -gt 0 -and (
+            $joinNext -or
+            $isJoiner -or
+            $isEmojiModifier -or
+            $isVariationSelector -or
+            $isEmojiTag -or
+            $isCombiningMark
+        )
+
+        if (-not $mergeWithPrevious) {
+            $stableIndexes.Add($start)
+        }
+
+        $joinNext = $end -gt $start -and $Text[$end - 1] -eq [char]0x200D
+    }
+
+    return $stableIndexes.ToArray()
+}
+
 function ConvertTo-FeloTruncatedText {
     param(
         [Parameter(Mandatory = $true)]
@@ -26,7 +93,7 @@ function ConvertTo-FeloTruncatedText {
         [int] $MaximumTextElements
     )
 
-    $textElementIndexes = [System.Globalization.StringInfo]::ParseCombiningCharacters($Text)
+    $textElementIndexes = @(Get-FeloStableTextElementIndexes -Text $Text)
     if ($textElementIndexes.Count -le $MaximumTextElements) {
         return [pscustomobject]@{
             Text = $Text
