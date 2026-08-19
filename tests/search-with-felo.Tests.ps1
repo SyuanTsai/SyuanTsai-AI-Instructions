@@ -167,9 +167,13 @@ exit 0
     It 'UnitT55_decodes_child_process_stdout_and_stderr_as_UTF8' {
         # Given
         $fakeScript = Join-Path $TestDrive 'fake-felo-utf8.ps1'
+        $expectedStdout = -join ([char[]]@(0x7E41, 0x9AD4, 0x4E2D, 0x6587, 0x6458, 0x8981))
+        $expectedStderr = -join ([char[]]@(0x8A3A, 0x65B7, 0x8A0A, 0x606F))
         Set-Content -LiteralPath $fakeScript -Encoding UTF8 -Value @'
-$stdoutBytes = [System.Text.Encoding]::UTF8.GetBytes('繁體中文摘要')
-$stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
+$stdoutText = -join ([char[]]@(0x7E41, 0x9AD4, 0x4E2D, 0x6587, 0x6458, 0x8981))
+$stderrText = -join ([char[]]@(0x8A3A, 0x65B7, 0x8A0A, 0x606F))
+$stdoutBytes = [System.Text.Encoding]::UTF8.GetBytes($stdoutText)
+$stderrBytes = [System.Text.Encoding]::UTF8.GetBytes($stderrText)
 [Console]::OpenStandardOutput().Write($stdoutBytes, 0, $stdoutBytes.Length)
 [Console]::OpenStandardError().Write($stderrBytes, 0, $stderrBytes.Length)
 '@
@@ -188,8 +192,8 @@ $stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
         }
 
         # Then
-        $result.StandardOutput | Should Be '繁體中文摘要'
-        $result.StandardError | Should Be '診斷訊息'
+        $result.StandardOutput | Should Be $expectedStdout
+        $result.StandardError | Should Be $expectedStderr
     }
 
     # Scenario: A public user query is prepared for the FELO CLI.
