@@ -59,7 +59,7 @@ Searching...
 
     # Scenario: FELO returns a summary longer than the configured limit and the boundary contains a multi-code-point emoji.
     # Purpose: Preserve one user-visible ZWJ emoji at the boundary consistently across Windows PowerShell 5.1 and PowerShell 7.
-    It 'T020_truncates_summary_by_Unicode_text_elements' {
+    It 'UnitT20_truncates_summary_without_splitting_a_ZWJ_emoji' {
         # Given
         $emoji = [char]::ConvertFromUtf32(0x1F469) + [char]0x200D + [char]::ConvertFromUtf32(0x1F4BB)
         $answer = ('a' * 799) + $emoji + 'tail'
@@ -78,6 +78,31 @@ Searching...
         # Then
         $result.summary | Should Be $expectedSummary
         $result.summary.EndsWith($emoji) | Should Be $true
+        $result.summary | Should Not Match 'tail'
+        $result.truncated | Should Be $true
+    }
+
+    # Scenario: FELO returns a summary whose limit falls between the two regional indicators of a flag emoji.
+    # Purpose: Keep a paired flag emoji intact on runtimes whose StringInfo implementation reports each indicator separately.
+    It 'UnitT25_truncates_summary_without_splitting_a_regional_indicator_flag' {
+        # Given
+        $flag = [char]::ConvertFromUtf32(0x1F1FA) + [char]::ConvertFromUtf32(0x1F1F8)
+        $answer = ('a' * 799) + $flag + 'tail'
+        $expectedSummary = ('a' * 799) + $flag
+        $rawResponse = [ordered]@{
+            status = 200
+            data = [ordered]@{
+                answer = $answer
+                resources = @([ordered]@{ title = 'Source'; link = 'https://example.com/source' })
+            }
+        } | ConvertTo-Json -Depth 5
+
+        # When
+        $result = ConvertTo-FeloCompactResult -RawOutput $rawResponse -AsOf ([DateTimeOffset]::UtcNow)
+
+        # Then
+        $result.summary | Should Be $expectedSummary
+        $result.summary.EndsWith($flag) | Should Be $true
         $result.summary | Should Not Match 'tail'
         $result.truncated | Should Be $true
     }

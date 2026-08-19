@@ -32,6 +32,28 @@ function Get-FeloCodePointAt {
     return [int] $character
 }
 
+function Get-FeloRegionalIndicatorCount {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Start,
+        [Parameter(Mandatory = $true)][int] $End
+    )
+
+    $count = 0
+    $index = $Start
+    while ($index -lt $End) {
+        $codePoint = Get-FeloCodePointAt -Text $Text -Index $index
+        if ($codePoint -lt 0x1F1E6 -or $codePoint -gt 0x1F1FF) {
+            return 0
+        }
+
+        $count++
+        $index += if ($codePoint -gt 0xFFFF) { 2 } else { 1 }
+    }
+
+    return $count
+}
+
 function Get-FeloStableTextElementIndexes {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -45,6 +67,7 @@ function Get-FeloStableTextElementIndexes {
     # consistent between Windows PowerShell 5.1 and modern PowerShell/.NET runtimes.
     $stableIndexes = New-Object 'System.Collections.Generic.List[int]'
     $joinNext = $false
+    $regionalIndicatorRunLength = 0
 
     for ($i = 0; $i -lt $rawIndexes.Count; $i++) {
         $start = $rawIndexes[$i]
@@ -58,6 +81,10 @@ function Get-FeloStableTextElementIndexes {
             ($firstCodePoint -ge 0xFE00 -and $firstCodePoint -le 0xFE0F) -or
             ($firstCodePoint -ge 0xE0100 -and $firstCodePoint -le 0xE01EF)
         $isEmojiTag = $firstCodePoint -ge 0xE0020 -and $firstCodePoint -le 0xE007F
+        $regionalIndicatorCount = Get-FeloRegionalIndicatorCount -Text $Text -Start $start -End $end
+        $joinsRegionalIndicatorPair =
+            $regionalIndicatorCount -gt 0 -and
+            $regionalIndicatorRunLength % 2 -eq 1
         $isCombiningMark = $category -in @(
             [System.Globalization.UnicodeCategory]::NonSpacingMark,
             [System.Globalization.UnicodeCategory]::SpacingCombiningMark,
@@ -70,6 +97,7 @@ function Get-FeloStableTextElementIndexes {
             $isEmojiModifier -or
             $isVariationSelector -or
             $isEmojiTag -or
+            $joinsRegionalIndicatorPair -or
             $isCombiningMark
         )
 
@@ -78,6 +106,12 @@ function Get-FeloStableTextElementIndexes {
         }
 
         $joinNext = $end -gt $start -and $Text[$end - 1] -eq [char]0x200D
+        if ($regionalIndicatorCount -gt 0) {
+            $regionalIndicatorRunLength += $regionalIndicatorCount
+        }
+        else {
+            $regionalIndicatorRunLength = 0
+        }
     }
 
     return $stableIndexes.ToArray()
