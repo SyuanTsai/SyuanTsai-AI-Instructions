@@ -190,7 +190,7 @@ function ConvertTo-FeloProcessArgument {
     }
 
     $builder = New-Object System.Text.StringBuilder
-    [void] $builder.Append('"')
+    [void] $builder.Append('"'.Substring(1))
     $backslashCount = 0
 
     foreach ($character in $Argument.ToCharArray()) {
@@ -199,12 +199,10 @@ function ConvertTo-FeloProcessArgument {
             continue
         }
 
-        if ($character -eq '"') {
-            if ($backslashCount -gt 0) {
-                [void] $builder.Append(('\' * ($backslashCount * 2)))
-                $backslashCount = 0
-            }
-            [void] $builder.Append('\"')
+        if ($character -eq '"'.Substring(1)) {
+            [void] $builder.Append(('\' * (($backslashCount * 2) + 1)))
+            [void] $builder.Append('"'.Substring(1))
+            $backslashCount = 0
             continue
         }
 
@@ -218,7 +216,7 @@ function ConvertTo-FeloProcessArgument {
     if ($backslashCount -gt 0) {
         [void] $builder.Append(('\' * ($backslashCount * 2)))
     }
-    [void] $builder.Append('"')
+    [void] $builder.Append('"'.Substring(1))
     return $builder.ToString()
 }
 
