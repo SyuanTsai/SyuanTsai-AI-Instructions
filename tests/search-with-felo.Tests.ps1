@@ -1,6 +1,14 @@
 $script:SkillRoot = Join-Path $PSScriptRoot '..\.agents\skills\search-with-felo'
 $script:ModulePath = Join-Path $script:SkillRoot 'scripts\SearchWithFelo.psm1'
 
+function Get-TestPowerShellHost {
+    $command = Get-Command pwsh, powershell.exe, powershell -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) {
+        throw 'No PowerShell executable is available for child-process tests.'
+    }
+    return $command.Source
+}
+
 Import-Module $script:ModulePath -Force
 
 Describe 'search-with-felo compact wrapper' {
@@ -143,7 +151,7 @@ exit 0
 
         # When
         $result = Invoke-FeloChildProcess `
-            -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+            -FilePath (Get-TestPowerShellHost) `
             -ArgumentList @('-NoProfile', '-File', $fakeScript) `
             -TimeoutSeconds 5
 
@@ -171,7 +179,7 @@ $stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
         try {
             [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(950)
             $result = Invoke-FeloChildProcess `
-                -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+                -FilePath (Get-TestPowerShellHost) `
                 -ArgumentList @('-NoProfile', '-File', $fakeScript) `
                 -TimeoutSeconds 5
         }
