@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - syp-79-multi-source-routing
+  pull_request:
+    branches:
+      - syp-86
   workflow_dispatch:
 
 jobs:
