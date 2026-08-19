@@ -334,7 +334,7 @@ Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
 $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog)
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
-$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\\', '/'))
+$tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
 $workingRoot = Join-Path $tempRoot ('syp79-multisource-' + [Guid]::NewGuid().ToString('N'))
 $instructionExtract = Join-Path $workingRoot 'instruction-source'
 $instructionArchiveDownload = Join-Path $workingRoot 'instruction-source.zip'
