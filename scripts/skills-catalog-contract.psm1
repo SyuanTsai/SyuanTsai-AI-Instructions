@@ -52,7 +52,12 @@ function Get-RequiredProperty {
         throw "$Context is missing required property '$Name'."
     }
 
-    Write-Output -NoEnumerate ($property.Value)
+    $value = $property.Value
+    if ($value -is [System.Array]) {
+        return ,$value
+    }
+
+    return $value
 }
 
 function Assert-NonEmptyString {
