@@ -16,6 +16,107 @@ function New-FeloErrorResult {
     }
 }
 
+function Get-FeloCodePointAt {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Index
+    )
+
+    $character = $Text[$Index]
+    if ([char]::IsHighSurrogate($character) -and
+        $Index + 1 -lt $Text.Length -and
+        [char]::IsLowSurrogate($Text[$Index + 1])) {
+        return [char]::ConvertToUtf32($character, $Text[$Index + 1])
+    }
+
+    return [int] $character
+}
+
+function Get-FeloRegionalIndicatorCount {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Start,
+        [Parameter(Mandatory = $true)][int] $End
+    )
+
+    $count = 0
+    $index = $Start
+    while ($index -lt $End) {
+        $codePoint = Get-FeloCodePointAt -Text $Text -Index $index
+        if ($codePoint -lt 0x1F1E6 -or $codePoint -gt 0x1F1FF) {
+            return 0
+        }
+
+        $count++
+        $index += if ($codePoint -gt 0xFFFF) { 2 } else { 1 }
+    }
+
+    return $count
+}
+
+function Get-FeloStableTextElementIndexes {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $rawIndexes = [System.Globalization.StringInfo]::ParseCombiningCharacters($Text)
+    if ($rawIndexes.Count -le 1) {
+        return $rawIndexes
+    }
+
+    # Older .NET Framework versions do not treat emoji ZWJ sequences as one text element.
+    # Normalize those legacy boundaries, plus common emoji extenders, so truncation is
+    # consistent between Windows PowerShell 5.1 and modern PowerShell/.NET runtimes.
+    $stableIndexes = New-Object 'System.Collections.Generic.List[int]'
+    $joinNext = $false
+    $regionalIndicatorRunLength = 0
+
+    for ($i = 0; $i -lt $rawIndexes.Count; $i++) {
+        $start = $rawIndexes[$i]
+        $end = if ($i + 1 -lt $rawIndexes.Count) { $rawIndexes[$i + 1] } else { $Text.Length }
+        $firstCodePoint = Get-FeloCodePointAt -Text $Text -Index $start
+        $category = [char]::GetUnicodeCategory($Text, $start)
+
+        $isJoiner = $firstCodePoint -eq 0x200D
+        $isEmojiModifier = $firstCodePoint -ge 0x1F3FB -and $firstCodePoint -le 0x1F3FF
+        $isVariationSelector =
+            ($firstCodePoint -ge 0xFE00 -and $firstCodePoint -le 0xFE0F) -or
+            ($firstCodePoint -ge 0xE0100 -and $firstCodePoint -le 0xE01EF)
+        $isEmojiTag = $firstCodePoint -ge 0xE0020 -and $firstCodePoint -le 0xE007F
+        $regionalIndicatorCount = Get-FeloRegionalIndicatorCount -Text $Text -Start $start -End $end
+        $joinsRegionalIndicatorPair =
+            $regionalIndicatorCount -gt 0 -and
+            $regionalIndicatorRunLength % 2 -eq 1
+        $isCombiningMark = $category -in @(
+            [System.Globalization.UnicodeCategory]::NonSpacingMark,
+            [System.Globalization.UnicodeCategory]::SpacingCombiningMark,
+            [System.Globalization.UnicodeCategory]::EnclosingMark
+        )
+
+        $mergeWithPrevious = $stableIndexes.Count -gt 0 -and (
+            $joinNext -or
+            $isJoiner -or
+            $isEmojiModifier -or
+            $isVariationSelector -or
+            $isEmojiTag -or
+            $joinsRegionalIndicatorPair -or
+            $isCombiningMark
+        )
+
+        if (-not $mergeWithPrevious) {
+            $stableIndexes.Add($start)
+        }
+
+        $joinNext = $end -gt $start -and $Text[$end - 1] -eq [char]0x200D
+        if ($regionalIndicatorCount -gt 0) {
+            $regionalIndicatorRunLength += $regionalIndicatorCount
+        }
+        else {
+            $regionalIndicatorRunLength = 0
+        }
+    }
+
+    return $stableIndexes.ToArray()
+}
+
 function ConvertTo-FeloTruncatedText {
     param(
         [Parameter(Mandatory = $true)]
@@ -26,7 +127,7 @@ function ConvertTo-FeloTruncatedText {
         [int] $MaximumTextElements
     )
 
-    $textElementIndexes = [System.Globalization.StringInfo]::ParseCombiningCharacters($Text)
+    $textElementIndexes = @(Get-FeloStableTextElementIndexes -Text $Text)
     if ($textElementIndexes.Count -le $MaximumTextElements) {
         return [pscustomobject]@{
             Text = $Text
@@ -76,7 +177,7 @@ function ConvertFrom-FeloJsonOutput {
     }
 
     try {
-        return $trimmedOutput | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+        return $trimmedOutput | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
         $firstBrace = $trimmedOutput.IndexOf('{')
@@ -87,7 +188,7 @@ function ConvertFrom-FeloJsonOutput {
 
         try {
             $jsonCandidate = $trimmedOutput.Substring($firstBrace, $lastBrace - $firstBrace + 1)
-            return $jsonCandidate | ConvertFrom-Json -Depth 30 -ErrorAction Stop
+            return $jsonCandidate | ConvertFrom-Json -ErrorAction Stop
         }
         catch {
             return $null
@@ -182,6 +283,45 @@ function ConvertTo-FeloCompactResult {
     }
 }
 
+function ConvertTo-FeloProcessArgument {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Argument)
+
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $quote = [char]34
+    $builder = New-Object System.Text.StringBuilder
+    [void] $builder.Append($quote)
+    $backslashCount = 0
+
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+
+        if ($character -eq $quote) {
+            [void] $builder.Append(('\' * (($backslashCount * 2) + 1)))
+            [void] $builder.Append($quote)
+            $backslashCount = 0
+            continue
+        }
+
+        if ($backslashCount -gt 0) {
+            [void] $builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+        [void] $builder.Append($character)
+    }
+
+    if ($backslashCount -gt 0) {
+        [void] $builder.Append(('\' * ($backslashCount * 2)))
+    }
+    [void] $builder.Append($quote)
+    return $builder.ToString()
+}
+
 function Invoke-FeloChildProcess {
     [CmdletBinding()]
     param(
@@ -204,8 +344,14 @@ function Invoke-FeloChildProcess {
     $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = $utf8Encoding
     $startInfo.StandardErrorEncoding = $utf8Encoding
-    foreach ($argument in $ArgumentList) {
-        $startInfo.ArgumentList.Add($argument)
+
+    if ($null -ne $startInfo.PSObject.Properties['ArgumentList']) {
+        foreach ($argument in $ArgumentList) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+    }
+    else {
+        $startInfo.Arguments = (@($ArgumentList | ForEach-Object { ConvertTo-FeloProcessArgument -Argument $_ }) -join ' ')
     }
 
     $process = [System.Diagnostics.Process]::new()
@@ -220,7 +366,7 @@ function Invoke-FeloChildProcess {
         $standardErrorTask = $process.StandardError.ReadToEndAsync()
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
         if ($timedOut) {
-            $process.Kill($true)
+            $process.Kill()
             $process.WaitForExit()
         }
 
@@ -277,7 +423,7 @@ function Resolve-FeloCliInvocation {
     }
 
     try {
-        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json -ErrorAction Stop
         $relativeCliPath = [string] $package.bin.felo
         $cliPath = Join-Path $packageRoot $relativeCliPath
     }

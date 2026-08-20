@@ -1,6 +1,14 @@
 $script:SkillRoot = Join-Path $PSScriptRoot '..\.agents\skills\search-with-felo'
 $script:ModulePath = Join-Path $script:SkillRoot 'scripts\SearchWithFelo.psm1'
 
+function Get-TestPowerShellHost {
+    $command = Get-Command pwsh, powershell.exe, powershell -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) {
+        throw 'No PowerShell executable is available for child-process tests.'
+    }
+    return $command.Source
+}
+
 Import-Module $script:ModulePath -Force
 
 Describe 'search-with-felo compact wrapper' {
@@ -50,10 +58,12 @@ Searching...
     }
 
     # Scenario: FELO returns a summary longer than the configured limit and the boundary contains a multi-code-point emoji.
-    # Purpose: Prevent invalid Unicode and guarantee the hard summary limit without splitting a user-visible character.
-    It 'T020_truncates_summary_by_Unicode_text_elements' {
+    # Purpose: Preserve one user-visible ZWJ emoji at the boundary consistently across Windows PowerShell 5.1 and PowerShell 7.
+    It 'UnitT20_truncates_summary_without_splitting_a_ZWJ_emoji' {
         # Given
-        $answer = ('a' * 799) + "👩‍💻" + 'tail'
+        $emoji = [char]::ConvertFromUtf32(0x1F469) + [char]0x200D + [char]::ConvertFromUtf32(0x1F4BB)
+        $answer = ('a' * 799) + $emoji + 'tail'
+        $expectedSummary = ('a' * 799) + $emoji
         $rawResponse = [ordered]@{
             status = 200
             data = [ordered]@{
@@ -64,11 +74,35 @@ Searching...
 
         # When
         $result = ConvertTo-FeloCompactResult -RawOutput $rawResponse -AsOf ([DateTimeOffset]::UtcNow)
-        $textElementCount = [System.Globalization.StringInfo]::ParseCombiningCharacters($result.summary).Count
 
         # Then
-        $textElementCount | Should Be 800
-        $result.summary.EndsWith("👩‍💻") | Should Be $true
+        $result.summary | Should Be $expectedSummary
+        $result.summary.EndsWith($emoji) | Should Be $true
+        $result.summary | Should Not Match 'tail'
+        $result.truncated | Should Be $true
+    }
+
+    # Scenario: FELO returns a summary whose limit falls between the two regional indicators of a flag emoji.
+    # Purpose: Keep a paired flag emoji intact on runtimes whose StringInfo implementation reports each indicator separately.
+    It 'UnitT25_truncates_summary_without_splitting_a_regional_indicator_flag' {
+        # Given
+        $flag = [char]::ConvertFromUtf32(0x1F1FA) + [char]::ConvertFromUtf32(0x1F1F8)
+        $answer = ('a' * 799) + $flag + 'tail'
+        $expectedSummary = ('a' * 799) + $flag
+        $rawResponse = [ordered]@{
+            status = 200
+            data = [ordered]@{
+                answer = $answer
+                resources = @([ordered]@{ title = 'Source'; link = 'https://example.com/source' })
+            }
+        } | ConvertTo-Json -Depth 5
+
+        # When
+        $result = ConvertTo-FeloCompactResult -RawOutput $rawResponse -AsOf ([DateTimeOffset]::UtcNow)
+
+        # Then
+        $result.summary | Should Be $expectedSummary
+        $result.summary.EndsWith($flag) | Should Be $true
         $result.summary | Should Not Match 'tail'
         $result.truncated | Should Be $true
     }
@@ -142,7 +176,7 @@ exit 0
 
         # When
         $result = Invoke-FeloChildProcess `
-            -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+            -FilePath (Get-TestPowerShellHost) `
             -ArgumentList @('-NoProfile', '-File', $fakeScript) `
             -TimeoutSeconds 5
 
@@ -158,9 +192,13 @@ exit 0
     It 'UnitT55_decodes_child_process_stdout_and_stderr_as_UTF8' {
         # Given
         $fakeScript = Join-Path $TestDrive 'fake-felo-utf8.ps1'
+        $expectedStdout = -join ([char[]]@(0x7E41, 0x9AD4, 0x4E2D, 0x6587, 0x6458, 0x8981))
+        $expectedStderr = -join ([char[]]@(0x8A3A, 0x65B7, 0x8A0A, 0x606F))
         Set-Content -LiteralPath $fakeScript -Encoding UTF8 -Value @'
-$stdoutBytes = [System.Text.Encoding]::UTF8.GetBytes('繁體中文摘要')
-$stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
+$stdoutText = -join ([char[]]@(0x7E41, 0x9AD4, 0x4E2D, 0x6587, 0x6458, 0x8981))
+$stderrText = -join ([char[]]@(0x8A3A, 0x65B7, 0x8A0A, 0x606F))
+$stdoutBytes = [System.Text.Encoding]::UTF8.GetBytes($stdoutText)
+$stderrBytes = [System.Text.Encoding]::UTF8.GetBytes($stderrText)
 [Console]::OpenStandardOutput().Write($stdoutBytes, 0, $stdoutBytes.Length)
 [Console]::OpenStandardError().Write($stderrBytes, 0, $stderrBytes.Length)
 '@
@@ -170,7 +208,7 @@ $stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
         try {
             [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(950)
             $result = Invoke-FeloChildProcess `
-                -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+                -FilePath (Get-TestPowerShellHost) `
                 -ArgumentList @('-NoProfile', '-File', $fakeScript) `
                 -TimeoutSeconds 5
         }
@@ -179,8 +217,8 @@ $stderrBytes = [System.Text.Encoding]::UTF8.GetBytes('診斷訊息')
         }
 
         # Then
-        $result.StandardOutput | Should Be '繁體中文摘要'
-        $result.StandardError | Should Be '診斷訊息'
+        $result.StandardOutput | Should Be $expectedStdout
+        $result.StandardError | Should Be $expectedStderr
     }
 
     # Scenario: A public user query is prepared for the FELO CLI.

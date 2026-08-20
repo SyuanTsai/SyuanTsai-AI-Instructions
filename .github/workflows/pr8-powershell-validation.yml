@@ -1,0 +1,119 @@
+name: PR8 PowerShell Validation
+
+on:
+  push:
+    branches:
+      - syp-79-multi-source-routing
+  pull_request:
+    branches:
+      - syp-86
+  workflow_dispatch:
+
+jobs:
+  windows-powershell-51:
+    name: Pester (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure Pester 3.4.0
+        shell: powershell
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable.' }
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
+
+      - name: Parse changed PowerShell files
+        shell: powershell
+        run: |
+          $files = git diff --name-only origin/syp-86...HEAD -- '*.ps1' '*.psm1'
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            foreach ($parseError in @($errors)) {
+              $failed = $true
+              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Run full Pester suite
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          git config --global core.autocrlf false
+          git config --global core.safecrlf false
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
+          Import-Module $pester.Path -Force
+          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          if ($null -eq $invokePester) { throw 'Invoke-Pester 3.4.0 could not be resolved.' }
+          Write-Host "Executing Pester $($invokePester.Module.Version)"
+          $result = & $invokePester -Script ./tests -PassThru
+          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ($result.FailedCount -gt 0) { exit 1 }
+
+  powershell-7:
+    name: Pester (PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
+
+      - name: Parse changed PowerShell files
+        shell: pwsh
+        run: |
+          $files = git diff --name-only origin/syp-86...HEAD -- '*.ps1' '*.psm1'
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            foreach ($parseError in @($errors)) {
+              $failed = $true
+              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Run full Pester suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          git config --global core.autocrlf false
+          git config --global core.safecrlf false
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
+          Import-Module $pester.Path -Force
+          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $invokePester) { throw 'Invoke-Pester 4.10.1 could not be resolved.' }
+          Write-Host "Executing Pester $($invokePester.Module.Version)"
+          $result = & $invokePester -Script ./tests -PassThru
+          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ($result.FailedCount -gt 0) { exit 1 }

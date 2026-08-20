@@ -56,7 +56,13 @@ function Compress-TestSource {
     )
 
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
-    Compress-Archive -Path $SourceRoot -DestinationPath $ArchivePath
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        [System.IO.Path]::GetFullPath($SourceRoot),
+        [System.IO.Path]::GetFullPath($ArchivePath),
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $true
+    )
 }
 
 function New-TestConfiguration {
