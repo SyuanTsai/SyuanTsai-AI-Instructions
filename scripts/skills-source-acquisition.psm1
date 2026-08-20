@@ -1,5 +1,7 @@
 Set-StrictMode -Version 2.0
 
+Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
+
 function Get-ArchiveSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -161,7 +163,7 @@ function Assert-SkillDefinition {
     if ($name -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md name must be a lowercase stable ID."
     }
-    if ($name -ne $ExpectedSkillId) {
+    if ($name -cne $ExpectedSkillId) {
         throw "Selected Skill '$ExpectedSkillId' SKILL.md name '$name' does not match its stable Skill ID."
     }
     if (-not $properties.ContainsKey('description') -or [string]::IsNullOrWhiteSpace([string]$properties['description'])) {
@@ -252,7 +254,7 @@ function Expand-ValidatedSkillsSourceArchives {
 
         $sourcePlan = $sourcePlansById[$sourceId]
         $expectedArchiveHash = [string] $sourcePlan.archiveSha256
-        if ($expectedArchiveHash -notmatch '^[0-9a-f]{64}$') {
+        if ($expectedArchiveHash -cnotmatch '^[0-9a-f]{64}$') {
             throw "Selected source '$sourceId' has an invalid archive SHA-256 pin."
         }
 
@@ -266,16 +268,11 @@ function Expand-ValidatedSkillsSourceArchives {
             Remove-Item -LiteralPath $sourceStagingPath -Recurse -Force
         }
         New-Item -ItemType Directory -Path $sourceStagingPath | Out-Null
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $sourceStagingPath -ErrorAction Stop
-
-        $archiveRoots = @(Get-ChildItem -LiteralPath $sourceStagingPath -Directory -Force)
-        if ($archiveRoots.Count -ne 1) {
-            throw "Selected source '$sourceId' archive must contain exactly one repository root; found $($archiveRoots.Count)."
-        }
+        $sourceRoot = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $sourceStagingPath
 
         $stagedSources += [pscustomobject][ordered]@{
             id = $sourceId
-            rootPath = $archiveRoots[0].FullName
+            rootPath = $sourceRoot
             archivePath = $archivePath
             archiveSha256 = $actualArchiveHash
             resolvedCommit = [string] $sourcePlan.resolvedCommit
@@ -315,7 +312,7 @@ function Expand-ValidatedSkillsSourceArchives {
         Assert-SkillDefinition -SkillDefinitionPath $skillDefinition -ExpectedSkillId $skillId
 
         $expectedContentHash = [string]$skill.contentSha256
-        if ($expectedContentHash -notmatch '^[0-9a-f]{64}$') {
+        if ($expectedContentHash -cnotmatch '^[0-9a-f]{64}$') {
             throw "Selected Skill '$skillId' has an invalid content SHA-256 lock."
         }
         $actualContentHash = Get-SkillInventorySha256 -RepositoryRoot $sourceRoot -SkillRoot $skillRoot

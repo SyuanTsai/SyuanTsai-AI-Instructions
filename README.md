@@ -1,10 +1,10 @@
 # SyuanTsai AI Instructions
 
-這個 Repository 是個人 Codex、GitHub Copilot Instructions 與兩平台共用 Agent Skills 的唯一來源。換電腦後，只要讓 Codex 完整讀取本檔案並依照「新電腦安裝」執行，即可重建目前的按需 bootstrap 設定。
+這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source；production Agent Skills 由 Catalog 指向的外部 repositories 提供。換電腦後，只要讓 Codex 完整讀取本檔案並依照「新電腦安裝」執行，即可重建目前的按需 bootstrap 設定。
 
 ## Agent Skills Catalog P0 契約
 
-為了將 Agent Skills 拆到獨立 Catalog monorepo，同時保留選擇性安裝、版本鎖定與安全同步，本 Repository 已建立下一版跨 Repository 契約：
+為了讓 Agent Skills 由多個外部 repositories 提供，同時保留選擇性安裝、版本鎖定與安全同步，本 Repository 維護下列跨 Repository 契約：
 
 - Skills Catalog schema 1：stable Skill ID、group、profiles、compatibility、hard／conditional／recommended dependencies 與 lifecycle。
 - Catalog lock schema 1：將 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash 與每個 Skill 的 deterministic content hash。
@@ -22,7 +22,7 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v3.example.json
 ```
 
-這是後續 P0 resolver、下載、manifest migration 與 installer 的穩定輸入；現行 bootstrap 仍使用單一來源與 manifest v1，直到後續任務完成整合。此階段不使用 Git submodule、不建立外部 Repository，也不搬移 `.agents/skills/<skill-name>/**`。
+production bootstrap 已使用這組契約：tracked Catalog lock 固定四個外部來源，schema v3 選出 Skills，manifest v2 記錄每個檔案的來源 provenance。Runtime 不使用 Git submodule，也不依 source ID 寫 domain-specific 分支。
 
 ## 給新電腦 Codex 的指示
 
@@ -42,15 +42,15 @@ Test-SkillsCatalogContract `
 
 1. 取得目前所在的 Git Repository 根目錄；不在 Git Repository 時直接略過。
 2. 若目前就是本 Instructions 來源 Repository，直接略過，避免把維護用的根目錄 `AGENTS.md` 當成 fan-out 目標。
-3. 從 GitHub Repository `SyuanTsai/SyuanTsai-AI-Instructions` 的 `main` branch 下載 ZIP archive，取得最新英文 Instructions。
+3. 驗證安裝時一併部署的 Catalog 與 tracked lock，依個人 schema v3 設定的完整 commit SHA 下載 Instructions，並只從 lock 的 `resolvedCommit` 下載被選取的外部 Skill 來源。
 4. Codex 的來源與目標 mapping：
    - `.codex/AGENTS.en.md` → 目標 Repository 的 `AGENTS.md`
    - `.codex/AI-Rules/*.en.md` → 目標 Repository 的 `.codex/AI-Rules/*.en.md`
 5. GitHub Copilot 的來源與目標 mapping：
    - `.github/copilot-instructions.en.md` → 目標 Repository 的 `.github/copilot-instructions.md`
    - `.github/AI-Rules/*.en.md` → 目標 Repository 的 `.github/AI-Rules/*.en.md`
-6. Codex 與 GitHub Copilot 共用 Agent Skills 的 mapping：`.agents/skills/<skill-name>/**` → 目標 Repository 的相同路徑；只同步合法命名且含 `SKILL.md` 的 Skill，來源 `.gitkeep` 不 fan out，scripts、references、assets 與其他資源以原始位元組安全同步。
-7. 使用目標 Repository 的 `.codex/ai-instructions.manifest.json` 記錄受管理檔案及最後套用的 SHA-256。
+6. Codex 與 GitHub Copilot 共用 Agent Skills 的 mapping：外部來源 `.agents/skills/<skill-name>/**` → 目標 Repository 的相同路徑；只同步 selection 選中、lock 驗證通過、合法命名且含 `SKILL.md` 的 Skill，scripts、references、assets、hidden resources 與二進位內容都以原始位元組安全同步。
+7. 使用目標 Repository 的 manifest v2 記錄 catalog／lock identity，以及每個受管理檔案的 source Repository、ref、commit、version、路徑與 SHA-256。既有 manifest v1 只有在所有受管檔案未修改時才一次性升級；否則在寫入前停止。
 8. 目標 Repository 可繼續以 Git ignore（包含 `.gitignore`、`.git/info/exclude` 或 global excludes）排除個人 Agent 設定；即使規則同時排除 `AGENTS.md`、`.codex/**`、`.github/copilot-instructions.md`、`.github/AI-Rules/**` 或 `.agents/skills/**`，仍依 manifest 正確新增、更新或移除共享受管理檔案。allowlist commit 與非 allowlist `PersonalAgent` stash 只對精確的受管理檔案與 manifest 越過 ignore，不納入同目錄中的個人設定、unmanaged 檔案或其他 ignored 內容。
 9. 來源 Agent 或 Skill 更新後，只自動更新內容仍等於 manifest hash 且沒有 staged changes 的受管理檔案；尚未 commit 的前一次同步結果仍可繼續更新。
 10. 來源新增 rule module、Skill 或 Skill resource 時自動建立；來源移除時，只刪除未被專案修改的受管理檔案。
@@ -58,8 +58,8 @@ Test-SkillsCatalogContract `
 12. 舊版 bootstrap 建立的檔案若仍與其 `chore: add shared AI instructions` 建立 commit 完全一致，會安全接管並建立 manifest。
 13. 讀取目前 Repository 的 `origin` URL 與 task 啟動目錄；若實際 Repository 位置列在個人 `~/.codex/ai-instructions-sync.json` 的 `excludedRepositoryUrls`，或啟動目錄位於 `excludedRepositoryPaths` 的 repo-relative 目錄底下，直接略過，不下載、不套用、不建立 stash 或 commit。
 14. 只有實際 Repository 位置列在 `autoCommitRepositoryUrls` 時才自動 commit。首次建立使用 `chore: add shared AI instructions`，後續更新使用 `chore: sync shared AI instructions`。
-15. 非 allowlist 且未被排除的 Repository 或目錄仍同步 Instructions、Skills 與 manifest，但不 stage、不 commit；同步結果會建立為名稱 `PersonalAgent` 的 Git stash，隨即用 `git stash apply` 抓回 working tree，stash 本身保留。
-16. 來源沒有更新時保留現有 `PersonalAgent` stash；需要更新時，先成功建立並套用新版 stash，再刪除舊的同名 stash。其他 stash 不受影響。
+15. 非 allowlist 且未被排除的 Repository 或目錄仍同步 Instructions、Skills 與 manifest，但不 stage、不 commit；同步結果會建立為名稱 `PersonalAgent` 的 Git stash，並以停用 `core.autocrlf` 的方式 apply 回 working tree，避免 Skill raw bytes 被換行轉換。
+16. 來源沒有更新時保留現有 `PersonalAgent` stash；需要更新時，先成功建立、套用並重新驗證所有受管檔 hash，再刪除舊的同名 stash。驗證失敗時保留新舊 stash；其他 stash 不受影響。
 17. 所有 Repository 都保留 unrelated staged/unstaged changes，而且永遠不自動 push。
 
 ## 新電腦安裝
@@ -92,8 +92,8 @@ git remote get-url origin
 
 Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.codex`。執行安裝腳本會完成下列本機設定：
 
-- 複製 `scripts/bootstrap-ai-instructions.ps1` 到個人 hook 目錄。
-- 建立或遷移 `$codexHome/ai-instructions-sync.json` 為 schema version 2，只保留允許自動 commit 的 Repository URL、明確排除同步的 Repository URL 與 Repository-relative 目錄，移除不再支援的舊版本機路徑設定。
+- 安裝 `bootstrap-ai-instructions-installed.ps1` 作為個人 hook，並將 multi-source wrapper、mutation engine、安全 ZIP 模組、Catalog 與 tracked lock 複製到 `$codexHome/hooks/ai-instructions-runtime/`；執行時不依賴 clone 的本機路徑。
+- 建立或遷移 `$codexHome/ai-instructions-sync.json` 為 schema version 3；v1／v2 保留合法 routing arrays 並新增安全 Catalog defaults，既有 v3 原樣保留 profiles 與 individual include／exclude，未知 schema 在安裝檔案變更前停止。
 - 在 `$codexHome/AGENTS.md` 新增或更新 `Repository Instructions Bootstrap` 區塊，保留其他個人規則。
 - 從 `$codexHome/hooks.json` 移除舊版 bootstrap `SessionStart` entry，保留其他 hooks；檔案不存在時不建立。
 
@@ -123,7 +123,7 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
   )
 ```
 
-安裝後的 bootstrap script 不依賴來源 Repository 的本機路徑；執行時會直接從 GitHub 下載最新英文版 Instructions，並依 manifest 安全同步新增、更新與移除。
+安裝後的 bootstrap script 不依賴來源 Repository 的本機路徑；執行時只下載 schema v3 與 lock 指定的完整 commits，先驗證所有 archives 與 Skill inventories，再依 manifest v2 安全同步新增、更新與移除。
 
 ### 4. 設定允許自動 commit 與排除同步的 Repository 或目錄
 
@@ -131,7 +131,7 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "autoCommitRepositoryUrls": [
     "git@example.com:your-account/owned-project-a.git",
     "https://example.com/your-account/owned-project-b.git"
@@ -141,7 +141,14 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
   ],
   "excludedRepositoryPaths": [
     "docs/architecture-planning"
-  ]
+  ],
+  "catalog": {
+    "repository": "https://example.org/acme/ai-instructions.git",
+    "ref": "89abcdef0123456789abcdef0123456789abcdef",
+    "profiles": ["core"],
+    "includeSkills": [],
+    "excludeSkills": []
+  }
 }
 ```
 
@@ -156,6 +163,7 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
 - 列在 `excludedRepositoryPaths` 的目錄會依 task 啟動目錄判斷；當 Codex 從該 repo-relative 目錄或其子目錄啟動時略過同步，從同一個 Repository 的其他目錄啟動時仍照常同步。
 - `excludedRepositoryPaths` 只接受 repo-relative path，例如 `docs/architecture-planning`；不得使用本機絕對路徑、`.` 或 `..`。
 - 同一個 Repository 同時列在 `autoCommitRepositoryUrls` 與 `excludedRepositoryUrls`，或啟動目錄命中 `excludedRepositoryPaths` 時，以排除為優先。
+- `catalog.ref` 必須是安裝來源的完整小寫 40-character commit SHA；`profiles`、`includeSkills` 與 `excludeSkills` 決定實際 fan-out 的 Skill set，明確 exclude 優先。
 - 設定檔不存在、清單為空或目前 Repository 不在清單時，仍會同步檔案，但不會 stage、commit 或 push；同步內容會保存到 `PersonalAgent` stash 並立即 apply 回 working tree。
 - 只有明確列入清單的 Repository 才會自動 commit；自動 commit 仍永遠不會 push。
 - 不要把主要負責人不是自己的 Repository 加入清單。
@@ -164,10 +172,17 @@ Codex home 優先使用 `CODEX_HOME`；未設定時使用目前使用者的 `~/.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "autoCommitRepositoryUrls": [],
   "excludedRepositoryUrls": [],
-  "excludedRepositoryPaths": []
+  "excludedRepositoryPaths": [],
+  "catalog": {
+    "repository": "https://example.org/acme/ai-instructions.git",
+    "ref": "89abcdef0123456789abcdef0123456789abcdef",
+    "profiles": ["core"],
+    "includeSkills": [],
+    "excludeSkills": []
+  }
 }
 ```
 
@@ -214,6 +229,10 @@ git stash apply 'stash@{0}'
 
 使用 `apply`，不要使用 `pop`，才能繼續保留 `PersonalAgent` stash。若目標 branch 已有同路徑的自訂 Instructions，Git 可能產生 conflict；不得使用 force 覆寫，應保留專案版本或人工合併。
 
+## 升級與 rollback
+
+先備份個人 `ai-instructions-sync.json`，再執行 installer。若 schema v1 manifest 含 customized、staged 或 missing managed files，bootstrap 會停止，不會自動升級；先保留專案內容並人工決定是否移除舊 manifest。完整的 preflight、rollback 與復原步驟見 [`docs/syp-86-production-cutover.md`](docs/syp-86-production-cutover.md)。
+
 ## 驗證
 
 ### 設定驗證
@@ -243,12 +262,15 @@ if (Test-Path -LiteralPath $hooksFile) {
 Import-Module Pester
 Invoke-Pester -Script @(
     '.\tests\bootstrap-ai-instructions.Tests.ps1'
+    '.\tests\bootstrap-ai-instructions-multisource.Tests.ps1'
     '.\tests\install-ai-instructions-bootstrap.Tests.ps1'
     '.\tests\skills-catalog-contract.Tests.ps1'
+    '.\tests\skills-source-acquisition.Tests.ps1'
+    '.\tests\production-skills-catalog.Tests.ps1'
 )
 ```
 
-兩個 bootstrap test files 的預期結果為 `23 passed, 0 failed`；Catalog contract test file 的預期結果為 `18 passed, 0 failed`。測試涵蓋首次建立、自動更新、無變更不重複 commit、保留 customized Instructions 與 Agent Skills、共用 Skill 及二進位資源的遞迴同步與安全移除、只對 ignored 受管理路徑建立 allowlist commit 或非 allowlist `PersonalAgent` stash、舊版 bootstrap 接管、安全移除 rule module、保留 unrelated staged/unstaged changes、以實際 origin URL 判斷 allowlist 與排除清單、以 task 啟動目錄判斷 repo-relative 排除路徑、SSH/HTTPS URL 等價比對、資料夾同名不誤判、非 allowlist 不 commit、未 commit 同步結果的連續更新、`PersonalAgent` stash 的建立、重新套用、保留與更新，以及本機安裝腳本的按需觸發、舊 SessionStart 清理、idempotent 合併與設定遷移。Catalog tests 另外驗證 10 個 Skills／6 個 profiles、schema parsing、stable ID、rename／removal、dependency 類型、safe path、immutable pin、per-file provenance 與 sync configuration v3。
+所有列出的 test files 必須為 `0 failed`。涵蓋 schema v3 installer、manifest v1→v2 遷移、per-file provenance、production lock completeness／staleness、四來源 selection／routing、immutable archive 與 Skill inventory hashes、安全 ZIP extraction、PowerShell 5.1 hidden／long-path 行為，以及 `core.autocrlf=true` 的 non-allowlist raw-byte no-op。
 
 ### Smoke test
 
@@ -281,15 +303,18 @@ Invoke-Pester -Script @(
 - `AGENTS.md`：本 Instructions Repository 的維護規範。
 - `.codex/`：fan-out 給 Codex 的繁體中文與英文 Instructions。
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
-- `.agents/skills/`：fan-out 給 Codex 與 GitHub Copilot 共用的 Agent Skills；目錄暫時為空時可用 `.gitkeep` 保留來源目錄，bootstrap 不會同步該 placeholder。
+- `.agents/skills/`：歷史來源目錄；production Catalog 的 10 個 Skills 已由四個 external repositories 提供。完成所有 cutover gate 前保留這些 legacy copies 作 rollback，不是 production acquisition source。
   - `plan-production-change`：依 Scope、風險與不確定性建立實作計畫。
   - `verify-data-access-performance`：診斷並驗證 query 效能、query count 與 N+1。
   - `write-copilot-implementation-prompt`：建立自包含的 GitHub Copilot 實作提示詞，並以完整可選名稱建議最低充分模型。
   - `work-with-jira`：依 scoped API 與授權規則安全查詢或修改 Jira Cloud。
   - `investigate-datadog-logs`：優先使用 Datadog connector 查詢或聚合 LOG、分析 APM trace，並處理調查用 Logs Explorer、trace 或 widget URL；純 incident record、dashboard 或 notebook 管理由對應的 Datadog guide 處理。
 - `catalog/`：Skills Catalog、lock、managed manifest v2 與個人 sync configuration v3 的 schemas、去識別化 examples 及跨 Repository 契約。
-- `scripts/bootstrap-ai-instructions.ps1`：從 GitHub 安全同步受管理 Instructions 與 Agent Skills，依個人排除清單跳過指定 Repository 或目錄，依 allowlist 決定 commit，或以 `PersonalAgent` stash 保存非 allowlist 內容的 bootstrap script。
-- `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝按需同步 script、合併 `AGENTS.md` 與 `ai-instructions-sync.json`，並移除舊版 bootstrap `SessionStart` hook。
+- `scripts/bootstrap-ai-instructions-installed.ps1`：安裝到個人 hook 的穩定入口，從同目錄 runtime bundle 啟動 multi-source bootstrap。
+- `scripts/bootstrap-ai-instructions-multisource.ps1`：驗證 schema v3、Catalog／lock、來源 archives 與 Skill inventories，組合 Instructions 與選中的 external Skills，並產生 manifest v2 provenance handoff。
+- `scripts/bootstrap-ai-instructions.ps1`：保留直接呼叫的 manifest v1 regression compatibility；production wrapper 提供 provenance 時則安全 mutation、v1→v2 migration、allowlist commit 或 byte-safe `PersonalAgent` stash。
+- `scripts/install-ai-instructions-bootstrap.ps1`：在本機 Codex home 安裝 launcher 與完整 runtime bundle、遷移 schema v3、合併 `AGENTS.md`，並移除舊版 bootstrap `SessionStart` hook。
+- `scripts/safe-zip.psm1`：PowerShell 5.1／7 共用的 single-root、case-collision、traversal、symlink／reparse 安全 extraction，並將 GitHub 長根目錄縮成固定 `repository`。
 - `scripts/skills-catalog-contract.psm1`：以 Windows PowerShell 5.1 相容方式驗證 Catalog、lock、manifest 與個人設定的 schema version、cross-reference、pin、hash 與安全路徑。
 - `tests/bootstrap-ai-instructions.Tests.ps1`：bootstrap script 的 Pester tests。
 - `tests/install-ai-instructions-bootstrap.Tests.ps1`：本機安裝腳本的 Pester tests。

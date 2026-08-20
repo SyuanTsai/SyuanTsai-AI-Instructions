@@ -13,7 +13,7 @@ function Get-GitHubArchiveUri {
     if (-not $uri.Host.Equals('github.com', [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Remote Skills source retrieval currently supports github.com repositories only: $Repository"
     }
-    if ($ResolvedCommit -notmatch '^[0-9a-f]{40}$') {
+    if ($ResolvedCommit -cnotmatch '^[0-9a-f]{40}$') {
         throw "Skills source resolvedCommit must be a full 40-character SHA: $ResolvedCommit"
     }
 

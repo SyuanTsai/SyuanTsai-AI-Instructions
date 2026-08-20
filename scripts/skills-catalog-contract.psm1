@@ -165,7 +165,7 @@ function Assert-Sha256 {
         [string] $Context
     )
 
-    if ([string] $Value -notmatch '^[0-9a-f]{64}$') {
+    if ([string] $Value -cnotmatch '^[0-9a-f]{64}$') {
         throw "$Context must be a lowercase 64-character SHA-256 hash."
     }
 }
@@ -194,7 +194,7 @@ function Assert-FullCommitSha {
         [string] $Context
     )
 
-    if ([string] $Value -notmatch '^[0-9a-f]{40}$') {
+    if ([string] $Value -cnotmatch '^[0-9a-f]{40}$') {
         throw "$Context resolvedCommit must be a full 40-character commit SHA."
     }
 }
@@ -478,6 +478,63 @@ function Test-SkillsCatalogDocument {
     return $catalog
 }
 
+function Assert-SkillsCatalogSourcePins {
+    param(
+        [Parameter(Mandatory = $true)][object] $Pins,
+        [Parameter(Mandatory = $true)][object] $Catalog
+    )
+
+    Assert-SchemaVersion -Document $Pins -Expected 1 -DocumentName 'Skills Catalog source pins'
+    if ([string](Get-RequiredProperty -Object $Pins -Name 'catalogId' -Context 'Skills Catalog source pins') -cne [string]$Catalog.catalogId) {
+        throw 'Skills Catalog source pins catalogId does not match the Skills Catalog.'
+    }
+
+    $catalogSources = @{}
+    foreach ($source in @($Catalog.sources)) {
+        $catalogSources[[string]$source.id] = $source
+    }
+    $sources = Get-RequiredProperty -Object $Pins -Name 'sources' -Context 'Skills Catalog source pins'
+    Assert-Array -Value $sources -Context 'Skills Catalog source pins sources'
+    $pinsById = @{}
+    foreach ($pin in @($sources)) {
+        $sourceId = Get-RequiredProperty -Object $pin -Name 'id' -Context 'Skills Catalog source pin'
+        Assert-StableId -Value $sourceId -Context 'Skills Catalog source pin id'
+        if ($pinsById.ContainsKey([string]$sourceId)) {
+            throw "Duplicate Skills Catalog source pin ID: $sourceId"
+        }
+        if (-not $catalogSources.ContainsKey([string]$sourceId)) {
+            throw "Skills Catalog source pins reference unknown source '$sourceId'."
+        }
+        $requestedRef = Get-RequiredProperty -Object $pin -Name 'requestedRef' -Context "Skills Catalog source pin '$sourceId'"
+        Assert-NonEmptyString -Value $requestedRef -Context "Skills Catalog source pin '$sourceId' requestedRef"
+        $requestedRefType = Get-RequiredProperty -Object $pin -Name 'requestedRefType' -Context "Skills Catalog source pin '$sourceId'"
+        if (@('branch','tag','commit') -cnotcontains [string]$requestedRefType) {
+            throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog source pin '$sourceId'."
+        }
+        Assert-FullCommitSha -Value (Get-RequiredProperty -Object $pin -Name 'resolvedCommit' -Context "Skills Catalog source pin '$sourceId'") -Context "Skills Catalog source pin '$sourceId'"
+        Assert-NonEmptyString -Value (Get-RequiredProperty -Object $pin -Name 'resolvedVersion' -Context "Skills Catalog source pin '$sourceId'") -Context "Skills Catalog source pin '$sourceId' resolvedVersion"
+        $pinsById[[string]$sourceId] = $pin
+    }
+    foreach ($sourceId in $catalogSources.Keys) {
+        if (-not $pinsById.ContainsKey([string]$sourceId)) {
+            throw "Skills Catalog source '$sourceId' has no source pin."
+        }
+    }
+}
+
+function Test-SkillsCatalogSourcePinsDocument {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $SourcePinsPath,
+        [Parameter(Mandatory = $true)][string] $CatalogPath
+    )
+
+    $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
+    $pins = Import-SkillsCatalogJson -Path $SourcePinsPath -DocumentName 'Skills Catalog source pins'
+    Assert-SkillsCatalogSourcePins -Pins $pins -Catalog $catalog
+    return $pins
+}
+
 function Assert-SkillsCatalogLock {
     param(
         [object] $Lock,
@@ -558,6 +615,23 @@ function Assert-SkillsCatalogLock {
     }
 }
 
+function Test-SkillsCatalogLockDocument {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $LockPath,
+        [Parameter(Mandatory = $true)][string] $CatalogPath
+    )
+
+    $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
+    $lock = Import-SkillsCatalogJson -Path $LockPath -DocumentName 'Skills Catalog lock'
+    Assert-SkillsCatalogLock -Lock $lock -Catalog $catalog
+    $catalogFileSha256 = Get-RawFileSha256 -Path $CatalogPath
+    if ([string]$lock.catalogSha256 -cne $catalogFileSha256) {
+        throw "Skills Catalog lock catalogSha256 does not match the Catalog file: expected $catalogFileSha256."
+    }
+    return $lock
+}
+
 function Assert-ManagedManifestV2 {
     param([object] $Manifest)
 
@@ -579,7 +653,7 @@ function Assert-ManagedManifestV2 {
         Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $entry -Name 'sourceRepository' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceRepository"
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceRef' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceRef"
         $sourceCommit = Get-RequiredProperty -Object $entry -Name 'sourceCommit' -Context "managed manifest file '$artifactId'"
-        if ([string] $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+        if ([string] $sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
             throw "managed manifest file '$artifactId' sourceCommit must be a full 40-character commit SHA."
         }
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceVersion"
@@ -618,7 +692,10 @@ function Assert-SyncConfigurationV3 {
 
     $selection = Get-RequiredProperty -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'
     Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog repository'
-    Assert-NonEmptyString -Value (Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog ref'
+    $catalogRef = Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'
+    if ([string]$catalogRef -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'AI instruction sync configuration catalog ref must be a full lowercase commit SHA.'
+    }
     Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'profiles' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog profiles' -AllowEmpty
     Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'includeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog includeSkills' -AllowEmpty
     Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'excludeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog excludeSkills' -AllowEmpty
@@ -695,4 +772,4 @@ function Test-SkillsCatalogContract {
     }
 }
 
-Export-ModuleMember -Function Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument
+Export-ModuleMember -Function Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

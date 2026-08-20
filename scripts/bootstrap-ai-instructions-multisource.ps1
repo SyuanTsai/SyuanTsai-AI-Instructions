@@ -7,6 +7,7 @@ param(
     [string] $InstructionSourceArchivePath,
     [string] $SourceRepository = 'SyuanTsai/SyuanTsai-AI-Instructions',
     [string] $SourceRef = 'main',
+    [string] $InstructionSourceCommit,
     [string] $TargetRoot
 )
 
@@ -21,6 +22,7 @@ Import-Module (Join-Path $scriptRoot 'skills-source-routing.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-retrieval.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-acquisition.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-composition.psm1') -Force
+Import-Module (Join-Path $scriptRoot 'safe-zip.psm1') -Force
 
 function Read-JsonDocument {
     param(
@@ -130,8 +132,8 @@ function Assert-MultiSourceConfiguration {
     Assert-HttpsUrl -Value $catalogRepository -Context 'AI instruction sync configuration catalog repository'
 
     $ref = Get-RequiredPropertyValue -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'
-    if ($ref -isnot [string] -or [string]::IsNullOrWhiteSpace([string] $ref)) {
-        throw 'AI instruction sync configuration catalog ref must be a non-empty string.'
+    if ($ref -isnot [string] -or [string]$ref -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'AI instruction sync configuration catalog ref must be a full lowercase commit SHA.'
     }
 
     foreach ($name in @('profiles', 'includeSkills', 'excludeSkills')) {
@@ -183,7 +185,7 @@ function Assert-MultiSourceLockContract {
     }
 
     $catalogHash = [string] (Get-RequiredPropertyValue -Object $Lock -Name 'catalogSha256' -Context 'Skills Catalog lock')
-    if ($catalogHash -notmatch '^[0-9a-f]{64}$') {
+    if ($catalogHash -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Skills Catalog lock catalogSha256 must be a lowercase 64-character SHA-256 hash.'
     }
     $actualHash = Get-RawFileSha256 -Path $CatalogFilePath
@@ -230,7 +232,7 @@ function Assert-MultiSourceLockContract {
         }
 
         $resolvedCommit = [string] (Get-RequiredPropertyValue -Object $source -Name 'resolvedCommit' -Context "Skills Catalog lock source '$id'")
-        if ($resolvedCommit -notmatch '^[0-9a-f]{40}$') {
+        if ($resolvedCommit -cnotmatch '^[0-9a-f]{40}$') {
             throw "Skills Catalog lock source '$id' resolvedCommit must be a full 40-character SHA."
         }
 
@@ -240,7 +242,7 @@ function Assert-MultiSourceLockContract {
         }
 
         $archiveHash = [string] (Get-RequiredPropertyValue -Object $source -Name 'archiveSha256' -Context "Skills Catalog lock source '$id'")
-        if ($archiveHash -notmatch '^[0-9a-f]{64}$') {
+        if ($archiveHash -cnotmatch '^[0-9a-f]{64}$') {
             throw "Skills Catalog lock source '$id' archiveSha256 must be a lowercase SHA-256."
         }
 
@@ -283,7 +285,7 @@ function Assert-MultiSourceLockContract {
         }
 
         $contentHash = [string] (Get-RequiredPropertyValue -Object $skill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$id'")
-        if ($contentHash -notmatch '^[0-9a-f]{64}$') {
+        if ($contentHash -cnotmatch '^[0-9a-f]{64}$') {
             throw "Skills Catalog lock Skill '$id' contentSha256 must be a lowercase SHA-256."
         }
         $lockedSkills[$id] = $skill
@@ -300,7 +302,7 @@ function Get-InstructionArchive {
     param(
         [string] $ProvidedArchivePath,
         [Parameter(Mandatory = $true)][string] $Repository,
-        [Parameter(Mandatory = $true)][string] $Ref,
+        [Parameter(Mandatory = $true)][string] $Commit,
         [Parameter(Mandatory = $true)][string] $DestinationPath
     )
 
@@ -312,32 +314,50 @@ function Get-InstructionArchive {
         return $fullPath
     }
 
-    if ($Repository -notmatch '^[^/]+/[^/]+$') {
-        throw "SourceRepository must use owner/repository format: $Repository"
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Repository, [System.UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -cne 'https' -or
+        $uri.Host -cne 'github.com') {
+        throw "Instruction source repository must be an HTTPS GitHub URL: $Repository"
     }
-    $parts = $Repository.Split('/')
+    $parts = @($uri.AbsolutePath.Trim('/').Split('/'))
+    if ($parts.Count -ne 2) {
+        throw "Instruction source repository must identify owner/repository: $Repository"
+    }
     $owner = [System.Uri]::EscapeDataString($parts[0])
-    $repo = [System.Uri]::EscapeDataString($parts[1])
-    $escapedRef = [System.Uri]::EscapeDataString($Ref)
-    $uri = "https://github.com/$owner/$repo/archive/refs/heads/$escapedRef.zip"
+    $repositoryName = $parts[1]
+    if ($repositoryName.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $repositoryName = $repositoryName.Substring(0, $repositoryName.Length - 4)
+    }
+    $repo = [System.Uri]::EscapeDataString($repositoryName)
+    $escapedCommit = [System.Uri]::EscapeDataString($Commit)
+    $archiveUri = "https://codeload.github.com/$owner/$repo/zip/$escapedCommit"
     [System.Net.ServicePointManager]::SecurityProtocol =
         [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -Uri $uri -Headers @{ 'User-Agent'='Codex-AI-Instructions-MultiSource-Bootstrap' } -OutFile $DestinationPath
+    Invoke-WebRequest -UseBasicParsing -Uri $archiveUri -Headers @{ 'User-Agent'='Codex-AI-Instructions-MultiSource-Bootstrap' } -OutFile $DestinationPath
     return $DestinationPath
 }
 
 $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
-$lock = Read-JsonDocument -Path $LockPath -Name 'Skills Catalog lock'
+$lock = Test-SkillsCatalogLockDocument -LockPath $LockPath -CatalogPath $CatalogPath
 $configuration = Read-JsonDocument -Path $ConfigurationPath -Name 'AI instruction sync configuration'
 
-Assert-MultiSourceLockContract -Lock $lock -Catalog $catalog -CatalogFilePath $CatalogPath
 Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
+
+$SourceRepository = [string]$configuration.catalog.repository
+$SourceRef = [string]$configuration.catalog.ref
+if ([string]::IsNullOrWhiteSpace($InstructionSourceCommit)) {
+    $InstructionSourceCommit = $SourceRef
+}
+if ($InstructionSourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $InstructionSourceCommit -cne $SourceRef) {
+    throw 'AI instruction sync configuration catalog ref and InstructionSourceCommit must be the same full lowercase commit SHA.'
+}
 
 $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $configuration.catalog)
 $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $selectedSkillIds
 
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\', '/'))
-$workingRoot = Join-Path $tempRoot ('syp79-multisource-' + [Guid]::NewGuid().ToString('N'))
+$workingRoot = Join-Path $tempRoot ('ai-' + [Guid]::NewGuid().ToString('N').Substring(0, 16))
 $instructionExtract = Join-Path $workingRoot 'instruction-source'
 $instructionArchiveDownload = Join-Path $workingRoot 'instruction-source.zip'
 $sourceDownloads = Join-Path $workingRoot 'source-downloads'
@@ -346,6 +366,7 @@ $composedParent = Join-Path $workingRoot 'composed'
 $composedRoot = Join-Path $composedParent 'repository'
 $composedArchive = Join-Path $workingRoot 'composed-source.zip'
 $legacyConfigurationPath = Join-Path $workingRoot 'legacy-sync-v2.json'
+$provenancePath = Join-Path $workingRoot 'managed-source-provenance.json'
 
 try {
     New-Item -ItemType Directory -Path $workingRoot, $instructionExtract, $sourceDownloads, $composedParent | Out-Null
@@ -363,21 +384,50 @@ try {
     $instructionArchive = Get-InstructionArchive `
         -ProvidedArchivePath $InstructionSourceArchivePath `
         -Repository $SourceRepository `
-        -Ref $SourceRef `
+        -Commit $InstructionSourceCommit `
         -DestinationPath $instructionArchiveDownload
 
-    Expand-Archive -LiteralPath $instructionArchive -DestinationPath $instructionExtract -ErrorAction Stop
-    $instructionRoots = @(Get-ChildItem -LiteralPath $instructionExtract -Directory -Force)
-    if ($instructionRoots.Count -ne 1) {
-        throw "Instruction source archive must contain exactly one repository root; found $($instructionRoots.Count)."
-    }
+    $instructionRoot = Expand-SafeZipRepository -ArchivePath $instructionArchive -DestinationRoot $instructionExtract
 
     New-ComposedBootstrapSource `
-        -InstructionSourceRoot $instructionRoots[0].FullName `
+        -InstructionSourceRoot $instructionRoot `
         -ResolvedSkills $resolved.Skills `
         -DestinationRoot $composedRoot | Out-Null
 
     New-ComposedBootstrapArchive -SourceRoot $composedRoot -DestinationPath $composedArchive | Out-Null
+
+    $sourcePlansById = @{}
+    foreach ($sourcePlan in @($plan.Sources)) {
+        $sourcePlansById[[string]$sourcePlan.id] = $sourcePlan
+    }
+    $skillProvenance = @(
+        foreach ($skill in @($resolved.Skills | Sort-Object id)) {
+            $sourcePlan = $sourcePlansById[[string]$skill.sourceId]
+            [ordered]@{
+                id = [string]$skill.id
+                sourceId = [string]$sourcePlan.id
+                sourceRepository = [string]$sourcePlan.repository
+                sourceRef = [string]$sourcePlan.requestedRef
+                sourceCommit = [string]$sourcePlan.resolvedCommit
+                sourceVersion = [string]$sourcePlan.resolvedVersion
+            }
+        }
+    )
+    $provenance = [ordered]@{
+        schemaVersion = 1
+        catalogId = [string]$catalog.catalogId
+        lockSha256 = Get-RawFileSha256 -Path $LockPath
+        instruction = [ordered]@{
+            sourceId = 'ai-instructions'
+            sourceRepository = $SourceRepository
+            sourceRef = $SourceRef
+            sourceCommit = $InstructionSourceCommit
+            sourceVersion = "commit@$($InstructionSourceCommit.Substring(0, 8))"
+        }
+        skills = $skillProvenance
+    }
+    $provenanceJson = ($provenance | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
+    [System.IO.File]::WriteAllText($provenancePath, $provenanceJson, (New-Object System.Text.UTF8Encoding($false)))
 
     $legacyConfiguration = [ordered]@{
         schemaVersion = 2
@@ -393,6 +443,7 @@ try {
         SourceRef = $SourceRef
         SourceArchivePath = $composedArchive
         ConfigurationPath = $legacyConfigurationPath
+        ProvenancePath = $provenancePath
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {
         $arguments.TargetRoot = $TargetRoot

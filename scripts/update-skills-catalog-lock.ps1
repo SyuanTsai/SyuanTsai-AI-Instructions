@@ -3,6 +3,7 @@ param(
     [string] $CatalogPath,
     [string] $SourcePinsPath,
     [string] $OutputPath,
+    [hashtable] $SourceArchivePaths = @{},
     [switch] $Check
 )
 
@@ -26,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 Import-Module (Join-Path $scriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-retrieval.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-acquisition.psm1') -Force
+Import-Module (Join-Path $scriptRoot 'safe-zip.psm1') -Force
 
 function Read-JsonDocument {
     param(
@@ -113,7 +115,7 @@ function Assert-SourcePins {
         if ([string]$pin.requestedRefType -notin @('branch', 'tag', 'commit')) {
             throw "Unsupported requestedRefType '$($pin.requestedRefType)' for source '$id'."
         }
-        if ([string]$pin.resolvedCommit -notmatch '^[0-9a-f]{40}$') {
+        if ([string]$pin.resolvedCommit -cnotmatch '^[0-9a-f]{40}$') {
             throw "Source '$id' resolvedCommit must be a full 40-character commit SHA."
         }
         if ([string]::IsNullOrWhiteSpace([string]$pin.requestedRef)) {
@@ -135,8 +137,11 @@ function Assert-SourcePins {
 }
 
 $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath
-$pins = Read-JsonDocument -Path $SourcePinsPath -Name 'Skills Catalog source pins'
-$pinsById = Assert-SourcePins -Pins $pins -Catalog $catalog
+$pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $SourcePinsPath -CatalogPath $CatalogPath
+$pinsById = @{}
+foreach ($pin in @($pins.sources)) {
+    $pinsById[[string]$pin.id] = $pin
+}
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('skills-catalog-lock-' + [Guid]::NewGuid().ToString('N'))
 $downloadRoot = Join-Path $tempRoot 'downloads'
@@ -159,7 +164,7 @@ try {
         Sources = $retrievalSources
         Skills = @()
     }
-    $archives = Get-SkillsSourceArchives -Plan $retrievalPlan -DestinationRoot $downloadRoot
+    $archives = Get-SkillsSourceArchives -Plan $retrievalPlan -DestinationRoot $downloadRoot -LocalArchiveOverrides $SourceArchivePaths
 
     $sourceRoots = @{}
     $lockSources = @()
@@ -171,12 +176,7 @@ try {
 
         $destination = Join-Path $extractRoot $id
         New-Item -ItemType Directory -Path $destination -Force | Out-Null
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $destination -ErrorAction Stop
-        $roots = @(Get-ChildItem -LiteralPath $destination -Directory -Force)
-        if ($roots.Count -ne 1) {
-            throw "Source '$id' archive must contain exactly one repository root; found $($roots.Count)."
-        }
-        $sourceRoots[$id] = $roots[0].FullName
+        $sourceRoots[$id] = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $destination
 
         $lockSources += [ordered]@{
             id = $id
@@ -225,7 +225,9 @@ try {
         skills = @($lockSkills)
     }
 
-    $json = ($lock | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
+    # ConvertTo-Json pretty-print whitespace differs between Windows PowerShell 5.1 and PowerShell 7.
+    # The compressed representation is deterministic across both supported runtimes.
+    $json = ($lock | ConvertTo-Json -Depth 20 -Compress) + "`n"
     $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 
     if ($Check) {

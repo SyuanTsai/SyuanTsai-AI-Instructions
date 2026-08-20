@@ -56,13 +56,24 @@ function Compress-TestSource {
     )
 
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        [System.IO.Path]::GetFullPath($SourceRoot),
-        [System.IO.Path]::GetFullPath($ArchivePath),
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $true
-    )
+    Add-Type -AssemblyName System.IO.Compression
+    $resolvedSource = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
+    $stream = [System.IO.File]::Open([System.IO.Path]::GetFullPath($ArchivePath), [System.IO.FileMode]::CreateNew)
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+        try {
+            $rootName = Split-Path -Leaf $resolvedSource
+            foreach ($file in @(Get-ChildItem -LiteralPath $resolvedSource -Recurse -Force -File | Sort-Object FullName)) {
+                $relativePath = $file.FullName.Substring($resolvedSource.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $entry = $archive.CreateEntry("$rootName/$relativePath", [System.IO.Compression.CompressionLevel]::Optimal)
+                $input = [System.IO.File]::OpenRead($file.FullName)
+                $output = $entry.Open()
+                try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
 }
 
 function New-TestConfiguration {
@@ -570,5 +581,37 @@ Describe 'bootstrap-ai-instructions' {
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
         ($output -join [Environment]::NewLine) | Should Match 'up to date'
+    }
+
+    # Scenario: Git is configured to rewrite text files to CRLF in a non-allowlisted repository.
+    # Purpose: Preserve the exact locked bytes of Agent Skill files across PersonalAgent stash push/apply.
+    It 'InterT80_preserves_raw_skill_bytes_with_core_autocrlf_enabled' {
+        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\raw-byte-skill'
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value @'
+---
+name: raw-byte-skill
+description: Verify raw bytes.
+---
+'@
+        Set-TestText -Path (Join-Path $sourceSkillPath 'references\data.txt') -Value ("first{0}second" -f [char]10)
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit-eol.json'
+        New-TestConfiguration -Path $noCommitConfigurationPath
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $noCommitConfigurationPath
+
+        $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        $entry = @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/raw-byte-skill/references/data.txt' })[0]
+        $targetSkillFile = Join-Path $targetRoot '.agents\skills\raw-byte-skill\references\data.txt'
+        (Get-FileHash -LiteralPath $targetSkillFile -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$entry.sha256)
+        $stashBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $noCommitConfigurationPath
+
+        (Get-FileHash -LiteralPath $targetSkillFile -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$entry.sha256)
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
+        ($output -join [Environment]::NewLine) | Should Match 'up to date'
+        ($output -join [Environment]::NewLine) | Should Not Match 'customized or unmanaged'
     }
 }

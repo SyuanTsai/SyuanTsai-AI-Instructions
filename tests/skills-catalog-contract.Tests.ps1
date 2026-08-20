@@ -55,7 +55,7 @@ Describe 'Skills Catalog contract' {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 4
+        $schemaFiles.Count | Should Be 5
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -231,12 +231,57 @@ Describe 'Skills Catalog contract' {
                 }
             },
             @{
+                Name = 'resolved-commit-uppercase'
+                Target = 'Lock'
+                Expected = 'resolvedCommit must be a full 40-character commit SHA'
+                Apply = {
+                    param($document)
+                    @($document.sources)[0].resolvedCommit = ('A' * 40)
+                }
+            },
+            @{
+                Name = 'archive-hash-uppercase'
+                Target = 'Lock'
+                Expected = 'archiveSha256 must be a lowercase 64-character SHA-256 hash'
+                Apply = {
+                    param($document)
+                    @($document.sources)[0].archiveSha256 = ('A' * 64)
+                }
+            },
+            @{
+                Name = 'content-hash-uppercase'
+                Target = 'Lock'
+                Expected = 'contentSha256 must be a lowercase 64-character SHA-256 hash'
+                Apply = {
+                    param($document)
+                    @($document.skills)[0].contentSha256 = ('A' * 64)
+                }
+            },
+            @{
                 Name = 'artifact-type'
                 Target = 'Manifest'
                 Expected = 'Unsupported managed manifest artifactType'
                 Apply = {
                     param($document)
                     @($document.files)[0].artifactType = 'Instruction'
+                }
+            },
+            @{
+                Name = 'manifest-commit-uppercase'
+                Target = 'Manifest'
+                Expected = 'sourceCommit must be a full 40-character commit SHA'
+                Apply = {
+                    param($document)
+                    @($document.files)[0].sourceCommit = ('A' * 40)
+                }
+            },
+            @{
+                Name = 'manifest-hash-uppercase'
+                Target = 'Manifest'
+                Expected = 'sha256 must be a lowercase 64-character SHA-256 hash'
+                Apply = {
+                    param($document)
+                    @($document.files)[0].sha256 = ('A' * 64)
                 }
             }
         )

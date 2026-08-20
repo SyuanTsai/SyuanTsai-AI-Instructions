@@ -11,7 +11,7 @@
   ],
   "catalog": {
     "repository": "https://example.org/acme/agent-skills-catalog.git",
-    "ref": "v1.0.0",
+    "ref": "89abcdef0123456789abcdef0123456789abcdef",
     "profiles": [
       "core"
     ],

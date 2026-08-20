@@ -44,13 +44,24 @@ function Compress-TestDirectory {
     param([string] $SourceRoot, [string] $ArchivePath)
 
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        [System.IO.Path]::GetFullPath($SourceRoot),
-        [System.IO.Path]::GetFullPath($ArchivePath),
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $true
-    )
+    Add-Type -AssemblyName System.IO.Compression
+    $resolvedSource = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
+    $stream = [System.IO.File]::Open([System.IO.Path]::GetFullPath($ArchivePath), [System.IO.FileMode]::CreateNew)
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+        try {
+            $rootName = Split-Path -Leaf $resolvedSource
+            foreach ($file in @(Get-ChildItem -LiteralPath $resolvedSource -Recurse -Force -File | Sort-Object FullName)) {
+                $relativePath = $file.FullName.Substring($resolvedSource.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $entry = $archive.CreateEntry("$rootName/$relativePath", [System.IO.Compression.CompressionLevel]::Optimal)
+                $input = [System.IO.File]::OpenRead($file.FullName)
+                $output = $entry.Open()
+                try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
 }
 
 function New-TestSkillText {
@@ -223,6 +234,117 @@ Describe 'Skills source archive acquisition' {
                 -WorkingRoot $workingRoot
         } '.'
         Test-Path -LiteralPath $escapedPath | Should Be $false
+    }
+
+    # Scenario: A ZIP contains two names that collide on a case-insensitive target filesystem.
+    # Purpose: Reject ambiguous archives before extraction on every supported operating system.
+    It 'UnitT26_rejects_case_insensitive_archive_path_collisions' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'case-collision.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                foreach ($name in @('repository/File.txt','repository/file.txt')) {
+                    $entry = $archive.CreateEntry($name)
+                    $writer = New-Object System.IO.StreamWriter($entry.Open())
+                    try { $writer.Write($name) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{'source-a'=$archivePath} -WorkingRoot (Join-Path $TestDrive 'case-staging')
+        } 'case-insensitive path collision'
+    }
+
+    # Scenario: ZIP file paths differ only in the casing of an implicit parent directory.
+    # Purpose: Prevent two logical trees from merging on a case-insensitive target filesystem.
+    It 'UnitT26b_rejects_case_insensitive_parent_directory_collisions' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'parent-case-collision.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                foreach ($name in @('repository/Folder/first.txt','repository/folder/second.txt')) {
+                    $entry = $archive.CreateEntry($name)
+                    $writer = New-Object System.IO.StreamWriter($entry.Open())
+                    try { $writer.Write($name) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{'source-a'=$archivePath} -WorkingRoot (Join-Path $TestDrive 'parent-case-staging')
+        } 'case-insensitive path collision'
+    }
+
+    # Scenario: A ZIP contains a symbolic-link entry under its repository root.
+    # Purpose: Prevent link traversal and reparse-point behavior from escaping staged source boundaries.
+    It 'UnitT27_rejects_symbolic_link_archive_entries' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'symbolic-link.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                $entry = $archive.CreateEntry('repository/link')
+                $entry.ExternalAttributes = -1610612736
+                $writer = New-Object System.IO.StreamWriter($entry.Open())
+                try { $writer.Write('../outside') } finally { $writer.Dispose() }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{'source-a'=$archivePath} -WorkingRoot (Join-Path $TestDrive 'link-staging')
+        } 'symbolic link'
+    }
+
+    # Scenario: A ZIP contains more than one top-level repository root.
+    # Purpose: Make archive root selection deterministic instead of silently choosing one tree.
+    It 'UnitT28_rejects_archives_with_multiple_repository_roots' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'multiple-roots.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                foreach ($name in @('first/a.txt','second/b.txt')) {
+                    $entry = $archive.CreateEntry($name)
+                    $writer = New-Object System.IO.StreamWriter($entry.Open())
+                    try { $writer.Write($name) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{'source-a'=$archivePath} -WorkingRoot (Join-Path $TestDrive 'roots-staging')
+        } 'exactly one repository root'
     }
 
     # Scenario: The routing plan requires two sources but only one archive input is available.

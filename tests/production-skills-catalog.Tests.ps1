@@ -1,6 +1,7 @@
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $catalogPath = Join-Path $repositoryRoot 'catalog\skills-catalog.json'
 $sourcePinsPath = Join-Path $repositoryRoot 'catalog\skills-catalog.sources.json'
+$lockPath = Join-Path $repositoryRoot 'catalog\skills-catalog-lock.json'
 $contractModule = Join-Path $repositoryRoot 'scripts\skills-catalog-contract.psm1'
 
 Import-Module $contractModule -Force
@@ -8,7 +9,8 @@ Import-Module $contractModule -Force
 Describe 'production Skills Catalog' {
     BeforeAll {
         $script:catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
-        $script:pins = Get-Content -Raw -Encoding UTF8 -LiteralPath $sourcePinsPath | ConvertFrom-Json
+        $script:pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $sourcePinsPath -CatalogPath $catalogPath
+        $script:lock = Test-SkillsCatalogLockDocument -LockPath $lockPath -CatalogPath $catalogPath
     }
 
     It 'uses the four external Skill repositories as the only production sources' {
@@ -52,7 +54,7 @@ Describe 'production Skills Catalog' {
 
     It 'pins every production source to a full immutable commit' {
         $script:pins.schemaVersion | Should Be 1
-        [string]$script:pins.catalogId | Should Be [string]$script:catalog.catalogId
+        ([string]$script:pins.catalogId) | Should Be ([string]$script:catalog.catalogId)
         @($script:pins.sources).Count | Should Be @($script:catalog.sources).Count
 
         foreach ($source in @($script:catalog.sources)) {
@@ -62,6 +64,22 @@ Describe 'production Skills Catalog' {
             [string]$matches[0].requestedRefType | Should Be 'branch'
             [string]$matches[0].resolvedCommit | Should Match '^[0-9a-f]{40}$'
             [string]$matches[0].resolvedVersion | Should Not BeNullOrEmpty
+        }
+    }
+
+    # Scenario: The production catalog is distributed with its generated immutable lock.
+    # Purpose: Make installation reproducible from tracked bytes and give CI a stale-lock gate.
+    It 'InterT30_tracks_a_complete_lock_for_every_production_source_and_skill' {
+        Test-Path -LiteralPath $lockPath -PathType Leaf | Should Be $true
+        ([string]$script:lock.catalogId) | Should Be ([string]$script:catalog.catalogId)
+        @($script:lock.sources).Count | Should Be @($script:catalog.sources).Count
+        @($script:lock.skills).Count | Should Be @($script:catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' }).Count
+        foreach ($source in @($script:lock.sources)) {
+            [string]$source.resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            [string]$source.archiveSha256 | Should Match '^[0-9a-f]{64}$'
+        }
+        foreach ($skill in @($script:lock.skills)) {
+            [string]$skill.contentSha256 | Should Match '^[0-9a-f]{64}$'
         }
     }
 }

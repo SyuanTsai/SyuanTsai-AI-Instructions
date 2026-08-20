@@ -113,7 +113,7 @@ function Write-LockArrayFixture {
         excludedRepositoryPaths = @()
         catalog = [ordered]@{
             repository = 'https://github.com/example/catalog.git'
-            ref = 'main'
+            ref = ('d' * 40)
             profiles = @()
             includeSkills = @()
             excludeSkills = @()
@@ -173,7 +173,7 @@ Describe 'bootstrap-ai-instructions-multisource lock array enumeration' {
         $result = Invoke-LockFixtureBootstrap -Fixture $fixture
 
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match "source 'source-1' has no resolved lock entry"
+        $result.Output | Should Match 'Skills Catalog lock sources must contain at least one value'
         $result.Output | Should Not Match "missing required property 'id'"
     }
 }

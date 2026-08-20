@@ -43,13 +43,60 @@ function New-ComposedBootstrapArchive {
         New-Item -ItemType Directory -Path $destinationParent | Out-Null
     }
 
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $source,
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $archiveStream = [System.IO.File]::Open(
         $destination,
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $true
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
     )
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive(
+            $archiveStream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $false
+        )
+        try {
+            $rootName = [System.IO.Path]::GetFileName($source)
+            $null = $archive.CreateEntry("$rootName/")
+            foreach ($directory in @(Get-ChildItem -LiteralPath $source -Directory -Recurse -Force | Sort-Object FullName)) {
+                $relativePath = $directory.FullName.Substring($source.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $null = $archive.CreateEntry("$rootName/$relativePath/")
+            }
+            foreach ($file in @(Get-ChildItem -LiteralPath $source -File -Recurse -Force | Sort-Object FullName)) {
+                $relativePath = $file.FullName.Substring($source.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $entry = $archive.CreateEntry(
+                    "$rootName/$relativePath",
+                    [System.IO.Compression.CompressionLevel]::Optimal
+                )
+                $inputStream = [System.IO.File]::OpenRead($file.FullName)
+                try {
+                    $entryStream = $entry.Open()
+                    try {
+                        $inputStream.CopyTo($entryStream)
+                    }
+                    finally {
+                        $entryStream.Dispose()
+                    }
+                }
+                finally {
+                    $inputStream.Dispose()
+                }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    catch {
+        $archiveStream.Dispose()
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    finally {
+        $archiveStream.Dispose()
+    }
 
     return $destination
 }

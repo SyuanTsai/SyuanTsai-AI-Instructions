@@ -2,20 +2,18 @@
 
 ## Status
 
-The multi-source bootstrap is ready for the next phase: provisioning real external Skill repositories and migrating Skills into them.
-
-This document intentionally stops before creating any repository.
+This is the historical SYP-79 readiness contract. The four external Skill repositories are now provisioned and SYP-86 uses their immutable production pins. Current cutover and rollback gates are in `docs/syp-86-production-cutover.md`.
 
 ## Initial source inventory
 
-The runtime does not hard-code these IDs. They are the first planned Catalog sources:
+The runtime does not hard-code these IDs. They are the production Catalog sources:
 
 | Source ID | Domain |
 | --- | --- |
 | `general` | General reusable Agent Skills |
 | `code-collaboration` | Code collaboration / PR / implementation workflows |
 | `knowledge-content` | Knowledge and content capture workflows |
-| `atlassian-work-management` | Jira / Confluence / Atlassian work-management workflows |
+| `atlassian-ecosystem` | Jira / Confluence / Atlassian ecosystem workflows |
 
 Adding a fifth source must require only Catalog + Lock changes, not bootstrap code changes.
 
@@ -98,9 +96,9 @@ Before target mutation starts, the multi-source path now performs:
 7. safe Skill path and `SKILL.md` validation;
 8. deterministic Skill `contentSha256` validation;
 9. composition of AI-Instructions Instructions/Rules with only the selected external Skills;
-10. handoff to the existing mutation engine only after all preflight work succeeds.
+10. handoff to the mutation engine with immutable per-file provenance only after all preflight work succeeds.
 
-The existing mutation engine continues to protect customized/unmanaged files and retains current PersonalAgent stash and commit behavior during the migration phase.
+The mutation engine protects customized/unmanaged files, writes manifest v2 when invoked by the production wrapper, and preserves raw Skill bytes through non-allowlist PersonalAgent stash refreshes.
 
 ## Repository provisioning sequence
 
@@ -118,6 +116,6 @@ For each source repository:
 10. Run the multi-source bootstrap against fixtures / a disposable target repository.
 11. Only after verification, remove the migrated Skill copy from AI-Instructions.
 
-## Stop condition for SYP-79 pre-repository work
+## Historical stop condition for SYP-79 pre-repository work
 
 The pre-repository phase is complete when the next required operation is **creating the first external Skill repository**. Repository creation and physical Skill migration must occur as a separate, explicit step so source URLs and immutable pins are known before Catalog/Lock are finalized.

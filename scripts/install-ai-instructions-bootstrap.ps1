@@ -173,7 +173,13 @@ function Set-SyncConfiguration {
 
         [string[]] $AdditionalExcludedRepositoryUrls = @(),
 
-        [string[]] $AdditionalExcludedRepositoryPaths = @()
+        [string[]] $AdditionalExcludedRepositoryPaths = @(),
+
+        [Parameter(Mandatory = $true)]
+        [string] $CatalogRepository,
+
+        [Parameter(Mandatory = $true)]
+        [string] $CatalogRef
     )
 
     $existingConfiguration = $null
@@ -184,6 +190,19 @@ function Set-SyncConfiguration {
         catch {
             throw "AI instruction sync configuration is not valid JSON: $ConfigurationPath"
         }
+    }
+
+    $existingSchemaVersion = if ($null -eq $existingConfiguration) {
+        $null
+    }
+    elseif (Test-ObjectHasProperty -Object $existingConfiguration -PropertyName 'schemaVersion') {
+        [int]$existingConfiguration.schemaVersion
+    }
+    else {
+        throw "AI instruction sync configuration is missing schemaVersion: $ConfigurationPath"
+    }
+    if ($null -ne $existingSchemaVersion -and $existingSchemaVersion -notin @(1, 2, 3)) {
+        throw "Unsupported AI instruction sync configuration schemaVersion '$existingSchemaVersion': $ConfigurationPath"
     }
 
     $candidateUrls = New-Object System.Collections.Generic.List[string]
@@ -240,13 +259,76 @@ function Set-SyncConfiguration {
             Sort-Object -Unique
     )
 
+    $catalogSelection = if ($existingSchemaVersion -eq 3) {
+        if (-not (Test-ObjectHasProperty -Object $existingConfiguration -PropertyName 'catalog')) {
+            throw "AI instruction sync configuration schemaVersion 3 is missing catalog: $ConfigurationPath"
+        }
+        foreach ($propertyName in @('repository','ref','profiles','includeSkills','excludeSkills')) {
+            if (-not (Test-ObjectHasProperty -Object $existingConfiguration.catalog -PropertyName $propertyName)) {
+                throw "AI instruction sync configuration catalog is missing '$propertyName': $ConfigurationPath"
+            }
+        }
+
+        $catalogRepositoryUri = $null
+        if (-not [System.Uri]::TryCreate([string]$existingConfiguration.catalog.repository, [System.UriKind]::Absolute, [ref]$catalogRepositoryUri) -or
+            $catalogRepositoryUri.Scheme -cne 'https' -or
+            [string]::IsNullOrWhiteSpace($catalogRepositoryUri.Host)) {
+            throw "AI instruction sync configuration catalog.repository must be an absolute HTTPS URL: $ConfigurationPath"
+        }
+        if ([string]$existingConfiguration.catalog.ref -cnotmatch '^[0-9a-f]{40}$') {
+            throw "AI instruction sync configuration catalog.ref must be a full lowercase 40-character commit SHA: $ConfigurationPath"
+        }
+
+        $selectionSets = @{}
+        foreach ($propertyName in @('profiles','includeSkills','excludeSkills')) {
+            $propertyValue = $existingConfiguration.catalog.$propertyName
+            if ($propertyValue -isnot [System.Array]) {
+                throw "AI instruction sync configuration catalog.$propertyName must be an array: $ConfigurationPath"
+            }
+
+            $selectionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            foreach ($value in @($propertyValue)) {
+                if ($value -isnot [string] -or [string]$value -cnotmatch '^[a-z0-9][a-z0-9-]*$') {
+                    throw "AI instruction sync configuration catalog.$propertyName contains an invalid ID: $ConfigurationPath"
+                }
+                if (-not $selectionSet.Add([string]$value)) {
+                    throw "AI instruction sync configuration catalog.$propertyName contains a duplicate ID: $ConfigurationPath"
+                }
+            }
+            $selectionSets[$propertyName] = $selectionSet
+        }
+        foreach ($skillId in $selectionSets['includeSkills']) {
+            if ($selectionSets['excludeSkills'].Contains($skillId)) {
+                throw "AI instruction sync configuration includes and excludes the same Skill '$skillId': $ConfigurationPath"
+            }
+        }
+
+        [ordered]@{
+            repository = [string]$existingConfiguration.catalog.repository
+            ref = [string]$existingConfiguration.catalog.ref
+            profiles = @(Get-StringArrayProperty -Object $existingConfiguration.catalog -PropertyName 'profiles')
+            includeSkills = @(Get-StringArrayProperty -Object $existingConfiguration.catalog -PropertyName 'includeSkills')
+            excludeSkills = @(Get-StringArrayProperty -Object $existingConfiguration.catalog -PropertyName 'excludeSkills')
+        }
+    }
+    else {
+        [ordered]@{
+            repository = $CatalogRepository
+            ref = $CatalogRef
+            profiles = @('core')
+            includeSkills = @()
+            excludeSkills = @()
+        }
+    }
+
     $configuration = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         autoCommitRepositoryUrls = @($repositoryUrls)
         excludedRepositoryUrls = @($excludedRepositoryUrls)
         excludedRepositoryPaths = @($excludedRepositoryPaths)
+        catalog = $catalogSelection
     }
-    $configurationJson = ($configuration | ConvertTo-Json -Depth 4).Replace("`r`n", "`n") + "`n"
+    $configurationJson = ($configuration | ConvertTo-Json -Depth 8).Replace("`r`n", "`n") + "`n"
     Write-Utf8NoBomFile -Path $ConfigurationPath -Content $configurationJson
 
     Get-Content -Raw -LiteralPath $ConfigurationPath | ConvertFrom-Json | Out-Null
@@ -318,15 +400,38 @@ function Remove-BootstrapSessionStartHook {
     Get-Content -Raw -LiteralPath $HooksPath | ConvertFrom-Json | Out-Null
 }
 
+function Get-CanonicalGitHubRepositoryUrl {
+    param([Parameter(Mandatory = $true)][string] $RepositoryUrl)
+
+    $value = $RepositoryUrl.Trim()
+    $owner = $null
+    $repositoryName = $null
+    if ($value -match '^(?:https|ssh|git)://(?:[^@/]+@)?github\.com/(?<Owner>[^/]+)/(?<Repository>[^/]+?)(?:\.git)?/?$') {
+        $owner = $Matches.Owner
+        $repositoryName = $Matches.Repository
+    }
+    elseif ($value -match '^(?:[^@/]+@)?github\.com:(?<Owner>[^/]+)/(?<Repository>[^/]+?)(?:\.git)?$') {
+        $owner = $Matches.Owner
+        $repositoryName = $Matches.Repository
+    }
+    else {
+        throw "The installer repository origin must be hosted on GitHub: $RepositoryUrl"
+    }
+
+    return "https://github.com/$owner/$repositoryName.git"
+}
+
 if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $resolvedRoot = Invoke-Git -WorkingDirectory (Get-Location).Path -Arguments @('rev-parse', '--show-toplevel')
     $RepositoryRoot = ($resolvedRoot | Select-Object -First 1).Trim()
 }
 
 $repositoryRootPath = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([char[]]@('\', '/'))
-$sourceBootstrapScript = Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions.ps1'
-if (-not (Test-Path -LiteralPath $sourceBootstrapScript -PathType Leaf)) {
-    throw "Bootstrap script was not found: $sourceBootstrapScript"
+$originUrl = (Invoke-Git -WorkingDirectory $repositoryRootPath -Arguments @('remote','get-url','origin') | Select-Object -First 1).Trim()
+$catalogRepository = Get-CanonicalGitHubRepositoryUrl -RepositoryUrl $originUrl
+$catalogRef = (Invoke-Git -WorkingDirectory $repositoryRootPath -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+if ($catalogRef -cnotmatch '^[0-9a-f]{40}$') {
+    throw "Installer repository HEAD is not a full lowercase commit SHA: $catalogRef"
 }
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
@@ -341,17 +446,49 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
 $codexHomePath = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd([char[]]@('\', '/'))
 $hookDirectory = Join-Path $codexHomePath 'hooks'
 $hookScript = Join-Path $hookDirectory 'bootstrap-ai-instructions.ps1'
+$runtimeDirectory = Join-Path $hookDirectory 'ai-instructions-runtime'
 $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 
-New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
-Copy-Item -LiteralPath $sourceBootstrapScript -Destination $hookScript -Force
-
 Set-SyncConfiguration -ConfigurationPath $configurationPath `
     -AdditionalRepositoryUrls $AutoCommitRepositoryUrls `
     -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls `
-    -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths
+    -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths `
+    -CatalogRepository $catalogRepository `
+    -CatalogRef $catalogRef
+
+$sourceLauncher = Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions-installed.ps1'
+$runtimeFiles = @(
+    'bootstrap-ai-instructions-multisource.ps1',
+    'bootstrap-ai-instructions.ps1',
+    'safe-zip.psm1',
+    'skills-catalog-contract.psm1',
+    'skills-selection.psm1',
+    'skills-source-routing.psm1',
+    'skills-source-retrieval.psm1',
+    'skills-source-acquisition.psm1',
+    'skills-source-composition.psm1'
+)
+$requiredSourcePaths = @($sourceLauncher)
+foreach ($fileName in $runtimeFiles) {
+    $requiredSourcePaths += Join-Path $repositoryRootPath "scripts\$fileName"
+}
+$requiredSourcePaths += Join-Path $repositoryRootPath 'catalog\skills-catalog.json'
+$requiredSourcePaths += Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json'
+foreach ($sourcePath in $requiredSourcePaths) {
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        throw "Installer runtime source was not found: $sourcePath"
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $hookDirectory, $runtimeDirectory, (Join-Path $runtimeDirectory 'catalog') | Out-Null
+Copy-Item -LiteralPath $sourceLauncher -Destination $hookScript -Force
+foreach ($fileName in $runtimeFiles) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRootPath "scripts\$fileName") -Destination (Join-Path $runtimeDirectory $fileName) -Force
+}
+Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $runtimeDirectory 'catalog\skills-catalog.json') -Force
+Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $runtimeDirectory 'catalog\skills-catalog-lock.json') -Force
 Set-BootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
 Remove-BootstrapSessionStartHook -HooksPath $hooksPath
 

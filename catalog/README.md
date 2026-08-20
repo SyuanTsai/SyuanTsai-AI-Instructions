@@ -1,15 +1,16 @@
 # Agent Skills Catalog contract
 
-本目錄定義 AI Instructions Repository、獨立 Agent Skills Catalog Repository 與目標 Repository 之間的 P0 穩定契約。這些檔案是後續 resolver、下載、manifest migration 與 installer 工作的輸入；目前的 bootstrap 仍維持既有單一來源行為，直到後續任務完成整合。
+本目錄定義 AI Instructions Repository、外部 Agent Skills repositories 與目標 Repository 之間的 production 契約。Installer 與 multi-source bootstrap 已直接使用這些 checked-in schemas、source pins、Catalog 與 immutable lock。
 
 ## 文件責任
 
 | 文件 | Schema | 責任 |
 | --- | ---: | --- |
 | Skills Catalog | 1 | 宣告可用來源、穩定 Skill ID、群組、profiles、compatibility、dependencies 與 lifecycle。不得包含已解析 commit 或目標 Repository 的安裝狀態。 |
+| Catalog source pins | 1 | 記錄維護者選定的 requested ref、完整 resolved commit 與顯示版本，供 lock generator 重現與 stale-check。 |
 | Catalog lock | 1 | 將 catalog 及每個來源的 branch／tag／commit ref 解析成完整 commit SHA，並記錄 archive 與 Skill 內容 hash。不得包含個人 profile 選擇。 |
 | Managed manifest | 2 | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
-| Personal sync configuration | 3 | 記錄個人 allowlist／exclusions、Catalog 位置與 ref、啟用 profiles，以及個別 Skill include／exclude。不得記錄 resolved SHA 或受管理檔案。 |
+| Personal sync configuration | 3 | 記錄個人 allowlist／exclusions、Catalog HTTPS 位置與完整 commit SHA、啟用 profiles，以及個別 Skill include／exclude。不得記錄受管理檔案。 |
 
 正式 schema 位於 [`schemas/`](schemas/)，去識別化、可通過 parser 的完整文件位於 [`examples/`](examples/)。`scripts/skills-catalog-contract.psm1` 負責 PowerShell 5.1 相容的跨文件驗證；JSON Schema 負責標準工具可讀的結構契約，parser 另外驗證 stable ID、交叉引用、重複值與安全路徑。
 
@@ -70,11 +71,11 @@ Skill entry 的 source 與 target 必須維持 `.agents/skills/<artifactId>/...`
 
 ## 個人設定 schema v3 與升級
 
-Installer 後續必須將 schema v2 idempotent 升級為 v3：
+Installer 會將 schema v1／v2 idempotent 升級為 v3：
 
 - 原樣保留合法的 `autoCommitRepositoryUrls`、`excludedRepositoryUrls` 與 `excludedRepositoryPaths`。
-- 新增 `catalog` object；安全預設為 Catalog 的 pinned release、`profiles = ["core"]`、空的 `includeSkills` 與 `excludeSkills`。
+- 新增 `catalog` object；安全預設為目前安裝 commit、`profiles = ["core"]`、空的 `includeSkills` 與 `excludeSkills`。`catalog.ref` 必須是完整小寫 commit SHA。
 - 已是 schema v3 時不得重排或改寫個人選擇；缺少必要欄位、未知 schema 或同一 Skill 同時 include/exclude 時停止並回報。
 - 真實私人 Repository URL 只存在個人設定；本 Repository 的 schema、examples、tests 一律使用 `example.com`、`example.org` 或 `example.test`。
 
-Config migration、resolver 與 bootstrap wiring 分別由後續 P0 任務實作。本契約不建立外部 Repository、不搬移 Skill，也不改變目前 manifest v1 的執行路徑。
+Production wrapper 已完成 config validation、selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Legacy mutation entry point 只為直接呼叫 regression compatibility 保留；安裝後入口不再走單一來源路徑。

@@ -27,13 +27,21 @@ function Assert-ThrowsMessage {
 function Compress-TestDirectory {
     param([string]$SourceRoot,[string]$ArchivePath)
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        [System.IO.Path]::GetFullPath($SourceRoot),
-        [System.IO.Path]::GetFullPath($ArchivePath),
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $true
-    )
+    Add-Type -AssemblyName System.IO.Compression
+    $resolvedSource=[System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
+    $stream=[System.IO.File]::Open([System.IO.Path]::GetFullPath($ArchivePath),[System.IO.FileMode]::CreateNew)
+    try{
+        $archive=New-Object System.IO.Compression.ZipArchive($stream,[System.IO.Compression.ZipArchiveMode]::Create,$false)
+        try{
+            $rootName=Split-Path -Leaf $resolvedSource
+            foreach($file in @(Get-ChildItem -LiteralPath $resolvedSource -Recurse -Force -File|Sort-Object FullName)){
+                $relativePath=$file.FullName.Substring($resolvedSource.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $entry=$archive.CreateEntry("$rootName/$relativePath",[System.IO.Compression.CompressionLevel]::Optimal)
+                $input=[System.IO.File]::OpenRead($file.FullName);$output=$entry.Open()
+                try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
+            }
+        }finally{$archive.Dispose()}
+    }finally{$stream.Dispose()}
 }
 function New-TestInstructionArchive {
     param([string]$Root,[string]$ArchivePath)
@@ -48,12 +56,16 @@ function New-TestInstructionArchive {
     Compress-TestDirectory -SourceRoot $repositoryRoot -ArchivePath $ArchivePath
 }
 function New-TestSkillArchive {
-    param([string]$Root,[string]$ArchivePath)
+    param(
+        [string]$Root,
+        [string]$ArchivePath,
+        [string]$Marker = 'Selected external fixture skill.'
+    )
     $repositoryRoot=Join-Path $Root 'external-skills-aaaaaaaa'
     $skillRoot=Join-Path $repositoryRoot '.agents\skills\skill-a'
     Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $skillRoot|Out-Null
-    Set-TestUtf8Text (Join-Path $skillRoot 'SKILL.md') "---`nname: skill-a`ndescription: Selected external fixture skill.`n---`n`n# Skill A`n"
+    Set-TestUtf8Text (Join-Path $skillRoot 'SKILL.md') "---`nname: skill-a`ndescription: $Marker`n---`n`n# Skill A`n"
     $contentHash=Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
     Compress-TestDirectory -SourceRoot $repositoryRoot -ArchivePath $ArchivePath
     return [pscustomobject]@{ArchivePath=$ArchivePath;ArchiveSha256=(Get-TestFileSha256 $ArchivePath);ContentSha256=$contentHash}
@@ -80,10 +92,29 @@ function New-TestDocuments {
         skills=@([ordered]@{id='skill-a';sourceId='source-a';sourcePath='.agents/skills/skill-a';contentSha256=$SkillArchive.ContentSha256})
     }
     Set-TestUtf8Text $LockPath (($lock|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
-    if($MissingSelectionArrays){$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref='main';profiles=@()}}
-    else{$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref='main';profiles=@();includeSkills=@('skill-a');excludeSkills=@()}}
+    if($MissingSelectionArrays){$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref=('c'*40);profiles=@()}}
+    else{$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref=('c'*40);profiles=@();includeSkills=@('skill-a');excludeSkills=@()}}
     $configuration=[ordered]@{schemaVersion=3;autoCommitRepositoryUrls=@($script:TestRepositoryUrl);excludedRepositoryUrls=@();excludedRepositoryPaths=@();catalog=$catalogSelection}
     Set-TestUtf8Text $ConfigurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+}
+
+function Convert-TestTargetManifestToV1 {
+    param([string]$TargetRoot)
+    $manifestPath=Join-Path $TargetRoot '.codex\ai-instructions.manifest.json'
+    $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+    $legacy=[ordered]@{
+        schemaVersion=1
+        sourceRepository='https://github.com/example/catalog.git'
+        sourceRef='main'
+        files=@(
+            foreach($entry in @($manifest.files)){
+                [ordered]@{sourcePath=[string]$entry.sourcePath;targetPath=[string]$entry.targetPath;sha256=[string]$entry.sha256}
+            }
+        )
+    }
+    Set-TestUtf8Text $manifestPath ($legacy|ConvertTo-Json -Depth 20)
+    Invoke-TestGit $TargetRoot @('add','--force','--','.codex/ai-instructions.manifest.json')|Out-Null
+    Invoke-TestGit $TargetRoot @('commit','--quiet','-m','legacy manifest fixture')|Out-Null
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
@@ -96,13 +127,24 @@ Describe 'bootstrap-ai-instructions-multisource' {
         New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
         New-TestTargetRepository $targetRoot
 
-        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
+        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceRepository 'https://github.com/example/catalog.git' -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
 
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim()|Should Be '# Codex Base'
         Test-Path (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md')|Should Be $true
         Test-Path (Join-Path $targetRoot '.agents\skills\legacy-skill')|Should Be $false
         (Get-Content -Raw (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md'))|Should Match 'Selected external fixture skill'
         Test-Path (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $true
+        $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|ConvertFrom-Json
+        $manifest.schemaVersion|Should Be 2
+        [string]$manifest.catalogId|Should Be 'multisource-smoke'
+        [string]$manifest.lockSha256|Should Be (Get-TestFileSha256 $lockPath)
+        @($manifest.files|Where-Object {$_.artifactType -eq 'skill'}).Count|Should Be 1
+        $skillEntry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
+        [string]$skillEntry.artifactId|Should Be 'skill-a'
+        [string]$skillEntry.sourceId|Should Be 'source-a'
+        [string]$skillEntry.sourceRepository|Should Be 'https://github.com/example/source-a.git'
+        [string]$skillEntry.sourceCommit|Should Be ('a'*40)
+        [string]$skillEntry.sourceVersion|Should Be 'test'
         (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: add shared AI instructions'
         @(Invoke-TestGit $targetRoot @('status','--porcelain')).Count|Should Be 0
     }
@@ -158,5 +200,114 @@ Describe 'bootstrap-ai-instructions-multisource' {
         try{& $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -SourceArchivePaths @{'source-a'=$skillArchivePath} -InstructionSourceArchivePath $missingInstructionArchive}catch{$thrown=$true;$message=$_.Exception.Message}
         $thrown|Should Be $true
         $message|Should Match "missing required property 'includeSkills'"
+    }
+
+    # Scenario: A target still has a schema-v1 manifest and every managed byte is unchanged.
+    # Purpose: Permit one safe migration to per-file schema-v2 provenance.
+    It 'InterT30_migrates_an_unchanged_v1_manifest_to_v2' {
+        $catalogPath=Join-Path $TestDrive 'migration-catalog.json';$lockPath=Join-Path $TestDrive 'migration-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'migration-sync-config.json';$instructionArchive=Join-Path $TestDrive 'migration-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'migration-source.zip';$targetRoot=Join-Path $TestDrive 'migration-target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'migration-instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'migration-skill-root') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        New-TestTargetRepository $targetRoot
+        $arguments=@{CatalogPath=$catalogPath;LockPath=$lockPath;ConfigurationPath=$configurationPath;InstructionSourceArchivePath=$instructionArchive;InstructionSourceCommit=('c'*40);SourceArchivePaths=@{'source-a'=$skillArchivePath};TargetRoot=$targetRoot}
+        & $script:BootstrapScript @arguments
+        Convert-TestTargetManifestToV1 -TargetRoot $targetRoot
+
+        & $script:BootstrapScript @arguments
+
+        $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|ConvertFrom-Json
+        $manifest.schemaVersion|Should Be 2
+        @($manifest.files|Where-Object {$_.sourceCommit -eq ('a'*40)}).Count|Should Be 1
+        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: sync shared AI instructions'
+    }
+
+    # Scenario: A schema-v1 target contains a locally customized managed Skill.
+    # Purpose: Stop before migration because v1 cannot prove the historical per-file source commit.
+    It 'InterT35_rejects_v1_migration_when_a_managed_file_is_customized' {
+        $catalogPath=Join-Path $TestDrive 'custom-catalog.json';$lockPath=Join-Path $TestDrive 'custom-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'custom-sync-config.json';$instructionArchive=Join-Path $TestDrive 'custom-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'custom-source.zip';$targetRoot=Join-Path $TestDrive 'custom-target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'custom-instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-skill-root') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        New-TestTargetRepository $targetRoot
+        $arguments=@{CatalogPath=$catalogPath;LockPath=$lockPath;ConfigurationPath=$configurationPath;InstructionSourceArchivePath=$instructionArchive;InstructionSourceCommit=('c'*40);SourceArchivePaths=@{'source-a'=$skillArchivePath};TargetRoot=$targetRoot}
+        & $script:BootstrapScript @arguments
+        Convert-TestTargetManifestToV1 -TargetRoot $targetRoot
+        $skillPath=Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md'
+        Set-TestUtf8Text $skillPath 'locally customized'
+        $headBefore=(@(Invoke-TestGit $targetRoot @('rev-parse','HEAD')) -join '').Trim()
+        $manifestBefore=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')
+
+        Assert-ThrowsMessage { & $script:BootstrapScript @arguments } 'Cannot migrate managed manifest v1.*customized'
+
+        (Get-Content -Raw $skillPath)|Should Be 'locally customized'
+        (Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json'))|Should Be $manifestBefore
+        (@(Invoke-TestGit $targetRoot @('rev-parse','HEAD')) -join '').Trim()|Should Be $headBefore
+    }
+
+    # Scenario: An existing schema-v2 target selects a new immutable source commit and content lock.
+    # Purpose: Use historical per-file provenance for customization checks, then safely advance the file and root lock provenance.
+    It 'InterT40_updates_an_unchanged_v2_managed_skill_to_a_new_pin' {
+        $catalogPath=Join-Path $TestDrive 'pin-catalog.json';$lockPath=Join-Path $TestDrive 'pin-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'pin-sync-config.json';$instructionArchive=Join-Path $TestDrive 'pin-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'pin-source-v1.zip';$targetRoot=Join-Path $TestDrive 'pin-target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'pin-instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'pin-skill-root-v1') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        New-TestTargetRepository $targetRoot
+        $arguments=@{CatalogPath=$catalogPath;LockPath=$lockPath;ConfigurationPath=$configurationPath;InstructionSourceArchivePath=$instructionArchive;InstructionSourceCommit=('c'*40);SourceArchivePaths=@{'source-a'=$skillArchivePath};TargetRoot=$targetRoot}
+        & $script:BootstrapScript @arguments
+
+        $newArchivePath=Join-Path $TestDrive 'pin-source-v2.zip'
+        $newArchive=New-TestSkillArchive (Join-Path $TestDrive 'pin-skill-root-v2') $newArchivePath -Marker 'Selected external fixture skill v2.'
+        $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
+        @($lock.sources)[0].resolvedCommit=('b'*40)
+        @($lock.sources)[0].resolvedVersion='test-v2'
+        @($lock.sources)[0].archiveSha256=$newArchive.ArchiveSha256
+        @($lock.skills)[0].contentSha256=$newArchive.ContentSha256
+        Set-TestUtf8Text $lockPath ($lock|ConvertTo-Json -Depth 20)
+        $arguments.SourceArchivePaths=@{'source-a'=$newArchivePath}
+
+        & $script:BootstrapScript @arguments
+
+        (Get-Content -Raw (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md'))|Should Match 'fixture skill v2'
+        $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|ConvertFrom-Json
+        [string]$manifest.lockSha256|Should Be (Get-TestFileSha256 $lockPath)
+        $entry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
+        [string]$entry.sourceCommit|Should Be ('b'*40)
+        [string]$entry.sourceVersion|Should Be 'test-v2'
+        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: sync shared AI instructions'
+    }
+
+    # Scenario: A schema-v2 target has a customized managed Skill when the selected source advances.
+    # Purpose: Keep the customized bytes and their historical provenance while advancing the root lock for other managed artifacts.
+    It 'InterT45_preserves_a_customized_v2_skill_across_a_pin_update' {
+        $catalogPath=Join-Path $TestDrive 'custom-pin-catalog.json';$lockPath=Join-Path $TestDrive 'custom-pin-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'custom-pin-sync-config.json';$instructionArchive=Join-Path $TestDrive 'custom-pin-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'custom-pin-source-v1.zip';$targetRoot=Join-Path $TestDrive 'custom-pin-target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'custom-pin-instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v1') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        New-TestTargetRepository $targetRoot
+        $arguments=@{CatalogPath=$catalogPath;LockPath=$lockPath;ConfigurationPath=$configurationPath;InstructionSourceArchivePath=$instructionArchive;InstructionSourceCommit=('c'*40);SourceArchivePaths=@{'source-a'=$skillArchivePath};TargetRoot=$targetRoot}
+        & $script:BootstrapScript @arguments
+        $skillPath=Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md'
+        Set-TestUtf8Text $skillPath 'locally customized v2 skill'
+
+        $newArchivePath=Join-Path $TestDrive 'custom-pin-source-v2.zip'
+        $newArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v2') $newArchivePath -Marker 'Selected external fixture skill v2.'
+        $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
+        @($lock.sources)[0].resolvedCommit=('b'*40)
+        @($lock.sources)[0].resolvedVersion='test-v2'
+        @($lock.sources)[0].archiveSha256=$newArchive.ArchiveSha256
+        @($lock.skills)[0].contentSha256=$newArchive.ContentSha256
+        Set-TestUtf8Text $lockPath ($lock|ConvertTo-Json -Depth 20)
+        $arguments.SourceArchivePaths=@{'source-a'=$newArchivePath}
+
+        & $script:BootstrapScript @arguments
+
+        (Get-Content -Raw $skillPath)|Should Be 'locally customized v2 skill'
+        $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|ConvertFrom-Json
+        [string]$manifest.lockSha256|Should Be (Get-TestFileSha256 $lockPath)
+        $entry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
+        [string]$entry.sourceCommit|Should Be ('a'*40)
+        [string]$entry.sourceVersion|Should Be 'test'
+        (@(Invoke-TestGit $targetRoot @('status','--porcelain','.agents/skills/skill-a/SKILL.md')) -join '')|Should Match 'SKILL.md'
     }
 }

@@ -42,7 +42,7 @@
         },
         "ref": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[0-9a-f]{40}$"
         },
         "profiles": {
           "$ref": "#/$defs/stableIdArray"
