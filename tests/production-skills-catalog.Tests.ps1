@@ -1,0 +1,67 @@
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$catalogPath = Join-Path $repositoryRoot 'catalog\skills-catalog.json'
+$sourcePinsPath = Join-Path $repositoryRoot 'catalog\skills-catalog.sources.json'
+$contractModule = Join-Path $repositoryRoot 'scripts\skills-catalog-contract.psm1'
+
+Import-Module $contractModule -Force
+
+Describe 'production Skills Catalog' {
+    BeforeAll {
+        $script:catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
+        $script:pins = Get-Content -Raw -Encoding UTF8 -LiteralPath $sourcePinsPath | ConvertFrom-Json
+    }
+
+    It 'uses the four external Skill repositories as the only production sources' {
+        $expected = @(
+            'atlassian-ecosystem',
+            'code-collaboration',
+            'general',
+            'knowledge-content'
+        )
+        @($script:catalog.sources.id | Sort-Object) | Should Be $expected
+        @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should Be 0
+    }
+
+    It 'maps all ten migrated Skills to external sources' {
+        @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' }).Count | Should Be 10
+
+        $expectedSourceBySkill = @{
+            'plan-production-change' = 'general'
+            'verify-data-access-performance' = 'general'
+            'investigate-datadog-logs' = 'general'
+            'search-with-felo' = 'general'
+            'write-copilot-implementation-prompt' = 'code-collaboration'
+            'capture-private-course-knowledge' = 'knowledge-content'
+            'configure-jira-api-access' = 'atlassian-ecosystem'
+            'publish-requirements-to-confluence' = 'atlassian-ecosystem'
+            'review-bitbucket-pull-request' = 'atlassian-ecosystem'
+            'work-with-jira' = 'atlassian-ecosystem'
+        }
+
+        foreach ($skill in @($script:catalog.skills)) {
+            $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should Be $true
+            [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
+            [string]$skill.source.path | Should Be ".agents/skills/$($skill.id)"
+        }
+    }
+
+    It 'keeps core as the only default profile' {
+        @($script:catalog.profiles | Where-Object { $_.default -eq $true }).Count | Should Be 1
+        [string]@($script:catalog.profiles | Where-Object { $_.default -eq $true })[0].id | Should Be 'core'
+    }
+
+    It 'pins every production source to a full immutable commit' {
+        $script:pins.schemaVersion | Should Be 1
+        [string]$script:pins.catalogId | Should Be [string]$script:catalog.catalogId
+        @($script:pins.sources).Count | Should Be @($script:catalog.sources).Count
+
+        foreach ($source in @($script:catalog.sources)) {
+            $matches = @($script:pins.sources | Where-Object { [string]$_.id -eq [string]$source.id })
+            $matches.Count | Should Be 1
+            [string]$matches[0].requestedRef | Should Be 'main'
+            [string]$matches[0].requestedRefType | Should Be 'branch'
+            [string]$matches[0].resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            [string]$matches[0].resolvedVersion | Should Not BeNullOrEmpty
+        }
+    }
+}
