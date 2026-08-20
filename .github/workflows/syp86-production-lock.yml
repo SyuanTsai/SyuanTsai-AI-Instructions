@@ -29,22 +29,26 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate-lock:
-    name: Validate production lock (${{ matrix.runtime_name }})
+  validate-lock-windows-powershell:
+    name: Validate production lock (Windows PowerShell 5.1)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runtime_name: Windows PowerShell 5.1
-            shell: powershell
-          - runtime_name: PowerShell 7
-            shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Validate checked-in lock
-        shell: ${{ matrix.shell }}
+        shell: powershell
+        run: |
+          ./scripts/update-skills-catalog-lock.ps1 -Check
+
+  validate-lock-powershell:
+    name: Validate production lock (PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate checked-in lock
+        shell: pwsh
         run: |
           ./scripts/update-skills-catalog-lock.ps1 -Check
