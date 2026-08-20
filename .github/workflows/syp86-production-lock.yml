@@ -1,0 +1,42 @@
+name: SYP86 Production Lock
+
+on:
+  push:
+    branches:
+      - syp-86
+    paths:
+      - 'catalog/skills-catalog.json'
+      - 'catalog/skills-catalog.sources.json'
+      - 'scripts/update-skills-catalog-lock.ps1'
+      - 'scripts/skills-catalog-contract.psm1'
+      - 'scripts/skills-source-retrieval.psm1'
+      - 'scripts/skills-source-acquisition.psm1'
+      - '.github/workflows/syp86-production-lock.yml'
+  workflow_dispatch:
+
+jobs:
+  generate-lock:
+    name: Generate production Skills Catalog lock
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate lock
+        shell: pwsh
+        run: |
+          ./scripts/update-skills-catalog-lock.ps1
+
+      - name: Emit generated lock
+        shell: pwsh
+        run: |
+          Write-Host '===SYP86_LOCK_BEGIN==='
+          Get-Content -Raw -LiteralPath ./catalog/skills-catalog-lock.json
+          Write-Host '===SYP86_LOCK_END==='
+
+      - name: Upload generated lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: syp86-production-lock
+          path: catalog/skills-catalog-lock.json
+          if-no-files-found: error
