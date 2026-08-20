@@ -29,25 +29,6 @@ Import-Module (Join-Path $scriptRoot 'skills-source-retrieval.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-acquisition.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'safe-zip.psm1') -Force
 
-function Read-JsonDocument {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string] $Name
-    )
-
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-        throw "$Name does not exist: $fullPath"
-    }
-
-    try {
-        return Get-Content -Raw -Encoding UTF8 -LiteralPath $fullPath | ConvertFrom-Json
-    }
-    catch {
-        throw "$Name is not valid JSON: $fullPath. $($_.Exception.Message)"
-    }
-}
-
 function Get-RawSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -83,57 +64,6 @@ function Write-Utf8NoBom {
         $Content,
         (New-Object System.Text.UTF8Encoding($false))
     )
-}
-
-function Assert-SourcePins {
-    param(
-        [Parameter(Mandatory = $true)][object] $Pins,
-        [Parameter(Mandatory = $true)][object] $Catalog
-    )
-
-    if ($Pins.schemaVersion -ne 1) {
-        throw "Unsupported Skills Catalog source pins schemaVersion '$($Pins.schemaVersion)'; expected 1."
-    }
-    if ([string]$Pins.catalogId -ne [string]$Catalog.catalogId) {
-        throw 'Skills Catalog source pins catalogId does not match the Catalog.'
-    }
-
-    $catalogSources = @{}
-    foreach ($source in @($Catalog.sources)) {
-        $catalogSources[[string]$source.id] = $source
-    }
-
-    $pinsById = @{}
-    foreach ($pin in @($Pins.sources)) {
-        $id = [string]$pin.id
-        if ([string]::IsNullOrWhiteSpace($id) -or $pinsById.ContainsKey($id)) {
-            throw "Duplicate or empty Skills Catalog source pin ID: $id"
-        }
-        if (-not $catalogSources.ContainsKey($id)) {
-            throw "Skills Catalog source pins reference unknown source '$id'."
-        }
-        if ([string]$pin.requestedRefType -notin @('branch', 'tag', 'commit')) {
-            throw "Unsupported requestedRefType '$($pin.requestedRefType)' for source '$id'."
-        }
-        if ([string]$pin.resolvedCommit -cnotmatch '^[0-9a-f]{40}$') {
-            throw "Source '$id' resolvedCommit must be a full 40-character commit SHA."
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$pin.requestedRef)) {
-            throw "Source '$id' requestedRef must be non-empty."
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$pin.resolvedVersion)) {
-            throw "Source '$id' resolvedVersion must be non-empty."
-        }
-        $pinsById[$id] = $pin
-    }
-
-    foreach ($id in $catalogSources.Keys) {
-        if (-not $pinsById.ContainsKey([string]$id)) {
-            throw "Skills Catalog source '$id' has no source pin."
-        }
-    }
-
-    return $pinsById
 }
 
 $catalog = Test-SkillsCatalogDocument -CatalogPath $CatalogPath

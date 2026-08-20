@@ -185,6 +185,32 @@ Describe 'Skills source archive acquisition' {
         Assert-ThrowsMessage { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$alpha.ArchivePath; 'source-b'=$beta.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'staging') } 'archive SHA-256 mismatch'
     }
 
+    # Scenario: A ZIP entry uses a lowercase Windows reserved device name with a file extension.
+    # Purpose: Reject device aliases in every casing before extraction on Windows or another operating system.
+    It 'UnitT24_rejects_lowercase_Windows_device_names' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'lowercase-device-name.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                $entry = $archive.CreateEntry('repository/nul.txt')
+                $writer = New-Object System.IO.StreamWriter($entry.Open())
+                try { $writer.Write('must not extract') } finally { $writer.Dispose() }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{'source-a'=$archivePath} -WorkingRoot (Join-Path $TestDrive 'device-staging')
+        } 'Windows device name'
+    }
+
     # Scenario: A hash-pinned source archive contains an entry that traverses above its assigned staging directory.
     # Purpose: Verify archive extraction fails closed without writing attacker-controlled content outside the source boundary.
     It 'UnitT25_rejects_archive_path_traversal_without_staging_escape' {
@@ -266,7 +292,7 @@ Describe 'Skills source archive acquisition' {
 
     # Scenario: ZIP file paths differ only in the casing of an implicit parent directory.
     # Purpose: Prevent two logical trees from merging on a case-insensitive target filesystem.
-    It 'UnitT26b_rejects_case_insensitive_parent_directory_collisions' {
+    It 'UnitT27_rejects_case_insensitive_parent_directory_collisions' {
         Add-Type -AssemblyName System.IO.Compression
         $archivePath = Join-Path $TestDrive 'parent-case-collision.zip'
         $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
@@ -294,7 +320,7 @@ Describe 'Skills source archive acquisition' {
 
     # Scenario: A ZIP contains a symbolic-link entry under its repository root.
     # Purpose: Prevent link traversal and reparse-point behavior from escaping staged source boundaries.
-    It 'UnitT27_rejects_symbolic_link_archive_entries' {
+    It 'UnitT28_rejects_symbolic_link_archive_entries' {
         Add-Type -AssemblyName System.IO.Compression
         $archivePath = Join-Path $TestDrive 'symbolic-link.zip'
         $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
@@ -321,7 +347,7 @@ Describe 'Skills source archive acquisition' {
 
     # Scenario: A ZIP contains more than one top-level repository root.
     # Purpose: Make archive root selection deterministic instead of silently choosing one tree.
-    It 'UnitT28_rejects_archives_with_multiple_repository_roots' {
+    It 'UnitT29_rejects_archives_with_multiple_repository_roots' {
         Add-Type -AssemblyName System.IO.Compression
         $archivePath = Join-Path $TestDrive 'multiple-roots.zip'
         $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)

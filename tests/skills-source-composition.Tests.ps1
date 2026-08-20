@@ -78,7 +78,7 @@ Describe 'Skills source composition' {
         Add-Type -AssemblyName System.IO.Compression
         $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
         try {
-            @($archive.Entries | Where-Object { $_.FullName.Contains('\\') }).Count | Should Be 0
+            @($archive.Entries | Where-Object { $_.FullName.Contains('\') }).Count | Should Be 0
         }
         finally {
             $archive.Dispose()

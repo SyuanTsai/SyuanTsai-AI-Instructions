@@ -43,7 +43,7 @@ function Assert-SafeZipEntry {
         }
 
         $baseName = $part.Split('.')[0]
-        if ($baseName -cmatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        if ($baseName -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
             throw "Unsafe Windows device name in ZIP entry: $name"
         }
     }
