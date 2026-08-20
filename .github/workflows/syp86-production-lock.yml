@@ -30,21 +30,21 @@ on:
 
 jobs:
   validate-lock:
-    name: Validate production lock (${{ matrix.runtime.name }})
+    name: Validate production lock (${{ matrix.runtime_name }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        runtime:
-          - name: Windows PowerShell 5.1
+        include:
+          - runtime_name: Windows PowerShell 5.1
             shell: powershell
-          - name: PowerShell 7
+          - runtime_name: PowerShell 7
             shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Validate checked-in lock
-        shell: ${{ matrix.runtime.shell }}
+        shell: ${{ matrix.shell }}
         run: |
           ./scripts/update-skills-catalog-lock.ps1 -Check
