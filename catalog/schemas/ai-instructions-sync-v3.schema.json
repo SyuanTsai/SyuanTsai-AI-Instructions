@@ -38,7 +38,7 @@
         "repository": {
           "type": "string",
           "format": "uri",
-          "pattern": "^https://github\\.com/[^/]+/[^/]+\\.git$"
+          "pattern": "^https://"
         },
         "ref": {
           "type": "string",
