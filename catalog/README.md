@@ -24,18 +24,18 @@
 
 ## Profile 與 dependency resolution
 
-後續 resolver 必須依固定順序處理：
+Resolver 依固定順序處理：
 
 1. 合併所有選定 profile 的 `includes`。
 2. 套用個人 `includeSkills`。
 3. 套用個人 `excludeSkills`；明確 exclude 優先於 profile 與 include。
-4. 過濾 platform、shell 與 capability compatibility；不相容 Skill 不得出現在 Agent 可用 catalog。
+4. 過濾 platform、shell 與 capability compatibility；profile 帶入但不相容的 Skill 會被移除，明確 `includeSkills` 指定但不相容則 fail closed。
 5. 驗證 dependencies：
    - `hard`：必須存在且相容；若被 exclude 或無法滿足，整次 resolution 失敗。
    - `conditional`：只有 `condition` 成立且 `fallback.capability` 不可用時才要求 dependency；否則不強制安裝。
    - `recommended`：只產生建議，不自動改變 resolved set。
 
-`work-with-jira` 對 `configure-jira-api-access` 使用 conditional dependency。Jira Cloud API 缺少或無效時可使用設定流程；若已有核准且已設定的 Jira connector，則以 `jira-cloud-connector` fallback 滿足，不強制安裝 API setup Skill。
+`work-with-jira` 對 `configure-jira-api-access` 使用 conditional dependency。Jira Cloud API 缺少或無效時可使用設定流程；若已有核准且已設定的 Jira connector，則以 `jira-cloud-connector` fallback 滿足，不強制要求該 dependency。
 
 ## Compatibility contract
 
@@ -44,7 +44,18 @@
 - `requiredCapabilities` 中每一項都必須滿足。
 - `anyOfCapabilities` 的每個內層集合代表 alternatives；每個集合至少滿足一項。
 - Capability `kind` 為 `command`、`connector` 或 `environment`；`state` 為 `available`、`authenticated` 或 `configured`。
-- Catalog metadata 只能宣告需求；resolver 必須以實際 capability evidence 驗證，不能只因 profile 被選取就假設相容。
+- `command` + `available` 可由本機 `Get-Command` 驗證；authentication、connector、API/environment readiness 不得由名稱猜測，必須有明確 runtime evidence。
+- Runtime evidence 透過 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 傳入 JSON array，例如：
+
+```json
+[
+  { "kind": "connector", "id": "jira-cloud-connector", "state": "configured" },
+  { "kind": "connector", "id": "datadog", "state": "configured" },
+  { "kind": "command", "id": "felo-ai", "state": "authenticated" }
+]
+```
+
+- 沒有 evidence 時採 fail-closed；不得只因 profile 被選取就假設 connector、authentication 或 API capability 可用。
 
 ## Pin 與 hash contract
 
@@ -75,7 +86,8 @@ Installer 會將 schema v1／v2 idempotent 升級為 v3：
 
 - 原樣保留合法的 `autoCommitRepositoryUrls`、`excludedRepositoryUrls` 與 `excludedRepositoryPaths`。
 - 新增 `catalog` object；安全預設為目前安裝 commit、`profiles = ["core"]`、空的 `includeSkills` 與 `excludeSkills`。`catalog.ref` 必須是完整小寫 commit SHA。
-- 已是 schema v3 時不得重排或改寫個人選擇；缺少必要欄位、未知 schema 或同一 Skill 同時 include/exclude 時停止並回報。
+- 已是 schema v3 時保留使用者的 `profiles`、`includeSkills` 與 `excludeSkills`。若設定指向同一個 AI-Instructions GitHub Repository，重新安裝／升級時 `catalog.repository` 與 `catalog.ref` 必須與本次安裝 runtime、Catalog、Lock 一起更新到目前 checkout，避免舊 pin 搭配新 runtime；明確使用其他 Catalog Repository 的設定則保留原 pin。
+- 缺少必要欄位、未知 schema、mutable ref 或同一 Skill 同時 include/exclude 時停止並回報。
 - 真實私人 Repository URL 只存在個人設定；本 Repository 的 schema、examples、tests 一律使用 `example.com`、`example.org` 或 `example.test`。
 
-Production wrapper 已完成 config validation、selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Legacy mutation entry point 只為直接呼叫 regression compatibility 保留；安裝後入口不再走單一來源路徑。
+Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Legacy mutation entry point 只為直接呼叫 regression compatibility 保留；安裝後入口不再走單一來源路徑。
