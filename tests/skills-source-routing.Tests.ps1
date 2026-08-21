@@ -95,6 +95,18 @@ Describe 'Skills source routing plan' {
         $fixture=New-MultiSourceFixture; $fixture.Lock.skills[0].sourceId='beta-source'
         Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'lock source does not match catalog Skill'
     }
+    # Scenario: The Lock changes only the casing of a selected Skill's repository path.
+    # Purpose: Preserve an exact Catalog-to-Lock binding on case-sensitive source filesystems.
+    It 'UnitT62_rejects_case_variant_catalog_lock_skill_paths' {
+        $fixture=New-MultiSourceFixture; $fixture.Lock.skills[0].sourcePath='.agents/skills/Skill-Alpha'
+        Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'lock source does not match catalog Skill'
+    }
+    # Scenario: The Lock changes only the casing of a selected source repository URL.
+    # Purpose: Require the immutable Lock to preserve the Catalog repository identity exactly.
+    It 'UnitT65_rejects_case_variant_catalog_lock_repository_urls' {
+        $fixture=New-MultiSourceFixture; $fixture.Lock.sources[0].repository='https://example.test/Alpha.git'
+        Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } 'repository does not match the catalog'
+    }
     # Scenario: A selected Skill source path attempts to traverse above its repository root.
     # Purpose: Stop unsafe paths before archive acquisition or target mutation.
     It 'UnitT70_rejects_unsafe_selected_skill_source_paths' {

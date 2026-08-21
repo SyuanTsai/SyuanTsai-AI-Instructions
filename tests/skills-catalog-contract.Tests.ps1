@@ -320,6 +320,48 @@ Describe 'Skills Catalog contract' {
         }
     }
 
+    # Scenario: Catalog and Lock identity fields differ only by letter casing.
+    # Purpose: Keep authoring-time contract validation exactly as strict as runtime routing.
+    It 'UnitT58_rejects_case_variant_catalog_lock_identity_fields' {
+        $cases = @(
+            @{ Name = 'catalog-id'; Expected = 'catalogId does not match'; Apply = { param($lock) $lock.catalogId = ([string]$lock.catalogId).ToUpperInvariant() } },
+            @{ Name = 'repository'; Expected = 'repository does not match'; Apply = { param($lock) @($lock.sources)[0].repository = 'https://github.com/example/Agent-Skills-Catalog.git' } },
+            @{ Name = 'source-id'; Expected = 'must be lowercase kebab-case'; Apply = { param($lock) @($lock.sources)[0].id = ([string]@($lock.sources)[0].id).ToUpperInvariant() } },
+            @{ Name = 'skill-id'; Expected = 'must be lowercase kebab-case'; Apply = { param($lock) @($lock.skills)[0].id = ([string]@($lock.skills)[0].id).ToUpperInvariant() } },
+            @{ Name = 'source-path'; Expected = 'lock source does not match'; Apply = { param($lock) @($lock.skills)[0].sourcePath = '.agents/skills/Capture-Private-Course-Knowledge' } }
+        )
+
+        foreach ($case in $cases) {
+            # Given
+            $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+            & $case.Apply $lock
+            $lockPath = Write-TestJsonDocument -Document $lock -Name "$($case.Name)-case-variant-lock.json"
+
+            # When
+            $errorMessage = Get-ContractValidationError -CatalogPath $script:CatalogExample -LockPath $lockPath
+
+            # Then
+            $errorMessage | Should Match $case.Expected
+        }
+    }
+
+    # Scenario: Catalog and manifest Skill paths differ from their stable IDs only by case.
+    # Purpose: Preserve exact flat-path identity across authoring validation and runtime routing.
+    It 'UnitT59_rejects_case_variant_catalog_and_manifest_skill_paths' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+        $catalogSkill = @($catalog.skills | Where-Object { $_.id -eq 'capture-private-course-knowledge' })[0]
+        $catalogSkill.source.path = ([string]$catalogSkill.source.path).Replace('/capture-', '/Capture-')
+        $catalogPath = Write-TestJsonDocument -Document $catalog -Name 'case-variant-catalog-path.json'
+        (Get-ContractValidationError -CatalogPath $catalogPath -LockPath $script:LockExample) | Should Match 'Unsafe Skill source path'
+
+        $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+        $skillFile = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
+        $skillFile.sourcePath = ([string]$skillFile.sourcePath).Replace('/work-', '/Work-')
+        $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'case-variant-manifest-path.json'
+        (Get-ContractValidationError -CatalogPath $script:CatalogExample -LockPath $script:LockExample -ManifestPath $manifestPath) |
+            Should Match 'must preserve the flat .agents/skills path'
+    }
+
     # Scenario: A requested ref has no immutable commit in the lock document.
     # Purpose: Prevent a mutable branch or tag from being treated as reproducible input.
     It 'UnitT60_rejects_an_unresolved_source_pin' {
@@ -381,7 +423,7 @@ Describe 'Skills Catalog contract' {
         $skillEntry = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
 
         $skillEntry.artifactId | Should Be 'work-with-jira'
-        $skillEntry.sourceRepository | Should Match '^https://example\.(com|org|test)/'
+        $skillEntry.sourceRepository | Should Be 'https://github.com/example/agent-skills-catalog.git'
         $skillEntry.sourceVersion | Should Not BeNullOrEmpty
         $skillEntry.sourceCommit | Should Match '^[0-9a-f]{40}$'
         $skillEntry.sourcePath | Should Be '.agents/skills/work-with-jira/SKILL.md'

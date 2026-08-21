@@ -5,12 +5,17 @@ param(
     [string] $SourceArchivePath,
     [string] $TargetRoot,
     [string] $ConfigurationPath,
-    [string] $ProvenancePath
+    [string] $ProvenancePath,
+    [string] $GitExecutable = 'git'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
+    throw 'GitExecutable must be a non-empty command name or path.'
+}
 
 $manifestRelativePath = '.codex/ai-instructions.manifest.json'
 $initialCommitMessage = 'chore: add shared AI instructions'
@@ -30,7 +35,7 @@ function Invoke-Git {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = & git -C $Repository @Arguments 2>&1
+        $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
@@ -56,7 +61,7 @@ function Get-GitExitCode {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $null = & git -C $Repository @Arguments 2>&1
+        $null = & $GitExecutable -C $Repository @Arguments 2>&1
         return $LASTEXITCODE
     }
     finally {
@@ -358,7 +363,7 @@ function Test-WasCreatedByPreviousBootstrap {
 
     $addCommit = ($addCommits | Select-Object -First 1).Trim()
     $subject = (Invoke-Git -Repository $Repository -Arguments @('show', '-s', '--format=%s', $addCommit) | Select-Object -First 1).Trim()
-    if ($subject -ne $initialCommitMessage) {
+    if ($subject -cne $initialCommitMessage) {
         return $false
     }
 
@@ -464,6 +469,121 @@ function Copy-ExistingManifestEntry {
     }
 }
 
+function New-TargetMutationSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)][string[]] $RelativePaths,
+        [Parameter(Mandatory = $true)][string] $BackupRoot
+    )
+
+    New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
+    $resolvedTargetRoot = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
+    $targetPrefix = $resolvedTargetRoot + [System.IO.Path]::DirectorySeparatorChar
+    $fileStates = New-Object System.Collections.Generic.List[object]
+    $missingDirectories = @{}
+    $backupIndex = 0
+
+    foreach ($relativePath in @($RelativePaths | Sort-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($relativePath)) { continue }
+        $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', '\')))
+        if (-not $targetPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe target mutation snapshot path: $relativePath"
+        }
+
+        $inspectionPath = $targetPath
+        while ($inspectionPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (Test-Path -LiteralPath $inspectionPath) {
+                $inspectionItem = Get-Item -LiteralPath $inspectionPath -Force
+                if (($inspectionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "Managed target path crosses a reparse point: $relativePath"
+                }
+            }
+            $inspectionPath = Split-Path -Parent $inspectionPath
+        }
+
+        $originalType = 'missing'
+        $backupPath = $null
+        if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+            $originalType = 'file'
+            $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
+            Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force
+            $backupIndex++
+        }
+        elseif (Test-Path -LiteralPath $targetPath) {
+            throw "Managed target path must be a file or missing: $relativePath"
+        }
+
+        $fileStates.Add([pscustomobject][ordered]@{
+            RelativePath = $relativePath
+            TargetPath = $targetPath
+            OriginalType = $originalType
+            BackupPath = $backupPath
+        })
+
+        $parentPath = Split-Path -Parent $targetPath
+        while (-not [string]::IsNullOrWhiteSpace($parentPath) -and
+            $parentPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not (Test-Path -LiteralPath $parentPath)) { $missingDirectories[$parentPath] = $true }
+            $parentPath = Split-Path -Parent $parentPath
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        FileStates = $fileStates.ToArray()
+        MissingDirectories = @($missingDirectories.Keys)
+    }
+}
+
+function Restore-TargetMutationSnapshot {
+    param([Parameter(Mandatory = $true)][object] $Snapshot)
+
+    foreach ($state in @($Snapshot.FileStates)) {
+        switch ([string]$state.OriginalType) {
+            'file' {
+                $parentPath = Split-Path -Parent ([string]$state.TargetPath)
+                if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) {
+                    New-Item -ItemType Directory -Force -Path $parentPath | Out-Null
+                }
+                Copy-Item -LiteralPath ([string]$state.BackupPath) -Destination ([string]$state.TargetPath) -Force
+            }
+            'missing' {
+                if (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Leaf) {
+                    Remove-Item -LiteralPath ([string]$state.TargetPath) -Force
+                }
+                elseif (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Container) {
+                    if (@(Get-ChildItem -LiteralPath ([string]$state.TargetPath) -Force).Count -gt 0) {
+                        throw "Target rollback found an unexpected non-empty directory: $($state.RelativePath)"
+                    }
+                    Remove-Item -LiteralPath ([string]$state.TargetPath) -Force
+                }
+                elseif (Test-Path -LiteralPath ([string]$state.TargetPath)) {
+                    throw "Target rollback found an unexpected filesystem entry: $($state.RelativePath)"
+                }
+            }
+        }
+    }
+
+    foreach ($directoryPath in @($Snapshot.MissingDirectories | Sort-Object { $_.Length } -Descending)) {
+        if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) { continue }
+        if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $directoryPath -Force
+        }
+    }
+}
+
+function Restore-TargetMutationTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Paths,
+        [Parameter(Mandatory = $true)][object] $Snapshot
+    )
+
+    if ($Paths.Count -gt 0) {
+        Invoke-Git -Repository $Repository -Arguments (@('reset', '--quiet', 'HEAD', '--') + $Paths) | Out-Null
+    }
+    Restore-TargetMutationSnapshot -Snapshot $Snapshot
+}
+
 function Get-PersonalAgentStashes {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
@@ -534,7 +654,12 @@ function Update-PersonalAgentStash {
             Sort-Object Index -Descending
     )
     foreach ($obsoleteStash in $obsoleteStashes) {
-        Invoke-Git -Repository $Repository -Arguments @('stash', 'drop', '--quiet', $obsoleteStash.Reference) | Out-Null
+        try {
+            Invoke-Git -Repository $Repository -Arguments @('stash', 'drop', '--quiet', $obsoleteStash.Reference) | Out-Null
+        }
+        catch {
+            Write-Warning "Obsolete PersonalAgent stash was retained because cleanup failed: $($obsoleteStash.Reference)"
+        }
     }
 
     return $newStashHash
@@ -545,7 +670,7 @@ if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $resolvedRoot = & git -C (Get-Location).Path rev-parse --show-toplevel 2>$null
+        $resolvedRoot = & $GitExecutable -C (Get-Location).Path rev-parse --show-toplevel 2>$null
         $resolveExitCode = $LASTEXITCODE
     }
     finally {
@@ -580,6 +705,11 @@ $sourceCopilotBaseInTarget = Join-Path $targetRootPath '.github\copilot-instruct
 if ((Test-Path -LiteralPath $sourceCodexBaseInTarget -PathType Leaf) -and
     (Test-Path -LiteralPath $sourceCopilotBaseInTarget -PathType Leaf)) {
     Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
+    return
+}
+
+if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
+    Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
     return
 }
 
@@ -776,7 +906,7 @@ if ($manifestExists) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
     }
     if ($manifestSchemaVersion -eq 1 -and -not $script:manifestV2Enabled -and
-        ($manifest.sourceRepository -ne $SourceRepository -or $manifest.sourceRef -ne $SourceRef)) {
+        ($manifest.sourceRepository -cne $SourceRepository -or $manifest.sourceRef -cne $SourceRef)) {
         throw 'Managed instruction manifest source does not match the configured source repository and ref.'
     }
 
@@ -826,10 +956,17 @@ if ($manifestExists) {
     }
 }
 
+if ($manifestExists -and
+    (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $manifestRelativePath)) {
+    Write-Output 'AI instruction sync skipped because the managed manifest has staged changes.'
+    return
+}
+
 $tempRootPath = Get-FullPathWithoutTrailingSeparator -Path ([System.IO.Path]::GetTempPath())
 $workingPath = Join-Path $tempRootPath ('codex-ai-instructions-' + [Guid]::NewGuid().ToString('N'))
 $archivePath = Join-Path $workingPath 'source.zip'
 $extractPath = Join-Path $workingPath 'source'
+$preserveWorkingPath = $false
 
 try {
     New-Item -ItemType Directory -Path $workingPath, $extractPath | Out-Null
@@ -974,7 +1111,16 @@ try {
     $skippedPaths = New-Object System.Collections.Generic.List[string]
     $nextManifestEntries = New-Object System.Collections.Generic.List[object]
 
-    foreach ($desiredEntry in @($desiredEntries | Sort-Object TargetPath)) {
+    $mutationPaths = @(
+        @($desiredEntries | ForEach-Object { [string]$_.TargetPath })
+        @($manifestEntriesByTarget.Keys)
+        $manifestRelativePath
+    )
+    $mutationBackupRoot = Join-Path $workingPath 'target-backup'
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot
+
+    try {
+        foreach ($desiredEntry in @($desiredEntries | Sort-Object TargetPath)) {
         $targetPath = $desiredEntry.TargetPath
         $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
@@ -986,6 +1132,8 @@ try {
             }
             continue
         }
+
+        $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256
 
         if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
@@ -1003,7 +1151,7 @@ try {
                 New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
                 Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
                 $updatedPaths.Add($targetPath)
-                $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+                $nextManifestEntries.Add($desiredManifestEntry)
                 continue
             }
 
@@ -1020,7 +1168,7 @@ try {
                     $updatedPaths.Add($targetPath)
                 }
 
-                $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+                $nextManifestEntries.Add($desiredManifestEntry)
             }
             else {
                 $skippedPaths.Add($targetPath)
@@ -1038,7 +1186,7 @@ try {
 
             Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
             $createdPaths.Add($targetPath)
-            $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+            $nextManifestEntries.Add($desiredManifestEntry)
             continue
         }
 
@@ -1050,14 +1198,14 @@ try {
             }
 
             $adoptedPaths.Add($targetPath)
-            $nextManifestEntries.Add((New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256))
+            $nextManifestEntries.Add($desiredManifestEntry)
         }
         else {
             $skippedPaths.Add($targetPath)
         }
-    }
+        }
 
-    foreach ($managedTargetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
+        foreach ($managedTargetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
         if ($desiredEntriesByTarget.ContainsKey($managedTargetPath)) {
             continue
         }
@@ -1079,11 +1227,11 @@ try {
             Remove-Item -LiteralPath $targetFullPath -Force
             $removedPaths.Add($managedTargetPath)
         }
-    }
+        }
 
-    $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
-    $manifestChanged = $false
-    if ($shouldWriteManifest) {
+        $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
+        $manifestChanged = $false
+        if ($shouldWriteManifest) {
         $manifestDirectory = Split-Path -Parent $manifestFullPath
         New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
 
@@ -1116,6 +1264,19 @@ try {
             [System.IO.File]::WriteAllText($manifestFullPath, $manifestJson, $utf8WithoutBom)
             $manifestChanged = $true
         }
+        }
+    }
+    catch {
+        $mutationError = $_
+        try {
+            Restore-TargetMutationSnapshot -Snapshot $mutationSnapshot
+        }
+        catch {
+            $rollbackError = $_
+            $preserveWorkingPath = $true
+            throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+        }
+        throw $mutationError
     }
 
     if ($skippedPaths.Count -gt 0) {
@@ -1131,17 +1292,9 @@ try {
             Sort-Object -Unique
     )
 
-    $manifestHasStagedChanges = $manifestExists -and
-        (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $manifestRelativePath)
-
     if (-not $autoCommitEnabled) {
         $personalAgentStashes = @(Get-PersonalAgentStashes -Repository $targetRootPath)
         $shouldRefreshPersonalAgentStash = $changedPaths.Count -gt 0 -or $personalAgentStashes.Count -eq 0
-
-        if ($manifestHasStagedChanges) {
-            Write-Output 'AI instructions synchronized without commit or PersonalAgent stash refresh because the managed manifest has staged changes.'
-            return
-        }
 
         if ($shouldRefreshPersonalAgentStash) {
             $stashPaths = New-Object System.Collections.Generic.List[string]
@@ -1170,7 +1323,24 @@ try {
 
             $stashPathArguments = @($stashPaths | Sort-Object -Unique)
             if ($stashPathArguments.Count -gt 0) {
-                $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments -ExpectedEntries ($nextManifestEntries.ToArray())
+                $expectedStashEntries = @(
+                    $nextManifestEntries | Where-Object { [string]$_.targetPath -cin $stashPathArguments }
+                )
+                try {
+                    $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments -ExpectedEntries $expectedStashEntries
+                }
+                catch {
+                    $finalizationError = $_
+                    try {
+                        Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot
+                    }
+                    catch {
+                        $rollbackError = $_
+                        $preserveWorkingPath = $true
+                        throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+                    }
+                    throw $finalizationError
+                }
                 Write-Output "PersonalAgent stash updated, reapplied, and retained: $newStashHash"
             }
         }
@@ -1181,11 +1351,6 @@ try {
         else {
             Write-Output "AI instructions synchronized without commit because this repository is not allowlisted: $($changedPaths -join ', ')"
         }
-        return
-    }
-
-    if ($manifestHasStagedChanges) {
-        Write-Output 'AI instructions synchronized without commit because the managed manifest has staged changes.'
         return
     }
 
@@ -1215,22 +1380,50 @@ try {
         return
     }
 
-    Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--force', '--') + $pathArguments) | Out-Null
-    Invoke-Git -Repository $targetRootPath -Arguments (@('diff', '--cached', '--check', '--') + $pathArguments) | Out-Null
-
     $isInitialBootstrap = -not $manifestExists -and
         $createdPaths.Count -gt 0 -and
         $updatedPaths.Count -eq 0 -and
         $adoptedPaths.Count -eq 0
     $commitMessage = if ($isInitialBootstrap) { $initialCommitMessage } else { $syncCommitMessage }
-    Invoke-Git -Repository $targetRootPath -Arguments (@('commit', '--only', '--quiet', '-m', $commitMessage, '--') + $pathArguments) | Out-Null
+    $headBeforeCommit = $null
 
-    $committedPaths = @(Invoke-Git -Repository $targetRootPath -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'))
-    $unexpectedPaths = @($committedPaths | Where-Object { $_ -notin $pathArguments })
-    $missingPaths = @($pathArguments | Where-Object { $_ -notin $committedPaths })
+    try {
+        $headBeforeCommit = (Invoke-Git -Repository $targetRootPath -Arguments @('rev-parse', 'HEAD') | Select-Object -First 1).Trim()
+        Invoke-Git -Repository $targetRootPath -Arguments (@('add', '--force', '--') + $pathArguments) | Out-Null
+        Invoke-Git -Repository $targetRootPath -Arguments (@('diff', '--cached', '--check', '--') + $pathArguments) | Out-Null
+        Invoke-Git -Repository $targetRootPath -Arguments (@('commit', '--only', '--quiet', '-m', $commitMessage, '--') + $pathArguments) | Out-Null
 
-    if ($unexpectedPaths.Count -gt 0 -or $missingPaths.Count -gt 0) {
-        throw "Instruction sync commit verification failed. Unexpected: $($unexpectedPaths -join ', '); Missing: $($missingPaths -join ', ')"
+        $committedPaths = @(Invoke-Git -Repository $targetRootPath -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'))
+        $unexpectedPaths = @($committedPaths | Where-Object { $_ -cnotin $pathArguments })
+        $missingPaths = @($pathArguments | Where-Object { $_ -cnotin $committedPaths })
+
+        if ($unexpectedPaths.Count -gt 0 -or $missingPaths.Count -gt 0) {
+            throw "Instruction sync commit verification failed. Unexpected: $($unexpectedPaths -join ', '); Missing: $($missingPaths -join ', ')"
+        }
+    }
+    catch {
+        $finalizationError = $_
+        try {
+            $headAfterFailure = (Invoke-Git -Repository $targetRootPath -Arguments @('rev-parse', 'HEAD') | Select-Object -First 1).Trim()
+            if ($null -ne $headBeforeCommit -and $headAfterFailure -cne $headBeforeCommit) {
+                $commitDescription = (Invoke-Git -Repository $targetRootPath -Arguments @('show', '-s', '--format=%P%x09%s', 'HEAD') | Select-Object -First 1).Trim()
+                $descriptionParts = $commitDescription.Split(@("`t"), 2, [System.StringSplitOptions]::None)
+                if ($descriptionParts.Count -ne 2 -or
+                    $descriptionParts[0] -cne $headBeforeCommit -or
+                    $descriptionParts[1] -cne $commitMessage) {
+                    throw 'Automatic rollback refused because HEAD no longer identifies the commit created by instruction sync.'
+                }
+                Invoke-Git -Repository $targetRootPath -Arguments @('reset', '--soft', $headBeforeCommit) | Out-Null
+            }
+
+            Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $pathArguments -Snapshot $mutationSnapshot
+        }
+        catch {
+            $rollbackError = $_
+            $preserveWorkingPath = $true
+            throw "AI instruction commit finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+        }
+        throw $finalizationError
     }
 
     Write-Output "AI instructions synchronized from GitHub and committed: $($pathArguments -join ', ')"
@@ -1242,5 +1435,10 @@ finally {
         throw "Unsafe temporary cleanup path: $resolvedWorkingPath"
     }
 
-    Remove-Item -LiteralPath $resolvedWorkingPath -Recurse -Force -ErrorAction SilentlyContinue
+    if ($preserveWorkingPath) {
+        Write-Warning "AI instruction sync temporary recovery files were preserved at: $resolvedWorkingPath"
+    }
+    else {
+        Remove-Item -LiteralPath $resolvedWorkingPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

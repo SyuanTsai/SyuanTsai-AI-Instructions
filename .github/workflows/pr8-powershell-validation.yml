@@ -124,3 +124,31 @@ jobs:
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
           if ($result.FailedCount -gt 0) { exit 1 }
           exit 0
+
+  powershell-7-unix-composition:
+    name: Composition (PowerShell 7 on Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+
+      - name: Run cross-platform composition tests
+        shell: pwsh
+        run: |
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
+          Import-Module $pester.Path -Force
+          $result = Invoke-Pester -Script ./tests/skills-source-composition.Tests.ps1 -PassThru
+          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ($result.FailedCount -gt 0) { exit 1 }

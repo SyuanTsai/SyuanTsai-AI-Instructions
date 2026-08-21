@@ -318,6 +318,69 @@ Describe 'Skills source archive acquisition' {
         } 'case-insensitive path collision'
     }
 
+    # Scenario: A valid ZIP lists a file before the explicit directory entries for its parent paths.
+    # Purpose: Distinguish a directory implied by descendants from a duplicate explicit archive entry.
+    It 'UnitT27_accepts_explicit_directory_entries_after_their_files' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'file-before-directory.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                $fileEntry = $archive.CreateEntry('repository/content/child.txt')
+                $writer = New-Object System.IO.StreamWriter($fileEntry.Open())
+                try { $writer.Write('valid content') } finally { $writer.Dispose() }
+                $null = $archive.CreateEntry('repository/content/')
+                $null = $archive.CreateEntry('repository/')
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        $result = Expand-ValidatedSkillsSourceArchives `
+            -Plan $plan `
+            -SourceArchivePaths @{'source-a'=$archivePath} `
+            -WorkingRoot (Join-Path $TestDrive 'file-before-directory-staging')
+
+        $extractedSource = @($result.Sources)[0]
+        Test-Path -LiteralPath (Join-Path ([string]$extractedSource.rootPath) 'content/child.txt') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: A ZIP first implies a directory through a child and later declares that same path as a file.
+    # Purpose: Keep file/directory collisions rejected while allowing a later explicit directory entry.
+    It 'UnitT27_rejects_a_file_that_reuses_an_implied_directory_path' {
+        Add-Type -AssemblyName System.IO.Compression
+        $archivePath = Join-Path $TestDrive 'file-directory-collision.zip'
+        $archiveStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+        try {
+            $archive = New-Object System.IO.Compression.ZipArchive($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                foreach ($name in @('repository/content/child.txt','repository/content')) {
+                    $entry = $archive.CreateEntry($name)
+                    $writer = New-Object System.IO.StreamWriter($entry.Open())
+                    try { $writer.Write($name) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $archive.Dispose() }
+        }
+        finally { $archiveStream.Dispose() }
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{id='source-a';archiveSha256=(Get-TestFileSha256 $archivePath);resolvedCommit=('a'*40)})
+            Skills = @()
+        }
+
+        Assert-ThrowsMessage {
+            Expand-ValidatedSkillsSourceArchives `
+                -Plan $plan `
+                -SourceArchivePaths @{'source-a'=$archivePath} `
+                -WorkingRoot (Join-Path $TestDrive 'file-directory-collision-staging')
+        } 'file/directory path collision'
+    }
+
     # Scenario: A ZIP contains a symbolic-link entry under its repository root.
     # Purpose: Prevent link traversal and reparse-point behavior from escaping staged source boundaries.
     It 'UnitT28_rejects_symbolic_link_archive_entries' {

@@ -122,7 +122,7 @@ function New-ComposedBootstrapSource {
     New-Item -ItemType Directory -Path $destination | Out-Null
     Copy-DirectoryContents -Source $instructionRoot -Destination $destination
 
-    $skillsRoot = Join-Path $destination '.agents\skills'
+    $skillsRoot = Join-Path (Join-Path $destination '.agents') 'skills'
     if (Test-Path -LiteralPath $skillsRoot) {
         Remove-Item -LiteralPath $skillsRoot -Recurse -Force
     }

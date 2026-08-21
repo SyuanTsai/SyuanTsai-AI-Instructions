@@ -12,6 +12,8 @@ function Assert-SafeZipEntry {
     param(
         [Parameter(Mandatory = $true)][object] $Entry,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.Dictionary[string,string]] $PathCasings,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitEntries,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitFiles,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $Roots
     )
 
@@ -51,17 +53,32 @@ function Assert-SafeZipEntry {
     for ($index = 0; $index -lt $parts.Count; $index++) {
         $pathPrefix = [string]::Join('/', [string[]]$parts[0..$index])
         $existingCasing = $null
-        if ($PathCasings.TryGetValue($pathPrefix, [ref]$existingCasing)) {
+        $pathAlreadyKnown = $PathCasings.TryGetValue($pathPrefix, [ref]$existingCasing)
+        if ($pathAlreadyKnown) {
             if ($existingCasing -cne $pathPrefix) {
                 throw "ZIP archive contains a case-insensitive path collision: $name"
-            }
-            if ($index -eq ($parts.Count - 1)) {
-                throw "ZIP archive contains a duplicate path: $name"
             }
         }
         else {
             $PathCasings.Add($pathPrefix, $pathPrefix)
         }
+
+        $isLeaf = $index -eq ($parts.Count - 1)
+        if (-not $isLeaf -and $ExplicitFiles.Contains($pathPrefix)) {
+            throw "ZIP archive contains a file/directory path collision: $name"
+        }
+        if ($isLeaf) {
+            if ($ExplicitEntries.Contains($pathPrefix)) {
+                throw "ZIP archive contains a duplicate path: $name"
+            }
+            if (-not $isDirectory -and $pathAlreadyKnown) {
+                throw "ZIP archive contains a file/directory path collision: $name"
+            }
+        }
+    }
+    $null = $ExplicitEntries.Add($normalizedName)
+    if (-not $isDirectory) {
+        $null = $ExplicitFiles.Add($normalizedName)
     }
     $null = $Roots.Add($parts[0])
 
@@ -114,9 +131,16 @@ function Expand-SafeZipRepository {
             }
 
             $pathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $explicitEntries = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            $explicitFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
             $roots = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
             foreach ($entry in $entries) {
-                Assert-SafeZipEntry -Entry $entry -PathCasings $pathCasings -Roots $roots
+                Assert-SafeZipEntry `
+                    -Entry $entry `
+                    -PathCasings $pathCasings `
+                    -ExplicitEntries $explicitEntries `
+                    -ExplicitFiles $explicitFiles `
+                    -Roots $roots
             }
             if ($roots.Count -ne 1) {
                 throw "ZIP archive must contain exactly one repository root; found $($roots.Count)."

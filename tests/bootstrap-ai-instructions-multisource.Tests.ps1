@@ -202,6 +202,39 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $message|Should Match "missing required property 'includeSkills'"
     }
 
+    # Scenario: A schema-v3 selection differs from a stable Catalog ID only by casing.
+    # Purpose: Keep the runtime entry point as strict as the authoring contract before acquisition begins.
+    It 'InterT22_rejects_case_variant_selection_ids_before_acquisition' {
+        $skillArchivePath=Join-Path $TestDrive 'case-source-a.zip'
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'case-skill-root') $skillArchivePath
+        $missingInstructionArchive=Join-Path $TestDrive 'case-missing-instructions.zip'
+        $cases=@(
+            @{Name='profile';Property='profiles';Values=@('CORE');Expected='item must be a lowercase stable ID'},
+            @{Name='include';Property='includeSkills';Values=@('Skill-A');Expected='item must be a lowercase stable ID'},
+            @{Name='exclude';Property='excludeSkills';Values=@('Skill-A');Expected='item must be a lowercase stable ID'},
+            @{Name='duplicate';Property='includeSkills';Values=@('skill-a','skill-a');Expected='contains duplicate value'}
+        )
+
+        foreach($case in $cases){
+            $catalogPath=Join-Path $TestDrive "$($case.Name)-catalog.json"
+            $lockPath=Join-Path $TestDrive "$($case.Name)-catalog.lock.json"
+            $configurationPath=Join-Path $TestDrive "$($case.Name)-sync-config.json"
+            New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+            $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath|ConvertFrom-Json
+            $configuration.catalog.PSObject.Properties[$case.Property].Value=@($case.Values)
+            Set-TestUtf8Text $configurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+
+            Assert-ThrowsMessage {
+                & $script:BootstrapScript `
+                    -CatalogPath $catalogPath `
+                    -LockPath $lockPath `
+                    -ConfigurationPath $configurationPath `
+                    -SourceArchivePaths @{'source-a'=$skillArchivePath} `
+                    -InstructionSourceArchivePath $missingInstructionArchive
+            } "catalog $($case.Property) $($case.Expected)"
+        }
+    }
+
     # Scenario: A target still has a schema-v1 manifest and every managed byte is unchanged.
     # Purpose: Permit one safe migration to per-file schema-v2 provenance.
     It 'InterT30_migrates_an_unchanged_v1_manifest_to_v2' {

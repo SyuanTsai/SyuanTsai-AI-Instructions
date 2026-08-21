@@ -352,7 +352,7 @@ Describe 'bootstrap-ai-instructions' {
         New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex\AI-Rules') | Out-Null
         Set-Content -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Existing Testing'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md', '.codex/AI-Rules/Testing.en.md') | Out-Null
-        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'existing instructions') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'Chore: add shared AI instructions') | Out-Null
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AI-Rules\CodeReview.en.md') -Value '# Codex English Code Review'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
@@ -555,6 +555,7 @@ Describe 'bootstrap-ai-instructions' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
             -ConfigurationPath $noCommitConfigurationPath
 
+        Set-TestText -Path (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Project customized Testing'
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v3'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
@@ -562,8 +563,11 @@ Describe 'bootstrap-ai-instructions' {
 
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $committedHead
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v3'
+        (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Project customized Testing'
         $personalAgentStashes = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs') | Where-Object { $_ -match 'PersonalAgent$' })
         $personalAgentStashes.Count | Should Be 1
+        $stashPaths = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'show', '--name-only', '--include-untracked', 'stash@{0}'))
+        ($stashPaths -contains '.codex/AI-Rules/Testing.en.md') | Should Be $false
         (Invoke-TestGit -Repository $targetRoot -Arguments @('show', 'stash@{0}:AGENTS.md')) -join "`n" | Should Match '# Codex English Base v3'
         ($output -join [Environment]::NewLine) | Should Match 'without commit'
     }
@@ -613,5 +617,245 @@ description: Verify raw bytes.
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
         ($output -join [Environment]::NewLine) | Should Match 'up to date'
         ($output -join [Environment]::NewLine) | Should Not Match 'customized or unmanaged'
+    }
+
+    # Scenario: A target path is blocked after an earlier managed file has already been copied.
+    # Purpose: Roll back every live target mutation when fan-out fails before the manifest is committed.
+    It 'InterT85_rolls_back_partial_target_writes_when_fan_out_fails' {
+        # Given
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot '.github\AI-Rules') -Value '# Existing path blocker'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', '.github/AI-Rules') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add path blocker') | Out-Null
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-TargetRoot', $targetRoot
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match '\.github\\AI-Rules\\Testing\.en\.md'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github\AI-Rules')).Trim() | Should Be '# Existing path blocker'
+    }
+
+    # Scenario: A managed file target is already occupied by a project-owned directory.
+    # Purpose: Reject the collision before Copy-Item writes inside the directory or creates a partial commit.
+    It 'InterT87_rejects_a_directory_at_an_exact_managed_file_path_before_mutation' {
+        # Given
+        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot 'AGENTS.md') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md\keep.txt') -Value '# Keep directory content'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md/keep.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add managed path directory blocker') | Out-Null
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-TargetRoot', $targetRoot
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'AGENTS\.md'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md\keep.txt')).Trim() | Should Be '# Keep directory content'
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+    }
+
+    # Scenario: A managed target ancestor is a junction that resolves outside the target Repository.
+    # Purpose: Prevent fan-out from following reparse points and mutating files outside the authorized target.
+    It 'InterT89_rejects_target_reparse_points_before_mutation' {
+        # Given
+        $outsideRoot = Join-Path $TestDrive 'outside-target'
+        New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $targetRoot '.codex') -Target $outsideRoot | Out-Null
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-TargetRoot', $targetRoot
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'reparse point'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        @(Get-ChildItem -LiteralPath $outsideRoot -Force).Count | Should Be 0
+    }
+
+    # Scenario: A caller supplies an explicit Git executable while relying on automatic target discovery.
+    # Purpose: Route target discovery, safety probes, mutation, and finalization through one consistent executable.
+    It 'InterT90_routes_every_git_call_through_the_configured_executable' {
+        # Given
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot = Join-Path $TestDrive 'configured-git-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $gitInvocationLog = Join-Path $wrapperRoot 'invocations.log'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = "@echo off`necho %* >> `"$gitInvocationLog`"`n`"$realGit`" %*"
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $powerShellExe = (Get-Command powershell.exe).Source
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-GitExecutable', $gitWrapperPath
+        )
+
+        # When
+        Push-Location $targetRoot
+        try {
+            $output = & $powerShellExe @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+
+        # Then
+        $exitCode | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'synchronized without commit'
+        $invocations = Get-Content -Raw -LiteralPath $gitInvocationLog
+        $invocations | Should Match 'rev-parse --show-toplevel'
+        $invocations | Should Match 'rev-parse --verify HEAD'
+        $invocations | Should Match 'stash apply'
+    }
+
+    # Scenario: An allowlisted repository rejects the generated commit through a pre-commit hook.
+    # Purpose: Restore managed files, manifest, and index when Git finalization fails after target mutation.
+    It 'InterT91_rolls_back_target_and_index_when_auto_commit_fails' {
+        # Given
+        $hookPath = Join-Path $targetRoot '.git\hooks\pre-commit'
+        Set-TestText -Path $hookPath -Value "#!/bin/sh`nexit 1"
+        Set-TestText -Path (Join-Path $targetRoot 'unrelated-staged.txt') -Value 'preserve staged content'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'unrelated-staged.txt') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'README.md') -Value '# Unrelated unstaged edit'
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-TargetRoot', $targetRoot
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'git commit'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+    }
+
+    # Scenario: A non-allowlisted repository cannot reapply the newly created PersonalAgent stash.
+    # Purpose: Restore target and index state while retaining the new stash as recovery evidence.
+    It 'InterT92_rolls_back_target_and_index_when_personal_agent_stash_apply_fails' {
+        # Given
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot = Join-Path $TestDrive 'git-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $powerShellExe = (Get-Command powershell.exe).Source
+        $gitWrapper = "@echo off`necho %* | `"$findString`" /C:`"stash apply`" >nul`nif not errorlevel 1 exit /b 86`n`"$realGit`" %*"
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & $powerShellExe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stash apply'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: A caller has staged an intentional managed-manifest edit before synchronization.
+    # Purpose: Stop before target mutation so the manifest and managed files cannot diverge.
+    It 'InterT93_skips_before_mutation_when_the_managed_manifest_is_staged' {
+        # Given
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        [System.IO.File]::AppendAllText($manifestPath, "`n")
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', $script:ManifestPath) | Out-Null
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+        $managedContentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        # When
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        ($output -join [Environment]::NewLine) | Should Match 'sync skipped.*manifest has staged changes'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $managedContentBefore
+    }
+
+    # Scenario: The target is a Git work tree without an initial commit.
+    # Purpose: Stop before mutation when Git cannot isolate or roll back a generated commit safely.
+    It 'InterT95_skips_an_unborn_repository_before_target_mutation' {
+        # Given
+        $unbornRoot = Join-Path $TestDrive 'unborn-target'
+        New-Item -ItemType Directory -Force -Path $unbornRoot | Out-Null
+        Invoke-TestGit -Repository $unbornRoot -Arguments @('init', '--quiet') | Out-Null
+        Invoke-TestGit -Repository $unbornRoot -Arguments @('remote', 'add', 'origin', $script:TestRepositoryUrl) | Out-Null
+
+        # When
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $unbornRoot
+
+        # Then
+        ($output -join [Environment]::NewLine) | Should Match 'target repository has no commit'
+        Test-Path -LiteralPath (Join-Path $unbornRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $unbornRoot $script:ManifestPath) | Should Be $false
+        (@(Invoke-TestGit -Repository $unbornRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be ''
     }
 }

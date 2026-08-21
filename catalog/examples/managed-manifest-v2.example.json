@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "catalogId": "example-agent-skills",
-  "lockSha256": "5333c61f0959c9e6ba440fc658ade513791fe5c4fd07aa489b69ef9046a1e207",
+  "lockSha256": "da2ff96b13985f770822c88ea8c621002f9c753b2691b9600e669a4185b62951",
   "files": [
     {
       "artifactType": "instruction",
@@ -19,7 +19,7 @@
       "artifactType": "skill",
       "artifactId": "work-with-jira",
       "sourceId": "agent-skills",
-      "sourceRepository": "https://example.org/acme/agent-skills-catalog.git",
+      "sourceRepository": "https://github.com/example/agent-skills-catalog.git",
       "sourceRef": "v1.0.0",
       "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
       "sourceVersion": "1.0.0",

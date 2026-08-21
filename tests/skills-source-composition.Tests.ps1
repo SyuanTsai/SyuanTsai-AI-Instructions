@@ -1,5 +1,5 @@
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
-Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-composition.psm1') -Force
+Import-Module (Join-Path $script:RepositoryRoot 'scripts/skills-source-composition.psm1') -Force
 
 function Assert-ThrowsMessage {
     param([scriptblock] $Action, [string] $Pattern)
@@ -23,30 +23,30 @@ Describe 'Skills source composition' {
     # Purpose: Compose one desired source containing only the selected external Skills alongside the instruction families.
     It 'UnitT10_composes_two_independent_skill_sources_into_one_desired_set' {
         $instructionRoot=Join-Path $TestDrive 'instructions'
-        New-Item -ItemType Directory -Force -Path (Join-Path $instructionRoot '.codex\AI-Rules'),(Join-Path $instructionRoot '.github\AI-Rules'),(Join-Path $instructionRoot '.agents\skills\legacy-skill') | Out-Null
-        Set-Content (Join-Path $instructionRoot '.codex\AGENTS.en.md') 'codex base'
-        Set-Content (Join-Path $instructionRoot '.github\copilot-instructions.en.md') 'copilot base'
-        Set-Content (Join-Path $instructionRoot '.codex\AI-Rules\core.en.md') 'codex rule'
-        Set-Content (Join-Path $instructionRoot '.github\AI-Rules\core.en.md') 'copilot rule'
-        Set-Content (Join-Path $instructionRoot '.agents\skills\legacy-skill\SKILL.md') '# legacy'
+        New-Item -ItemType Directory -Force -Path (Join-Path $instructionRoot '.codex/AI-Rules'),(Join-Path $instructionRoot '.github/AI-Rules'),(Join-Path $instructionRoot '.agents/skills/legacy-skill') | Out-Null
+        Set-Content (Join-Path $instructionRoot '.codex/AGENTS.en.md') 'codex base'
+        Set-Content (Join-Path $instructionRoot '.github/copilot-instructions.en.md') 'copilot base'
+        Set-Content (Join-Path $instructionRoot '.codex/AI-Rules/core.en.md') 'codex rule'
+        Set-Content (Join-Path $instructionRoot '.github/AI-Rules/core.en.md') 'copilot rule'
+        Set-Content (Join-Path $instructionRoot '.agents/skills/legacy-skill/SKILL.md') '# legacy'
         $skills=@((New-TestSkill (Join-Path $TestDrive 'source-a') 'skill-a' 'from source A'),(New-TestSkill (Join-Path $TestDrive 'source-b') 'skill-b' 'from source B'))
         $destination=Join-Path $TestDrive 'composed'
         $result=New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills $skills -DestinationRoot $destination
         @($result.SkillIds).Count | Should Be 2
-        Test-Path (Join-Path $destination '.agents\skills\skill-a\SKILL.md') | Should Be $true
-        Test-Path (Join-Path $destination '.agents\skills\skill-b\SKILL.md') | Should Be $true
-        Test-Path (Join-Path $destination '.agents\skills\legacy-skill') | Should Be $false
+        Test-Path (Join-Path $destination '.agents/skills/skill-a/SKILL.md') | Should Be $true
+        Test-Path (Join-Path $destination '.agents/skills/skill-b/SKILL.md') | Should Be $true
+        Test-Path (Join-Path $destination '.agents/skills/legacy-skill') | Should Be $false
     }
     # Scenario: Selection resolves to no Skills while the instruction source still contains an old bundled Skill.
     # Purpose: Produce a valid instruction-only source with an empty .agents/skills directory.
     It 'UnitT20_allows_instruction_only_composition_with_no_selected_skills' {
         $instructionRoot=Join-Path $TestDrive 'instruction-only'
-        New-Item -ItemType Directory -Force -Path (Join-Path $instructionRoot '.agents\skills\old') | Out-Null
-        Set-Content (Join-Path $instructionRoot '.agents\skills\old\SKILL.md') '# old'
+        New-Item -ItemType Directory -Force -Path (Join-Path $instructionRoot '.agents/skills/old') | Out-Null
+        Set-Content (Join-Path $instructionRoot '.agents/skills/old/SKILL.md') '# old'
         $destination=Join-Path $TestDrive 'instruction-only-composed'
         $result=New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @() -DestinationRoot $destination
         @($result.SkillIds).Count | Should Be 0
-        @(Get-ChildItem -LiteralPath (Join-Path $destination '.agents\skills') -Directory).Count | Should Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $destination '.agents/skills') -Directory).Count | Should Be 0
     }
 
     # Scenario: The composed repository contains hidden dot-directories, matching how .codex, .github, and .agents are treated on Linux and macOS.
@@ -57,9 +57,9 @@ Describe 'Skills source composition' {
         $archivePath = Join-Path $TestDrive 'composed-source.zip'
         $extractRoot = Join-Path $TestDrive 'archive-extract'
         $expectedFiles = @(
-            '.codex\AGENTS.md',
-            '.github\copilot-instructions.md',
-            '.agents\skills\skill-a\SKILL.md'
+            '.codex/AGENTS.md',
+            '.github/copilot-instructions.md',
+            '.agents/skills/skill-a/SKILL.md'
         )
         foreach ($relativePath in $expectedFiles) {
             $path = Join-Path $sourceRoot $relativePath
@@ -96,7 +96,7 @@ Describe 'Skills source composition' {
     It 'UnitT26_preserves_an_empty_skills_directory_in_the_handoff_archive' {
         # Given
         $sourceRoot = Join-Path $TestDrive 'instruction-only-repository'
-        $skillsRoot = Join-Path $sourceRoot '.agents\skills'
+        $skillsRoot = Join-Path $sourceRoot '.agents/skills'
         $archivePath = Join-Path $TestDrive 'instruction-only-source.zip'
         $extractRoot = Join-Path $TestDrive 'instruction-only-extract'
         New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
@@ -106,7 +106,7 @@ Describe 'Skills source composition' {
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot
 
         # Then
-        Test-Path -LiteralPath (Join-Path (Join-Path $extractRoot 'instruction-only-repository') '.agents\skills') -PathType Container | Should Be $true
+        Test-Path -LiteralPath (Join-Path (Join-Path $extractRoot 'instruction-only-repository') '.agents/skills') -PathType Container | Should Be $true
     }
 
     # Scenario: A caller places the destination ZIP underneath the directory being archived.

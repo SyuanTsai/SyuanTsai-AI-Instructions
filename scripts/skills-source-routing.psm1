@@ -149,7 +149,7 @@ function Resolve-SkillsSourcePlan {
         $lockedSkill = $lockedSkillsById[$skillId]
         $lockedSourceId = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'")
         $lockedSourcePath = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'")
-        if ($lockedSourceId -ne $sourceId -or $lockedSourcePath -ne $sourcePath) {
+        if ($lockedSourceId -cne $sourceId -or $lockedSourcePath -cne $sourcePath) {
             throw "Skills Catalog lock source does not match catalog Skill '$skillId'."
         }
 
@@ -168,7 +168,7 @@ function Resolve-SkillsSourcePlan {
         $lockedSource = $lockedSourcesById[$sourceId]
         $catalogRepository = [string] (Get-RoutingProperty -Object $catalogSource -Name 'repository' -Context "Skills Catalog source '$sourceId'")
         $lockedRepository = [string] (Get-RoutingProperty -Object $lockedSource -Name 'repository' -Context "Skills Catalog lock source '$sourceId'")
-        if ($catalogRepository -ne $lockedRepository) {
+        if ($catalogRepository -cne $lockedRepository) {
             throw "Skills Catalog lock source '$sourceId' repository does not match the catalog."
         }
 

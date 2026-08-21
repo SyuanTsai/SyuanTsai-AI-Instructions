@@ -71,6 +71,7 @@ Conditional operator 的 production semantics：
 - Catalog source `repository` 在 schema v1 僅接受 `https://github.com/<owner>/<repository>[.git]`。這是刻意的 deterministic boundary；其他 Git host 留待後續 schema version 擴充。
 - GitHub source 一律使用完整 `resolvedCommit` 的 codeload ZIP。Lock generator 與 bootstrap 使用相同 archive provider，因此 `archiveSha256` 可直接比對同一 immutable archive bytes。
 - `requestedRef` 保存 branch、tag 或 commit；`requestedRefType` 明確區分類型。
+- `requestedRef` 與 `requestedRefType` 是維護者在 pin 更新當下記錄的 provenance metadata，不是 runtime 的安全輸入；branch 或 tag 後續可移動，因此 `-Check` 不以目前 remote ref 反推歷史關係。PR 必須審查 pin 更新時的 ref 解析證據，runtime 與 stale-check 則只以 `resolvedCommit`、`archiveSha256` 與 `contentSha256` 為權威。
 - `resolvedCommit` 必須是 40 個小寫十六進位字元的完整 commit SHA。Bootstrap 不得重新以 mutable ref 決定內容。
 - `catalogSha256` 是 Catalog JSON 原始檔案 bytes 的 SHA-256。
 - `archiveSha256` 是 GitHub codeload archive 原始 bytes 的 SHA-256。

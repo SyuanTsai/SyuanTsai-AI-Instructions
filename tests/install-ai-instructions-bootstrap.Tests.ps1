@@ -53,7 +53,7 @@ function Set-TestJson {
 Describe 'install-ai-instructions-bootstrap' {
     BeforeEach {
         $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-        $codexHome = Join-Path $TestDrive '.codex'
+        $codexHome = Join-Path $TestDrive ('.codex-' + [Guid]::NewGuid().ToString('N'))
     }
 
     It 'InterT05_installs_the_multi_source_runtime_without_creating_a_SessionStart_hook' {
