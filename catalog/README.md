@@ -68,12 +68,12 @@ Conditional operator 的 production semantics：
 
 ## Source acquisition、pin 與 hash contract
 
-- Catalog source `repository` 接受 absolute HTTPS Git Repository URL。
-- `github.com` 使用 commit-pinned codeload ZIP；其他 HTTPS Git host 使用 `git fetch` 取得 requested ref，驗證 `FETCH_HEAD == resolvedCommit` 後以 `git archive` 建立單一 root archive。
+- Catalog source `repository` 在 schema v1 僅接受 `https://github.com/<owner>/<repository>[.git]`。這是刻意的 deterministic boundary；其他 Git host 留待後續 schema version 擴充。
+- GitHub source 一律使用完整 `resolvedCommit` 的 codeload ZIP。Lock generator 與 bootstrap 使用相同 archive provider，因此 `archiveSha256` 可直接比對同一 immutable archive bytes。
 - `requestedRef` 保存 branch、tag 或 commit；`requestedRefType` 明確區分類型。
-- `resolvedCommit` 必須是 40 個小寫十六進位字元的完整 commit SHA。Bootstrap 不得重新以未驗證 mutable ref 決定內容。
+- `resolvedCommit` 必須是 40 個小寫十六進位字元的完整 commit SHA。Bootstrap 不得重新以 mutable ref 決定內容。
 - `catalogSha256` 是 Catalog JSON 原始檔案 bytes 的 SHA-256。
-- `archiveSha256` 是實際 acquisition archive 原始 bytes 的 SHA-256。
+- `archiveSha256` 是 GitHub codeload archive 原始 bytes 的 SHA-256。
 - Skill `contentSha256` 是 deterministic inventory 的 SHA-256：以 repository-relative forward-slash path 做 ordinal 排序，每行使用 `<path>\t<raw-file-sha256>\n` 的 UTF-8（無 BOM）資料串接後計算。
 - Manifest `sha256` 是實際套用到 target path 的檔案 bytes SHA-256。
 - `resolvedVersion`／`sourceVersion` 只供顯示與稽核；重現性仍以完整 commit SHA 與 hash 為準。
@@ -89,11 +89,11 @@ Conditional operator 的 production semantics：
 Installer 將 schema v1／v2 idempotent 升級為 v3：
 
 - 原樣保留合法的 `autoCommitRepositoryUrls`、`excludedRepositoryUrls` 與 `excludedRepositoryPaths`。
-- `catalog.repository` 是目前安裝 AI-Instructions runtime/Catalog/Lock bundle 的 canonical GitHub `.git` URL，不是任意外部 Catalog Repository；外部 Skill repositories 由 checked-in Catalog `sources[]` 管理。
+- `catalog.repository` 是目前安裝 AI-Instructions runtime/Catalog/Lock bundle 的 canonical GitHub `.git` URL，不是任意外部 Catalog Repository；external Skill repositories 由 checked-in Catalog `sources[]` 管理。
 - `catalog.ref` 是該 bundle 的完整小寫 commit SHA。
 - schema v3 重新安裝時只保留使用者 `profiles`、`includeSkills`、`excludeSkills`，bundle repository/ref 必須與本次 installer checkout 一起前進；若 config 指向其他 Repository，installer fail closed。
 - Installer 只允許其 launcher、runtime modules、Catalog 與 Lock bytes 完全等於 `HEAD` 的 clean tracked files；因此 installed bytes 可由 `catalog.ref` 重現。
-- 新 runtime 先在 staging directory 完整複製、parse、驗證 Catalog/Lock 與 `runtime-bundle.json`，再 swap 到 active runtime；config 最後更新。正常例外會 rollback；程序中斷造成的暫時不一致則由 identity-checking launcher fail closed。
+- 新 runtime 先在 staging directory 完整複製、parse、驗證 Catalog/Lock 與 `runtime-bundle.json`，再 swap 到 active runtime；config 最後更新。正常例外會 rollback；rollback 本身失敗時保留 backup path；程序中斷造成的暫時不一致則由 identity-checking launcher fail closed。
 - 缺少必要欄位、未知 schema、mutable ref、bundle identity mismatch 或同一 Skill 同時 include/exclude 時停止並回報。
 
 Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Legacy mutation entry point只為直接呼叫 regression compatibility 保留；安裝後入口不再走單一來源路徑。
