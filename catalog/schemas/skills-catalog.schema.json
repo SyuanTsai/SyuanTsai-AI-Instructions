@@ -4,38 +4,23 @@
   "title": "Agent Skills Catalog",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schemaVersion",
-    "catalogId",
-    "sources",
-    "profiles",
-    "skills"
-  ],
+  "required": ["schemaVersion","catalogId","sources","profiles","skills"],
   "properties": {
-    "schemaVersion": {
-      "const": 1
-    },
-    "catalogId": {
-      "$ref": "#/$defs/stableId"
-    },
+    "schemaVersion": {"const": 1},
+    "catalogId": {"$ref": "#/$defs/stableId"},
     "sources": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "repository"
-        ],
+        "required": ["id","repository"],
         "properties": {
-          "id": {
-            "$ref": "#/$defs/stableId"
-          },
+          "id": {"$ref": "#/$defs/stableId"},
           "repository": {
             "type": "string",
             "format": "uri",
-            "pattern": "^https://"
+            "pattern": "^https://github\\.com/[^/]+/[^/]+(?:\\.git)?/?$"
           }
         }
       }
@@ -46,296 +31,87 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "description",
-          "default",
-          "includes",
-          "excludes"
-        ],
+        "required": ["id","description","default","includes","excludes"],
         "properties": {
-          "id": {
-            "$ref": "#/$defs/stableId"
-          },
-          "description": {
-            "type": "string",
-            "minLength": 1
-          },
-          "default": {
-            "type": "boolean"
-          },
-          "includes": {
-            "$ref": "#/$defs/stableIdArray"
-          },
-          "excludes": {
-            "$ref": "#/$defs/stableIdArray"
-          }
+          "id": {"$ref": "#/$defs/stableId"},
+          "description": {"type": "string","minLength": 1},
+          "default": {"type": "boolean"},
+          "includes": {"$ref": "#/$defs/stableIdArray"},
+          "excludes": {"$ref": "#/$defs/stableIdArray"}
         }
       }
     },
-    "skills": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "$ref": "#/$defs/skill"
-      }
-    }
+    "skills": {"type": "array","minItems": 1,"items": {"$ref": "#/$defs/skill"}}
   },
   "$defs": {
-    "stableId": {
-      "type": "string",
-      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
-    },
-    "stableIdArray": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": {
-        "$ref": "#/$defs/stableId"
-      }
-    },
+    "stableId": {"type": "string","pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"},
+    "stableIdArray": {"type": "array","uniqueItems": true,"items": {"$ref": "#/$defs/stableId"}},
     "capability": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "id",
-        "state"
-      ],
+      "type": "object","additionalProperties": false,"required": ["kind","id","state"],
       "properties": {
-        "kind": {
-          "type": "string",
-          "enum": [
-            "command",
-            "connector",
-            "environment"
-          ]
-        },
-        "id": {
-          "$ref": "#/$defs/stableId"
-        },
-        "state": {
-          "type": "string",
-          "enum": [
-            "available",
-            "authenticated",
-            "configured"
-          ]
-        }
+        "kind": {"type": "string","enum": ["command","connector","environment"]},
+        "id": {"$ref": "#/$defs/stableId"},
+        "state": {"type": "string","enum": ["available","authenticated","configured"]}
       }
     },
     "dependency": {
-      "type": "object",
-      "required": [
-        "skillId",
-        "type"
-      ],
+      "type": "object","required": ["skillId","type"],
       "properties": {
-        "skillId": {
-          "$ref": "#/$defs/stableId"
-        },
-        "type": {
-          "type": "string",
-          "enum": [
-            "hard",
-            "conditional",
-            "recommended"
-          ]
-        },
+        "skillId": {"$ref": "#/$defs/stableId"},
+        "type": {"type": "string","enum": ["hard","conditional","recommended"]},
         "condition": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "capability",
-            "operator"
-          ],
+          "type": "object","additionalProperties": false,"required": ["capability","operator"],
           "properties": {
-            "capability": {
-              "$ref": "#/$defs/stableId"
-            },
-            "operator": {
-              "type": "string",
-              "enum": [
-                "available",
-                "missing",
-                "missing-or-invalid",
-                "unavailable"
-              ]
-            }
+            "capability": {"$ref": "#/$defs/stableId"},
+            "operator": {"type": "string","enum": ["available","missing","missing-or-invalid","unavailable"]}
           }
         },
         "fallback": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "capability",
-            "description"
-          ],
+          "type": "object","additionalProperties": false,"required": ["capability","description"],
           "properties": {
-            "capability": {
-              "$ref": "#/$defs/stableId"
-            },
-            "description": {
-              "type": "string",
-              "minLength": 1
-            }
+            "capability": {"$ref": "#/$defs/stableId"},
+            "description": {"type": "string","minLength": 1}
           }
         }
       },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "type": {
-                "const": "conditional"
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          "then": {
-            "required": [
-              "condition",
-              "fallback"
-            ]
-          },
-          "else": {
-            "not": {
-              "anyOf": [
-                {
-                  "required": [
-                    "condition"
-                  ]
-                },
-                {
-                  "required": [
-                    "fallback"
-                  ]
-                }
-              ]
-            }
-          }
-        }
-      ],
+      "allOf": [{
+        "if": {"properties": {"type": {"const": "conditional"}},"required": ["type"]},
+        "then": {"required": ["condition","fallback"]},
+        "else": {"not": {"anyOf": [{"required": ["condition"]},{"required": ["fallback"]}]}}
+      }],
       "additionalProperties": false
     },
     "skill": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "group",
-        "source",
-        "profiles",
-        "compatibility",
-        "dependencies",
-        "lifecycle"
-      ],
+      "type": "object","additionalProperties": false,
+      "required": ["id","group","source","profiles","compatibility","dependencies","lifecycle"],
       "properties": {
-        "id": {
-          "$ref": "#/$defs/stableId"
-        },
-        "group": {
-          "$ref": "#/$defs/stableId"
-        },
+        "id": {"$ref": "#/$defs/stableId"},
+        "group": {"$ref": "#/$defs/stableId"},
         "source": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "sourceId",
-            "path"
-          ],
+          "type": "object","additionalProperties": false,"required": ["sourceId","path"],
           "properties": {
-            "sourceId": {
-              "$ref": "#/$defs/stableId"
-            },
-            "path": {
-              "type": "string",
-              "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
-            }
+            "sourceId": {"$ref": "#/$defs/stableId"},
+            "path": {"type": "string","pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"}
           }
         },
-        "profiles": {
-          "$ref": "#/$defs/stableIdArray"
-        },
+        "profiles": {"$ref": "#/$defs/stableIdArray"},
         "compatibility": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "platforms",
-            "shells",
-            "requiredCapabilities",
-            "anyOfCapabilities"
-          ],
+          "type": "object","additionalProperties": false,
+          "required": ["platforms","shells","requiredCapabilities","anyOfCapabilities"],
           "properties": {
-            "platforms": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "enum": [
-                  "any",
-                  "linux",
-                  "macos",
-                  "windows"
-                ]
-              }
-            },
-            "shells": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "requiredCapabilities": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/capability"
-              }
-            },
-            "anyOfCapabilities": {
-              "type": "array",
-              "items": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "$ref": "#/$defs/capability"
-                }
-              }
-            }
+            "platforms": {"type": "array","minItems": 1,"uniqueItems": true,"items": {"type": "string","enum": ["any","linux","macos","windows"]}},
+            "shells": {"type": "array","uniqueItems": true,"items": {"type": "string","minLength": 1}},
+            "requiredCapabilities": {"type": "array","items": {"$ref": "#/$defs/capability"}},
+            "anyOfCapabilities": {"type": "array","items": {"type": "array","minItems": 1,"items": {"$ref": "#/$defs/capability"}}}
           }
         },
-        "dependencies": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/dependency"
-          }
-        },
+        "dependencies": {"type": "array","items": {"$ref": "#/$defs/dependency"}},
         "lifecycle": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status",
-            "aliases"
-          ],
+          "type": "object","additionalProperties": false,"required": ["status","aliases"],
           "properties": {
-            "status": {
-              "type": "string",
-              "enum": [
-                "active",
-                "deprecated",
-                "removed"
-              ]
-            },
-            "aliases": {
-              "$ref": "#/$defs/stableIdArray"
-            },
-            "replacementId": {
-              "$ref": "#/$defs/stableId"
-            }
+            "status": {"type": "string","enum": ["active","deprecated","removed"]},
+            "aliases": {"$ref": "#/$defs/stableIdArray"},
+            "replacementId": {"$ref": "#/$defs/stableId"}
           }
         }
       }
