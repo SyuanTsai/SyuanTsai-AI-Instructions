@@ -49,6 +49,7 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+          exit 0
 
       - name: Run full Pester suite
         shell: powershell
@@ -66,6 +67,7 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
           if ($result.FailedCount -gt 0) { exit 1 }
+          exit 0
 
   powershell-7:
     name: Pester (PowerShell 7)
@@ -103,6 +105,7 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+          exit 0
 
       - name: Run full Pester suite
         shell: pwsh
@@ -120,3 +123,4 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
           if ($result.FailedCount -gt 0) { exit 1 }
+          exit 0
