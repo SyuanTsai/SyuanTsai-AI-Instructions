@@ -16,10 +16,8 @@ Describe 'Skills source retrieval' {
         $uri | Should Be ('https://codeload.github.com/example/example-skills/zip/' + ('a' * 40))
     }
 
-    # Get-GitHubArchiveUri is the GitHub-specific fast path. Other HTTPS Git hosts are handled
-    # by Get-SkillsSourceArchives through git fetch + git archive instead of this helper.
-    It 'UnitT20_keeps_the_GitHub_codeload_helper_host_specific' {
-        Assert-ThrowsMessage { Get-GitHubArchiveUri -Repository 'https://example.org/acme/skills.git' -ResolvedCommit ('a' * 40) } 'requires a github.com repository'
+    It 'UnitT20_rejects_an_unsupported_remote_repository_host' {
+        Assert-ThrowsMessage { Get-GitHubArchiveUri -Repository 'https://example.org/acme/skills.git' -ResolvedCommit ('a' * 40) } 'supports github.com repositories only'
     }
 
     It 'UnitT25_rejects_non_https_repository_urls' {
