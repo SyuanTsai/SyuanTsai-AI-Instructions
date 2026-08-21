@@ -30,14 +30,20 @@ function New-TestSkill {
         [string]$Id,
         [object]$Compatibility = $null,
         [object[]]$Dependencies = @(),
-        [string]$Status = 'active'
+        [string]$Status = 'active',
+        [string[]]$Aliases = @(),
+        [string]$ReplacementId
     )
     if ($null -eq $Compatibility) { $Compatibility = New-TestCompatibility }
+    $lifecycle = [pscustomobject][ordered]@{ status=$Status; aliases=@($Aliases) }
+    if (-not [string]::IsNullOrWhiteSpace($ReplacementId)) {
+        $lifecycle | Add-Member -NotePropertyName replacementId -NotePropertyValue $ReplacementId
+    }
     return [pscustomobject]@{
         id = $Id
         compatibility = $Compatibility
         dependencies = $Dependencies
-        lifecycle = [pscustomobject]@{ status=$Status }
+        lifecycle = $lifecycle
     }
 }
 
@@ -97,14 +103,24 @@ Describe 'Skills selection resolver' {
         Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection $selection } 'Unknown Skills Catalog profile'
     }
 
-    It 'UnitT60_rejects_unknown_and_removed_explicit_skills' {
+    It 'UnitT60_rejects_unknown_and_removed_explicit_skills_without_replacement' {
         $catalog = New-SelectionCatalog
         Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('missing'); excludeSkills=@() }) } 'does not exist'
         Assert-ThrowsMessage { Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('skill-old'); excludeSkills=@() }) } 'is removed'
     }
 
-    # Profile selection may request optional capabilities that are not available on this host.
-    # The resolver must omit them rather than placing an unusable Skill into the installed catalog.
+    It 'UnitT65_migrates_removed_ids_and_aliases_to_the_replacement_skill' {
+        $catalog = [pscustomobject]@{
+            profiles=@([pscustomobject]@{ id='core'; default=$true; includes=@('new-skill'); excludes=@() })
+            skills=@(
+                (New-TestSkill -Id 'old-skill' -Status 'removed' -ReplacementId 'new-skill'),
+                (New-TestSkill -Id 'new-skill' -Aliases @('old-skill'))
+            )
+        }
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('old-skill'); excludeSkills=@() })) | Should Be @('new-skill')
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('old-skill') })).Count | Should Be 0
+    }
+
     It 'UnitT70_filters_profile_selected_skills_when_required_capability_is_missing' {
         $catalog = New-SelectionCatalog
         $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
@@ -116,7 +132,6 @@ Describe 'Skills selection resolver' {
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
     }
 
-    # Explicit include is a stronger statement of user intent; silently dropping it would hide a bad setup.
     It 'UnitT80_fails_closed_when_an_explicitly_included_skill_is_incompatible' {
         $catalog = New-SelectionCatalog
         $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
@@ -153,7 +168,7 @@ Describe 'Skills selection resolver' {
         } 'Required dependency.*excluded'
     }
 
-    It 'UnitT110_resolves_conditional_dependency_from_capability_evidence' {
+    It 'UnitT110_resolves_missing_or_invalid_dependency_from_capability_evidence' {
         $conditional = [pscustomobject]@{
             skillId='skill-b'
             type='conditional'
@@ -167,12 +182,37 @@ Describe 'Skills selection resolver' {
         $selection=[pscustomobject]@{ profiles=@('jira'); includeSkills=@(); excludeSkills=@() }
 
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-a','skill-b')
-
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"jira-cloud-connector","state":"configured"}]'
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-a')
-
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"jira-cloud-api","state":"configured"}]'
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be @('skill-a')
+    }
+
+    It 'UnitT115_supports_every_catalog_conditional_operator' {
+        $cases = @(
+            @{ Operator='available'; WithoutEvidence=@('skill-a'); WithEvidence=@('skill-a','skill-b') },
+            @{ Operator='missing'; WithoutEvidence=@('skill-a','skill-b'); WithEvidence=@('skill-a') },
+            @{ Operator='unavailable'; WithoutEvidence=@('skill-a','skill-b'); WithEvidence=@('skill-a') },
+            @{ Operator='missing-or-invalid'; WithoutEvidence=@('skill-a','skill-b'); WithEvidence=@('skill-a') }
+        )
+        foreach ($case in $cases) {
+            Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
+            $conditional = [pscustomobject]@{
+                skillId='skill-b'
+                type='conditional'
+                condition=[pscustomobject]@{ capability='condition-capability'; operator=$case.Operator }
+                fallback=[pscustomobject]@{ capability='fallback-capability'; description='fallback' }
+            }
+            $catalog = [pscustomobject]@{
+                profiles=@([pscustomobject]@{ id='test'; default=$false; includes=@('skill-a'); excludes=@() })
+                skills=@((New-TestSkill -Id 'skill-a' -Dependencies @($conditional)),(New-TestSkill -Id 'skill-b'))
+            }
+            $selection=[pscustomobject]@{ profiles=@('test'); includeSkills=@(); excludeSkills=@() }
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be $case.WithoutEvidence
+
+            $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"condition-capability","state":"configured"}]'
+            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should Be $case.WithEvidence
+        }
     }
 
     It 'UnitT120_rejects_invalid_capability_evidence_json' {
