@@ -30,7 +30,6 @@ function Get-CurrentPlatformId {
         }
     }
     catch {
-        # Older Windows PowerShell/.NET combinations may not expose RuntimeInformation.
     }
 
     return 'unix'
@@ -371,14 +370,30 @@ function Resolve-SkillsSelection {
                             throw "Conditional dependency '$skillId' -> '$dependencyId' is missing condition or fallback metadata."
                         }
                         $operator = [string](Get-OptionalPropertyValue -Object $condition -Name 'operator' -DefaultValue '')
-                        if ($operator -cne 'missing-or-invalid') {
-                            throw "Unsupported conditional dependency operator '$operator' for '$skillId'."
-                        }
                         $conditionCapability = [string](Get-OptionalPropertyValue -Object $condition -Name 'capability' -DefaultValue '')
                         $fallbackCapability = [string](Get-OptionalPropertyValue -Object $fallback -Name 'capability' -DefaultValue '')
-                        $conditionIsMissing = -not (Test-CapabilityIdAvailable -CapabilityId $conditionCapability -Evidence $evidence)
+                        $conditionAvailable = Test-CapabilityIdAvailable -CapabilityId $conditionCapability -Evidence $evidence
                         $fallbackAvailable = Test-CapabilityIdAvailable -CapabilityId $fallbackCapability -Evidence $evidence
-                        $required = $conditionIsMissing -and -not $fallbackAvailable
+
+                        switch ($operator) {
+                            'available' {
+                                $required = $conditionAvailable -and -not $fallbackAvailable
+                            }
+                            'missing' {
+                                $required = -not $conditionAvailable -and -not $fallbackAvailable
+                            }
+                            'unavailable' {
+                                $required = -not $conditionAvailable -and -not $fallbackAvailable
+                            }
+                            'missing-or-invalid' {
+                                # Invalid evidence is rejected when loaded, so an invalid capability is treated
+                                # as unavailable evidence at this layer.
+                                $required = -not $conditionAvailable -and -not $fallbackAvailable
+                            }
+                            default {
+                                throw "Unsupported conditional dependency operator '$operator' for '$skillId'."
+                            }
+                        }
                     }
                     'recommended' {
                         continue
