@@ -32,7 +32,9 @@ If an applicable module is missing, identify the missing file and do not invent 
 - Query or aggregate Datadog logs, analyze APM traces, handle Logs Explorer, trace, or investigation widget URLs, or investigate an incident with Datadog telemetry → `.agents/skills/investigate-datadog-logs/SKILL.md`
 - Search public information through FELO under the external research rules → `.agents/skills/search-with-felo/SKILL.md`
 
-Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. If an applicable Skill is missing, identify the missing file and do not invent its workflow.
+The non-`core` Skills above may be absent because of the selected profile or runtime capabilities. A missing optional Skill is not by itself a task failure: build a GitHub Copilot implementation prompt directly from current repository evidence and Instructions; use Jira or Datadog directly only when an approved connector or API capability is already available; and use the `ExternalResearch` fallback path through an approved connector or platform web search when FELO is unavailable. If no safe fallback capability exists, report that the capability is not installed or configured and do not invent the missing Skill workflow.
+
+Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it.
 
 ## Agents
 
