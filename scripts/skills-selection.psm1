@@ -148,8 +148,6 @@ function Test-CapabilityRequirement {
         return $null -ne (Get-Command $id -ErrorAction SilentlyContinue | Select-Object -First 1)
     }
 
-    # Authentication, connector configuration, and abstract API/environment readiness cannot
-    # be inferred safely from process-local state. They require explicit runtime evidence.
     return $false
 }
 
@@ -218,6 +216,31 @@ function Test-SkillCompatibility {
     return $true
 }
 
+function Resolve-ConfiguredSkillId {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][hashtable] $SkillsById,
+        [Parameter(Mandatory = $true)][hashtable] $AliasesById
+    )
+
+    if ($SkillsById.ContainsKey($SkillId)) {
+        $skill = $SkillsById[$SkillId]
+        if ([string]$skill.lifecycle.status -eq 'removed') {
+            $replacement = [string](Get-OptionalPropertyValue -Object $skill.lifecycle -Name 'replacementId' -DefaultValue '')
+            if (-not [string]::IsNullOrWhiteSpace($replacement)) {
+                return $replacement
+            }
+        }
+        return $SkillId
+    }
+
+    if ($AliasesById.ContainsKey($SkillId)) {
+        return [string]$AliasesById[$SkillId]
+    }
+
+    return $null
+}
+
 function Resolve-SkillsSelection {
     [CmdletBinding()]
     param(
@@ -231,8 +254,19 @@ function Resolve-SkillsSelection {
     }
 
     $skillsById = @{}
+    $aliasesById = @{}
     foreach ($skill in @($Catalog.skills)) {
-        $skillsById[[string]$skill.id] = $skill
+        $skillId = [string]$skill.id
+        $skillsById[$skillId] = $skill
+        if ([string]$skill.lifecycle.status -ne 'removed') {
+            foreach ($aliasValue in @($skill.lifecycle.aliases)) {
+                $alias = [string]$aliasValue
+                if ($aliasesById.ContainsKey($alias) -and [string]$aliasesById[$alias] -cne $skillId) {
+                    throw "Ambiguous Skills Catalog alias '$alias'."
+                }
+                $aliasesById[$alias] = $skillId
+            }
+        }
     }
 
     $evidence = @(Get-ExplicitCapabilityEvidence)
@@ -258,14 +292,20 @@ function Resolve-SkillsSelection {
 
         $profile = $profilesById[$profileId]
         foreach ($skillIdValue in @($profile.includes)) {
-            $skillId = [string]$skillIdValue
-            if (-not $skillsById.ContainsKey($skillId)) {
-                throw "Skills Catalog profile '$profileId' references unknown Skill '$skillId'."
+            $configuredId = [string]$skillIdValue
+            $skillId = Resolve-ConfiguredSkillId -SkillId $configuredId -SkillsById $skillsById -AliasesById $aliasesById
+            if ([string]::IsNullOrWhiteSpace($skillId)) {
+                throw "Skills Catalog profile '$profileId' references unknown Skill '$configuredId'."
             }
             $selected[$skillId] = $true
         }
         foreach ($skillIdValue in @($profile.excludes)) {
-            $profileExcludes[[string]$skillIdValue] = $true
+            $configuredId = [string]$skillIdValue
+            $skillId = Resolve-ConfiguredSkillId -SkillId $configuredId -SkillsById $skillsById -AliasesById $aliasesById
+            if ([string]::IsNullOrWhiteSpace($skillId)) {
+                throw "Skills Catalog profile '$profileId' excludes unknown Skill '$configuredId'."
+            }
+            $profileExcludes[$skillId] = $true
         }
     }
 
@@ -274,26 +314,25 @@ function Resolve-SkillsSelection {
     }
 
     foreach ($skillIdValue in @($Selection.includeSkills)) {
-        $skillId = [string]$skillIdValue
-        if (-not $skillsById.ContainsKey($skillId)) {
-            throw "Explicitly included Skill '$skillId' does not exist in the Skills Catalog."
+        $configuredId = [string]$skillIdValue
+        $skillId = Resolve-ConfiguredSkillId -SkillId $configuredId -SkillsById $skillsById -AliasesById $aliasesById
+        if ([string]::IsNullOrWhiteSpace($skillId)) {
+            throw "Explicitly included Skill '$configuredId' does not exist in the Skills Catalog."
         }
         $explicitIncludes[$skillId] = $true
         $selected[$skillId] = $true
     }
 
     foreach ($skillIdValue in @($Selection.excludeSkills)) {
-        $skillId = [string]$skillIdValue
-        if (-not $skillsById.ContainsKey($skillId)) {
-            throw "Explicitly excluded Skill '$skillId' does not exist in the Skills Catalog."
+        $configuredId = [string]$skillIdValue
+        $skillId = Resolve-ConfiguredSkillId -SkillId $configuredId -SkillsById $skillsById -AliasesById $aliasesById
+        if ([string]::IsNullOrWhiteSpace($skillId)) {
+            throw "Explicitly excluded Skill '$configuredId' does not exist in the Skills Catalog."
         }
         $explicitExcludes[$skillId] = $true
         $selected.Remove($skillId)
     }
 
-    # Compatibility is evaluated after profile/include/exclude resolution. Profile-selected
-    # incompatible Skills are filtered; an explicit include fails closed so user intent is not
-    # silently ignored.
     foreach ($skillId in @($selected.Keys)) {
         $skill = $skillsById[$skillId]
         if ([string]$skill.lifecycle.status -eq 'removed') {
@@ -308,8 +347,6 @@ function Resolve-SkillsSelection {
         }
     }
 
-    # Dependencies may add Skills, so resolve to a fixed point. Explicit personal excludes always
-    # win by turning a required dependency into a fail-closed resolution error.
     $changed = $true
     while ($changed) {
         $changed = $false
