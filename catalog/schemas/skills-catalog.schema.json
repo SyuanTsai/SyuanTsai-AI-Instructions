@@ -35,7 +35,7 @@
           "repository": {
             "type": "string",
             "format": "uri",
-            "pattern": "^https://github\\.com/[^/]+/[^/]+(?:\\.git)?/?$"
+            "pattern": "^https://"
           }
         }
       }
@@ -154,7 +154,12 @@
             },
             "operator": {
               "type": "string",
-              "const": "missing-or-invalid"
+              "enum": [
+                "available",
+                "missing",
+                "missing-or-invalid",
+                "unavailable"
+              ]
             }
           }
         },
