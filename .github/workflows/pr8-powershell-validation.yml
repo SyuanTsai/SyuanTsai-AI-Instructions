@@ -1,12 +1,15 @@
-name: PR8 PowerShell Validation
+name: PowerShell Regression
 
 on:
   push:
     branches:
       - syp-79-multi-source-routing
+      - syp-86
+      - main
   pull_request:
     branches:
       - syp-86
+      - main
   workflow_dispatch:
 
 jobs:
@@ -31,10 +34,10 @@ jobs:
           Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
           Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
 
-      - name: Parse changed PowerShell files
+      - name: Parse all PowerShell files
         shell: powershell
         run: |
-          $files = git diff --name-only origin/syp-86...HEAD -- '*.ps1' '*.psm1'
+          $files = git ls-files '*.ps1' '*.psm1'
           $failed = $false
           foreach ($file in $files) {
             $tokens = $null
@@ -85,10 +88,10 @@ jobs:
           Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
           Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
 
-      - name: Parse changed PowerShell files
+      - name: Parse all PowerShell files
         shell: pwsh
         run: |
-          $files = git diff --name-only origin/syp-86...HEAD -- '*.ps1' '*.psm1'
+          $files = git ls-files '*.ps1' '*.psm1'
           $failed = $false
           foreach ($file in $files) {
             $tokens = $null
