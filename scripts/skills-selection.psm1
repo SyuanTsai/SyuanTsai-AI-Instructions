@@ -66,7 +66,7 @@ function Get-ExplicitCapabilityEvidence {
 
 function Test-ExplicitCapabilityEvidence {
     param(
-        [Parameter(Mandatory = $true)][object[]] $Evidence,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
         [Parameter(Mandatory = $true)][string] $Kind,
         [Parameter(Mandatory = $true)][string] $Id,
         [Parameter(Mandatory = $true)][string] $State
@@ -128,7 +128,7 @@ function Test-ShellExpression {
 function Test-CapabilityRequirement {
     param(
         [Parameter(Mandatory = $true)][object] $Requirement,
-        [Parameter(Mandatory = $true)][object[]] $Evidence
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
     )
 
     $kind = [string](Get-OptionalPropertyValue -Object $Requirement -Name 'kind' -DefaultValue '')
@@ -156,7 +156,7 @@ function Test-CapabilityRequirement {
 function Test-CapabilityIdAvailable {
     param(
         [Parameter(Mandatory = $true)][string] $CapabilityId,
-        [Parameter(Mandatory = $true)][object[]] $Evidence
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
     )
 
     if ($CapabilityId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
@@ -174,7 +174,7 @@ function Test-CapabilityIdAvailable {
 function Test-SkillCompatibility {
     param(
         [Parameter(Mandatory = $true)][object] $Skill,
-        [Parameter(Mandatory = $true)][object[]] $Evidence
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
     )
 
     $compatibility = Get-OptionalPropertyValue -Object $Skill -Name 'compatibility'
