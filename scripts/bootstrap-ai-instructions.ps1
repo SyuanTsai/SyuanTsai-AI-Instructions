@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-    [string] $SourceRepository = 'SyuanTsai/SyuanTsai-AI-Instructions',
-    [string] $SourceRef = 'main',
+    [Parameter(Mandatory = $true)]
     [string] $SourceArchivePath,
     [string] $TargetRoot,
+    [Parameter(Mandatory = $true)]
     [string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)]
     [string] $ProvenancePath,
     [string] $GitExecutable = 'git'
 )
@@ -384,14 +385,6 @@ function New-ManifestEntry {
         [string] $Sha256
     )
 
-    if (-not $script:manifestV2Enabled) {
-        return [pscustomobject][ordered]@{
-            sourcePath = $SourcePath
-            targetPath = $TargetPath
-            sha256 = $Sha256
-        }
-    }
-
     $artifactType = 'instruction'
     $artifactId = $null
     $source = $script:instructionProvenance
@@ -450,10 +443,6 @@ function New-ManifestEntry {
 
 function Copy-ExistingManifestEntry {
     param([Parameter(Mandatory = $true)][object] $Entry)
-
-    if (-not $script:manifestV2Enabled) {
-        return New-ManifestEntry -SourcePath ([string]$Entry.sourcePath) -TargetPath ([string]$Entry.targetPath) -Sha256 ([string]$Entry.sha256)
-    }
 
     return [pscustomobject][ordered]@{
         artifactType = [string] $Entry.artifactType
@@ -828,60 +817,57 @@ $manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/',
 $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
 $manifestEntriesByTarget = @{}
 $manifestSchemaVersion = $null
-$script:manifestV2Enabled = -not [string]::IsNullOrWhiteSpace($ProvenancePath)
 $script:instructionProvenance = $null
 $script:skillProvenanceById = @{}
 $provenance = $null
 
-if ($script:manifestV2Enabled) {
-    $resolvedProvenancePath = [System.IO.Path]::GetFullPath($ProvenancePath)
-    if (-not (Test-Path -LiteralPath $resolvedProvenancePath -PathType Leaf)) {
-        throw "Managed source provenance does not exist: $resolvedProvenancePath"
-    }
-    try {
-        $provenance = Get-Content -Raw -Encoding UTF8 -LiteralPath $resolvedProvenancePath | ConvertFrom-Json
-    }
-    catch {
-        throw "Managed source provenance is not valid JSON: $resolvedProvenancePath"
-    }
-    if ($provenance.schemaVersion -ne 1 -or
-        [string]$provenance.catalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
-        [string]$provenance.lockSha256 -cnotmatch '^[0-9a-f]{64}$') {
-        throw 'Managed source provenance has an unsupported schema, catalog ID, or lock hash.'
-    }
+$resolvedProvenancePath = [System.IO.Path]::GetFullPath($ProvenancePath)
+if (-not (Test-Path -LiteralPath $resolvedProvenancePath -PathType Leaf)) {
+    throw "Managed source provenance does not exist: $resolvedProvenancePath"
+}
+try {
+    $provenance = Get-Content -Raw -Encoding UTF8 -LiteralPath $resolvedProvenancePath | ConvertFrom-Json
+}
+catch {
+    throw "Managed source provenance is not valid JSON: $resolvedProvenancePath"
+}
+if ($provenance.schemaVersion -ne 1 -or
+    [string]$provenance.catalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+    [string]$provenance.lockSha256 -cnotmatch '^[0-9a-f]{64}$') {
+    throw 'Managed source provenance has an unsupported schema, catalog ID, or lock hash.'
+}
 
-    $script:instructionProvenance = $provenance.instruction
+$script:instructionProvenance = $provenance.instruction
+foreach ($requiredProperty in @('sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion')) {
+    if ($null -eq $script:instructionProvenance.PSObject.Properties[$requiredProperty] -or
+        [string]::IsNullOrWhiteSpace([string]$script:instructionProvenance.$requiredProperty)) {
+        throw "Managed instruction provenance is missing '$requiredProperty'."
+    }
+}
+if ([string]$script:instructionProvenance.sourceId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+    [string]$script:instructionProvenance.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    [string]$script:instructionProvenance.sourceRepository -cnotmatch '^https://') {
+    throw 'Managed instruction provenance contains an invalid source ID, repository, or commit.'
+}
+
+foreach ($skillSource in @($provenance.skills)) {
+    $skillId = [string]$skillSource.id
+    if ($skillId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+        $script:skillProvenanceById.ContainsKey($skillId)) {
+        throw "Managed Skill provenance contains an invalid or duplicate Skill ID: $skillId"
+    }
     foreach ($requiredProperty in @('sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion')) {
-        if ($null -eq $script:instructionProvenance.PSObject.Properties[$requiredProperty] -or
-            [string]::IsNullOrWhiteSpace([string]$script:instructionProvenance.$requiredProperty)) {
-            throw "Managed instruction provenance is missing '$requiredProperty'."
+        if ($null -eq $skillSource.PSObject.Properties[$requiredProperty] -or
+            [string]::IsNullOrWhiteSpace([string]$skillSource.$requiredProperty)) {
+            throw "Managed Skill '$skillId' provenance is missing '$requiredProperty'."
         }
     }
-    if ([string]$script:instructionProvenance.sourceId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
-        [string]$script:instructionProvenance.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
-        [string]$script:instructionProvenance.sourceRepository -cnotmatch '^https://') {
-        throw 'Managed instruction provenance contains an invalid source ID, repository, or commit.'
+    if ([string]$skillSource.sourceId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+        [string]$skillSource.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+        [string]$skillSource.sourceRepository -cnotmatch '^https://') {
+        throw "Managed Skill '$skillId' provenance contains an invalid source."
     }
-
-    foreach ($skillSource in @($provenance.skills)) {
-        $skillId = [string]$skillSource.id
-        if ($skillId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
-            $script:skillProvenanceById.ContainsKey($skillId)) {
-            throw "Managed Skill provenance contains an invalid or duplicate Skill ID: $skillId"
-        }
-        foreach ($requiredProperty in @('sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion')) {
-            if ($null -eq $skillSource.PSObject.Properties[$requiredProperty] -or
-                [string]::IsNullOrWhiteSpace([string]$skillSource.$requiredProperty)) {
-                throw "Managed Skill '$skillId' provenance is missing '$requiredProperty'."
-            }
-        }
-        if ([string]$skillSource.sourceId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
-            [string]$skillSource.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
-            [string]$skillSource.sourceRepository -cnotmatch '^https://') {
-            throw "Managed Skill '$skillId' provenance contains an invalid source."
-        }
-        $script:skillProvenanceById[$skillId] = $skillSource
-    }
+    $script:skillProvenanceById[$skillId] = $skillSource
 }
 
 if ($manifestExists) {
@@ -897,19 +883,11 @@ if ($manifestExists) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
 
-    if ($manifestSchemaVersion -eq 2 -and -not $script:manifestV2Enabled) {
-        throw 'Managed instruction manifest schemaVersion 2 requires immutable source provenance.'
-    }
     if ($manifestSchemaVersion -eq 2 -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
     }
-    if ($manifestSchemaVersion -eq 1 -and -not $script:manifestV2Enabled -and
-        ($manifest.sourceRepository -cne $SourceRepository -or $manifest.sourceRef -cne $SourceRef)) {
-        throw 'Managed instruction manifest source does not match the configured source repository and ref.'
-    }
-
     foreach ($entry in @($manifest.files)) {
         $targetPath = [string] $entry.targetPath
         if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
@@ -943,7 +921,7 @@ if ($manifestExists) {
         $manifestEntriesByTarget[$targetPath] = $entry
     }
 
-    if ($manifestSchemaVersion -eq 1 -and $script:manifestV2Enabled) {
+    if ($manifestSchemaVersion -eq 1) {
         foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
             $entry = $manifestEntriesByTarget[$targetPath]
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
@@ -971,32 +949,12 @@ $preserveWorkingPath = $false
 try {
     New-Item -ItemType Directory -Path $workingPath, $extractPath | Out-Null
 
-    if ([string]::IsNullOrWhiteSpace($SourceArchivePath)) {
-        if ($SourceRepository -notmatch '^[^/]+/[^/]+$') {
-            throw "SourceRepository must use owner/repository format: $SourceRepository"
-        }
-
-        $repositoryParts = $SourceRepository.Split('/')
-        $escapedOwner = [System.Uri]::EscapeDataString($repositoryParts[0])
-        $escapedRepository = [System.Uri]::EscapeDataString($repositoryParts[1])
-        $escapedRef = [System.Uri]::EscapeDataString($SourceRef)
-        $archiveUri = "https://github.com/$escapedOwner/$escapedRepository/archive/refs/heads/$escapedRef.zip"
-
-        [System.Net.ServicePointManager]::SecurityProtocol =
-            [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-
-        Invoke-WebRequest -UseBasicParsing -Uri $archiveUri -Headers @{
-            'User-Agent' = 'Codex-AI-Instructions-Bootstrap'
-        } -OutFile $archivePath
+    $providedArchivePath = Get-FullPathWithoutTrailingSeparator -Path $SourceArchivePath
+    if (-not (Test-Path -LiteralPath $providedArchivePath -PathType Leaf)) {
+        throw "Source archive does not exist: $providedArchivePath"
     }
-    else {
-        $providedArchivePath = Get-FullPathWithoutTrailingSeparator -Path $SourceArchivePath
-        if (-not (Test-Path -LiteralPath $providedArchivePath -PathType Leaf)) {
-            throw "Source archive does not exist: $providedArchivePath"
-        }
 
-        Copy-Item -LiteralPath $providedArchivePath -Destination $archivePath
-    }
+    Copy-Item -LiteralPath $providedArchivePath -Destination $archivePath
 
     $sourceRootPath = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $extractPath
     $desiredEntries = New-Object System.Collections.Generic.List[object]
@@ -1235,21 +1193,11 @@ try {
         $manifestDirectory = Split-Path -Parent $manifestFullPath
         New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
 
-        $manifestObject = if ($script:manifestV2Enabled) {
-            [ordered]@{
-                schemaVersion = 2
-                catalogId = [string] $provenance.catalogId
-                lockSha256 = [string] $provenance.lockSha256
-                files = @($nextManifestEntries | Sort-Object targetPath)
-            }
-        }
-        else {
-            [ordered]@{
-                schemaVersion = 1
-                sourceRepository = $SourceRepository
-                sourceRef = $SourceRef
-                files = @($nextManifestEntries | Sort-Object targetPath)
-            }
+        $manifestObject = [ordered]@{
+            schemaVersion = 2
+            catalogId = [string] $provenance.catalogId
+            lockSha256 = [string] $provenance.lockSha256
+            files = @($nextManifestEntries | Sort-Object targetPath)
         }
         $manifestJson = ($manifestObject | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
         $existingManifestJson = if ($manifestExists) {

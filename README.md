@@ -1,6 +1,6 @@
 # SyuanTsai AI Instructions
 
-這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source；production Agent Skills 由 Catalog 指向的外部 repositories 提供。換電腦後，只要讓 Codex 完整讀取本檔案並依照「新電腦安裝」執行，即可重建目前的按需 bootstrap 設定。
+這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source；production Agent Skills 只由 Catalog 指向的外部 repositories 提供，本 Repository 不保存共用 Skill source。換電腦後，只要讓 Codex 完整讀取本檔案並依照「新電腦安裝」執行，即可重建目前的按需 bootstrap 設定。
 
 ## Agent Skills Catalog P0 契約
 
@@ -23,7 +23,7 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v3.example.json
 ```
 
-production bootstrap 已使用這組契約：tracked Catalog lock 固定外部來源，schema v3 選出 Skills，manifest v2 記錄每個檔案的來源 provenance。Runtime 不使用 Git submodule，也不依 source ID 寫 domain-specific 分支。
+production bootstrap 已使用這組契約：tracked Catalog lock 固定外部來源，schema v3 選出 Skills，manifest v2 記錄每個檔案的來源 provenance。Runtime 不使用 Git submodule，也不依 source ID 寫 domain-specific 分支。`Skill-Darktide-Translate`（SYP-88／SYP-92）是獨立產品，不在此 Catalog、Lock 或 bootstrap fan-out 範圍內。
 
 ## 給新電腦 Codex 的指示
 
@@ -264,7 +264,7 @@ CI workflow `SYP86 Production Smoke` 會在 Windows PowerShell 5.1 與 PowerShel
 
 ## 維護與更新
 
-- 共通 Instructions 依根目錄 `AGENTS.md` 維護；production Skills 的 canonical source 是 Catalog 指向的 external repositories，legacy `.agents/skills/**` 只保留到 cutover cleanup gate。
+- 共通 Instructions 依根目錄 `AGENTS.md` 維護；production Skills 的唯一 canonical source 是 Catalog 指向的 external repositories。本 Repository 不得重新加入 `.agents/skills/<skill-id>/**` source。
 - 修改 installer/runtime/Catalog/Lock 前保持 tracked source bytes clean；需要測試 local edits 時使用 disposable clone，不要用 local edits 建立正式 installation pin。
 - 修改 `scripts/bootstrap-ai-instructions.ps1`、multi-source wrapper、selection/retrieval/acquisition/composition 或 installer 時，更新相應 Pester tests，並通過三個 CI workflows：`PowerShell Regression`、`SYP86 Production Lock`、`SYP86 Production Smoke`。
 - Catalog source pin 更新時重新產生 lock；bootstrap 永遠只依已驗證 immutable commit/hash 契約取得內容。
@@ -278,11 +278,10 @@ CI workflow `SYP86 Production Smoke` 會在 Windows PowerShell 5.1 與 PowerShel
 - `AGENTS.md`：本 Instructions Repository 的維護規範。
 - `.codex/`：fan-out 給 Codex 的繁體中文與英文 Instructions。
 - `.github/`：fan-out 給 GitHub Copilot 的繁體中文與英文 Instructions。
-- `.agents/skills/`：歷史來源目錄；production Catalog 的 Skills 已由 external repositories 提供。完成所有 cutover gate 前保留 legacy copies 作 rollback，不是 production acquisition source。
 - `catalog/`：Skills Catalog、source pins、lock、manifest v2 與 sync configuration v3 的 schemas、examples 及跨 Repository 契約。
 - `scripts/bootstrap-ai-instructions-installed.ps1`：安裝到個人 hook 的穩定入口；驗證 `runtime-bundle.json` 與 config pin 後啟動 multi-source bootstrap。
 - `scripts/bootstrap-ai-instructions-multisource.ps1`：驗證 schema v3、Catalog／lock、來源 archives 與 Skill inventories，組合 Instructions 與選中的 external Skills，並產生 manifest v2 provenance handoff。
-- `scripts/bootstrap-ai-instructions.ps1`：mutation engine；處理 safe migration、customized/unmanaged protection、allowlist commit 或 byte-safe `PersonalAgent` stash。
+- `scripts/bootstrap-ai-instructions.ps1`：multi-source wrapper 的內部 mutation engine；只接受已組合 archive 與 immutable provenance，並處理 manifest v1 safe migration、customized/unmanaged protection、allowlist commit 或 byte-safe `PersonalAgent` stash。
 - `scripts/install-ai-instructions-bootstrap.ps1`：transactional installer；驗證 clean pinned source、staging bundle、runtime identity、rollback 與 SessionStart cleanup。
 - `scripts/test-production-cutover.ps1`：使用真實 immutable sources 的 production cutover smoke test。
 - `scripts/safe-zip.psm1`：PS5.1／7 共用的 single-root、case-collision、traversal、symlink／reparse 安全 extraction。

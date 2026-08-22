@@ -76,6 +76,54 @@ function Compress-TestSource {
     finally { $stream.Dispose() }
 }
 
+function New-TestProvenance {
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $skillIds = @(
+            $archive.Entries |
+                ForEach-Object {
+                    if ($_.FullName -cmatch '^[^/]+/\.agents/skills/([^/]+)/SKILL\.md$') { $Matches[1] }
+                } |
+                Sort-Object -Unique
+        )
+    }
+    finally { $archive.Dispose() }
+
+    $skillSources = @(
+        foreach ($skillId in $skillIds) {
+            [ordered]@{
+                id = $skillId
+                sourceId = 'test-skills'
+                sourceRepository = 'https://example.com/test-skills.git'
+                sourceRef = 'main'
+                sourceCommit = ('b' * 40)
+                sourceVersion = 'test@bbbbbbbb'
+            }
+        }
+    )
+    $provenance = [ordered]@{
+        schemaVersion = 1
+        catalogId = 'test-catalog'
+        lockSha256 = ('a' * 64)
+        instruction = [ordered]@{
+            sourceId = 'ai-instructions'
+            sourceRepository = 'https://example.com/ai-instructions.git'
+            sourceRef = ('c' * 40)
+            sourceCommit = ('c' * 40)
+            sourceVersion = 'test@cccccccc'
+        }
+        skills = $skillSources
+    }
+    $json = ($provenance | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function New-TestConfiguration {
     param(
         [Parameter(Mandatory = $true)]
@@ -133,12 +181,14 @@ function Invoke-BootstrapScript {
         [switch] $UseCurrentRepositoryRoot
     )
 
+    New-TestProvenance -ArchivePath $SourceArchivePath -Path $script:TestProvenancePath
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-File', $script:BootstrapScript,
         '-SourceArchivePath', $SourceArchivePath,
-        '-ConfigurationPath', $ConfigurationPath
+        '-ConfigurationPath', $ConfigurationPath,
+        '-ProvenancePath', $script:TestProvenancePath
     )
 
     if (-not $UseCurrentRepositoryRoot) {
@@ -171,12 +221,15 @@ Describe 'bootstrap-ai-instructions' {
         $sourceArchive = Join-Path $TestDrive 'source.zip'
         $targetRoot = Join-Path $TestDrive 'target'
         $configurationPath = Join-Path $TestDrive 'sync-config.json'
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $archiveRoot, $sourceArchive, $targetRoot, $configurationPath
+        $provenancePath = Join-Path $TestDrive 'provenance.json'
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $archiveRoot, $sourceArchive, $targetRoot, $configurationPath, $provenancePath
         New-TestSource -Path $sourceRoot
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         New-TestRepository -Path $targetRoot
         New-TestConfiguration -Path $configurationPath -AutoCommitRepositoryUrls @($script:TestRepositoryUrl)
         $script:TestConfigurationPath = $configurationPath
+        $script:TestProvenancePath = $provenancePath
+        New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
     It 'creates both English instruction families and commits only those files' {
@@ -189,9 +242,9 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
 
         $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
-        $manifest.schemaVersion | Should Be 1
-        $manifest.sourceRepository | Should Be 'SyuanTsai/SyuanTsai-AI-Instructions'
-        $manifest.sourceRef | Should Be 'main'
+        $manifest.schemaVersion | Should Be 2
+        $manifest.catalogId | Should Be 'test-catalog'
+        $manifest.lockSha256 | Should Be ('a' * 64)
         $manifest.files.Count | Should Be 4
 
         $commitMessage = Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')
@@ -635,6 +688,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
         $output = & powershell.exe @arguments 2>&1
@@ -666,6 +720,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
         $output = & powershell.exe @arguments 2>&1
@@ -695,6 +750,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
         $output = & powershell.exe @arguments 2>&1
@@ -725,6 +781,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-GitExecutable', $gitWrapperPath
         )
 
@@ -764,6 +821,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
         $output = & powershell.exe @arguments 2>&1
@@ -799,6 +857,7 @@ description: Verify raw bytes.
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
             '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot,
             '-GitExecutable', $gitWrapperPath
         )

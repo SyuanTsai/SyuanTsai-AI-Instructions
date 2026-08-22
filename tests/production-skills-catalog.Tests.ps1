@@ -24,6 +24,22 @@ Describe 'production Skills Catalog' {
         )
         @($script:catalog.sources.id | Sort-Object) | Should Be $expected
         @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should Be 0
+        @($script:catalog.sources | Where-Object { $_.repository -match 'Skill-Darktide-Translate' }).Count | Should Be 0
+    }
+
+    # Scenario: The AI-Instructions repository has completed its cutover to externally owned shared Skills.
+    # Purpose: Keep external repositories as the only shared Skill sources and prevent legacy copies from returning.
+    It 'InterT12_contains_no_built_in_shared_Skill_source' {
+        $builtInSkillRoot = Join-Path $repositoryRoot '.agents\skills'
+        if (Test-Path -LiteralPath $builtInSkillRoot -PathType Container) {
+            @(
+                Get-ChildItem -LiteralPath $builtInSkillRoot -Recurse -Force -File |
+                    Where-Object { $_.Name -ne '.gitkeep' }
+            ).Count | Should Be 0
+        }
+        else {
+            Test-Path -LiteralPath $builtInSkillRoot | Should Be $false
+        }
     }
 
     # Scenario: All active migrated Skills are resolved from the tracked production catalog.
@@ -49,6 +65,8 @@ Describe 'production Skills Catalog' {
             [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
             [string]$skill.source.path | Should Be ".agents/skills/$($skill.id)"
         }
+
+        @($script:catalog.skills | Where-Object { [string]$_.id -match 'darktide' }).Count | Should Be 0
     }
 
     # Scenario: The production catalog contains the profiles used by a new installation.

@@ -1,6 +1,6 @@
 # Agent Skills Catalog contract
 
-本目錄定義 AI Instructions Repository、外部 Agent Skills repositories 與目標 Repository 之間的 production 契約。Installer 與 multi-source bootstrap 直接使用這些 checked-in schemas、source pins、Catalog 與 immutable lock。
+本目錄定義 AI Instructions Repository、外部 Agent Skills repositories 與目標 Repository 之間的 production 契約。Installer 與 multi-source bootstrap 直接使用這些 checked-in schemas、source pins、Catalog 與 immutable lock。共用 Skill source 只存在於 Catalog 列出的 external repositories；本 Repository 不保存副本。`Skill-Darktide-Translate`（SYP-88／SYP-92）維持獨立，不加入本 Catalog 或 Lock。
 
 ## 文件責任
 
@@ -97,4 +97,4 @@ Installer 將 schema v1／v2 idempotent 升級為 v3：
 - 新 runtime 先在 staging directory 完整複製、parse、驗證 Catalog/Lock 與 `runtime-bundle.json`，再 swap 到 active runtime；config 最後更新。正常例外會 rollback；rollback 本身失敗時保留 backup path；程序中斷造成的暫時不一致則由 identity-checking launcher fail closed。
 - 缺少必要欄位、未知 schema、mutable ref、bundle identity mismatch 或同一 Skill 同時 include/exclude 時停止並回報。
 
-Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Legacy mutation entry point只為直接呼叫 regression compatibility 保留；安裝後入口不再走單一來源路徑。
+Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除，既有 manifest v1 仍可在所有受管檔案未變更且未 staged 時安全升級。

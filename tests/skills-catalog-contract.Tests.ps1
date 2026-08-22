@@ -1,5 +1,6 @@
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:ContractModule = Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
+$script:ProductionCatalog = Join-Path $script:RepositoryRoot 'catalog\skills-catalog.json'
 $script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog.example.json'
 $script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
 $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
@@ -78,11 +79,8 @@ Describe 'Skills Catalog contract' {
         $result.ManifestFileCount | Should Be 2
 
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
-        $actualSkillIds = @(
-            Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot '.agents\skills') -Directory |
-                Select-Object -ExpandProperty Name |
-                Sort-Object
-        )
+        $productionCatalog = Test-SkillsCatalogDocument -CatalogPath $script:ProductionCatalog
+        $actualSkillIds = @($productionCatalog.skills | Select-Object -ExpandProperty id | Sort-Object)
         $catalogSkillIds = @($catalog.skills | Select-Object -ExpandProperty id | Sort-Object)
         ($catalogSkillIds -join "`n") | Should Be ($actualSkillIds -join "`n")
 

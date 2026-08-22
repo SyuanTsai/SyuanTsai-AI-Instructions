@@ -1,8 +1,8 @@
 # SYP-86 production cutover and rollback
 
-## Release gates
+## Final cutover invariant
 
-Do not remove the legacy `.agents/skills/**` copies until all gates pass on the same commit:
+The final cutover removes the legacy `.agents/skills/**` copies only when all gates pass on the same commit, and CI keeps the no-built-in-source invariant under regression test:
 
 1. `catalog/skills-catalog-lock.json` is tracked and `scripts/update-skills-catalog-lock.ps1 -Check` succeeds.
 2. The production Catalog exposes exactly the intended four sources and ten active stable Skill IDs.
@@ -12,7 +12,7 @@ Do not remove the legacy `.agents/skills/**` copies until all gates pass on the 
 6. Installer safety tests prove that dirty runtime source bytes are rejected before Codex Home mutation, runtime/config bundle identity is checked at launch, and a late installation failure restores the previous launcher, runtime, config and personal files.
 7. Allowlist, excluded-repository, customized-file, wrong-hash, ZIP traversal/collision/link, and manifest-v1 migration scenarios all pass.
 
-Keeping the legacy copies after a successful cutover is safe: the composition stage removes Instructions-repository Skills and replaces them only with validated external selections. Deletion is a separate cleanup change, not part of the runtime switch.
+After these gates pass, retaining legacy copies would create a second source of truth. The final cutover therefore removes them. The composition stage continues to discard any `.agents/skills` content found in an Instructions archive and replaces it only with validated external selections. `Skill-Darktide-Translate` (SYP-88/SYP-92) remains an independent repository and is deliberately absent from this Catalog and Lock.
 
 ## Personal installation preflight
 
