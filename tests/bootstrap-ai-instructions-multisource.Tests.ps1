@@ -127,7 +127,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
         New-TestTargetRepository $targetRoot
 
-        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceRepository 'https://github.com/example/catalog.git' -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
+        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
 
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim()|Should Be '# Codex Base'
         Test-Path (Join-Path $targetRoot '.agents\skills\skill-a\SKILL.md')|Should Be $true

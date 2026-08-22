@@ -5,8 +5,6 @@ param(
     [Parameter(Mandatory = $true)][string] $ConfigurationPath,
     [hashtable] $SourceArchivePaths = @{},
     [string] $InstructionSourceArchivePath,
-    [string] $SourceRepository = 'SyuanTsai/SyuanTsai-AI-Instructions',
-    [string] $SourceRef = 'main',
     [string] $InstructionSourceCommit,
     [string] $TargetRoot
 )
