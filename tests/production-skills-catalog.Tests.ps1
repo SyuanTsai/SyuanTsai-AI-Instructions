@@ -13,7 +13,9 @@ Describe 'production Skills Catalog' {
         $script:lock = Test-SkillsCatalogLockDocument -LockPath $lockPath -CatalogPath $catalogPath
     }
 
-    It 'uses the four external Skill repositories as the only production sources' {
+    # Scenario: The tracked production catalog defines the repositories available to installed consumers.
+    # Purpose: Prevent the bootstrap repository or an unapproved source from re-entering production routing.
+    It 'InterT10_uses_the_four_external_Skill_repositories_as_the_only_production_sources' {
         $expected = @(
             'atlassian-ecosystem',
             'code-collaboration',
@@ -24,7 +26,9 @@ Describe 'production Skills Catalog' {
         @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should Be 0
     }
 
-    It 'maps all ten migrated Skills to external sources' {
+    # Scenario: All active migrated Skills are resolved from the tracked production catalog.
+    # Purpose: Detect missing, duplicated, or incorrectly routed production Skill assignments.
+    It 'InterT15_maps_all_ten_migrated_Skills_to_external_sources' {
         @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' }).Count | Should Be 10
 
         $expectedSourceBySkill = @{
@@ -47,12 +51,16 @@ Describe 'production Skills Catalog' {
         }
     }
 
-    It 'keeps core as the only default profile' {
+    # Scenario: The production catalog contains the profiles used by a new installation.
+    # Purpose: Keep installation defaults deterministic and limited to the intended core profile.
+    It 'InterT20_keeps_core_as_the_only_default_profile' {
         @($script:catalog.profiles | Where-Object { $_.default -eq $true }).Count | Should Be 1
         [string]@($script:catalog.profiles | Where-Object { $_.default -eq $true })[0].id | Should Be 'core'
     }
 
-    It 'pins every production source to a full immutable commit' {
+    # Scenario: Production source pins are loaded together with the tracked catalog.
+    # Purpose: Ensure every source resolves from an immutable commit while preserving its operator-facing branch metadata.
+    It 'InterT25_pins_every_production_source_to_a_full_immutable_commit' {
         $script:pins.schemaVersion | Should Be 1
         ([string]$script:pins.catalogId) | Should Be ([string]$script:catalog.catalogId)
         @($script:pins.sources).Count | Should Be @($script:catalog.sources).Count
