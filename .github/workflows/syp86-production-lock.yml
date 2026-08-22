@@ -1,0 +1,54 @@
+name: SYP86 Production Lock
+
+on:
+  push:
+    branches:
+      - main
+      - syp-86
+    paths:
+      - 'catalog/skills-catalog.json'
+      - 'catalog/skills-catalog.sources.json'
+      - 'catalog/skills-catalog-lock.json'
+      - 'scripts/update-skills-catalog-lock.ps1'
+      - 'scripts/skills-catalog-contract.psm1'
+      - 'scripts/safe-zip.psm1'
+      - 'scripts/skills-source-retrieval.psm1'
+      - 'scripts/skills-source-acquisition.psm1'
+      - '.github/workflows/syp86-production-lock.yml'
+  pull_request:
+    paths:
+      - 'catalog/skills-catalog.json'
+      - 'catalog/skills-catalog.sources.json'
+      - 'catalog/skills-catalog-lock.json'
+      - 'scripts/update-skills-catalog-lock.ps1'
+      - 'scripts/skills-catalog-contract.psm1'
+      - 'scripts/safe-zip.psm1'
+      - 'scripts/skills-source-retrieval.psm1'
+      - 'scripts/skills-source-acquisition.psm1'
+      - '.github/workflows/syp86-production-lock.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-lock-windows-powershell:
+    name: Validate production lock (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate checked-in lock
+        shell: powershell
+        run: |
+          ./scripts/update-skills-catalog-lock.ps1 -Check
+
+  validate-lock-powershell:
+    name: Validate production lock (PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate checked-in lock
+        shell: pwsh
+        run: |
+          ./scripts/update-skills-catalog-lock.ps1 -Check

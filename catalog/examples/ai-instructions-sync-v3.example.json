@@ -10,8 +10,8 @@
     "docs/architecture-planning"
   ],
   "catalog": {
-    "repository": "https://example.org/acme/agent-skills-catalog.git",
-    "ref": "v1.0.0",
+    "repository": "https://github.com/example/ai-instructions.git",
+    "ref": "89abcdef0123456789abcdef0123456789abcdef",
     "profiles": [
       "core"
     ],

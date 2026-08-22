@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "syuantsai-agent-skills",
+  "sources": [
+    {
+      "id": "general",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "71a053d81eec6377f04ba0473735003e97094af0",
+      "resolvedVersion": "main@71a053d8"
+    },
+    {
+      "id": "code-collaboration",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "2d864e4b0ee0f9e2a0cc00dab29cf2f1cfdae45d",
+      "resolvedVersion": "main@2d864e4b"
+    },
+    {
+      "id": "knowledge-content",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "d483dce47b199b65a309839720bf131b188ac5a5",
+      "resolvedVersion": "main@d483dce4"
+    },
+    {
+      "id": "atlassian-ecosystem",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "b8aa37c2aa905c2fb213da930d50f9b208c5ccc1",
+      "resolvedVersion": "main@b8aa37c2"
+    }
+  ]
+}

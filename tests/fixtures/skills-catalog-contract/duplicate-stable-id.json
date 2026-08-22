@@ -4,7 +4,7 @@
   "sources": [
     {
       "id": "fixture-source",
-      "repository": "https://example.test/acme/skills.git"
+      "repository": "https://github.com/example/skills.git"
     }
   ],
   "profiles": [

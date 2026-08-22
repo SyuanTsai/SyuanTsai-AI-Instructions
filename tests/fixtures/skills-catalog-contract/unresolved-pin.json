@@ -5,7 +5,7 @@
   "sources": [
     {
       "id": "agent-skills",
-      "repository": "https://example.org/acme/agent-skills-catalog.git",
+      "repository": "https://github.com/example/agent-skills-catalog.git",
       "requestedRef": "main",
       "requestedRefType": "branch",
       "resolvedCommit": "main",

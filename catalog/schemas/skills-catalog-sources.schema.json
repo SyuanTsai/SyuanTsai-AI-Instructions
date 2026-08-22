@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/skills-catalog-sources.schema.json",
+  "title": "Skills Catalog source pins",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogId",
+    "sources"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "catalogId": {
+      "$ref": "#/$defs/stableId"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "requestedRef",
+          "requestedRefType",
+          "resolvedCommit",
+          "resolvedVersion"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/stableId"
+          },
+          "requestedRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestedRefType": {
+            "type": "string",
+            "enum": [
+              "branch",
+              "tag",
+              "commit"
+            ]
+          },
+          "resolvedCommit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "resolvedVersion": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    }
+  }
+}

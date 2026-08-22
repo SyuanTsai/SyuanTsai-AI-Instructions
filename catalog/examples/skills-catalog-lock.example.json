@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "a048457cc1adc7096464e19fc25f994ad7d2278cea3f038ed795479c31fd8906",
+  "catalogSha256": "89e8253597bc2961dd74e047e57095576376a0ba2e5a2d9591e858fa06467350",
   "sources": [
     {
       "id": "agent-skills",
-      "repository": "https://example.org/acme/agent-skills-catalog.git",
+      "repository": "https://github.com/example/agent-skills-catalog.git",
       "requestedRef": "v1.0.0",
       "requestedRefType": "tag",
       "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",

@@ -1,0 +1,40 @@
+name: SYP86 Production Smoke
+
+on:
+  push:
+    branches:
+      - syp-86
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  production-smoke-windows-powershell:
+    name: Production smoke (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run real pinned-archive production smoke
+        shell: powershell
+        run: |
+          ./scripts/test-production-cutover.ps1
+
+  production-smoke-powershell-7:
+    name: Production smoke (PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run real pinned-archive production smoke
+        shell: pwsh
+        run: |
+          ./scripts/test-production-cutover.ps1
