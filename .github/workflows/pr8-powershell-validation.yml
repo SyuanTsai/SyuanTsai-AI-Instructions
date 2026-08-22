@@ -54,9 +54,8 @@ jobs:
       - name: Run full Pester suite
         shell: powershell
         run: |
+          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
           $ErrorActionPreference = 'Continue'
-          git config --global core.autocrlf false
-          git config --global core.safecrlf false
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
@@ -110,9 +109,8 @@ jobs:
       - name: Run full Pester suite
         shell: pwsh
         run: |
+          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
           $ErrorActionPreference = 'Continue'
-          git config --global core.autocrlf false
-          git config --global core.safecrlf false
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
