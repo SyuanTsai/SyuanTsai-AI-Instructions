@@ -251,7 +251,7 @@ $sourceStaging = Join-Path $workingRoot 'skill-sources'
 $composedParent = Join-Path $workingRoot 'composed'
 $composedRoot = Join-Path $composedParent 'repository'
 $composedArchive = Join-Path $workingRoot 'composed-source.zip'
-$legacyConfigurationPath = Join-Path $workingRoot 'legacy-sync-v2.json'
+$routingConfigurationPath = Join-Path $workingRoot 'routing-v2.json'
 $provenancePath = Join-Path $workingRoot 'managed-source-provenance.json'
 
 try {
@@ -315,20 +315,18 @@ try {
     $provenanceJson = ($provenance | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
     [System.IO.File]::WriteAllText($provenancePath, $provenanceJson, (New-Object System.Text.UTF8Encoding($false)))
 
-    $legacyConfiguration = [ordered]@{
+    $routingConfiguration = [ordered]@{
         schemaVersion = 2
         autoCommitRepositoryUrls = @($configuration.autoCommitRepositoryUrls)
         excludedRepositoryUrls = @($configuration.excludedRepositoryUrls)
         excludedRepositoryPaths = @($configuration.excludedRepositoryPaths)
     }
-    $legacyJson = ($legacyConfiguration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
-    [System.IO.File]::WriteAllText($legacyConfigurationPath, $legacyJson, (New-Object System.Text.UTF8Encoding($false)))
+    $routingJson = ($routingConfiguration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
+    [System.IO.File]::WriteAllText($routingConfigurationPath, $routingJson, (New-Object System.Text.UTF8Encoding($false)))
 
     $arguments = @{
-        SourceRepository = $SourceRepository
-        SourceRef = $SourceRef
         SourceArchivePath = $composedArchive
-        ConfigurationPath = $legacyConfigurationPath
+        ConfigurationPath = $routingConfigurationPath
         ProvenancePath = $provenancePath
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {

@@ -6,8 +6,8 @@
       "id": "general",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "71a053d81eec6377f04ba0473735003e97094af0",
-      "resolvedVersion": "main@71a053d8"
+      "resolvedCommit": "7e4e7c076e85966a66a1d0cdcc5fa569182b0bcf",
+      "resolvedVersion": "main@7e4e7c07"
     },
     {
       "id": "code-collaboration",
