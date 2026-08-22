@@ -27,7 +27,7 @@ Describe 'production Skills Catalog' {
         @($script:catalog.sources | Where-Object { $_.repository -match 'Skill-Darktide-Translate' }).Count | Should Be 0
     }
 
-    # Scenario: The final cutover commit is used as the AI-Instructions bundle itself.
+    # Scenario: The AI-Instructions repository has completed its cutover to externally owned shared Skills.
     # Purpose: Keep external repositories as the only shared Skill sources and prevent legacy copies from returning.
     It 'InterT12_contains_no_built_in_shared_Skill_source' {
         $builtInSkillRoot = Join-Path $repositoryRoot '.agents\skills'
