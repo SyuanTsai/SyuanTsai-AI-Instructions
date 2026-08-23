@@ -49,17 +49,17 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = ((Invoke-SmokeGit -Repository (Get-Location).Path -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
 }
 $repositoryRootPath = [System.IO.Path]::GetFullPath($RepositoryRoot)
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('syp86-production-smoke-' + [Guid]::NewGuid().ToString('N'))
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('syp101-production-smoke-' + [Guid]::NewGuid().ToString('N'))
 $codexHome = Join-Path $tempRoot '.codex'
 $targetRoot = Join-Path $tempRoot 'target'
 
 try {
     New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
     Invoke-SmokeGit -Repository $targetRoot -Arguments @('init','--quiet') | Out-Null
-    Invoke-SmokeGit -Repository $targetRoot -Arguments @('config','user.name','SYP86 Production Smoke') | Out-Null
-    Invoke-SmokeGit -Repository $targetRoot -Arguments @('config','user.email','syp86-smoke@example.test') | Out-Null
-    Invoke-SmokeGit -Repository $targetRoot -Arguments @('remote','add','origin','https://example.com/smoke/non-allowlisted-target.git') | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $targetRoot 'README.md'),"# SYP86 production smoke`n",(New-Object System.Text.UTF8Encoding($false)))
+    Invoke-SmokeGit -Repository $targetRoot -Arguments @('config','user.name','SYP101 Production Smoke') | Out-Null
+    Invoke-SmokeGit -Repository $targetRoot -Arguments @('config','user.email','syp101-smoke@example.test') | Out-Null
+    Invoke-SmokeGit -Repository $targetRoot -Arguments @('remote','add','origin','https://example.com/smoke/branch-independent-target.git') | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $targetRoot 'README.md'),"# SYP101 production smoke`n",(New-Object System.Text.UTF8Encoding($false)))
     Invoke-SmokeGit -Repository $targetRoot -Arguments @('add','--','README.md') | Out-Null
     Invoke-SmokeGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','initial smoke target') | Out-Null
     $initialHead = ((Invoke-SmokeGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
@@ -81,10 +81,10 @@ try {
     $beforeStatus = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('status','--porcelain')))
     $beforeStashes = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('stash','list','--format=%H%x00%gs')))
     if (@($beforeStashes | Where-Object { $_ -match 'PersonalAgent' }).Count -ne 1) {
-        throw 'Production smoke expected exactly one retained PersonalAgent stash after first non-allowlist sync.'
+        throw 'Production smoke expected exactly one retained PersonalAgent recovery stash after the first sync.'
     }
     $headAfterFirst = ((Invoke-SmokeGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
-    if ($headAfterFirst -cne $initialHead) { throw 'Non-allowlist production smoke unexpectedly committed the bootstrap.' }
+    if ($headAfterFirst -cne $initialHead) { throw 'Branch-independent production smoke unexpectedly committed the bootstrap.' }
 
     Invoke-SmokeGit -Repository $targetRoot -Arguments @('config','core.autocrlf','true') | Out-Null
     & $hook -TargetRoot $targetRoot
@@ -98,9 +98,9 @@ try {
     if (($beforeStatus -join "`n") -cne ($afterStatus -join "`n")) { throw 'Second production smoke sync changed working-tree status.' }
     if (($beforeStashes -join "`n") -cne ($afterStashes -join "`n")) { throw 'Second production smoke sync replaced or added a PersonalAgent stash.' }
     $headAfterSecond = ((Invoke-SmokeGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
-    if ($headAfterSecond -cne $initialHead) { throw 'Second non-allowlist production smoke unexpectedly committed changes.' }
+    if ($headAfterSecond -cne $initialHead) { throw 'Second branch-independent production smoke unexpectedly committed changes.' }
 
-    Write-Output "SYP86 production smoke passed with $($skillEntries.Count) real external Skill manifest entries."
+    Write-Output "SYP101 production smoke passed with $($skillEntries.Count) real external Skill manifest entries."
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }

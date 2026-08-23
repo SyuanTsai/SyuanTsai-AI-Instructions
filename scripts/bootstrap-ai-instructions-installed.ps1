@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
-    [string] $TargetRoot
+    [string] $TargetRoot,
+    [switch] $SkipUpdateCheck
 )
 
-Set-StrictMode -Version 2.0
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $codexHome = Split-Path -Parent $PSScriptRoot
@@ -12,28 +13,32 @@ $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
 $catalogPath = Join-Path $runtimeRoot 'catalog\skills-catalog.json'
 $lockPath = Join-Path $runtimeRoot 'catalog\skills-catalog-lock.json'
 $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+$contractPath = Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
+$updaterPath = Join-Path $runtimeRoot 'update-ai-instructions.ps1'
 $bootstrapPath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
 
-foreach ($requiredPath in @($configurationPath, $catalogPath, $lockPath, $bundlePath, $bootstrapPath)) {
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Installed AI instruction runtime is incomplete: $requiredPath"
+function Assert-InstalledRuntime {
+    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$updaterPath,$bootstrapPath)) {
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) { throw "Installed AI instruction runtime is incomplete: $requiredPath" }
     }
+    try {
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+    }
+    catch { throw "Installed AI instruction runtime identity is invalid: $($_.Exception.Message)" }
+    Import-Module $contractPath -Force
+    Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
 }
 
-try {
-    $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-    $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-}
-catch {
-    throw "Installed AI instruction runtime identity is invalid: $($_.Exception.Message)"
-}
-
-if ($configuration.schemaVersion -ne 3 -or
-    $bundle.schemaVersion -ne 1 -or
-    [string]$bundle.repository -cne [string]$configuration.catalog.repository -or
-    [string]$bundle.commit -cne [string]$configuration.catalog.ref -or
-    [string]$bundle.commit -cnotmatch '^[0-9a-f]{40}$') {
-    throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin. Re-run the installer before bootstrapping.'
+Assert-InstalledRuntime
+if (-not $SkipUpdateCheck) {
+    $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
+    $enginePath = Join-Path $PSHOME $engineName
+    if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { $enginePath = $engineName }
+    $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $updaterPath -CodexHome $codexHome 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "AI instructions update check failed: $($updateOutput -join [Environment]::NewLine)" }
+    foreach ($line in @($updateOutput)) { Write-Output $line }
+    Assert-InstalledRuntime
 }
 
 $arguments = @{
@@ -41,8 +46,5 @@ $arguments = @{
     LockPath = $lockPath
     ConfigurationPath = $configurationPath
 }
-if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {
-    $arguments.TargetRoot = $TargetRoot
-}
-
+if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) { $arguments.TargetRoot = $TargetRoot }
 & $bootstrapPath @arguments

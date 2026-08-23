@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/ai-instructions-sync-v4.schema.json",
+  "title": "Personal AI Instructions sync configuration v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "excludedRepositoryUrls",
+    "excludedRepositoryPaths",
+    "catalog",
+    "updates"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 4
+    },
+    "excludedRepositoryUrls": {
+      "$ref": "#/$defs/stringArray"
+    },
+    "excludedRepositoryPaths": {
+      "$ref": "#/$defs/stringArray"
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "ref",
+        "profiles",
+        "includeSkills",
+        "excludeSkills"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "profiles": {
+          "$ref": "#/$defs/stableIdArray"
+        },
+        "includeSkills": {
+          "$ref": "#/$defs/stableIdArray"
+        },
+        "excludeSkills": {
+          "$ref": "#/$defs/stableIdArray"
+        }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "channel",
+        "ref",
+        "minimumCheckIntervalMinutes"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "notify-only",
+            "auto-install-approved"
+          ]
+        },
+        "channel": {
+          "enum": [
+            "protected-branch",
+            "github-release"
+          ]
+        },
+        "ref": {
+          "enum": [
+            "main",
+            "latest"
+          ]
+        },
+        "minimumCheckIntervalMinutes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "channel": {
+                "const": "protected-branch"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ref": {
+                "const": "main"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {
+                "const": "github-release"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ref": {
+                "const": "latest"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "stableIdArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+      }
+    }
+  }
+}

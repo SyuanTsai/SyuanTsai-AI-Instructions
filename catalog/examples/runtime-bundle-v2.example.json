@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "repository": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git",
+  "commit": "89abcdef0123456789abcdef0123456789abcdef",
+  "acquisition": "github-codeload",
+  "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "inventorySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "inventory": [
+    {
+      "path": "bootstrap-ai-instructions.ps1",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

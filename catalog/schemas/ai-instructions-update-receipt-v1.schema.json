@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/ai-instructions-update-receipt-v1.schema.json",
+  "title": "AI Instructions update receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "checkedAtUtc",
+    "mode",
+    "channel",
+    "ref",
+    "currentCommit",
+    "candidateCommit",
+    "outcome",
+    "archiveSha256",
+    "message"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "checkedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "mode": {
+      "enum": [
+        "notify-only",
+        "auto-install-approved"
+      ]
+    },
+    "channel": {
+      "enum": [
+        "protected-branch",
+        "github-release"
+      ]
+    },
+    "ref": {
+      "enum": [
+        "main",
+        "latest"
+      ]
+    },
+    "currentCommit": {
+      "$ref": "#/$defs/commit"
+    },
+    "candidateCommit": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/commit"
+        }
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "current",
+        "available",
+        "installed",
+        "offline",
+        "rate-limited",
+        "drift",
+        "failed"
+      ]
+    },
+    "archiveSha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/hash"
+        }
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -21,6 +21,7 @@ Import-Module (Join-Path $scriptRoot 'skills-source-retrieval.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-acquisition.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'skills-source-composition.psm1') -Force
 Import-Module (Join-Path $scriptRoot 'safe-zip.psm1') -Force
+Import-Module (Join-Path $scriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 
 function Read-JsonDocument {
     param(
@@ -135,11 +136,13 @@ function Assert-MultiSourceConfiguration {
     )
 
     $schemaVersion = Get-RequiredPropertyValue -Object $Configuration -Name 'schemaVersion' -Context 'AI instruction sync configuration'
-    if ($schemaVersion -ne 3) {
-        throw "Multi-source bootstrap requires AI instruction sync configuration schemaVersion 3; actual: $schemaVersion"
+    if ($schemaVersion -ne 4) {
+        throw "Multi-source bootstrap requires AI instruction sync configuration schemaVersion 4; actual: $schemaVersion"
     }
 
-    foreach ($name in @('autoCommitRepositoryUrls', 'excludedRepositoryUrls', 'excludedRepositoryPaths')) {
+    Assert-AiInstructionsSyncConfigurationV4 -Configuration $Configuration | Out-Null
+
+    foreach ($name in @('excludedRepositoryUrls', 'excludedRepositoryPaths')) {
         $value = Get-RequiredPropertyValue -Object $Configuration -Name $name -Context 'AI instruction sync configuration'
         Assert-StringArrayValue -Value $value -Context "AI instruction sync configuration $name"
     }
@@ -316,8 +319,7 @@ try {
     [System.IO.File]::WriteAllText($provenancePath, $provenanceJson, (New-Object System.Text.UTF8Encoding($false)))
 
     $routingConfiguration = [ordered]@{
-        schemaVersion = 2
-        autoCommitRepositoryUrls = @($configuration.autoCommitRepositoryUrls)
+        schemaVersion = 3
         excludedRepositoryUrls = @($configuration.excludedRepositoryUrls)
         excludedRepositoryPaths = @($configuration.excludedRepositoryPaths)
     }

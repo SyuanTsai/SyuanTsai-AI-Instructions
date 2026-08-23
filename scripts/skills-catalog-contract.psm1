@@ -363,10 +363,10 @@ function Assert-ManagedManifestV2 {
     }
 }
 
-function Assert-SyncConfigurationV3 {
+function Assert-SyncConfigurationV4 {
     param([object] $Configuration,[object] $Catalog)
-    Assert-SchemaVersion -Document $Configuration -Expected 3 -DocumentName 'AI instruction sync configuration'
-    foreach ($propertyName in @('autoCommitRepositoryUrls','excludedRepositoryUrls','excludedRepositoryPaths')) { Assert-StringArray -Value (Get-RequiredProperty -Object $Configuration -Name $propertyName -Context 'AI instruction sync configuration') -Context "AI instruction sync configuration $propertyName" -AllowEmpty }
+    Assert-SchemaVersion -Document $Configuration -Expected 4 -DocumentName 'AI instruction sync configuration'
+    foreach ($propertyName in @('excludedRepositoryUrls','excludedRepositoryPaths')) { Assert-StringArray -Value (Get-RequiredProperty -Object $Configuration -Name $propertyName -Context 'AI instruction sync configuration') -Context "AI instruction sync configuration $propertyName" -AllowEmpty }
     $selection=Get-RequiredProperty -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'; Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog repository'
     $catalogRef=Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'; if ([string]$catalogRef -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instruction sync configuration catalog ref must be a full lowercase commit SHA.' }
     Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'profiles' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog profiles' -AllowEmpty; Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'includeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog includeSkills' -AllowEmpty; Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'excludeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog excludeSkills' -AllowEmpty
@@ -374,6 +374,16 @@ function Assert-SyncConfigurationV3 {
     foreach ($profileId in @($selection.profiles)) { if (-not $profileIds.ContainsKey([string]$profileId)) { throw "AI instruction sync configuration references unknown profile '$profileId'." } }
     foreach ($skillId in @($selection.includeSkills)+@($selection.excludeSkills)) { if (-not $skillIds.ContainsKey([string]$skillId)) { throw "AI instruction sync configuration references unknown Skill '$skillId'." } }
     foreach ($skillId in @($selection.includeSkills)) { if (@($selection.excludeSkills) -contains [string]$skillId) { throw "AI instruction sync configuration both includes and excludes Skill '$skillId'." } }
+
+    $updates=Get-RequiredProperty -Object $Configuration -Name 'updates' -Context 'AI instruction sync configuration'
+    $mode=Get-RequiredProperty -Object $updates -Name 'mode' -Context 'AI instruction sync configuration updates'; if (@('notify-only','auto-install-approved') -cnotcontains [string]$mode) { throw "Unsupported AI instruction update mode '$mode'." }
+    $channel=Get-RequiredProperty -Object $updates -Name 'channel' -Context 'AI instruction sync configuration updates'; if (@('protected-branch','github-release') -cnotcontains [string]$channel) { throw "Unsupported AI instruction update channel '$channel'." }
+    $updateRef=Get-RequiredProperty -Object $updates -Name 'ref' -Context 'AI instruction sync configuration updates'; Assert-NonEmptyString -Value $updateRef -Context 'AI instruction sync configuration updates ref'
+    if ([string]$channel -eq 'protected-branch' -and [string]$updateRef -cne 'main') { throw "Protected-branch updates must use the canonical 'main' ref." }
+    if ([string]$channel -eq 'github-release' -and [string]$updateRef -cne 'latest') { throw "GitHub release updates must use the canonical 'latest' ref." }
+    $minimumCheckIntervalMinutes=Get-RequiredProperty -Object $updates -Name 'minimumCheckIntervalMinutes' -Context 'AI instruction sync configuration updates'
+    if ($minimumCheckIntervalMinutes -isnot [int] -and $minimumCheckIntervalMinutes -isnot [long]) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be an integer.' }
+    if ([long]$minimumCheckIntervalMinutes -lt 1) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be at least 1.' }
 }
 
 function Test-SkillsCatalogContract {
@@ -382,7 +392,7 @@ function Test-SkillsCatalogContract {
     $catalog=Test-SkillsCatalogDocument -CatalogPath $CatalogPath
     $lock=Import-SkillsCatalogJson -Path $LockPath -DocumentName 'Skills Catalog lock'; Assert-SkillsCatalogLock -Lock $lock -Catalog $catalog; $catalogFileSha256=Get-RawFileSha256 -Path $CatalogPath; if ([string]$lock.catalogSha256 -cne $catalogFileSha256) { throw "Skills Catalog lock catalogSha256 does not match the Catalog file: expected $catalogFileSha256." }
     $manifest=Import-SkillsCatalogJson -Path $ManifestPath -DocumentName 'managed manifest'; Assert-ManagedManifestV2 -Manifest $manifest; if ([string]$manifest.catalogId -cne [string]$catalog.catalogId) { throw 'managed manifest catalogId does not match the Skills Catalog.' }; $lockFileSha256=Get-RawFileSha256 -Path $LockPath; if ([string]$manifest.lockSha256 -cne $lockFileSha256) { throw "managed manifest lockSha256 does not match the Catalog lock file: expected $lockFileSha256." }
-    $configuration=Import-SkillsCatalogJson -Path $ConfigurationPath -DocumentName 'AI instruction sync configuration'; Assert-SyncConfigurationV3 -Configuration $configuration -Catalog $catalog
+    $configuration=Import-SkillsCatalogJson -Path $ConfigurationPath -DocumentName 'AI instruction sync configuration'; Assert-SyncConfigurationV4 -Configuration $configuration -Catalog $catalog
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 

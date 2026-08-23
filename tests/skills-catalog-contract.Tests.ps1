@@ -4,7 +4,7 @@ $script:ProductionCatalog = Join-Path $script:RepositoryRoot 'catalog\skills-cat
 $script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog.example.json'
 $script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
 $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
-$script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v3.example.json'
+$script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
 $script:FixtureRoot = Join-Path $PSScriptRoot 'fixtures\skills-catalog-contract'
 
 Import-Module $script:ContractModule -Force
@@ -56,7 +56,7 @@ Describe 'Skills Catalog contract' {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 5
+        $schemaFiles.Count | Should Be 7
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -431,13 +431,16 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: The personal sync configuration selects profiles and explicit per-Skill overrides.
     # Purpose: Keep user selection separate from catalog availability and the resolved lock.
-    It 'UnitT92_keeps_profile_and_include_exclude_selection_in_sync_configuration_v3' {
+    It 'UnitT92_keeps_profile_and_include_exclude_selection_in_sync_configuration_v4' {
         $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
 
-        $configuration.schemaVersion | Should Be 3
+        $configuration.schemaVersion | Should Be 4
         @($configuration.catalog.profiles).Count | Should BeGreaterThan 0
         ($configuration.catalog.PSObject.Properties.Name -contains 'includeSkills') | Should Be $true
         ($configuration.catalog.PSObject.Properties.Name -contains 'excludeSkills') | Should Be $true
+        $configuration.updates.mode | Should Be 'notify-only'
+        $configuration.updates.channel | Should Be 'protected-branch'
+        $configuration.updates.ref | Should Be 'main'
     }
 
     # Scenario: A personal selection differs from a known stable ID only by invalid casing.

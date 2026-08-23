@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/runtime-bundle-v2.schema.json",
+  "title": "Installed AI Instructions runtime bundle v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repository",
+    "commit",
+    "acquisition",
+    "archiveSha256",
+    "inventorySha256",
+    "inventory"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "repository": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github\\.com/"
+    },
+    "commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "acquisition": {
+      "enum": [
+        "git-checkout",
+        "github-codeload"
+      ]
+    },
+    "archiveSha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/hash"
+        }
+      ]
+    },
+    "inventorySha256": {
+      "$ref": "#/$defs/hash"
+    },
+    "inventory": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+          },
+          "sha256": {
+            "$ref": "#/$defs/hash"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "acquisition": {
+            "const": "github-codeload"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "archiveSha256": {
+            "$ref": "#/$defs/hash"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

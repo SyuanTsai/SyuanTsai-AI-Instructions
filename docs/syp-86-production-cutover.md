@@ -1,5 +1,7 @@
 # SYP-86 production cutover and rollback
 
+> Historical note: SYP-101 removed allowlist auto-commit and per-branch stash operations. Current config v4, runtime bundle v2, branch-independent local artifacts, updater, cleanup and rollback procedures are defined in [`syp-101-autonomous-update-self-healing.md`](syp-101-autonomous-update-self-healing.md). Where this historical document conflicts, the SYP-101 design is authoritative.
+
 ## Final cutover invariant
 
 The final cutover removes the legacy `.agents/skills/**` copies only when all gates pass on the same commit, and CI keeps the no-built-in-source invariant under regression test:

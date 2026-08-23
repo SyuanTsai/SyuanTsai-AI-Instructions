@@ -94,7 +94,14 @@ function New-TestDocuments {
     Set-TestUtf8Text $LockPath (($lock|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
     if($MissingSelectionArrays){$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref=('c'*40);profiles=@()}}
     else{$catalogSelection=[ordered]@{repository='https://github.com/example/catalog.git';ref=('c'*40);profiles=@();includeSkills=@('skill-a');excludeSkills=@()}}
-    $configuration=[ordered]@{schemaVersion=3;autoCommitRepositoryUrls=@($script:TestRepositoryUrl);excludedRepositoryUrls=@();excludedRepositoryPaths=@();catalog=$catalogSelection}
+    $catalogSelection.repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+    $configuration=[ordered]@{
+        schemaVersion=4
+        excludedRepositoryUrls=@()
+        excludedRepositoryPaths=@()
+        catalog=$catalogSelection
+        updates=[ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+    }
     Set-TestUtf8Text $ConfigurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
 }
 
@@ -113,13 +120,11 @@ function Convert-TestTargetManifestToV1 {
         )
     }
     Set-TestUtf8Text $manifestPath ($legacy|ConvertTo-Json -Depth 20)
-    Invoke-TestGit $TargetRoot @('add','--force','--','.codex/ai-instructions.manifest.json')|Out-Null
-    Invoke-TestGit $TargetRoot @('commit','--quiet','-m','legacy manifest fixture')|Out-Null
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
-    # Scenario: Schema v3 selects one locally pinned Skill source and targets a disposable allowlisted Git repository.
-    # Purpose: Exercise validation, routing, acquisition, composition, schema-v2 handoff, and legacy mutation end to end without network access.
+    # Scenario: Schema v4 selects one locally pinned Skill source and targets a disposable Git repository.
+    # Purpose: Exercise validation, routing, acquisition, composition, schema-v2 handoff, and branch-independent local artifacts without network access.
     It 'InterT10_executes_a_selected_skill_local_source_end_to_end' {
         $catalogPath=Join-Path $TestDrive 'catalog.json';$lockPath=Join-Path $TestDrive 'catalog.lock.json';$configurationPath=Join-Path $TestDrive 'sync-config.json';$instructionArchive=Join-Path $TestDrive 'instruction-source.zip';$skillArchivePath=Join-Path $TestDrive 'source-a.zip';$targetRoot=Join-Path $TestDrive 'target'
         New-TestInstructionArchive (Join-Path $TestDrive 'instruction-root') $instructionArchive
@@ -145,8 +150,9 @@ Describe 'bootstrap-ai-instructions-multisource' {
         [string]$skillEntry.sourceRepository|Should Be 'https://github.com/example/source-a.git'
         [string]$skillEntry.sourceCommit|Should Be ('a'*40)
         [string]$skillEntry.sourceVersion|Should Be 'test'
-        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: add shared AI instructions'
+        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'initial commit'
         @(Invoke-TestGit $targetRoot @('status','--porcelain')).Count|Should Be 0
+        (@(Invoke-TestGit $targetRoot @('stash','list','--format=%s')) -join "`n")|Should Match 'PersonalAgent'
     }
 
     # Scenario: The Lock declares a catalogId different from the validated Catalog document.
@@ -199,10 +205,10 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $thrown=$false;$message=$null
         try{& $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -SourceArchivePaths @{'source-a'=$skillArchivePath} -InstructionSourceArchivePath $missingInstructionArchive}catch{$thrown=$true;$message=$_.Exception.Message}
         $thrown|Should Be $true
-        $message|Should Match "missing required property 'includeSkills'"
+        $message|Should Match "catalog is missing 'includeSkills'"
     }
 
-    # Scenario: A schema-v3 selection differs from a stable Catalog ID only by casing.
+    # Scenario: A schema-v4 selection differs from a stable Catalog ID only by casing.
     # Purpose: Keep the runtime entry point as strict as the authoring contract before acquisition begins.
     It 'InterT22_rejects_case_variant_selection_ids_before_acquisition' {
         $skillArchivePath=Join-Path $TestDrive 'case-source-a.zip'
@@ -212,7 +218,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
             @{Name='profile';Property='profiles';Values=@('CORE');Expected='item must be a lowercase stable ID'},
             @{Name='include';Property='includeSkills';Values=@('Skill-A');Expected='item must be a lowercase stable ID'},
             @{Name='exclude';Property='excludeSkills';Values=@('Skill-A');Expected='item must be a lowercase stable ID'},
-            @{Name='duplicate';Property='includeSkills';Values=@('skill-a','skill-a');Expected='contains duplicate value'}
+            @{Name='duplicate';Property='includeSkills';Values=@('skill-a','skill-a');Expected='contains duplicate (?:value|ID)'}
         )
 
         foreach($case in $cases){
@@ -231,7 +237,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
                     -ConfigurationPath $configurationPath `
                     -SourceArchivePaths @{'source-a'=$skillArchivePath} `
                     -InstructionSourceArchivePath $missingInstructionArchive
-            } "catalog $($case.Property) $($case.Expected)"
+            } "catalog\.$($case.Property) $($case.Expected)"
         }
     }
 
@@ -252,7 +258,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $manifest=Get-Content -Raw (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|ConvertFrom-Json
         $manifest.schemaVersion|Should Be 2
         @($manifest.files|Where-Object {$_.sourceCommit -eq ('a'*40)}).Count|Should Be 1
-        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: sync shared AI instructions'
+        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'initial commit'
     }
 
     # Scenario: A schema-v1 target contains a locally customized managed Skill.
@@ -307,7 +313,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $entry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
         [string]$entry.sourceCommit|Should Be ('b'*40)
         [string]$entry.sourceVersion|Should Be 'test-v2'
-        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'chore: sync shared AI instructions'
+        (@(Invoke-TestGit $targetRoot @('log','-1','--pretty=%s')) -join '').Trim()|Should Be 'initial commit'
     }
 
     # Scenario: A schema-v2 target has a customized managed Skill when the selected source advances.
@@ -341,6 +347,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $entry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
         [string]$entry.sourceCommit|Should Be ('a'*40)
         [string]$entry.sourceVersion|Should Be 'test'
-        (@(Invoke-TestGit $targetRoot @('status','--porcelain','.agents/skills/skill-a/SKILL.md')) -join '')|Should Match 'SKILL.md'
+        (@(Invoke-TestGit $targetRoot @('status','--porcelain','.agents/skills/skill-a/SKILL.md')) -join '')|Should BeNullOrEmpty
+        (@(Invoke-TestGit $targetRoot @('stash','list','--format=%s')) -join "`n")|Should Match 'PersonalAgent'
     }
 }

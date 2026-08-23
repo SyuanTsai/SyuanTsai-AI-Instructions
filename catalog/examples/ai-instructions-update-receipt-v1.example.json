@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-08-23T00:00:00.0000000Z",
+  "mode": "notify-only",
+  "channel": "protected-branch",
+  "ref": "main",
+  "currentCommit": "89abcdef0123456789abcdef0123456789abcdef",
+  "candidateCommit": "0123456789abcdef0123456789abcdef01234567",
+  "outcome": "available",
+  "archiveSha256": null,
+  "message": "A verified canonical candidate is available; notify-only mode did not install it."
+}
