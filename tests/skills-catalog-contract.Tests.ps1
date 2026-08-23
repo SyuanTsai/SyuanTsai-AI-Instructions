@@ -352,7 +352,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A legacy schema-v1 manifest is used as migration or pollution-cleanup ownership evidence.
     # Purpose: Accept only the exact historical shape and reject unknown fields before any ignore or index mutation.
-    It 'UnitT57b_validates_the_exact_legacy_managed_manifest_v1_shape' {
+    It 'UnitT57_validates_the_exact_legacy_managed_manifest_v1_shape' {
         $legacyManifest = [pscustomobject][ordered]@{
             schemaVersion = 1
             sourceRepository = 'https://github.com/example/catalog.git'
@@ -374,7 +374,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A schema-v2 manifest uses a singleton array where sha256 must be a string.
     # Purpose: Keep executable ownership checks aligned with the portable schema instead of relying on coercion.
-    It 'UnitT57c_rejects_singleton_arrays_in_manifest_hash_fields' {
+    It 'UnitT57_rejects_singleton_arrays_in_manifest_hash_fields' {
         $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
         @($manifest.files)[0].sha256 = @(('a' * 64))
         $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'manifest-array-hash.json'
@@ -385,7 +385,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A manifest labels a flat Skill path as an instruction to bypass the Skill artifact/path relationship.
     # Purpose: Prevent forged ownership evidence from overwriting or staging deletion of a Repository-owned Skill.
-    It 'UnitT57e_rejects_instruction_artifacts_that_claim_skill_paths' {
+    It 'UnitT57_rejects_instruction_artifacts_that_claim_skill_paths' {
         $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
         $skillFile = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
         $skillFile.artifactType = 'instruction'
@@ -407,7 +407,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: Catalog, source-pin, and lock objects carry fields forbidden by their additionalProperties=false schemas.
     # Purpose: Ensure the executable verifier rejects schema drift before updater or bootstrap trust the documents.
-    It 'UnitT57d_rejects_unknown_catalog_source_pin_and_lock_properties' {
+    It 'UnitT57_rejects_unknown_catalog_source_pin_and_lock_properties' {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
         @($catalog.skills)[0].compatibility | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
         $catalogPath = Write-TestJsonDocument -Document $catalog -Name 'catalog-unknown-property.json'

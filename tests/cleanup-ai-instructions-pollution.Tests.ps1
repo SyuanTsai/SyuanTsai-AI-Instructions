@@ -336,7 +336,7 @@ Describe 'tracked AI instructions pollution cleanup' {
 
     # Scenario: The shared exclude file contains a begin marker without its matching end marker.
     # Purpose: Stop before index mutation instead of creating duplicate or ambiguous managed ignore blocks.
-    It 'InterT68b_rejects_a_malformed_managed_exclude_block' {
+    It 'InterT68_rejects_a_malformed_managed_exclude_block' {
         $targetRoot = Join-Path $TestDrive 'malformed-exclude-block'
         New-PollutedTestRepository -Path $targetRoot
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
@@ -353,7 +353,7 @@ Describe 'tracked AI instructions pollution cleanup' {
 
     # Scenario: A managed manifest is reached through a directory junction after the polluted commit was created.
     # Purpose: Treat reparse-backed ownership evidence as unsafe and stop before touching the Git index.
-    It 'InterT68c_rejects_a_reparse_backed_managed_manifest_path' {
+    It 'InterT68_rejects_a_reparse_backed_managed_manifest_path' {
         $targetRoot = Join-Path $TestDrive 'reparse-manifest'
         New-PollutedTestRepository -Path $targetRoot
         $codexPath = Join-Path $targetRoot '.codex'

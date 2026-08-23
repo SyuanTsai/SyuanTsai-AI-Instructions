@@ -489,7 +489,7 @@ Keep this section too.
 
     # Scenario: The active runtime keeps the expected commit string but one inventory file drifts before install lock acquisition.
     # Purpose: Revalidate the complete active state, not only attacker-controllable bundle metadata, before candidate swap.
-    It 'InterT48b_revalidates_the_complete_active_runtime_inside_the_install_lock' {
+    It 'InterT48_revalidates_the_complete_active_runtime_inside_the_install_lock' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
         $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
@@ -626,7 +626,7 @@ Keep this section too.
 
     # Scenario: A user runs the stable cleanup command after its runtime contracts are tampered.
     # Purpose: Refuse cleanup before importing or executing the unverified contract modules.
-    It 'InterT61b_cleanup_command_preflights_runtime_before_import' {
+    It 'InterT61_cleanup_command_preflights_runtime_before_import' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimeScript = Join-Path $codexHome 'hooks\ai-instructions-runtime\skills-catalog-contract.psm1'
         $executionEvidence = Join-Path $codexHome 'tampered-cleanup-contract-executed.txt'

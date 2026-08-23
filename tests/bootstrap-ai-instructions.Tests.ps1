@@ -1136,7 +1136,7 @@ description: Verify raw bytes.
 
     # Scenario: Git reports stash apply success but the managed manifest raw bytes are changed afterward.
     # Purpose: Verify every canonical recovery path byte-for-byte before obsolete PersonalAgent evidence can be removed.
-    It 'InterT92b_rolls_back_when_stash_apply_changes_only_manifest_bytes' {
+    It 'InterT92_rolls_back_when_stash_apply_changes_only_manifest_bytes' {
         New-TestConfiguration -Path $configurationPath
         $wrapperRoot = Join-Path $TestDrive 'git-manifest-tamper-wrapper'
         New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null

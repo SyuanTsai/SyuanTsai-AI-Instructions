@@ -192,7 +192,7 @@ Describe 'AI instructions updater workflow' {
 
     # Scenario: A candidate acquisition adapter returns an object without archive hash evidence.
     # Purpose: Keep StrictMode property access from masking the original acquisition contract failure.
-    It 'UnitT46b_records_a_candidate_package_missing_its_hash_as_a_schema_valid_failure' {
+    It 'UnitT46_records_a_candidate_package_missing_its_hash_as_a_schema_valid_failure' {
         $codexHome = Join-Path $TestDrive 'missing-package-hash'
         New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
 
@@ -209,7 +209,7 @@ Describe 'AI instructions updater workflow' {
 
     # Scenario: Resolver and acquisition adapters return singleton arrays in fields that must be scalar evidence.
     # Purpose: Reject PowerShell string coercion at the immutable candidate boundary.
-    It 'UnitT46c_rejects_singleton_arrays_in_candidate_evidence' {
+    It 'UnitT46_rejects_singleton_arrays_in_candidate_evidence' {
         $candidateHome = Join-Path $TestDrive 'candidate-array'
         New-TestUpdaterHome -Path $candidateHome -Mode 'auto-install-approved'
         $candidateResult = Invoke-AiInstructionsUpdateWorkflow -CodexHome $candidateHome -ForceCheck `
