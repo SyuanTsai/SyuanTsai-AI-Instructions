@@ -161,6 +161,23 @@ Describe 'AI instructions updater workflow' {
         $result.outcome | Should Be 'rate-limit'
     }
 
+    # Scenario: A prior process interruption leaves a malformed noncritical update receipt.
+    # Purpose: Quarantine stale evidence and continue from the verified installed runtime instead of bricking bootstrap.
+    It 'UnitT55_self_heals_a_malformed_update_receipt' {
+        $codexHome = Join-Path $TestDrive 'malformed-receipt'
+        New-TestUpdaterHome -Path $codexHome
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-update-receipt.json'),'{not-json')
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -NowUtc ([datetime]'2026-08-23T05:00:00Z') `
+            -ResolveCandidate { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+
+        $result.outcome | Should Be 'current'
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'current'
+        @(Get-ChildItem -LiteralPath $codexHome -File -Filter 'ai-instructions-update-receipt.invalid-*.json').Count | Should Be 1
+    }
+
     # Scenario: The protected ref moves after candidate validation but before installation.
     # Purpose: Stop rather than installing a candidate selected from stale mutable-ref state.
     It 'UnitT60_stops_on_candidate_drift' {
@@ -184,6 +201,33 @@ Describe 'AI instructions updater workflow' {
         $script:installCalls | Should Be 0
     }
 
+    # Scenario: The production updater delegates installation after selecting a candidate from the current runtime.
+    # Purpose: Pass the expected current commit so the installer can revalidate it under the installation lock.
+    It 'UnitT65_passes_the_expected_current_commit_to_the_installer' {
+        $sourceRoot = Join-Path $TestDrive 'installer-contract'
+        $scriptsRoot = Join-Path $sourceRoot 'scripts'
+        New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
+        $fakeInstaller = @'
+param(
+    [string]$RepositoryRoot,[string]$CodexHome,[string]$SourceRepository,[string]$SourceCommit,
+    [string]$Acquisition,[string]$ArchiveSha256,[string]$SourceArchivePath,[string]$ExpectedCurrentCommit
+)
+[System.IO.File]::WriteAllText((Join-Path $RepositoryRoot 'expected-current.txt'),$ExpectedCurrentCommit)
+'@
+        [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
+        $request = [pscustomobject]@{
+            CodexHome = (Join-Path $TestDrive 'installer-contract-home')
+            Repository = $script:CanonicalRepository
+            CurrentCommit = ('a' * 40)
+            CandidateCommit = ('b' * 40)
+            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+        }
+
+        Install-AiInstructionsCandidatePackage -Request $request
+
+        [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'expected-current.txt')) | Should Be ('a' * 40)
+    }
+
     # Scenario: Another updater process holds the per-home update lock.
     # Purpose: Prevent concurrent staging or runtime swap operations.
     It 'UnitT70_reports_concurrent_when_the_update_lock_is_held' {
@@ -191,6 +235,26 @@ Describe 'AI instructions updater workflow' {
         New-TestUpdaterHome -Path $codexHome
         $lockPath = Join-Path $codexHome 'ai-instructions-update.lock'
         $lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                -ResolveCandidate { throw 'resolver must not run' } `
+                -AcquireCandidate { throw 'archive must not be acquired' } `
+                -InstallCandidate { throw 'installer must not run' }
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $result.outcome | Should Be 'concurrent'
+    }
+
+    # Scenario: A manual installer is swapping the active runtime while an update check starts.
+    # Purpose: Avoid reading a mixed runtime/config identity and let the next bootstrap retry safely.
+    It 'UnitT75_reports_concurrent_when_the_install_lock_is_held' {
+        $codexHome = Join-Path $TestDrive 'concurrent-install'
+        New-TestUpdaterHome -Path $codexHome
+        $lockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+        $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
         try {
             $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
                 -ResolveCandidate { throw 'resolver must not run' } `

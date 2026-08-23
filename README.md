@@ -35,7 +35,7 @@ Test-SkillsCatalogContract `
 3. 依 Catalog selection 解析 external Skills，只取得 lock 中的 immutable commits，驗證 archive 與每個 Skill content inventory。
 4. 將 Codex、GitHub Copilot 與選中的 Skills 組成已驗證 archive，再交給 mutation engine。
 5. Mutation engine 依 manifest hash 更新未被自訂的檔案、建立新檔、移除來源已刪除且未被修改的檔案。
-6. 將精確受管路徑寫入 `.git/info/exclude` 的 managed marker block，建立並重新套用一份 branch-neutral `PersonalAgent` recovery stash，最後再次驗證 bytes。
+6. 在 common Git directory 的 repository operation lock 內，將所有 live worktree manifest 的精確受管路徑聯集寫入共用 `.git/info/exclude` managed marker block，建立並重新套用一份 branch-neutral `PersonalAgent` recovery stash，最後再次驗證 bytes。
 
 來源與目標 mapping：
 
@@ -51,7 +51,7 @@ Test-SkillsCatalogContract `
 
 個人 artifacts 不屬於任何 branch，因此正常 `git switch` 不需要手動 `stash apply`。切換 branch 後，原檔案會留在 working tree；再次執行 bootstrap 只會驗證或更新同一組 artifacts。
 
-Linked worktree 有自己的 working directory，因此第一次使用時仍需執行 bootstrap；它會建立相同的 local ignored artifacts 模型，不修改任一 branch 的 commit。
+Linked worktree 有自己的 working directory，因此第一次使用時仍需執行 bootstrap；它會建立相同的 local ignored artifacts 模型，不修改任一 branch 的 commit。所有 worktree 共用的 stash 與 `.git/info/exclude` 由同一把 repository operation lock 序列化；exclude marker 會合併所有 live worktree 的有效 manifest，避免其中一個 worktree 使另一個 worktree 的 artifacts 重新出現在 `git status`。
 
 Bootstrap 會自動修復：
 
@@ -160,14 +160,14 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 - 下載 codeload ZIP、計算 archive SHA-256、安全解壓、parse 全部 PowerShell、驗證 Catalog/Lock；
 - 安裝前再次解析 candidate，遇到 TOCTOU drift 即停止；
 - 透過 installer transaction swap，失敗時 rollback；
-- 使用 per-Codex-Home lock 阻止並行更新；
-- 以 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed。
+- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit；
+- 以原子替換的 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed；若舊 receipt 損壞，先 quarantine 再從已驗證 runtime 繼續檢查。
 
 網路不可用時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。若 local runtime inventory 有缺檔、額外檔案或 hash drift，launcher/updater 會 fail closed，應重新執行可信 installer。
 
 ## Tracked pollution 與 cleanup
 
-Personal artifacts 必須保持 untracked。若 manifest 能證明的受管路徑已進入 Git index，bootstrap 會在任何 target/index mutation 前停止，列出污染路徑，且不會自動修復 index。
+Personal artifacts 必須保持 untracked。若 manifest 能證明的受管路徑已進入 Git index，bootstrap 會在任何 target/index mutation 前停止，列出污染路徑，且不會自動修復 index。Windows 或 `core.ignorecase=true` Repository 會把大小寫不同但等價的 index path 一併視為 pollution；cleanup 使用 index 的實際 spelling 精確 stage 刪除。
 
 先檢查內容與 manifest，再明確授權 cleanup：
 
@@ -188,7 +188,7 @@ git diff --cached --name-status
 
 ## Rollback 與復原
 
-- Installer/updater 的一般失敗會自動恢復上一個完整 runtime/config 組合。
+- Installer/updater 的一般失敗會自動恢復上一個完整 runtime/config 組合；staging 驗證尚未進入 active swap 就失敗時，也會清除 staging/backup transaction directories。
 - 若 rollback 本身失敗，錯誤會保留並回報 backup path；先保存該目錄再人工處理。
 - Process 被強制中止導致 runtime/config mismatch 時，launcher 會 fail closed；重新執行上一個可信 commit 的 installer。
 - Target fan-out 或 stash apply 失敗時，mutation engine 恢復 target bytes、manifest、index 與 `.git/info/exclude`；新舊 `PersonalAgent` evidence 會保留供復原，不會刪除其他 stash。

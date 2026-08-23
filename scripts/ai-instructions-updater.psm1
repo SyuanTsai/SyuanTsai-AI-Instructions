@@ -173,7 +173,8 @@ function Install-AiInstructionsCandidatePackage {
         -SourceCommit ([string]$Request.CandidateCommit) `
         -Acquisition github-codeload `
         -ArchiveSha256 ([string]$Request.Package.ArchiveSha256) `
-        -SourceArchivePath ([string]$Request.Package.ArchivePath)
+        -SourceArchivePath ([string]$Request.Package.ArchivePath) `
+        -ExpectedCurrentCommit ([string]$Request.CurrentCommit)
 }
 
 function New-AiInstructionsUpdateResult {
@@ -232,6 +233,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
 
     New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
     $lockStream = $null
+    $installStateLockStream = $null
     try {
         try {
             $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
@@ -241,11 +243,23 @@ function Invoke-AiInstructionsUpdateWorkflow {
         }
 
         try {
-            $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-            $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+            $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
         }
-        catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
-        Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
+        catch [System.IO.IOException] {
+            return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer is already running.' }
+        }
+        try {
+            try {
+                $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+                $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+            }
+            catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
+            Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
+        }
+        finally {
+            $installStateLockStream.Dispose()
+            $installStateLockStream = $null
+        }
 
         if (-not $ForceCheck -and (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
             try {
@@ -257,7 +271,11 @@ function Invoke-AiInstructionsUpdateWorkflow {
                 }
             }
             catch {
-                throw "AI instruction update receipt is invalid: $receiptPath. $($_.Exception.Message)"
+                $receiptError = $_
+                $quarantinePath = Join-Path $codexHomePath ('ai-instructions-update-receipt.invalid-' + $NowUtc.ToString('yyyyMMddHHmmssfffffff') + '-' + [Guid]::NewGuid().ToString('N') + '.json')
+                try { Move-Item -LiteralPath $receiptPath -Destination $quarantinePath }
+                catch { Write-Warning "Malformed update receipt could not be quarantined and will be replaced after this check: $receiptPath" }
+                Write-Warning "Malformed update receipt was ignored so the verified installed runtime can self-heal: $($receiptError.Exception.Message)"
             }
         }
 
@@ -340,6 +358,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
         }
     }
     finally {
+        if ($null -ne $installStateLockStream) { $installStateLockStream.Dispose() }
         if ($null -ne $lockStream) { $lockStream.Dispose() }
     }
 }

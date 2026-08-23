@@ -96,7 +96,7 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須至少為 1。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
 - Installed launcher 在更新檢查前、更新完成後與實際 bootstrap 前驗證 config、bundle identity、完整 inventory、Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
-- Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。離線時保留已驗證 runtime，並寫入 receipt；並行執行由 per-home lock 拒絕。
-- Installer 先在 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再原子替換 launcher、updater、cleanup、runtime 與 config；正常例外會完整 rollback，rollback 本身失敗才保留 backup path。
+- Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。離線時保留已驗證 runtime；receipt 使用原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
+- Installer 在 install lock 內重驗 expected current commit，先在 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、cleanup、runtime 與 config；任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
 
 Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除，既有 manifest v1 仍可在所有受管檔案未變更且未 staged 時安全升級。

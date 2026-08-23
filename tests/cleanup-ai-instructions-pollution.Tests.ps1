@@ -153,4 +153,74 @@ Describe 'tracked AI instructions pollution cleanup' {
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.agents\skills\project-skill\SKILL.md')).Trim() | Should Be '# Project-owned Skill'
         (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')) -contains '.agents/skills/project-skill/SKILL.md') | Should Be $false
     }
+
+    # Scenario: The index spelling of a manifest-owned path differs only by case on an ignore-case repository.
+    # Purpose: Stage the actual polluted index entry while preserving the canonical local materialization.
+    It 'InterT65_cleans_the_actual_case_variant_index_path' {
+        $targetRoot = Join-Path $TestDrive 'case-variant'
+        New-PollutedTestRepository -Path $targetRoot
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('config','core.ignorecase','true') | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('mv','-f','AGENTS.md','agent-case-temporary.md') | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('mv','-f','agent-case-temporary.md','agents.md') | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','case-variant pollution') | Out-Null
+        $canonicalPath = Join-Path $targetRoot 'AGENTS.md'
+        $caseVariantPath = Join-Path $targetRoot 'agents.md'
+        if (-not (Test-Path -LiteralPath $canonicalPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $caseVariantPath -Destination $canonicalPath
+        }
+        $canonicalBytes = [System.IO.File]::ReadAllBytes($canonicalPath)
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Be 0
+        $stagedChanges = @((Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-status')) | Sort-Object)
+        ($stagedChanges -contains "D`tagents.md") | Should Be $true
+        ($stagedChanges -contains "D`t.codex/ai-instructions.manifest.json") | Should Be $true
+        [System.IO.File]::ReadAllBytes($canonicalPath) | Should Be $canonicalBytes
+    }
+
+    # Scenario: A repository imported from a case-sensitive system has both case aliases in the index.
+    # Purpose: Remove every colliding pollution entry instead of collapsing them during cleanup path de-duplication.
+    It 'InterT67_cleans_all_case_colliding_index_entries' {
+        $targetRoot = Join-Path $TestDrive 'case-collision'
+        New-PollutedTestRepository -Path $targetRoot
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('config','core.ignorecase','true') | Out-Null
+        $blob = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object','AGENTS.md')) -join '').Trim()
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('update-index','--add','--cacheinfo',"100644,$blob,agents.md") | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','dual case pollution') | Out-Null
+        $trackedBefore = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('ls-files'))
+        ($trackedBefore -ccontains 'AGENTS.md') | Should Be $true
+        ($trackedBefore -ccontains 'agents.md') | Should Be $true
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Be 0
+        $remaining = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('ls-files'))
+        ($remaining -ccontains 'AGENTS.md') | Should Be $false
+        ($remaining -ccontains 'agents.md') | Should Be $false
+        $stagedChanges = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-status'))
+        ($stagedChanges -ccontains "D`tAGENTS.md") | Should Be $true
+        ($stagedChanges -ccontains "D`tagents.md") | Should Be $true
+    }
+
+    # Scenario: Bootstrap or another cleanup process holds the shared repository runtime lock.
+    # Purpose: Prevent cleanup index changes from interleaving with stash, manifest, or exclude transactions.
+    It 'InterT70_refuses_cleanup_while_the_repository_runtime_lock_is_held' {
+        $targetRoot = Join-Path $TestDrive 'concurrent-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $commonGitDirectory = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-common-dir')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $targetRoot $commonGitDirectory }
+        $runtimeLockPath = Join-Path ([System.IO.Path]::GetFullPath($commonGitDirectory)) 'codex-ai-instructions.lock'
+        $lockStream = [System.IO.File]::Open($runtimeLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'another AI instruction repository operation is already running'
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
 }

@@ -8,7 +8,8 @@ param(
     [string] $SourceCommit,
     [ValidateSet('git-checkout','github-codeload')][string] $Acquisition = 'git-checkout',
     [string] $ArchiveSha256,
-    [string] $SourceArchivePath
+    [string] $SourceArchivePath,
+    [string] $ExpectedCurrentCommit
 )
 
 Set-StrictMode -Version Latest
@@ -143,6 +144,9 @@ else {
     $catalogRef = $SourceCommit
 }
 if ($catalogRef -cnotmatch '^[0-9a-f]{40}$') { throw 'Installer source commit must be a full lowercase 40-character commit SHA.' }
+if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit) -and $ExpectedCurrentCommit -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'ExpectedCurrentCommit must be a full lowercase 40-character commit SHA.'
+}
 
 $runtimeFiles = @(
     'bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
@@ -175,88 +179,114 @@ $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
-
-$existingConfiguration = $null
-if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
-    try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json }
-    catch { throw "AI instruction sync configuration is not valid JSON: $configurationPath" }
-}
-$configuration = ConvertTo-AiInstructionsSyncConfigurationV4 `
-    -ExistingConfiguration $existingConfiguration `
-    -CatalogRepository $catalogRepository `
-    -CatalogRef $catalogRef `
-    -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls `
-    -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths
-
-$transactionId = [Guid]::NewGuid().ToString('N')
-$stagingRoot = Join-Path $codexHomePath ".ai-instructions-install-$transactionId"
-$stagingRuntime = Join-Path $stagingRoot 'runtime'
-$stagingLauncher = Join-Path $stagingRoot 'bootstrap-ai-instructions.ps1'
-$stagingUpdater = Join-Path $stagingRoot 'update-ai-instructions.ps1'
-$stagingCleanup = Join-Path $stagingRoot 'cleanup-ai-instructions-pollution.ps1'
-$stagingConfiguration = Join-Path $stagingRoot 'ai-instructions-sync.json'
-$backupRoot = Join-Path $codexHomePath ".ai-instructions-backup-$transactionId"
-$backupRuntime = Join-Path $backupRoot 'runtime'
-New-Item -ItemType Directory -Force -Path $stagingRuntime,(Join-Path $stagingRuntime 'catalog'),$backupRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions-installed.ps1') -Destination $stagingLauncher -Force
-Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\update-ai-instructions.ps1') -Destination $stagingUpdater -Force
-Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\cleanup-ai-instructions-pollution.ps1') -Destination $stagingCleanup -Force
-foreach ($fileName in $runtimeFiles) { Copy-Item -LiteralPath (Join-Path $repositoryRootPath "scripts\$fileName") -Destination (Join-Path $stagingRuntime $fileName) -Force }
-Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
-Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -Force
-Write-AiInstructionsJsonFile -Path $stagingConfiguration -Document $configuration
-Import-Module (Join-Path $stagingRuntime 'ai-instructions-runtime-contract.psm1') -Force
-$bundle = New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256
-Write-AiInstructionsJsonFile -Path (Join-Path $stagingRuntime 'runtime-bundle.json') -Document $bundle
-$stagedConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $stagingConfiguration | ConvertFrom-Json
-$stagedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $stagingRuntime 'runtime-bundle.json') | ConvertFrom-Json
-Assert-AiInstructionsRuntimeBundleV2 -Bundle $stagedBundle -Configuration $stagedConfiguration -RuntimeRoot $stagingRuntime | Out-Null
-Import-Module (Join-Path $stagingRuntime 'skills-catalog-contract.psm1') -Force
-Test-SkillsCatalogLockDocument -LockPath (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -CatalogPath (Join-Path $stagingRuntime 'catalog\skills-catalog.json') | Out-Null
-foreach ($scriptPath in @($stagingLauncher,$stagingUpdater,$stagingCleanup) + @(Get-ChildItem -LiteralPath $stagingRuntime -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | Select-Object -ExpandProperty FullName)) {
-    $tokens=$null; $errors=$null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$errors)
-    if (@($errors).Count -gt 0) { throw "Staged installer runtime contains a PowerShell parse error in '$scriptPath': $(@($errors)[0].Message)" }
-}
-
-$hadRuntime = Test-Path -LiteralPath $runtimeDirectory -PathType Container
-$hadHook = Copy-InstallerBackupFile -Source $hookScript -Destination (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1')
-$hadUpdater = Copy-InstallerBackupFile -Source $updateScript -Destination (Join-Path $backupRoot 'update-ai-instructions.ps1')
-$hadCleanup = Copy-InstallerBackupFile -Source $cleanupScript -Destination (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1')
-$hadConfiguration = Copy-InstallerBackupFile -Source $configurationPath -Destination (Join-Path $backupRoot 'ai-instructions-sync.json')
-$hadAgents = Copy-InstallerBackupFile -Source $agentsPath -Destination (Join-Path $backupRoot 'AGENTS.md')
-$hadHooks = Copy-InstallerBackupFile -Source $hooksPath -Destination (Join-Path $backupRoot 'hooks.json')
-$runtimeBackedUp=$false; $runtimeInstalled=$false; $installSucceeded=$false; $rollbackSucceeded=$false
+$installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
+$installLockStream = $null
 try {
-    Copy-Item -LiteralPath $stagingLauncher -Destination $hookScript -Force
-    Copy-Item -LiteralPath $stagingUpdater -Destination $updateScript -Force
-    Copy-Item -LiteralPath $stagingCleanup -Destination $cleanupScript -Force
-    if ($hadRuntime) { Move-Item -LiteralPath $runtimeDirectory -Destination $backupRuntime; $runtimeBackedUp=$true }
-    Move-Item -LiteralPath $stagingRuntime -Destination $runtimeDirectory; $runtimeInstalled=$true
-    Copy-Item -LiteralPath $stagingConfiguration -Destination $configurationPath -Force
-    Set-InstallerBootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
-    Remove-InstallerSessionStartHook -HooksPath $hooksPath
-    $installSucceeded=$true
-}
-catch {
-    $installError=$_
     try {
-        if ($runtimeInstalled -and (Test-Path -LiteralPath $runtimeDirectory -PathType Container)) { Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force }
-        if ($runtimeBackedUp -and (Test-Path -LiteralPath $backupRuntime -PathType Container)) { Move-Item -LiteralPath $backupRuntime -Destination $runtimeDirectory }
-        Restore-InstallerBackupFile -Destination $hookScript -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook
-        Restore-InstallerBackupFile -Destination $updateScript -Backup (Join-Path $backupRoot 'update-ai-instructions.ps1') -OriginallyExisted $hadUpdater
-        Restore-InstallerBackupFile -Destination $cleanupScript -Backup (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1') -OriginallyExisted $hadCleanup
-        Restore-InstallerBackupFile -Destination $configurationPath -Backup (Join-Path $backupRoot 'ai-instructions-sync.json') -OriginallyExisted $hadConfiguration
-        Restore-InstallerBackupFile -Destination $agentsPath -Backup (Join-Path $backupRoot 'AGENTS.md') -OriginallyExisted $hadAgents
-        Restore-InstallerBackupFile -Destination $hooksPath -Backup (Join-Path $backupRoot 'hooks.json') -OriginallyExisted $hadHooks
-        $rollbackSucceeded=$true
+        $installLockStream = [System.IO.File]::Open($installLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
     }
-    catch { throw "AI instructions installation failed and rollback also failed. Recovery backup retained at '$backupRoot'. Original error: $($installError.Exception.Message). Rollback error: $($_.Exception.Message)" }
-    throw $installError
+    catch [System.IO.IOException] {
+        throw 'Another AI instructions installer is already running for this Codex Home.'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) {
+        $installedBundlePath = Join-Path $runtimeDirectory 'runtime-bundle.json'
+        try { $installedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $installedBundlePath | ConvertFrom-Json }
+        catch { throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.' }
+        if ([string]$installedBundle.commit -cne $ExpectedCurrentCommit) {
+            throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.'
+        }
+    }
+
+    $existingConfiguration = $null
+    if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
+        try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json }
+        catch { throw "AI instruction sync configuration is not valid JSON: $configurationPath" }
+    }
+    $configuration = ConvertTo-AiInstructionsSyncConfigurationV4 `
+        -ExistingConfiguration $existingConfiguration `
+        -CatalogRepository $catalogRepository `
+        -CatalogRef $catalogRef `
+        -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls `
+        -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths
+
+    $transactionId = [Guid]::NewGuid().ToString('N')
+    $stagingRoot = Join-Path $codexHomePath ".ai-instructions-install-$transactionId"
+    $stagingRuntime = Join-Path $stagingRoot 'runtime'
+    $stagingLauncher = Join-Path $stagingRoot 'bootstrap-ai-instructions.ps1'
+    $stagingUpdater = Join-Path $stagingRoot 'update-ai-instructions.ps1'
+    $stagingCleanup = Join-Path $stagingRoot 'cleanup-ai-instructions-pollution.ps1'
+    $stagingConfiguration = Join-Path $stagingRoot 'ai-instructions-sync.json'
+    $backupRoot = Join-Path $codexHomePath ".ai-instructions-backup-$transactionId"
+    $backupRuntime = Join-Path $backupRoot 'runtime'
+    $retainRecoveryBackup = $false
+    try {
+        New-Item -ItemType Directory -Force -Path $stagingRuntime,(Join-Path $stagingRuntime 'catalog'),$backupRoot | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions-installed.ps1') -Destination $stagingLauncher -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\update-ai-instructions.ps1') -Destination $stagingUpdater -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\cleanup-ai-instructions-pollution.ps1') -Destination $stagingCleanup -Force
+        foreach ($fileName in $runtimeFiles) { Copy-Item -LiteralPath (Join-Path $repositoryRootPath "scripts\$fileName") -Destination (Join-Path $stagingRuntime $fileName) -Force }
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -Force
+        Write-AiInstructionsJsonFile -Path $stagingConfiguration -Document $configuration
+        Import-Module (Join-Path $stagingRuntime 'ai-instructions-runtime-contract.psm1') -Force
+        $bundle = New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256
+        Write-AiInstructionsJsonFile -Path (Join-Path $stagingRuntime 'runtime-bundle.json') -Document $bundle
+        $stagedConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $stagingConfiguration | ConvertFrom-Json
+        $stagedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $stagingRuntime 'runtime-bundle.json') | ConvertFrom-Json
+        Assert-AiInstructionsRuntimeBundleV2 -Bundle $stagedBundle -Configuration $stagedConfiguration -RuntimeRoot $stagingRuntime | Out-Null
+        Import-Module (Join-Path $stagingRuntime 'skills-catalog-contract.psm1') -Force
+        Test-SkillsCatalogLockDocument -LockPath (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -CatalogPath (Join-Path $stagingRuntime 'catalog\skills-catalog.json') | Out-Null
+        foreach ($scriptPath in @($stagingLauncher,$stagingUpdater,$stagingCleanup) + @(Get-ChildItem -LiteralPath $stagingRuntime -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | Select-Object -ExpandProperty FullName)) {
+            $tokens=$null; $errors=$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$errors)
+            if (@($errors).Count -gt 0) { throw "Staged installer runtime contains a PowerShell parse error in '$scriptPath': $(@($errors)[0].Message)" }
+        }
+
+        $hadRuntime = Test-Path -LiteralPath $runtimeDirectory -PathType Container
+        $hadHook = Copy-InstallerBackupFile -Source $hookScript -Destination (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1')
+        $hadUpdater = Copy-InstallerBackupFile -Source $updateScript -Destination (Join-Path $backupRoot 'update-ai-instructions.ps1')
+        $hadCleanup = Copy-InstallerBackupFile -Source $cleanupScript -Destination (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1')
+        $hadConfiguration = Copy-InstallerBackupFile -Source $configurationPath -Destination (Join-Path $backupRoot 'ai-instructions-sync.json')
+        $hadAgents = Copy-InstallerBackupFile -Source $agentsPath -Destination (Join-Path $backupRoot 'AGENTS.md')
+        $hadHooks = Copy-InstallerBackupFile -Source $hooksPath -Destination (Join-Path $backupRoot 'hooks.json')
+        $runtimeBackedUp=$false; $runtimeInstalled=$false
+        try {
+            Copy-Item -LiteralPath $stagingLauncher -Destination $hookScript -Force
+            Copy-Item -LiteralPath $stagingUpdater -Destination $updateScript -Force
+            Copy-Item -LiteralPath $stagingCleanup -Destination $cleanupScript -Force
+            if ($hadRuntime) { Move-Item -LiteralPath $runtimeDirectory -Destination $backupRuntime; $runtimeBackedUp=$true }
+            Move-Item -LiteralPath $stagingRuntime -Destination $runtimeDirectory; $runtimeInstalled=$true
+            Copy-Item -LiteralPath $stagingConfiguration -Destination $configurationPath -Force
+            Set-InstallerBootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
+            Remove-InstallerSessionStartHook -HooksPath $hooksPath
+        }
+        catch {
+            $installError=$_
+            try {
+                if ($runtimeInstalled -and (Test-Path -LiteralPath $runtimeDirectory -PathType Container)) { Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force }
+                if ($runtimeBackedUp -and (Test-Path -LiteralPath $backupRuntime -PathType Container)) { Move-Item -LiteralPath $backupRuntime -Destination $runtimeDirectory }
+                Restore-InstallerBackupFile -Destination $hookScript -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook
+                Restore-InstallerBackupFile -Destination $updateScript -Backup (Join-Path $backupRoot 'update-ai-instructions.ps1') -OriginallyExisted $hadUpdater
+                Restore-InstallerBackupFile -Destination $cleanupScript -Backup (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1') -OriginallyExisted $hadCleanup
+                Restore-InstallerBackupFile -Destination $configurationPath -Backup (Join-Path $backupRoot 'ai-instructions-sync.json') -OriginallyExisted $hadConfiguration
+                Restore-InstallerBackupFile -Destination $agentsPath -Backup (Join-Path $backupRoot 'AGENTS.md') -OriginallyExisted $hadAgents
+                Restore-InstallerBackupFile -Destination $hooksPath -Backup (Join-Path $backupRoot 'hooks.json') -OriginallyExisted $hadHooks
+            }
+            catch {
+                $retainRecoveryBackup = $true
+                throw "AI instructions installation failed and rollback also failed. Recovery backup retained at '$backupRoot'. Original error: $($installError.Exception.Message). Rollback error: $($_.Exception.Message)"
+            }
+            throw $installError
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (-not $retainRecoveryBackup -and (Test-Path -LiteralPath $backupRoot)) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 finally {
-    if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
-    if (($installSucceeded -or $rollbackSucceeded) -and (Test-Path -LiteralPath $backupRoot)) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $installLockStream) { $installLockStream.Dispose() }
 }
 
 Write-Output "Installed AI instructions bootstrap launcher: $hookScript"

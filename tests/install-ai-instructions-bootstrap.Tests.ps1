@@ -40,7 +40,7 @@ function Invoke-InstallScript {
 }
 
 function Invoke-InstallExpectFailure {
-    param([string]$RepositoryRoot,[string]$CodexHome,[switch]$GitCheckout,[switch]$InvalidArchiveHash)
+    param([string]$RepositoryRoot,[string]$CodexHome,[switch]$GitCheckout,[switch]$InvalidArchiveHash,[string]$ExpectedCurrentCommit)
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$RepositoryRoot,'-CodexHome',$CodexHome)
     if (-not $GitCheckout) {
         $sourceCommit = (@(& git -C $RepositoryRoot rev-parse HEAD) -join '').Trim()
@@ -57,6 +57,7 @@ function Invoke-InstallExpectFailure {
             '-SourceArchivePath',$archivePath
         )
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) { $arguments += @('-ExpectedCurrentCommit',$ExpectedCurrentCommit) }
     $output = & powershell.exe @arguments 2>&1
     return [pscustomobject]@{ ExitCode=$LASTEXITCODE; Output=($output -join [Environment]::NewLine) }
 }
@@ -321,6 +322,54 @@ Keep this section too.
         $result.Output | Should Match 'differ from HEAD'
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | Should Be $false
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $false
+    }
+
+    # Scenario: A malformed codeload candidate fails during staged PowerShell validation.
+    # Purpose: Remove all staging and backup directories when failure occurs before active runtime mutation.
+    It 'InterT46_cleans_transaction_directories_after_staging_validation_failure' {
+        $invalidSource = Join-Path $TestDrive 'invalid-staging-source'
+        & git clone --quiet $repositoryRoot $invalidSource
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to create invalid staging source clone.' }
+        [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $invalidSource -CodexHome $codexHome
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'PowerShell parse error'
+        @(Get-ChildItem -LiteralPath $codexHome -Force -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 0
+    }
+
+    # Scenario: Another installer owns the per-Codex-Home installation transaction lock.
+    # Purpose: Prevent concurrent runtime swaps and rollback from overwriting a successful installation.
+    It 'InterT47_refuses_installation_while_the_install_lock_is_held' {
+        New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+        $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+        $lockStream = [System.IO.File]::Open($installLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'another AI instructions installer is already running'
+        Test-Path -LiteralPath (Join-Path $codexHome 'hooks\ai-instructions-runtime') | Should Be $false
+    }
+
+    # Scenario: The installed runtime changes after updater candidate selection but before the installer acquires its lock.
+    # Purpose: Refuse a stale candidate transaction instead of overwriting a newer or divergent installed runtime.
+    It 'InterT48_revalidates_the_expected_current_commit_inside_the_install_lock' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $bundleBefore = Get-Content -Raw -LiteralPath $bundlePath
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome -ExpectedCurrentCommit ('0' * 40)
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'installed runtime changed before installation'
+        (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
     }
 
     It 'InterT50_rolls_back_runtime_config_and_agent_files_when_a_late_install_step_fails' {

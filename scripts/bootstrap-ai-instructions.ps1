@@ -274,6 +274,63 @@ function Get-GitInfoExcludePath {
     return [System.IO.Path]::GetFullPath($path)
 }
 
+function Get-GitPathComparer {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ((Get-GitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
+        $configured = ((Invoke-Git -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
+        if ($configured -ceq 'true') { $ignoreCase = $true }
+    }
+    if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
+    return [System.StringComparer]::Ordinal
+}
+
+function Open-RepositoryOperationLock {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $commonGitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $Repository $commonGitDirectory }
+    $lockPath = Join-Path ([System.IO.Path]::GetFullPath($commonGitDirectory)) 'codex-ai-instructions.lock'
+    try {
+        return [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+    }
+    catch [System.IO.IOException] {
+        throw 'Another AI instruction repository operation is already running; bootstrap stopped before mutation.'
+    }
+}
+
+function Get-SharedManagedExcludePaths {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $CurrentManagedPaths
+    )
+
+    $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
+    foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
+        $text = [string]$line
+        if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { continue }
+        $worktreeRoot = $text.Substring('worktree '.Length)
+        $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
+        try { $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json }
+        catch { throw "Cannot compose shared Git exclusions because a linked worktree manifest is invalid: $worktreeManifestPath" }
+        if ($worktreeManifest.schemaVersion -notin @(1,2) -or $worktreeManifest.files -isnot [System.Array]) {
+            throw "Cannot compose shared Git exclusions because a linked worktree manifest has an unsupported schema: $worktreeManifestPath"
+        }
+        [void]$paths.Add($manifestRelativePath)
+        foreach ($entry in @($worktreeManifest.files)) {
+            $targetPath = [string]$entry.targetPath
+            if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
+                throw "Cannot compose shared Git exclusions because a linked worktree manifest contains an unsafe path: $targetPath"
+            }
+            [void]$paths.Add($targetPath)
+        }
+    }
+    return @($paths | Sort-Object)
+}
+
 function New-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
@@ -318,7 +375,8 @@ function Set-ManagedGitInfoExclude {
     $content = if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
     $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
     $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
-    $lines = @($ManagedPaths | Sort-Object -Unique | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
+    $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
+    $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
     $updated = $withoutBlock
     if ($lines.Count -gt 0) {
         $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
@@ -766,6 +824,10 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     }
 }
 
+$repositoryOperationLock = $null
+try {
+    $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+
 $families = @(
     @{
         Name = 'Codex'
@@ -906,7 +968,8 @@ if ($manifestExists) {
     }
 }
 
-$trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+$gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
+$trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPathComparer
 foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('ls-files'))) {
     [void]$trackedPaths.Add(([string]$trackedPath).Replace('\','/'))
 }
@@ -1285,4 +1348,8 @@ finally {
     else {
         Remove-Item -LiteralPath $resolvedWorkingPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+}
+finally {
+    if ($null -ne $repositoryOperationLock) { $repositoryOperationLock.Dispose() }
 }

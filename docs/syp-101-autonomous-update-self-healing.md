@@ -37,7 +37,8 @@ Manifest v2 是 ownership 證據。每個 entry 記錄 artifact identity、來�
 validate installed state
         |
         v
-acquire per-home lock ---- held ----> concurrent (no mutation)
+acquire per-home update lock -- held --> concurrent (no mutation)
+acquire install-state lock ----- held --> concurrent (no mixed read)
         |
         v
 minimum interval active -----------> rate-limit (no network)
@@ -70,22 +71,23 @@ Updater 不根據 mutable ref 直接安裝內容。它先解析完整 commit，�
 
 Installer 在 Codex Home 建立同磁碟 staging/backup：
 
-1. 組合 launcher、updater、cleanup、完整 runtime 與 config。
-2. 產生 runtime bundle v2。
-3. Parse 所有 PowerShell，驗證 bundle/config inventory 與 Catalog/Lock。
-4. 備份現有 stable commands、runtime、config、個人 `AGENTS.md` 與 `hooks.json`。
-5. 替換 stable commands，swap runtime，寫入 config，再更新個人文件/hooks。
-6. 任一步失敗即恢復所有備份；rollback 成功後刪除 transaction directories。
+1. 取得 per-Codex-Home install lock；updater 安裝另在鎖內確認 installed commit 仍等於 candidate selection 時的 current commit。
+2. 組合 launcher、updater、cleanup、完整 runtime 與 config。
+3. 產生 runtime bundle v2。
+4. Parse 所有 PowerShell，驗證 bundle/config inventory 與 Catalog/Lock。
+5. 備份現有 stable commands、runtime、config、個人 `AGENTS.md` 與 `hooks.json`。
+6. 替換 stable commands，swap runtime，寫入 config，再更新個人文件/hooks。
+7. 任一步失敗即恢復所有備份；包含 staging validation failure 在內，rollback 成功後都刪除 transaction directories。
 
 若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行。
 
-Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths、manifest 與 `.git/info/exclude` 都先備份。Fan-out 或 stash apply/byte verification 失敗時全部恢復；其他 user stash 不會刪除。
+Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths、manifest 與 `.git/info/exclude` 都先備份。整段 mutation、stash 與 cleanup 由 common Git directory 的 repository operation lock 序列化；Fan-out 或 stash apply/byte verification 失敗時全部恢復，其他 user stash 不會刪除。
 
 ## Branch 與 linked worktree
 
 一般 branch 共用同一 working directory，ignored artifacts 不受 checkout 影響，因此不需在每個 branch 建立或套用不同 stash。`PersonalAgent` 只是一份 branch-neutral recovery evidence。
 
-Linked worktree 有獨立 working directory。第一次在該 worktree 啟動 production change 時執行 bootstrap，即會建立同一契約的本機 artifacts；共同 Git metadata 中的 PersonalAgent evidence 會安全刷新，但兩個 worktree 的 HEAD/index 都不會改變。
+Linked worktree 有獨立 working directory。第一次在該 worktree 啟動 production change 時執行 bootstrap，即會建立同一契約的本機 artifacts；共同 Git metadata 中的 PersonalAgent evidence 會在 repository operation lock 內安全刷新，`.git/info/exclude` 則採所有 live worktree valid manifest 的路徑聯集，因此不同 worktree 的 customized/unmanaged 狀態不會互相移除 ignore。兩個 worktree 的 HEAD/index 都不會改變。
 
 ## Config migration
 
@@ -120,16 +122,18 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Runtime inventory drift | Launcher/updater fail closed，重新執行可信 installer。 |
 | Candidate parse/Catalog/Lock failure | 不進入 active swap。 |
 | Installer mutation failure | Transactional rollback；若 rollback 也失敗則保留 backup。 |
+| Malformed update receipt | Quarantine 損壞檔案，從已驗證 runtime 繼續並原子寫入新 receipt。 |
 | Target customized file | 保留檔案與歷史 manifest entry，繼續安全更新其他檔案。 |
-| Manifest-proven tracked file | Bootstrap fail closed，要求明確 cleanup。 |
+| Manifest-proven tracked file | Bootstrap fail closed，要求明確 cleanup；ignore-case Repository 的 case variant 亦視為 pollution。 |
+| Concurrent target bootstrap/cleanup | Repository operation lock fail closed，不交錯 stash、exclude 或 index transaction。 |
 | Target fan-out/stash verification failure | 恢復 target、manifest、index、exclude；保留 recovery evidence。 |
 
 ## 驗證矩陣
 
 - Config v1/v2/v3/v4 migration、unknown schema、identity/ref rejection。
 - Runtime inventory exact match、缺檔、額外檔案、byte drift、codeload archive hash requirement。
-- Update current/available/installed/offline/stale/rate-limit/drift/concurrent。
-- Installer staging、late failure rollback、launcher identity/inventory rejection。
-- Bootstrap branch switch、linked worktree、manifest/file/exclude self-healing。
-- Customized/unmanaged protection、tracked pollution fail closed、cleanup authorization/hash/staged/rollback boundaries。
+- Update current/available/installed/offline/stale/rate-limit/drift、update/install lock concurrent 與 malformed receipt self-healing。
+- Installer staging validation cleanup、expected-current revalidation、late failure rollback、launcher identity/inventory rejection。
+- Bootstrap branch switch、linked worktree divergent managed sets、manifest/file/exclude self-healing 與 repository lock。
+- Customized/unmanaged protection、case-variant tracked pollution fail closed、cleanup authorization/hash/staged/rollback boundaries。
 - PowerShell 5.1 與 7 完整 Pester；real immutable archive production smoke。

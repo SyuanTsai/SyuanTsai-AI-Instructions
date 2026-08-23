@@ -392,10 +392,25 @@ function Write-AiInstructionsJsonFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Document)
 
-    $parent = Split-Path -Parent $Path
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $fullPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $json = ($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
-    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $temporaryPath = Join-Path $parent ('.' + (Split-Path -Leaf $fullPath) + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+        $stream = [System.IO.File]::Open($temporaryPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+        try {
+            $stream.Write($bytes,0,$bytes.Length)
+            $stream.Flush($true)
+        }
+        finally { $stream.Dispose() }
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) { [System.IO.File]::Replace($temporaryPath,$fullPath,$null) }
+        else { [System.IO.File]::Move($temporaryPath,$fullPath) }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 Export-ModuleMember -Function @(

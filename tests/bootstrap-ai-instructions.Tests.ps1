@@ -465,6 +465,27 @@ Describe 'bootstrap-ai-instructions' {
         }
     }
 
+    # Scenario: One linked worktree has an unmanaged Codex base while another materializes the managed base.
+    # Purpose: Keep the shared info/exclude state valid for every live worktree after either worktree bootstraps.
+    It 'InterT72_preserves_linked_worktree_exclusions_when_managed_sets_differ' {
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Unmanaged project Agent'
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-divergent-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-divergent-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot
+
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+            (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Unmanaged project Agent'
+            (Get-Content -Raw -LiteralPath (Join-Path $linkedRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+            (@(Invoke-TestGit -Repository $linkedRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     It 'self-heals a missing manifest, managed file, and local exclude marker' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         Remove-Item -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -Force
@@ -524,6 +545,27 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'cleanup-ai-instructions-pollution\.ps1'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $contentBefore
+    }
+
+    # Scenario: Git tracks a case variant of a manifest-proven managed path on an ignore-case repository.
+    # Purpose: Prevent Windows path aliases from bypassing tracked pollution detection and managed ownership checks.
+    It 'InterT73_fails_closed_for_a_case_variant_tracked_managed_path' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Invoke-TestGit -Repository $targetRoot -Arguments @('config','core.ignorecase','true') | Out-Null
+        $agentPath = Join-Path $targetRoot 'AGENTS.md'
+        $temporaryPath = Join-Path $targetRoot 'agent-case-temporary.md'
+        $caseVariantPath = Join-Path $targetRoot 'agents.md'
+        Move-Item -LiteralPath $agentPath -Destination $temporaryPath
+        Move-Item -LiteralPath $temporaryPath -Destination $caseVariantPath
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','agents.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','case-variant pollution fixture') | Out-Null
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & powershell.exe @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected.*AGENTS\.md'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','agents.md')) -join '') | Should Be 'agents.md'
     }
 
     It 'removes an unchanged managed rule when the source removes it' {
@@ -917,6 +959,28 @@ description: Verify raw bytes.
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $managedContentBefore
+    }
+
+    # Scenario: Another worktree holds the repository-wide personal runtime transaction lock.
+    # Purpose: Serialize shared stash and info/exclude mutation before any target bytes are changed.
+    It 'InterT94_fails_closed_when_the_repository_runtime_lock_is_held' {
+        $commonGitDirectory = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-common-dir')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $targetRoot $commonGitDirectory }
+        $runtimeLockPath = Join-Path ([System.IO.Path]::GetFullPath($commonGitDirectory)) 'codex-ai-instructions.lock'
+        $lockStream = [System.IO.File]::Open($runtimeLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & powershell.exe @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'another AI instruction repository operation is already running'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
     }
 
     # Scenario: The target is a Git work tree without an initial commit.

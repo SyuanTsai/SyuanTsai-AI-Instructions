@@ -37,6 +37,32 @@ function Get-CleanupGitExitCode {
     finally { $ErrorActionPreference = $previousPreference }
 }
 
+function Get-CleanupGitPathComparer {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    if ((Get-CleanupGitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
+        $configured = ((Invoke-CleanupGit -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
+        if ($configured -ceq 'true') { $ignoreCase = $true }
+    }
+    if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
+    return [System.StringComparer]::Ordinal
+}
+
+function Open-CleanupRepositoryOperationLock {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $commonGitDirectory = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-common-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $Repository $commonGitDirectory }
+    $lockPath = Join-Path ([System.IO.Path]::GetFullPath($commonGitDirectory)) 'codex-ai-instructions.lock'
+    try {
+        return [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+    }
+    catch [System.IO.IOException] {
+        throw 'Another AI instruction repository operation is already running; cleanup stopped before index mutation.'
+    }
+}
+
 function Test-CleanupManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
     if ($Path -eq 'AGENTS.md' -or $Path -eq '.github/copilot-instructions.md' -or
@@ -85,12 +111,48 @@ function ConvertTo-CleanupExcludePattern {
     return "/$escaped"
 }
 
+function Get-CleanupSharedManagedPaths {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $CurrentManagedPaths
+    )
+
+    $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
+    foreach ($line in @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
+        $text = [string]$line
+        if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { continue }
+        $worktreeRoot = $text.Substring('worktree '.Length)
+        $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
+        try { $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json }
+        catch { throw "Cannot compose shared Git exclusions because a linked worktree manifest is invalid: $worktreeManifestPath" }
+        if ($worktreeManifest.schemaVersion -notin @(1,2) -or $worktreeManifest.files -isnot [System.Array]) {
+            throw "Cannot compose shared Git exclusions because a linked worktree manifest has an unsupported schema: $worktreeManifestPath"
+        }
+        [void]$paths.Add($manifestRelativePath)
+        foreach ($entry in @($worktreeManifest.files)) {
+            $targetPath = [string]$entry.targetPath
+            if (-not (Test-CleanupManagedPath -Path $targetPath)) {
+                throw "Cannot compose shared Git exclusions because a linked worktree manifest contains an unsafe path: $targetPath"
+            }
+            [void]$paths.Add($targetPath)
+        }
+    }
+    return @($paths | Sort-Object)
+}
+
 function Set-CleanupExcludeBlock {
-    param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string[]] $ManagedPaths)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string[]] $ManagedPaths
+    )
     $content = if (Test-Path -LiteralPath $Path -PathType Leaf) { [System.IO.File]::ReadAllText($Path).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
     $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
     $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
-    $lines = @($ManagedPaths | Sort-Object -Unique | ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ })
+    $sharedManagedPaths = @(Get-CleanupSharedManagedPaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
+    $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ })
     $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
     $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
     $parent = Split-Path -Parent $Path
@@ -109,6 +171,9 @@ if ((Test-Path -LiteralPath (Join-Path $targetRootPath '.codex\AGENTS.en.md') -P
     (Test-Path -LiteralPath (Join-Path $targetRootPath '.github\copilot-instructions.en.md') -PathType Leaf)) {
     throw 'Tracked AI instructions pollution cleanup refuses the canonical Instructions source repository.'
 }
+
+$repositoryOperationLock = Open-CleanupRepositoryOperationLock -Repository $targetRootPath
+try {
 
 $manifestPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/','\')
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -131,23 +196,31 @@ foreach ($entry in @($manifest.files)) {
 }
 
 $trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('ls-files') | ForEach-Object { ([string]$_).Replace('\','/') })
-$trackedManagedPaths = @(
-    if ($trackedPaths -ccontains $manifestRelativePath) { $manifestRelativePath }
-    foreach ($path in @($entriesByPath.Keys | Sort-Object)) {
-        if ($trackedPaths -ccontains [string]$path) { [string]$path }
+$gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
+$trackedManagedEntries = New-Object System.Collections.Generic.List[object]
+foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
+    foreach ($actualTrackedPath in $trackedPaths) {
+        if ($gitPathComparer.Equals([string]$manifestTargetPath,[string]$actualTrackedPath)) {
+            $trackedManagedEntries.Add([pscustomobject]@{ ManifestPath=[string]$manifestTargetPath; IndexPath=[string]$actualTrackedPath })
+        }
     }
-)
+}
+$trackedManagedPathSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+foreach ($trackedManagedEntry in $trackedManagedEntries) { [void]$trackedManagedPathSet.Add([string]$trackedManagedEntry.IndexPath) }
+$trackedManagedPaths = @($trackedManagedPathSet | Sort-Object)
 if ($trackedManagedPaths.Count -eq 0) { throw 'No tracked managed AI instruction pollution was found.' }
-foreach ($trackedPath in $trackedManagedPaths) {
-    $stagedExitCode = Get-CleanupGitExitCode -Repository $targetRootPath -Arguments @('diff','--cached','--quiet','--',$trackedPath)
-    if ($stagedExitCode -gt 1) { throw "Unable to inspect staged managed path: $trackedPath" }
-    if ($stagedExitCode -eq 1) { throw "Tracked managed path already has staged changes; cleanup stopped: $trackedPath" }
-    if ($trackedPath -ceq $manifestRelativePath) { continue }
-    $fullPath = Join-Path $targetRootPath $trackedPath.Replace('/','\')
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Tracked managed path is missing and ownership cannot be verified: $trackedPath" }
-    $currentHash = Get-CleanupManagedHash -Path $fullPath -TargetPath $trackedPath
-    if ($currentHash -cne [string]$entriesByPath[$trackedPath].sha256) {
-        throw "Tracked managed path is customized or has an ownership hash mismatch: $trackedPath"
+foreach ($trackedManagedEntry in $trackedManagedEntries) {
+    $indexPath = [string]$trackedManagedEntry.IndexPath
+    $manifestTargetPath = [string]$trackedManagedEntry.ManifestPath
+    $stagedExitCode = Get-CleanupGitExitCode -Repository $targetRootPath -Arguments @('diff','--cached','--quiet','--',$indexPath)
+    if ($stagedExitCode -gt 1) { throw "Unable to inspect staged managed path: $indexPath" }
+    if ($stagedExitCode -eq 1) { throw "Tracked managed path already has staged changes; cleanup stopped: $indexPath" }
+    if ($manifestTargetPath -ceq $manifestRelativePath) { continue }
+    $fullPath = Join-Path $targetRootPath $manifestTargetPath.Replace('/','\')
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Tracked managed path is missing and ownership cannot be verified: $manifestTargetPath" }
+    $currentHash = Get-CleanupManagedHash -Path $fullPath -TargetPath $manifestTargetPath
+    if ($currentHash -cne [string]$entriesByPath[$manifestTargetPath].sha256) {
+        throw "Tracked managed path is customized or has an ownership hash mismatch: $manifestTargetPath"
     }
 }
 
@@ -158,9 +231,9 @@ $gitExcludePath = ((Invoke-CleanupGit -Repository $targetRootPath -Arguments @('
 if (-not [System.IO.Path]::IsPathRooted($gitExcludePath)) { $gitExcludePath = Join-Path $targetRootPath $gitExcludePath }
 $excludeExisted = Test-Path -LiteralPath $gitExcludePath -PathType Leaf
 $excludeBefore = if ($excludeExisted) { [System.IO.File]::ReadAllBytes($gitExcludePath) } else { $null }
-$cleanupPaths = @($trackedManagedPaths | Sort-Object -Unique)
+$cleanupPaths = @($trackedManagedPaths | Sort-Object)
 try {
-    Set-CleanupExcludeBlock -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath)
+    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths)
     Invoke-CleanupGit -Repository $targetRootPath -Arguments (@('rm','--cached','--') + $cleanupPaths) | Out-Null
     foreach ($cleanupPath in $cleanupPaths) {
         $fullPath = Join-Path $targetRootPath $cleanupPath.Replace('/','\')
@@ -181,3 +254,7 @@ catch {
 }
 
 Write-Output "Tracked AI instructions pollution cleanup staged deletions only; local files were preserved and ignored: $($cleanupPaths -join ', ')"
+}
+finally {
+    $repositoryOperationLock.Dispose()
+}
