@@ -61,6 +61,7 @@
         "available",
         "installed",
         "offline",
+        "stale",
         "rate-limited",
         "drift",
         "failed"

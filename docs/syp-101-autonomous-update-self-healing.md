@@ -46,6 +46,7 @@ minimum interval active -----------> rate-limit (no network)
 resolve canonical candidate
    | offline/error -----------------> offline receipt; keep current runtime
    | same commit -------------------> current receipt
+   | behind/diverged --------------> stale receipt; refuse downgrade
    | newer + notify-only ----------> available receipt
    v
 download immutable codeload ZIP
@@ -63,7 +64,7 @@ revalidate active state ------------> installed receipt
 
 合法 channel/ref 只有 `protected-branch/main` 與 `github-release/latest`。`notify-only` 是預設；`auto-install-approved` 表示使用者已在個人 config 核准該 channel，單次 `-InstallApproved` 也可明確核准目前 candidate。
 
-Updater 不根據 mutable ref 直接安裝內容。它先解析完整 commit，取得該 commit 的 archive，驗證後再次解析 ref；第二次結果不同即視為 TOCTOU drift。
+Updater 不根據 mutable ref 直接安裝內容。它先解析完整 commit，使用 GitHub compare 證明 candidate 是 installed commit 的 descendant，再取得該 commit 的 archive；behind 或 diverged candidate 只寫 stale receipt，永不降級。Archive 驗證後再次解析 ref；第二次 commit 或 lineage 結果不同即視為 TOCTOU drift。
 
 ## Transaction 與 rollback
 
@@ -114,6 +115,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Failure | 行為 |
 | --- | --- |
 | Network unavailable | 寫 offline receipt，保留已驗證 runtime；不降級、不安裝。 |
+| Candidate behind/diverged | 寫 stale receipt，不下載、不降級、不安裝。 |
 | GitHub candidate drift | 寫 drift receipt，刪除暫存下載，不安裝。 |
 | Runtime inventory drift | Launcher/updater fail closed，重新執行可信 installer。 |
 | Candidate parse/Catalog/Lock failure | 不進入 active swap。 |
@@ -126,7 +128,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 
 - Config v1/v2/v3/v4 migration、unknown schema、identity/ref rejection。
 - Runtime inventory exact match、缺檔、額外檔案、byte drift、codeload archive hash requirement。
-- Update current/available/installed/offline/rate-limit/drift/concurrent。
+- Update current/available/installed/offline/stale/rate-limit/drift/concurrent。
 - Installer staging、late failure rollback、launcher identity/inventory rejection。
 - Bootstrap branch switch、linked worktree、manifest/file/exclude self-healing。
 - Customized/unmanaged protection、tracked pollution fail closed、cleanup authorization/hash/staged/rollback boundaries。

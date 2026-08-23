@@ -59,6 +59,23 @@ Describe 'AI instructions updater workflow' {
         $result.candidateCommit | Should Be ('b' * 40)
     }
 
+    # Scenario: The configured mutable ref resolves behind or off the installed immutable history.
+    # Purpose: Refuse downgrades and divergent candidates before acquisition in every update mode.
+    It 'UnitT25_reports_a_stale_non_forward_candidate_without_installing' {
+        $codexHome = Join-Path $TestDrive 'stale'
+        New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $script:installCalls = 0
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { [pscustomobject]@{ Commit=('b' * 40); Relation='behind' } } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { $script:installCalls++ }
+
+        $result.outcome | Should Be 'stale'
+        $result.message | Should Match 'downgrade or divergent installation was refused'
+        $script:installCalls | Should Be 0
+    }
+
     # Scenario: A newer candidate remains stable across acquisition and auto-install is approved.
     # Purpose: Install only after a second immutable-ref resolution rules out candidate drift.
     It 'UnitT30_installs_an_approved_stable_candidate' {

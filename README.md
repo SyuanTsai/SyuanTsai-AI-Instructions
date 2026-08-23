@@ -156,12 +156,12 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 若要由 policy 自動安裝已核准 channel 的更新，將 `updates.mode` 設為 `auto-install-approved`。Updater 仍會：
 
 - 只接受 canonical Repository 與合法 channel/ref；
-- 解析 immutable candidate commit；
+- 解析 immutable candidate commit，並以 GitHub compare 驗證它是目前 installed commit 的 descendant；behind／diverged candidate 一律標為 stale 且不安裝；
 - 下載 codeload ZIP、計算 archive SHA-256、安全解壓、parse 全部 PowerShell、驗證 Catalog/Lock；
 - 安裝前再次解析 candidate，遇到 TOCTOU drift 即停止；
 - 透過 installer transaction swap，失敗時 rollback；
 - 使用 per-Codex-Home lock 阻止並行更新；
-- 以 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、drift 或 failed。
+- 以 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed。
 
 網路不可用時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。若 local runtime inventory 有缺檔、額外檔案或 hash drift，launcher/updater 會 fail closed，應重新執行可信 installer。
 

@@ -55,7 +55,45 @@ function Get-AiInstructionsRemoteCandidate {
     $commit = Invoke-RestMethod -UseBasicParsing -Uri $commitUri -Headers $headers -Method Get
     $sha = [string]$commit.sha
     if ($sha -cnotmatch '^[0-9a-f]{40}$') { throw 'The canonical GitHub candidate did not resolve to a full lowercase commit SHA.' }
-    return $sha
+    $currentCommit = [string]$Request.CurrentCommit
+    if ($currentCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'The installed runtime does not expose a valid immutable commit for lineage validation.' }
+    $relation = 'identical'
+    if ($sha -cne $currentCommit) {
+        $escapedCurrent = [System.Uri]::EscapeDataString($currentCommit)
+        $escapedCandidate = [System.Uri]::EscapeDataString($sha)
+        $compareUri = "https://api.github.com/repos/$owner/$repository/compare/$escapedCurrent...$escapedCandidate"
+        $comparison = Invoke-RestMethod -UseBasicParsing -Uri $compareUri -Headers $headers -Method Get
+        $relation = [string]$comparison.status
+        if ($relation -cnotin @('ahead','behind','diverged')) {
+            throw "The canonical GitHub candidate returned an unsupported commit relation '$relation'."
+        }
+    }
+    return [pscustomobject][ordered]@{ Commit=$sha; Relation=$relation }
+}
+
+function ConvertTo-AiInstructionsResolvedCandidate {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Value,
+        [Parameter(Mandatory = $true)][string] $CurrentCommit
+    )
+
+    if ($Value -is [string]) {
+        $commit = [string]$Value
+        $relation = if ($commit -ceq $CurrentCommit) { 'identical' } else { 'ahead' }
+    }
+    else {
+        if ($null -eq $Value -or $null -eq $Value.PSObject.Properties['Commit'] -or $null -eq $Value.PSObject.Properties['Relation']) {
+            throw 'AI instructions candidate resolver returned an invalid result.'
+        }
+        $commit = [string]$Value.Commit
+        $relation = [string]$Value.Relation
+    }
+    if ($commit -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instructions update candidate must be a full lowercase 40-character commit SHA.' }
+    if ($relation -cnotin @('identical','ahead','behind','diverged')) { throw "Unsupported AI instructions candidate relation '$relation'." }
+    if (($commit -ceq $CurrentCommit) -ne ($relation -ceq 'identical')) {
+        throw 'AI instructions candidate commit and lineage relation are inconsistent.'
+    }
+    return [pscustomobject][ordered]@{ Commit=$commit; Relation=$relation }
 }
 
 function Test-AiInstructionsPowerShellFiles {
@@ -232,7 +270,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
             Ref = [string]$configuration.updates.ref
         }
         try {
-            $candidateCommit = [string](& $ResolveCandidate $request)
+            $resolvedCandidate = ConvertTo-AiInstructionsResolvedCandidate -Value (& $ResolveCandidate $request) -CurrentCommit ([string]$bundle.commit)
         }
         catch {
             $resolveOutcome = if (Test-AiInstructionsTransientNetworkError -Exception $_.Exception) { 'offline' } else { 'failed' }
@@ -240,9 +278,14 @@ function Invoke-AiInstructionsUpdateWorkflow {
             Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
             return $result
         }
-        if ($candidateCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instructions update candidate must be a full lowercase 40-character commit SHA.' }
+        $candidateCommit = [string]$resolvedCandidate.Commit
         if ($candidateCommit -ceq [string]$bundle.commit) {
             $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'current' -ArchiveSha256 $null -Message 'The installed runtime is current.'
+            Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
+            return $result
+        }
+        if ([string]$resolvedCandidate.Relation -cne 'ahead') {
+            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'stale' -ArchiveSha256 $null -Message "The canonical candidate is $($resolvedCandidate.Relation) relative to the installed runtime; downgrade or divergent installation was refused."
             Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
             return $result
         }
@@ -259,8 +302,9 @@ function Invoke-AiInstructionsUpdateWorkflow {
             if ($null -eq $package -or [string]$package.ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
                 throw 'Candidate package did not provide a valid archiveSha256.'
             }
-            $candidateAfterAcquisition = [string](& $ResolveCandidate $request)
-            if ($candidateAfterAcquisition -cne $candidateCommit) {
+            $resolvedAfterAcquisition = ConvertTo-AiInstructionsResolvedCandidate -Value (& $ResolveCandidate $request) -CurrentCommit ([string]$bundle.commit)
+            $candidateAfterAcquisition = [string]$resolvedAfterAcquisition.Commit
+            if ($candidateAfterAcquisition -cne $candidateCommit -or [string]$resolvedAfterAcquisition.Relation -cne 'ahead') {
                 $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'drift' -ArchiveSha256 ([string]$package.ArchiveSha256) -Message "Candidate drifted to $candidateAfterAcquisition before installation."
                 Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
                 return $result
