@@ -735,7 +735,11 @@ function Update-PersonalAgentStash {
 
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
-        [object[]] $ExpectedEntries
+        [object[]] $ExpectedEntries,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $PriorStashes
     )
 
     if ($Paths.Count -eq 0) {
@@ -755,13 +759,28 @@ function Update-PersonalAgentStash {
         '-c', 'core.autocrlf=false', 'stash', 'push', '--all', '--quiet', '-m', 'PersonalAgent', '--'
     ) + $Paths) | Out-Null
 
-    $newStashHash = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', 'stash@{0}') | Select-Object -First 1).Trim()
-    $newStash = @(Get-PersonalAgentStashes -Repository $Repository | Where-Object { $_.Hash -eq $newStashHash })
-    if ($newStash.Count -ne 1) {
-        throw 'PersonalAgent stash was not created as the latest stash.'
+    $priorStashHashCounts = @{}
+    foreach ($priorStash in @($PriorStashes)) {
+        $priorHash = [string]$priorStash.Hash
+        if (-not $priorStashHashCounts.ContainsKey($priorHash)) { $priorStashHashCounts[$priorHash] = 0 }
+        $priorStashHashCounts[$priorHash]++
     }
 
-    Invoke-Git -Repository $Repository -Arguments @('-c', 'core.autocrlf=false', 'stash', 'apply', '--quiet', 'stash@{0}') | Out-Null
+    $currentStashHashCounts = @{}
+    $newStashes = New-Object System.Collections.Generic.List[object]
+    foreach ($currentStash in @(Get-PersonalAgentStashes -Repository $Repository)) {
+        $currentHash = [string]$currentStash.Hash
+        if (-not $currentStashHashCounts.ContainsKey($currentHash)) { $currentStashHashCounts[$currentHash] = 0 }
+        $currentStashHashCounts[$currentHash]++
+        $priorCount = if ($priorStashHashCounts.ContainsKey($currentHash)) { [int]$priorStashHashCounts[$currentHash] } else { 0 }
+        if ($currentStashHashCounts[$currentHash] -gt $priorCount) { $newStashes.Add($currentStash) }
+    }
+    if ($newStashes.Count -ne 1) {
+        throw 'The newly created PersonalAgent stash could not be identified uniquely.'
+    }
+    $newStashHash = [string]$newStashes[0].Hash
+
+    Invoke-Git -Repository $Repository -Arguments @('-c', 'core.autocrlf=false', 'stash', 'apply', '--quiet', $newStashHash) | Out-Null
 
     foreach ($path in $Paths) {
         $fullPath = Join-Path $Repository $path.Replace('/','\')
@@ -786,11 +805,63 @@ function Update-PersonalAgentStash {
             Sort-Object Index -Descending
     )
     foreach ($obsoleteStash in $obsoleteStashes) {
+        $droppedHash = $null
         try {
-            Invoke-Git -Repository $Repository -Arguments @('stash', 'drop', '--quiet', $obsoleteStash.Reference) | Out-Null
+            $currentMatches = @(
+                Get-PersonalAgentStashes -Repository $Repository |
+                    Where-Object { $_.Hash -ceq [string]$obsoleteStash.Hash }
+            )
+            if ($currentMatches.Count -ne 1) {
+                throw "Expected exactly one current PersonalAgent stash with hash $($obsoleteStash.Hash)."
+            }
+
+            $currentObsoleteStash = $currentMatches[0]
+            $resolvedHash = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', '--verify', $currentObsoleteStash.Reference) |
+                Select-Object -First 1).Trim()
+            if ($resolvedHash -cne [string]$obsoleteStash.Hash) {
+                throw "PersonalAgent stash reference changed before cleanup: $($currentObsoleteStash.Reference)"
+            }
+
+            $dropOutput = @(Invoke-Git -Repository $Repository -Arguments @('stash', 'drop', $currentObsoleteStash.Reference))
+            $dropMatch = [System.Text.RegularExpressions.Regex]::Match(
+                ($dropOutput -join [Environment]::NewLine),
+                '\(([0-9a-fA-F]{40}|[0-9a-fA-F]{64})\)'
+            )
+            if (-not $dropMatch.Success) {
+                throw "Git did not report the hash removed for $($currentObsoleteStash.Reference)."
+            }
+            $droppedHash = $dropMatch.Groups[1].Value.ToLowerInvariant()
         }
         catch {
-            Write-Warning "Obsolete PersonalAgent stash was retained because cleanup failed: $($obsoleteStash.Reference)"
+            Write-Warning "Obsolete PersonalAgent stash cleanup stopped before a safe result could be confirmed: $($obsoleteStash.Hash). $($_.Exception.Message)"
+            continue
+        }
+
+        if ($droppedHash -cne ([string]$obsoleteStash.Hash).ToLowerInvariant()) {
+            $recoveryMessage = "Recovered after concurrent PersonalAgent cleanup: $droppedHash"
+            try {
+                $stashSubject = (Invoke-Git -Repository $Repository -Arguments @('show', '--no-patch', '--format=%s', $droppedHash) |
+                    Select-Object -First 1).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($stashSubject)) { $recoveryMessage = $stashSubject }
+            }
+            catch {
+                # The immutable commit hash is sufficient for recovery even when its original subject cannot be read.
+            }
+
+            try {
+                Invoke-Git -Repository $Repository -Arguments @('stash', 'store', '--quiet', '-m', $recoveryMessage, $droppedHash) | Out-Null
+            }
+            catch {
+                throw "An unrelated stash was removed after concurrent index drift and could not be restored: $droppedHash. $($_.Exception.Message)"
+            }
+            $restoredHashCount = @(
+                Invoke-Git -Repository $Repository -Arguments @('stash', 'list', '--format=%H') |
+                    Where-Object { ([string]$_).Trim() -ceq $droppedHash }
+            ).Count
+            if ($restoredHashCount -eq 0) {
+                throw "An unrelated stash was removed after concurrent index drift but Git did not retain its restored hash: $droppedHash"
+            }
+            Write-Warning "Obsolete PersonalAgent cleanup observed concurrent stash index drift; the unrelated stash was restored and old evidence was retained: $droppedHash"
         }
     }
 
@@ -1444,7 +1515,8 @@ try {
             $stashPathArguments = @($stashPaths | Sort-Object -Unique)
             if ($stashPathArguments.Count -gt 0) {
                 $expectedStashEntries = @($nextManifestEntries | Where-Object { [string]$_.targetPath -cin $stashPathArguments })
-                $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments -ExpectedEntries $expectedStashEntries
+                $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments `
+                    -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes
                 Write-Output "PersonalAgent recovery evidence updated, reapplied, and retained: $newStashHash"
             }
         }

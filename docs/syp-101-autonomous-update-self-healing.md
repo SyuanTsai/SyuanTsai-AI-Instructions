@@ -81,7 +81,7 @@ Installer 在 Codex Home 建立同磁碟 staging/backup：
 
 若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行。
 
-Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths、manifest 與 `.git/info/exclude` 都先備份。整段 mutation、stash 與 cleanup 由 common Git directory 的 repository operation lock 序列化；stash reapply 會對所有 canonical paths（包含 manifest）比較 raw SHA-256，Fan-out 或 byte verification 失敗時全部恢復，其他 user stash 不會刪除。
+Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths、manifest 與 `.git/info/exclude` 都先備份。整段 mutation、stash 與 cleanup 由 common Git directory 的 repository operation lock 序列化；新 stash 以建立前後的 PersonalAgent hash multiset 唯一識別並以 immutable hash reapply，再對所有 canonical paths（包含 manifest）比較 raw SHA-256。清理舊 evidence 時會依 hash 重新解析目前 reference 並在 drop 前再次驗證；若不受 repository lock 約束的外部 Git 行程仍在最後時點移動 index，runtime 會核對 Git 實際刪除的 commit hash、還原非預期刪除的 stash 並保留舊 evidence。Fan-out、byte verification 或唯一識別失敗時則全部恢復 target transaction，其他 user stash 不會靜默遺失。
 
 ## Branch 與 linked worktree
 
@@ -128,6 +128,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Manifest-proven tracked file | Bootstrap fail closed，要求明確 cleanup；ignore-case Repository 的 case variant 亦視為 pollution。 |
 | Stable/exclude mutation path 是目錄或 reparse point | 在寫入前 fail closed，保留原 filesystem entry。 |
 | Concurrent target bootstrap/cleanup | Repository operation lock fail closed，不交錯 stash、exclude 或 index transaction。 |
+| External Git process shifts stash indices | 新 evidence 以 immutable hash 套用；舊 evidence cleanup 重新解析 reference，drop hash 不符時還原實際刪除的 stash 並保留舊 evidence。 |
 | Target fan-out/stash verification failure | 恢復 target、manifest、index、exclude；保留 recovery evidence。 |
 
 ## 驗證矩陣

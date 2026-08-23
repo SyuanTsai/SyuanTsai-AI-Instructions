@@ -851,6 +851,224 @@ Describe 'bootstrap-ai-instructions' {
         @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
+    # Scenario: Another Git process inserts a stash after obsolete PersonalAgent references are enumerated.
+    # Purpose: Re-resolve recovery evidence by immutable hash so index drift cannot delete unrelated user work.
+    It 'InterT88_preserves_unrelated_stashes_when_cleanup_references_shift' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-index-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+        $secondListMarker = Join-Path $wrapperRoot 'second-list.marker'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+if not exist "$firstListMarker" (
+  type nul > "$firstListMarker"
+  goto forward
+)
+if not exist "$secondListMarker" (
+  type nul > "$secondListMarker"
+  goto forward
+)
+if not exist "$insertionMarker" (
+  type nul > "$insertionMarker"
+  "$realGit" %*
+  if errorlevel 1 exit /b 86
+  "$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$unrelatedStashHash"
+  if errorlevel 1 exit /b 87
+  exit /b 0
+)
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object {
+            $_ -match "^$([regex]::Escape($unrelatedStashHash))`t.*ProjectWork$"
+        }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Not Match 'cleanup failed'
+    }
+
+    # Scenario: Another Git process inserts a stash after the new PersonalAgent stash is created but before it is reapplied.
+    # Purpose: Apply the newly identified immutable hash instead of whichever stash later occupies index zero.
+    It 'InterT96_applies_new_recovery_evidence_by_hash_when_the_latest_stash_shifts' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-apply-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $pushMarker = Join-Path $wrapperRoot 'push.marker'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash push" >nul
+if errorlevel 1 goto maybe_insert
+"$realGit" %*
+if errorlevel 1 exit /b 86
+type nul > "$pushMarker"
+exit /b 0
+:maybe_insert
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+if not exist "$pushMarker" goto forward
+if exist "$insertionMarker" goto forward
+type nul > "$insertionMarker"
+"$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$unrelatedStashHash"
+if errorlevel 1 exit /b 87
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object { $_ -match 'ProjectWork$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Not Match 'stash apply changed'
+    }
+
+    # Scenario: A stash index changes after cleanup identity verification but before Git executes the drop.
+    # Purpose: Restore any unexpectedly dropped immutable commit and retain old recovery evidence rather than lose user work.
+    It 'InterT97_restores_an_unexpected_stash_dropped_during_last_moment_index_drift' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Set-TestText -Path (Join-Path $targetRoot 'concurrent.txt') -Value 'committed concurrent notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt', 'concurrent.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+        Set-TestText -Path (Join-Path $targetRoot 'concurrent.txt') -Value 'concurrent work in progress'
+        $concurrentStashHash = [string](@(
+            Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'create', 'ConcurrentUser') |
+                ForEach-Object { [string]$_ } |
+                Where-Object { $_ -match '^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$' } |
+                Select-Object -First 1
+        )[0])
+        $concurrentStashHash = $concurrentStashHash.Trim()
+        [string]::IsNullOrWhiteSpace($concurrentStashHash) | Should Be $false
+        Invoke-TestGit -Repository $targetRoot -Arguments @('restore', '--worktree', '--', 'concurrent.txt') | Out-Null
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-last-moment-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash drop" >nul
+if errorlevel 1 goto forward
+if exist "$insertionMarker" goto forward
+type nul > "$insertionMarker"
+"$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$concurrentStashHash"
+if errorlevel 1 exit /b 87
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object { $_ -match "^$([regex]::Escape($unrelatedStashHash))`t" }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match "^$([regex]::Escape($concurrentStashHash))`t" }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ProjectWork$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 2
+        ($output -join [Environment]::NewLine) | Should Match 'concurrent stash index drift.*restored'
+    }
+
     # Scenario: Prior branch-independent materialization exists locally and one managed file is subsequently customized.
     # Purpose: Refresh other provable files without relying on product commits or overwriting local customization.
     It 'InterT81_refreshes_provable_files_while_prior_materialization_remains_uncommitted' {

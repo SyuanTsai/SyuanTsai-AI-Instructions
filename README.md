@@ -210,7 +210,7 @@ git diff --cached --name-status
 - Installer/updater 的一般失敗會自動恢復上一個完整 runtime/config 組合；staging 驗證尚未進入 active swap 就失敗時，也會清除 staging/backup transaction directories。
 - 若 rollback 本身失敗，錯誤會保留並回報 backup path；先保存該目錄再人工處理。
 - Process 被強制中止導致 runtime/config mismatch 時，launcher 會 fail closed；重新執行上一個可信 commit 的 installer。
-- Target fan-out 或 stash apply 失敗時，mutation engine 以包含 manifest 在內的 canonical path raw SHA-256 驗證 byte-safe reapply，失敗即恢復 target bytes、manifest、index 與 `.git/info/exclude`；新舊 `PersonalAgent` evidence 會保留供復原，不會刪除其他 stash。
+- Target fan-out 或 stash apply 失敗時，mutation engine 以包含 manifest 在內的 canonical path raw SHA-256 驗證 byte-safe reapply，失敗即恢復 target bytes、manifest、index 與 `.git/info/exclude`；新舊 `PersonalAgent` evidence 會保留供復原。新 evidence 以 immutable hash 套用；清理舊 evidence 前會重新解析並驗證目前 stash reference，若執行 drop 時仍發生外部 index drift，會依 Git 回報的實際 commit hash 還原非預期刪除的 stash 並保留舊 evidence。
 - 不要用 `git reset --hard` 清理 personal artifacts；這些檔案本來就不應在 index。
 
 設計、安全狀態機與操作 runbook 見 [docs/syp-101-autonomous-update-self-healing.md](docs/syp-101-autonomous-update-self-healing.md)。SYP-86 舊 cutover 文件只保留歷史背景，若與本文件衝突以 SYP-101 為準。
