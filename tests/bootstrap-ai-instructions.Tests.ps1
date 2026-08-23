@@ -962,6 +962,45 @@ description: Verify raw bytes.
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github\AI-Rules')).Trim() | Should Be '# Existing path blocker'
     }
 
+    # Scenario: Git cannot enumerate existing PersonalAgent evidence after target files, manifest, and exclusions have been written.
+    # Purpose: Keep stash discovery inside the target transaction so every live mutation is restored when finalization cannot begin.
+    It 'InterT86_rolls_back_target_and_exclusions_when_stash_discovery_fails' {
+        # Given
+        $wrapperRoot = Join-Path $TestDrive 'stash-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $gitWrapper = "@echo off`necho %* | `"$findString`" /C:`"stash list`" >nul`nif not errorlevel 1 exit /b 86`n`"$realGit`" %*"
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $excludePath = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', '--git-path', 'info/exclude')
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $excludeBytesBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & powershell.exe @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stash list'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
+    }
+
     # Scenario: A managed file target is already occupied by a project-owned directory.
     # Purpose: Reject the collision before Copy-Item writes inside the directory or creates a partial commit.
     It 'InterT87_rejects_a_directory_at_an_exact_managed_file_path_before_mutation' {

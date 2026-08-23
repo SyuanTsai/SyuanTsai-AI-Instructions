@@ -1426,40 +1426,41 @@ try {
             Sort-Object -Unique
     )
 
-    $personalAgentStashes = @(Get-PersonalAgentStashes -Repository $targetRootPath)
-    $shouldRefreshPersonalAgentStash = $changedPaths.Count -gt 0 -or $personalAgentStashes.Count -eq 0
-    if ($shouldRefreshPersonalAgentStash) {
-        $stashPaths = New-Object System.Collections.Generic.List[string]
-        foreach ($manifestEntry in $nextManifestEntries) {
-            $targetPath = [string]$manifestEntry.targetPath
-            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
-            if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
-                (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
-                $stashPaths.Add($targetPath)
+    $stashPathArguments = @()
+    try {
+        $personalAgentStashes = @(Get-PersonalAgentStashes -Repository $targetRootPath)
+        $shouldRefreshPersonalAgentStash = $changedPaths.Count -gt 0 -or $personalAgentStashes.Count -eq 0
+        if ($shouldRefreshPersonalAgentStash) {
+            $stashPaths = New-Object System.Collections.Generic.List[string]
+            foreach ($manifestEntry in $nextManifestEntries) {
+                $targetPath = [string]$manifestEntry.targetPath
+                $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+                if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
+                    (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
+                    $stashPaths.Add($targetPath)
+                }
             }
-        }
-        if (Test-Path -LiteralPath $manifestFullPath -PathType Leaf) { $stashPaths.Add($manifestRelativePath) }
-        $stashPathArguments = @($stashPaths | Sort-Object -Unique)
-        if ($stashPathArguments.Count -gt 0) {
-            $expectedStashEntries = @($nextManifestEntries | Where-Object { [string]$_.targetPath -cin $stashPathArguments })
-            try {
+            if (Test-Path -LiteralPath $manifestFullPath -PathType Leaf) { $stashPaths.Add($manifestRelativePath) }
+            $stashPathArguments = @($stashPaths | Sort-Object -Unique)
+            if ($stashPathArguments.Count -gt 0) {
+                $expectedStashEntries = @($nextManifestEntries | Where-Object { [string]$_.targetPath -cin $stashPathArguments })
                 $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments -ExpectedEntries $expectedStashEntries
+                Write-Output "PersonalAgent recovery evidence updated, reapplied, and retained: $newStashHash"
             }
-            catch {
-                $finalizationError = $_
-                try {
-                    Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot
-                    Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot
-                }
-                catch {
-                    $rollbackError = $_
-                    $preserveWorkingPath = $true
-                    throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
-                }
-                throw $finalizationError
-            }
-            Write-Output "PersonalAgent recovery evidence updated, reapplied, and retained: $newStashHash"
         }
+    }
+    catch {
+        $finalizationError = $_
+        try {
+            Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot
+            Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot
+        }
+        catch {
+            $rollbackError = $_
+            $preserveWorkingPath = $true
+            throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+        }
+        throw $finalizationError
     }
 
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
