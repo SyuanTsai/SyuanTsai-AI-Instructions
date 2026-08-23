@@ -195,7 +195,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         } 'catalogSha256 does not match'
     }
 
-    # Scenario: Schema v3 personal configuration omits required includeSkills and excludeSkills arrays.
+    # Scenario: Schema v4 personal configuration omits required includeSkills and excludeSkills arrays.
     # Purpose: Fail before acquisition with an actionable configuration message instead of a strict-mode property error.
     It 'InterT20_rejects_missing_selection_arrays_with_an_actionable_error' {
         $catalogPath=Join-Path $TestDrive 'bad-catalog.json';$lockPath=Join-Path $TestDrive 'bad-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'bad-sync-config.json';$skillArchivePath=Join-Path $TestDrive 'bad-source-a.zip'
