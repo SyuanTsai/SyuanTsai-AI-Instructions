@@ -34,8 +34,7 @@
       "properties": {
         "repository": {
           "type": "string",
-          "format": "uri",
-          "pattern": "^https://"
+          "const": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git"
         },
         "ref": {
           "type": "string",

@@ -61,6 +61,8 @@ Bootstrap 會自動修復：
 - immutable source 更新後仍未被自訂的受管檔案；
 - 缺失或過期的 `PersonalAgent` recovery evidence。
 
+`git clean -fdx` 會刻意刪除 ignored personal artifacts；下一次合法 bootstrap 會依 immutable source 重新建立完整檔案、manifest、exclude marker 與 recovery evidence，且不改變產品 Repository 的 HEAD 或 index。
+
 若受管檔案有使用者修改，會保留其內容與歷史 manifest entry，並在輸出列出；不會 force overwrite。
 
 ## 新電腦安裝
@@ -75,7 +77,7 @@ git pull --ff-only
 git status --short
 ```
 
-Installer 的 git-checkout 模式只接受 canonical origin、完整 `HEAD` commit，以及與 `HEAD` 完全相同的 tracked runtime sources；local edits 會在修改 Codex Home 前 fail closed。
+Installer 的 git-checkout 模式只接受 canonical origin、完整 `HEAD` commit，以及與 `HEAD` 完全相同的 tracked runtime sources；stable installer 會先以內建 verifier 完成來源比對，通過後才 import candidate contract，因此 local edits 會在執行 candidate module 或修改 Codex Home 前 fail closed。
 
 ```powershell
 .\scripts\install-ai-instructions-bootstrap.ps1
@@ -90,7 +92,7 @@ Installer 的 git-checkout 模式只接受 canonical origin、完整 `HEAD` comm
 - `~/.codex/ai-instructions-sync.json`
 - 個人 `AGENTS.md` 的 `Repository Instructions Bootstrap` 區塊
 
-舊 bootstrap `SessionStart` entry 會移除，其他 hooks 與個人規則保留。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`。
+舊 bootstrap `SessionStart` hook 會從 entry 內精確移除；同一 entry 的其他 hooks 與個人規則保留。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`。
 
 安裝時可追加 exclusions：
 
@@ -160,10 +162,12 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 - 下載 codeload ZIP、計算 archive SHA-256、安全解壓、parse 全部 PowerShell、驗證 Catalog/Lock；
 - 安裝前再次解析 candidate，遇到 TOCTOU drift 即停止；
 - 透過 installer transaction swap，失敗時 rollback；
-- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit；
-- 以原子替換的 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed；若舊 receipt 損壞，先 quarantine 再從已驗證 runtime 繼續檢查。
+- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit 與 mode/channel/ref，核准已撤銷或 policy 已變更時在任何 mutation 前停止；
+- 以原子替換的 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed；`current` 以 `currentCommit` 表示已解析版本且 `candidateCommit` 為 `null`，避免重複身分無法由 JSON Schema 驗證。若舊 receipt 損壞，先 quarantine 再從已驗證 runtime 繼續檢查。
 
-網路不可用時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。若 local runtime inventory 有缺檔、額外檔案或 hash drift，launcher/updater 會 fail closed，應重新執行可信 installer。
+最小檢查間隔尚未經過時，updater 回傳不落盤的 `rate-limit` workflow 結果並保留上一份有效 receipt；鎖已被其他 updater／installer 持有時則回傳不落盤的 `concurrent` 並讓 manual command／launcher fail closed。兩者都不屬於 update receipt schema 的 persisted outcomes。
+
+網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
 
 ## Tracked pollution 與 cleanup
 
@@ -177,7 +181,7 @@ Personal artifacts 必須保持 untracked。若 manifest 能證明的受管路�
   -Authorize
 ```
 
-Cleanup 僅對下列路徑執行 `git rm --cached`：manifest v2 列出、目前仍 tracked、未 staged、且本機 bytes 仍等於 manifest hash 的檔案，以及 manifest 本身。它會保留 working-tree files、更新 `.git/info/exclude`，但不 commit 或 push。若有 staged conflict、customized bytes、未知 manifest、unsafe path，或目標是本 canonical source Repository，整次操作會停止並 rollback index/exclude。
+Cleanup 僅對下列路徑執行 `git rm --cached`：通過完整 manifest v2 parser（或精確 legacy v1 migration parser）、目前仍 tracked、未 staged、且 index／本機 bytes 都等於 manifest hash 的檔案，以及 manifest 本身。它會保留 working-tree files、更新 `.git/info/exclude`，但不 commit 或 push。若有 staged conflict、customized bytes、schema-invalid manifest、unsafe path/reparse point，或 origin／Repository 外形表明目標是本 canonical source Repository，整次操作會停止並 rollback index/exclude。
 
 Cleanup 後由使用者自行檢查並決定產品 Repository 的 commit：
 
@@ -191,7 +195,7 @@ git diff --cached --name-status
 - Installer/updater 的一般失敗會自動恢復上一個完整 runtime/config 組合；staging 驗證尚未進入 active swap 就失敗時，也會清除 staging/backup transaction directories。
 - 若 rollback 本身失敗，錯誤會保留並回報 backup path；先保存該目錄再人工處理。
 - Process 被強制中止導致 runtime/config mismatch 時，launcher 會 fail closed；重新執行上一個可信 commit 的 installer。
-- Target fan-out 或 stash apply 失敗時，mutation engine 恢復 target bytes、manifest、index 與 `.git/info/exclude`；新舊 `PersonalAgent` evidence 會保留供復原，不會刪除其他 stash。
+- Target fan-out 或 stash apply 失敗時，mutation engine 以包含 manifest 在內的 canonical path raw SHA-256 驗證 byte-safe reapply，失敗即恢復 target bytes、manifest、index 與 `.git/info/exclude`；新舊 `PersonalAgent` evidence 會保留供復原，不會刪除其他 stash。
 - 不要用 `git reset --hard` 清理 personal artifacts；這些檔案本來就不應在 index。
 
 設計、安全狀態機與操作 runbook 見 [docs/syp-101-autonomous-update-self-healing.md](docs/syp-101-autonomous-update-self-healing.md)。SYP-86 舊 cutover 文件只保留歷史背景，若與本文件衝突以 SYP-101 為準。
@@ -211,6 +215,8 @@ Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，
 ```powershell
 .\scripts\test-syp101-production-smoke.ps1
 ```
+
+既有 runbook 的 `.\scripts\test-production-cutover.ps1` 仍保留為相容入口，並轉交同一份 SYP-101 smoke。
 
 CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lock 與 production smoke。
 

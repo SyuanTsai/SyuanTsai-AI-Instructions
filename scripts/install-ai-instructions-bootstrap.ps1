@@ -9,7 +9,10 @@ param(
     [ValidateSet('git-checkout','github-codeload')][string] $Acquisition = 'git-checkout',
     [string] $ArchiveSha256,
     [string] $SourceArchivePath,
-    [string] $ExpectedCurrentCommit
+    [string] $ExpectedCurrentCommit,
+    [string] $ExpectedUpdateMode,
+    [string] $ExpectedUpdateChannel,
+    [string] $ExpectedUpdateRef
 )
 
 Set-StrictMode -Version Latest
@@ -55,6 +58,66 @@ function Test-InstallerHasProperty {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
+function Assert-InstallerMutationPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('File','Directory')][string] $ExpectedType
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -Force -LiteralPath $Path
+    $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    $hasExpectedType = if ($ExpectedType -ceq 'Directory') { $item.PSIsContainer } else { -not $item.PSIsContainer }
+    if ($isReparsePoint -or -not $hasExpectedType) {
+        throw "Unsafe installer mutation path '$Path': expected a non-reparse $($ExpectedType.ToLowerInvariant())."
+    }
+}
+
+function Get-InstallerFullDirectoryPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($rootPath) -and $fullPath.Equals($rootPath,[System.StringComparison]::OrdinalIgnoreCase)) { return $rootPath }
+    return $fullPath.TrimEnd([char[]]@('\','/'))
+}
+
+function Get-InstallerFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($Path))
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Assert-InstallerCanonicalRepository {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+    $value = $Repository.Trim()
+    if ($value -match '^(?:https|ssh|git)://(?:[^@/]+@)?github\.com/(?<Owner>[^/]+)/(?<Repository>[^/]+?)(?:\.git)?/?$' -or
+        $value -match '^(?:[^@/]+@)?github\.com:(?<Owner>[^/]+)/(?<Repository>[^/]+?)(?:\.git)?$') {
+        $identity = "github.com/$($Matches.Owner)/$($Matches.Repository)".ToLowerInvariant()
+        if ($identity -ceq 'github.com/syuantsai/syuantsai-ai-instructions') { return }
+    }
+    throw "AI-Instructions runtime accepts only the canonical repository; actual: '$Repository'."
+}
+
+function Assert-InstallerSafeChildDirectory {
+    param([Parameter(Mandatory = $true)][string] $Parent,[Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $LeafPrefix)
+    $parentPath = Get-InstallerFullDirectoryPath -Path $Parent
+    $childPath = Get-InstallerFullDirectoryPath -Path $Path
+    $childParent = Get-InstallerFullDirectoryPath -Path (Split-Path -Parent $childPath)
+    if (-not $childParent.Equals($parentPath,[System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Split-Path -Leaf $childPath).StartsWith($LeafPrefix,[System.StringComparison]::Ordinal) -or
+        -not (Test-Path -LiteralPath $childPath -PathType Container)) {
+        throw "Unsafe installer transaction cleanup path: $childPath"
+    }
+    $item = Get-Item -Force -LiteralPath $childPath
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Unsafe reparse-backed installer transaction cleanup path: $childPath" }
+    return $childPath
+}
+
 function Remove-InstallerSessionStartHook {
     param([Parameter(Mandatory = $true)][string] $HooksPath)
     if (-not (Test-Path -LiteralPath $HooksPath -PathType Leaf)) { return }
@@ -66,16 +129,24 @@ function Remove-InstallerSessionStartHook {
     foreach ($entry in @($document.hooks.SessionStart)) {
         if ($null -eq $entry) { continue }
         if (-not (Test-InstallerHasProperty -Object $entry -Name 'hooks')) { $retained.Add($entry); continue }
-        $containsBootstrap = $false
+        $removedBootstrap = $false
+        $retainedHooks = New-Object System.Collections.Generic.List[object]
         foreach ($hook in @($entry.hooks)) {
-            if ($null -eq $hook) { continue }
+            if ($null -eq $hook) { $retainedHooks.Add($hook); continue }
+            $isBootstrap = $false
             foreach ($propertyName in @('command','commandWindows')) {
                 if ((Test-InstallerHasProperty -Object $hook -Name $propertyName) -and [string]$hook.$propertyName -match 'bootstrap-ai-instructions\.ps1') {
-                    $containsBootstrap = $true
+                    $isBootstrap = $true
                 }
             }
+            if ($isBootstrap) { $removedBootstrap = $true }
+            else { $retainedHooks.Add($hook) }
         }
-        if (-not $containsBootstrap) { $retained.Add($entry) }
+        if (-not $removedBootstrap) { $retained.Add($entry); continue }
+        if ($retainedHooks.Count -gt 0) {
+            $entry.PSObject.Properties['hooks'].Value = @($retainedHooks.ToArray())
+            $retained.Add($entry)
+        }
     }
     if ($retained.Count -eq 0) { $document.hooks.PSObject.Properties.Remove('SessionStart') }
     else { $document.hooks.PSObject.Properties['SessionStart'].Value = @($retained.ToArray()) }
@@ -109,20 +180,18 @@ function Restore-InstallerBackupFile {
     elseif (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
 }
 
-if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
-    $RepositoryRoot = ((Invoke-InstallerGit -WorkingDirectory (Get-Location).Path -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
-}
-$repositoryRootPath = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([char[]]@('\','/'))
-$runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
-if (-not (Test-Path -LiteralPath $runtimeContractSource -PathType Leaf)) { throw "Installer runtime contract source was not found: $runtimeContractSource" }
-Import-Module $runtimeContractSource -Force
-
+$archiveSourceWorkingRoot = $null
+try {
 if ($Acquisition -ceq 'git-checkout') {
+    if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+        $RepositoryRoot = ((Invoke-InstallerGit -WorkingDirectory (Get-Location).Path -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
+    }
+    $repositoryRootPath = Get-InstallerFullDirectoryPath -Path $RepositoryRoot
     $originUrl = ((Invoke-InstallerGit -WorkingDirectory $repositoryRootPath -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
-    Assert-AiInstructionsCanonicalRepository -Repository $originUrl
+    Assert-InstallerCanonicalRepository -Repository $originUrl
     $catalogRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
     $catalogRef = ((Invoke-InstallerGit -WorkingDirectory $repositoryRootPath -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($SourceRepository)) { Assert-AiInstructionsCanonicalRepository -Repository $SourceRepository }
+    if (-not [string]::IsNullOrWhiteSpace($SourceRepository)) { Assert-InstallerCanonicalRepository -Repository $SourceRepository }
     if (-not [string]::IsNullOrWhiteSpace($SourceCommit) -and $SourceCommit -cne $catalogRef) { throw 'SourceCommit does not match the git checkout HEAD.' }
     $ArchiveSha256 = $null
 }
@@ -130,15 +199,25 @@ else {
     if ([string]::IsNullOrWhiteSpace($SourceRepository) -or [string]::IsNullOrWhiteSpace($SourceCommit)) {
         throw 'github-codeload installation requires SourceRepository and SourceCommit.'
     }
-    Assert-AiInstructionsCanonicalRepository -Repository $SourceRepository
+    Assert-InstallerCanonicalRepository -Repository $SourceRepository
     if ($SourceCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'SourceCommit must be a full lowercase 40-character commit SHA.' }
     if ($ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'github-codeload installation requires ArchiveSha256.' }
     if ([string]::IsNullOrWhiteSpace($SourceArchivePath) -or -not (Test-Path -LiteralPath $SourceArchivePath -PathType Leaf)) {
         throw 'github-codeload installation requires the downloaded SourceArchivePath.'
     }
-    $actualArchiveSha256 = Get-AiInstructionsFileSha256 -Path $SourceArchivePath
+    $actualArchiveSha256 = Get-InstallerFileSha256 -Path $SourceArchivePath
     if ($actualArchiveSha256 -cne $ArchiveSha256) {
         throw "github-codeload SourceArchivePath SHA-256 does not match ArchiveSha256: expected $ArchiveSha256; actual $actualArchiveSha256."
+    }
+    $tempRootPath = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
+    $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
+    try {
+        Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
+        $repositoryRootPath = Expand-SafeZipRepository -ArchivePath $SourceArchivePath -DestinationRoot $archiveSourceWorkingRoot
+    }
+    catch {
+        throw "github-codeload archive cannot supply the verified runtime sources: $($_.Exception.Message)"
     }
     $catalogRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
     $catalogRef = $SourceCommit
@@ -147,9 +226,22 @@ if ($catalogRef -cnotmatch '^[0-9a-f]{40}$') { throw 'Installer source commit mu
 if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit) -and $ExpectedCurrentCommit -cnotmatch '^[0-9a-f]{40}$') {
     throw 'ExpectedCurrentCommit must be a full lowercase 40-character commit SHA.'
 }
+$expectedPolicyValues = @(@($ExpectedUpdateMode,$ExpectedUpdateChannel,$ExpectedUpdateRef) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+$expectedPolicySpecified = $expectedPolicyValues.Count -gt 0
+if ($expectedPolicySpecified -and $expectedPolicyValues.Count -ne 3) {
+    throw 'ExpectedUpdateMode, ExpectedUpdateChannel, and ExpectedUpdateRef must be supplied together.'
+}
+if ($expectedPolicySpecified) {
+    if ($ExpectedUpdateMode -cnotin @('notify-only','auto-install-approved')) { throw "Unsupported ExpectedUpdateMode '$ExpectedUpdateMode'." }
+    if ($ExpectedUpdateChannel -cnotin @('protected-branch','github-release')) { throw "Unsupported ExpectedUpdateChannel '$ExpectedUpdateChannel'." }
+    if (($ExpectedUpdateChannel -ceq 'protected-branch' -and $ExpectedUpdateRef -cne 'main') -or
+        ($ExpectedUpdateChannel -ceq 'github-release' -and $ExpectedUpdateRef -cne 'latest')) {
+        throw 'Expected update channel/ref combination is invalid.'
+    }
+}
 
 $runtimeFiles = @(
-    'bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
+    'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
     'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
     'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
     'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
@@ -161,15 +253,23 @@ foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) {
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 foreach ($relativePath in $relativeSourcePaths) {
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRootPath $relativePath.Replace('/','\')) -PathType Leaf)) {
+        if ($Acquisition -ceq 'github-codeload') { throw "github-codeload archive runtime source was not found: $relativePath" }
         throw "Installer runtime source was not found: $relativePath"
     }
 }
 if ($Acquisition -ceq 'git-checkout') { Assert-InstallerSourcesMatchHead -Repository $repositoryRootPath -RelativePaths $relativeSourcePaths }
 
+$runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
+Import-Module $runtimeContractSource -Force
+
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 }
-$codexHomePath = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd([char[]]@('\','/'))
+$codexHomePath = Get-InstallerFullDirectoryPath -Path $CodexHome
+$codexHomeRoot = [System.IO.Path]::GetPathRoot($codexHomePath)
+if (-not [string]::IsNullOrWhiteSpace($codexHomeRoot) -and $codexHomePath.Equals($codexHomeRoot,[System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Codex Home must not be a filesystem root: $codexHomePath"
+}
 $hookDirectory = Join-Path $codexHomePath 'hooks'
 $hookScript = Join-Path $hookDirectory 'bootstrap-ai-instructions.ps1'
 $updateScript = Join-Path $hookDirectory 'update-ai-instructions.ps1'
@@ -178,6 +278,12 @@ $runtimeDirectory = Join-Path $hookDirectory 'ai-instructions-runtime'
 $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
+Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
+Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
+Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
+foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
+    Assert-InstallerMutationPath -Path $filePath -ExpectedType File
+}
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 $installLockStream = $null
@@ -191,8 +297,17 @@ try {
 
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) {
         $installedBundlePath = Join-Path $runtimeDirectory 'runtime-bundle.json'
-        try { $installedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $installedBundlePath | ConvertFrom-Json }
-        catch { throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.' }
+        try {
+            $installedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $installedBundlePath | ConvertFrom-Json
+            $installedConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+            Assert-AiInstructionsRuntimeBundleV2 `
+                -Bundle $installedBundle `
+                -Configuration $installedConfiguration `
+                -RuntimeRoot $runtimeDirectory | Out-Null
+        }
+        catch {
+            throw "The installed runtime changed before installation; the candidate transaction must be resolved again. $($_.Exception.Message)"
+        }
         if ([string]$installedBundle.commit -cne $ExpectedCurrentCommit) {
             throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.'
         }
@@ -202,6 +317,15 @@ try {
     if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
         try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json }
         catch { throw "AI instruction sync configuration is not valid JSON: $configurationPath" }
+    }
+    if ($expectedPolicySpecified) {
+        try { Assert-AiInstructionsSyncConfigurationV4 -Configuration $existingConfiguration | Out-Null }
+        catch { throw 'The active runtime update policy changed before installation; candidate approval must be resolved again.' }
+        if ([string]$existingConfiguration.updates.mode -cne $ExpectedUpdateMode -or
+            [string]$existingConfiguration.updates.channel -cne $ExpectedUpdateChannel -or
+            [string]$existingConfiguration.updates.ref -cne $ExpectedUpdateRef) {
+            throw 'The active runtime update policy changed before installation; candidate approval must be resolved again.'
+        }
     }
     $configuration = ConvertTo-AiInstructionsSyncConfigurationV4 `
         -ExistingConfiguration $existingConfiguration `
@@ -281,8 +405,14 @@ try {
         }
     }
     finally {
-        if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
-        if (-not $retainRecoveryBackup -and (Test-Path -LiteralPath $backupRoot)) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $stagingRoot) {
+            $safeStagingRoot = Assert-InstallerSafeChildDirectory -Parent $codexHomePath -Path $stagingRoot -LeafPrefix '.ai-instructions-install-'
+            Remove-Item -LiteralPath $safeStagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (-not $retainRecoveryBackup -and (Test-Path -LiteralPath $backupRoot)) {
+            $safeBackupRoot = Assert-InstallerSafeChildDirectory -Parent $codexHomePath -Path $backupRoot -LeafPrefix '.ai-instructions-backup-'
+            Remove-Item -LiteralPath $safeBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 finally {
@@ -294,3 +424,11 @@ Write-Output "Installed AI instructions manual updater: $updateScript"
 Write-Output "Installed AI instructions pollution cleanup command: $cleanupScript"
 Write-Output "Installed immutable runtime bundle: $runtimeDirectory"
 Write-Output "Updated AI instructions sync configuration schema v4: $configurationPath"
+}
+finally {
+    if (-not [string]::IsNullOrWhiteSpace($archiveSourceWorkingRoot) -and (Test-Path -LiteralPath $archiveSourceWorkingRoot)) {
+        $resolvedTempRoot = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
+        $resolvedArchiveSourceRoot = Assert-InstallerSafeChildDirectory -Parent $resolvedTempRoot -Path $archiveSourceWorkingRoot -LeafPrefix 'ai-instructions-installer-source-'
+        Remove-Item -LiteralPath $resolvedArchiveSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

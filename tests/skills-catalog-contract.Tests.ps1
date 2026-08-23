@@ -318,6 +318,117 @@ Describe 'Skills Catalog contract' {
         }
     }
 
+    # Scenario: A managed manifest uses a string schema version or carries fields outside the published v2 schema.
+    # Purpose: Keep executable ownership validation from accepting documents rejected by portable JSON Schema tooling.
+    It 'UnitT57_rejects_schema_type_and_unknown_managed_manifest_properties' {
+        $cases = @(
+            @{
+                Name = 'manifest-schema-string'
+                Expected = 'schemaVersion.*integer'
+                Apply = { param($document) $document.schemaVersion = '2' }
+            },
+            @{
+                Name = 'manifest-top-level-property'
+                Expected = 'unsupported property.*unexpected'
+                Apply = { param($document) $document | Add-Member -NotePropertyName unexpected -NotePropertyValue $true }
+            },
+            @{
+                Name = 'manifest-file-property'
+                Expected = 'file.*unsupported property.*unexpected'
+                Apply = { param($document) @($document.files)[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true }
+            }
+        )
+
+        foreach ($case in $cases) {
+            $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+            & $case.Apply $manifest
+            $manifestPath = Write-TestJsonDocument -Document $manifest -Name "$($case.Name).json"
+
+            $errorMessage = Get-ContractValidationError -CatalogPath $script:CatalogExample -ManifestPath $manifestPath
+
+            $errorMessage | Should Match $case.Expected
+        }
+    }
+
+    # Scenario: A legacy schema-v1 manifest is used as migration or pollution-cleanup ownership evidence.
+    # Purpose: Accept only the exact historical shape and reject unknown fields before any ignore or index mutation.
+    It 'UnitT57b_validates_the_exact_legacy_managed_manifest_v1_shape' {
+        $legacyManifest = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            sourceRepository = 'https://github.com/example/catalog.git'
+            sourceRef = 'main'
+            files = @([pscustomobject][ordered]@{
+                sourcePath = '.codex/AGENTS.en.md'
+                targetPath = 'AGENTS.md'
+                sha256 = ('a' * 64)
+            })
+        }
+
+        { Assert-LegacyManagedManifestV1 -Manifest $legacyManifest } | Should Not Throw
+
+        $legacyManifest.files[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        try { Assert-LegacyManagedManifestV1 -Manifest $legacyManifest; $errorMessage = $null }
+        catch { $errorMessage = $_.Exception.Message }
+        $errorMessage | Should Match 'legacy managed manifest file.*unsupported property.*unexpected'
+    }
+
+    # Scenario: A schema-v2 manifest uses a singleton array where sha256 must be a string.
+    # Purpose: Keep executable ownership checks aligned with the portable schema instead of relying on coercion.
+    It 'UnitT57c_rejects_singleton_arrays_in_manifest_hash_fields' {
+        $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+        @($manifest.files)[0].sha256 = @(('a' * 64))
+        $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'manifest-array-hash.json'
+
+        (Get-ContractValidationError -CatalogPath $script:CatalogExample -ManifestPath $manifestPath) |
+            Should Match 'sha256.*string'
+    }
+
+    # Scenario: A manifest labels a flat Skill path as an instruction to bypass the Skill artifact/path relationship.
+    # Purpose: Prevent forged ownership evidence from overwriting or staging deletion of a Repository-owned Skill.
+    It 'UnitT57e_rejects_instruction_artifacts_that_claim_skill_paths' {
+        $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+        $skillFile = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
+        $skillFile.artifactType = 'instruction'
+        $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'manifest-instruction-skill-path.json'
+
+        (Get-ContractValidationError -CatalogPath $script:CatalogExample -ManifestPath $manifestPath) |
+            Should Match 'Managed instruction.*must not claim a .agents/skills path'
+
+        $schema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v2.schema.json') `
+            -DocumentName 'managed manifest schema'
+        $typeRule = @($schema.properties.files.items.allOf | Where-Object {
+            [string]$_.if.properties.artifactType.const -ceq 'skill'
+        })
+        $typeRule.Count | Should Be 1
+        [string]$typeRule[0].then.properties.targetPath.pattern | Should Be '^\.agents/skills/'
+        [string]$typeRule[0].else.properties.targetPath.not.pattern | Should Be '^\.agents/skills/'
+    }
+
+    # Scenario: Catalog, source-pin, and lock objects carry fields forbidden by their additionalProperties=false schemas.
+    # Purpose: Ensure the executable verifier rejects schema drift before updater or bootstrap trust the documents.
+    It 'UnitT57d_rejects_unknown_catalog_source_pin_and_lock_properties' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+        @($catalog.skills)[0].compatibility | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        $catalogPath = Write-TestJsonDocument -Document $catalog -Name 'catalog-unknown-property.json'
+        try { Test-SkillsCatalogDocument -CatalogPath $catalogPath | Out-Null; $catalogError = $null }
+        catch { $catalogError = $_.Exception.Message }
+        $catalogError | Should Match 'compatibility.*unsupported property.*unexpected'
+
+        $sourcePins = Import-SkillsCatalogJson -Path (Join-Path $script:RepositoryRoot 'catalog\skills-catalog.sources.json') -DocumentName 'Skills Catalog source pins'
+        @($sourcePins.sources)[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        $sourcePinsPath = Write-TestJsonDocument -Document $sourcePins -Name 'source-pins-unknown-property.json'
+        try { Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $sourcePinsPath -CatalogPath $script:ProductionCatalog | Out-Null; $sourcePinsError = $null }
+        catch { $sourcePinsError = $_.Exception.Message }
+        $sourcePinsError | Should Match 'source pin.*unsupported property.*unexpected'
+
+        $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+        @($lock.sources)[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        $lockPath = Write-TestJsonDocument -Document $lock -Name 'lock-unknown-property.json'
+        (Get-ContractValidationError -CatalogPath $script:CatalogExample -LockPath $lockPath) |
+            Should Match 'lock source.*unsupported property.*unexpected'
+    }
+
     # Scenario: Catalog and Lock identity fields differ only by letter casing.
     # Purpose: Keep authoring-time contract validation exactly as strict as runtime routing.
     It 'UnitT58_rejects_case_variant_catalog_lock_identity_fields' {

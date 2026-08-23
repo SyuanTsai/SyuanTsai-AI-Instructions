@@ -23,6 +23,8 @@ $excludeBeginMarker = '# BEGIN Codex AI Instructions managed paths'
 $excludeEndMarker = '# END Codex AI Instructions managed paths'
 
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 
 function Invoke-Git {
     param(
@@ -73,7 +75,13 @@ function Get-GitExitCode {
 function Get-FullPathWithoutTrailingSeparator {
     param([Parameter(Mandatory = $true)][string] $Path)
 
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($rootPath) -and
+        $fullPath.Equals($rootPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+        return $rootPath
+    }
+    return $fullPath.TrimEnd([char[]]@('\', '/'))
 }
 
 function Get-NormalizedRepositoryLocation {
@@ -266,12 +274,36 @@ function Test-IsAllowedManagedPath {
     return $true
 }
 
+function Test-IsCanonicalInstructionSourceRepository {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    if ((Get-GitExitCode -Repository $Repository -Arguments @('remote','get-url','origin')) -ne 0) { return $false }
+    foreach ($originUrl in @(Invoke-Git -Repository $Repository -Arguments @('remote','get-url','--all','origin'))) {
+        try {
+            Assert-AiInstructionsCanonicalRepository -Repository ([string]$originUrl)
+            return $true
+        }
+        catch { }
+    }
+    return $false
+}
+
 function Get-GitInfoExcludePath {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $path = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','info/exclude')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path $Repository $path }
     return [System.IO.Path]::GetFullPath($path)
+}
+
+function Assert-GitInfoExcludeMutationPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -Force -LiteralPath $Path
+    if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Unsafe shared Git exclude mutation path '$Path': expected a non-reparse file or a missing path."
+    }
 }
 
 function Get-GitPathComparer {
@@ -300,6 +332,27 @@ function Open-RepositoryOperationLock {
     }
 }
 
+function Assert-ManagedPathDoesNotCrossReparsePoint {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $resolvedRoot = Get-FullPathWithoutTrailingSeparator -Path $Root
+    $rootPrefix = $resolvedRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not $resolvedPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw "$Context is outside its worktree: $resolvedPath" }
+    $inspectionPath = $resolvedPath
+    while ($inspectionPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-Path -LiteralPath $inspectionPath) {
+            $item = Get-Item -Force -LiteralPath $inspectionPath
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Context crosses a reparse point: $inspectionPath" }
+        }
+        $inspectionPath = Split-Path -Parent $inspectionPath
+    }
+}
+
 function Get-SharedManagedExcludePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -314,10 +367,21 @@ function Get-SharedManagedExcludePaths {
         $worktreeRoot = $text.Substring('worktree '.Length)
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
-        try { $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json }
-        catch { throw "Cannot compose shared Git exclusions because a linked worktree manifest is invalid: $worktreeManifestPath" }
-        if ($worktreeManifest.schemaVersion -notin @(1,2) -or $worktreeManifest.files -isnot [System.Array]) {
-            throw "Cannot compose shared Git exclusions because a linked worktree manifest has an unsupported schema: $worktreeManifestPath"
+        Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
+        try {
+            $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
+            $worktreeManifestSchemaVersion = $worktreeManifest.schemaVersion
+            if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
+                throw 'schemaVersion must be an integer.'
+            }
+            if ($worktreeManifestSchemaVersion -eq 2) { Assert-ManagedManifestV2 -Manifest $worktreeManifest }
+            elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
+            else {
+                throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
+            }
+        }
+        catch {
+            throw "Cannot compose shared Git exclusions because a linked worktree manifest is invalid: $worktreeManifestPath. $($_.Exception.Message)"
         }
         [void]$paths.Add($manifestRelativePath)
         foreach ($entry in @($worktreeManifest.files)) {
@@ -335,6 +399,7 @@ function New-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $path = Get-GitInfoExcludePath -Repository $Repository
+    Assert-GitInfoExcludeMutationPath -Path $path
     $exists = Test-Path -LiteralPath $path -PathType Leaf
     return [pscustomobject][ordered]@{
         Path = $path
@@ -347,11 +412,13 @@ function Restore-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
     if ([bool]$Snapshot.Existed) {
+        Assert-GitInfoExcludeMutationPath -Path ([string]$Snapshot.Path)
         $parent = Split-Path -Parent ([string]$Snapshot.Path)
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
         [System.IO.File]::WriteAllBytes([string]$Snapshot.Path,[byte[]]$Snapshot.Bytes)
     }
     elseif (Test-Path -LiteralPath ([string]$Snapshot.Path)) {
+        Assert-GitInfoExcludeMutationPath -Path ([string]$Snapshot.Path)
         Remove-Item -LiteralPath ([string]$Snapshot.Path) -Force
     }
 }
@@ -372,8 +439,14 @@ function Set-ManagedGitInfoExclude {
     )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
+    Assert-GitInfoExcludeMutationPath -Path $path
     $content = if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
     $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
+    $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
+    $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
+    if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
+        throw "The Codex AI Instructions managed exclude block is malformed: $path"
+    }
     $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
     $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
     $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
@@ -520,7 +593,7 @@ function New-TargetMutationSnapshot {
 
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
     $resolvedTargetRoot = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
-    $targetPrefix = $resolvedTargetRoot + [System.IO.Path]::DirectorySeparatorChar
+    $targetPrefix = $resolvedTargetRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     $fileStates = New-Object System.Collections.Generic.List[object]
     $missingDirectories = @{}
     $backupIndex = 0
@@ -669,6 +742,15 @@ function Update-PersonalAgentStash {
         throw 'Cannot create PersonalAgent stash without managed changes.'
     }
 
+    $expectedRawHashes = @{}
+    foreach ($path in $Paths) {
+        $fullPath = Join-Path $Repository $path.Replace('/','\')
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Cannot create byte-safe PersonalAgent evidence because a managed path is missing: $path"
+        }
+        $expectedRawHashes[$path] = Get-RawContentHash -Path $fullPath
+    }
+
     Invoke-Git -Repository $Repository -Arguments (@(
         '-c', 'core.autocrlf=false', 'stash', 'push', '--all', '--quiet', '-m', 'PersonalAgent', '--'
     ) + $Paths) | Out-Null
@@ -680,6 +762,14 @@ function Update-PersonalAgentStash {
     }
 
     Invoke-Git -Repository $Repository -Arguments @('-c', 'core.autocrlf=false', 'stash', 'apply', '--quiet', 'stash@{0}') | Out-Null
+
+    foreach ($path in $Paths) {
+        $fullPath = Join-Path $Repository $path.Replace('/','\')
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
+            (Get-RawContentHash -Path $fullPath) -cne [string]$expectedRawHashes[$path]) {
+            throw "PersonalAgent stash apply changed managed raw bytes; prior stashes were retained: $path"
+        }
+    }
 
     foreach ($entry in @($ExpectedEntries)) {
         $targetPath = [string]$entry.targetPath
@@ -732,7 +822,7 @@ $syncStartRelativePath = ''
 if ($syncStartPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     $syncStartRelativePath = ''
 }
-elseif ($syncStartPath.StartsWith($targetRootPath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+elseif ($syncStartPath.StartsWith($targetRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     $syncStartRelativePath = Get-RepositoryRelativePath -RepositoryRoot $targetRootPath -FullPath $syncStartPath
 }
 
@@ -744,8 +834,9 @@ if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
 
 $sourceCodexBaseInTarget = Join-Path $targetRootPath '.codex\AGENTS.en.md'
 $sourceCopilotBaseInTarget = Join-Path $targetRootPath '.github\copilot-instructions.en.md'
-if ((Test-Path -LiteralPath $sourceCodexBaseInTarget -PathType Leaf) -and
-    (Test-Path -LiteralPath $sourceCopilotBaseInTarget -PathType Leaf)) {
+if ((Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) -or
+    ((Test-Path -LiteralPath $sourceCodexBaseInTarget -PathType Leaf) -and
+     (Test-Path -LiteralPath $sourceCopilotBaseInTarget -PathType Leaf))) {
     Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
     return
 }
@@ -913,9 +1004,14 @@ if ($manifestExists) {
     }
 
     $manifestSchemaVersion = $manifest.schemaVersion
-    if ($manifestSchemaVersion -notin @(1, 2)) {
+    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
+
+    if ($manifestSchemaVersion -eq 2) {
+        Assert-ManagedManifestV2 -Manifest $manifest
+    }
+    else { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
     if ($manifestSchemaVersion -eq 2 -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
@@ -1104,20 +1200,45 @@ try {
     foreach ($family in $families) {
         $baseTargetPath = $family.TargetBase
         $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
+        $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath)
         $baseTargetMatchesDesired = $false
         if ((Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -and
-            -not $trackedPaths.Contains($baseTargetPath) -and
+            -not $baseTargetIsTracked -and
             $desiredEntriesByTarget.ContainsKey($baseTargetPath)) {
             $baseTargetMatchesDesired =
                 (Get-ManagedContentHash -Path $baseTargetFullPath -TargetPath $baseTargetPath) -ceq
                 [string]$desiredEntriesByTarget[$baseTargetPath].Sha256
         }
         $eligibleFamilies[$family.Name] =
-            $manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
-            -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
-            $baseTargetMatchesDesired
+            -not $baseTargetIsTracked -and
+            ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+             -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
+             $baseTargetMatchesDesired)
     }
-    $eligibleFamilies[$sharedSkillsFamilyName] = $true
+    $eligibleSkillIds = @{}
+    foreach ($sourceSkillDirectory in $sourceSkillDirectories) {
+        $skillId = [string]$sourceSkillDirectory.Name
+        $skillPrefix = ".agents/skills/$skillId/"
+        $skillBasePath = $skillPrefix + 'SKILL.md'
+        $skillBaseFullPath = Join-Path $targetRootPath $skillBasePath.Replace('/','\')
+        $skillManifestOwned = @($manifestEntriesByTarget.Keys | Where-Object { ([string]$_).StartsWith($skillPrefix,[System.StringComparison]::Ordinal) }).Count -gt 0
+        $skillHasTrackedPath = @($trackedPaths | Where-Object {
+            $trackedPath = [string]$_
+            $trackedPath.Length -gt $skillPrefix.Length -and
+                $gitPathComparer.Equals($trackedPath.Substring(0,$skillPrefix.Length),$skillPrefix)
+        }).Count -gt 0
+        $skillBaseMatchesDesired = $false
+        if ((Test-Path -LiteralPath $skillBaseFullPath -PathType Leaf) -and
+            -not $skillHasTrackedPath -and
+            $desiredEntriesByTarget.ContainsKey($skillBasePath)) {
+            $skillBaseMatchesDesired =
+                (Get-ManagedContentHash -Path $skillBaseFullPath -TargetPath $skillBasePath) -ceq
+                [string]$desiredEntriesByTarget[$skillBasePath].Sha256
+        }
+        $eligibleSkillIds[$skillId] =
+            -not $skillHasTrackedPath -and
+            ($skillManifestOwned -or -not (Test-Path -LiteralPath $skillBaseFullPath -PathType Leaf) -or $skillBaseMatchesDesired)
+    }
 
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
@@ -1141,10 +1262,13 @@ try {
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
         $managedEntry = $null
 
-        if (-not $eligibleFamilies[$desiredEntry.FamilyName]) {
-            if ($targetExists) {
-                $skippedPaths.Add($targetPath)
-            }
+        $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
+        if ($targetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) {
+            $skillId = @($targetPath.Split('/'))[2]
+            $entryIsEligible = $eligibleSkillIds.ContainsKey($skillId) -and [bool]$eligibleSkillIds[$skillId]
+        }
+        if (-not $entryIsEligible) {
+            $skippedPaths.Add($targetPath)
             continue
         }
 
@@ -1194,6 +1318,10 @@ try {
         }
 
         if (-not $targetExists) {
+            if ($trackedPaths.Contains($targetPath)) {
+                $skippedPaths.Add($targetPath)
+                continue
+            }
             $targetDirectory = Split-Path -Parent $targetFullPath
             if (-not [string]::IsNullOrWhiteSpace($targetDirectory)) {
                 New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
@@ -1224,6 +1352,7 @@ try {
         $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', '\')
         if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $managedTargetPath) {
             $skippedPaths.Add($managedTargetPath)
+            $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
             continue
         }
 
@@ -1231,6 +1360,7 @@ try {
             $currentHash = Get-ManagedContentHash -Path $targetFullPath -TargetPath $managedTargetPath
             if ($currentHash -ne [string] $managedEntry.sha256) {
                 $skippedPaths.Add($managedTargetPath)
+                $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
                 continue
             }
 
@@ -1337,7 +1467,7 @@ try {
 }
 finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)
-    $expectedPrefix = $tempRootPath + [System.IO.Path]::DirectorySeparatorChar
+    $expectedPrefix = $tempRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe temporary cleanup path: $resolvedWorkingPath"
     }

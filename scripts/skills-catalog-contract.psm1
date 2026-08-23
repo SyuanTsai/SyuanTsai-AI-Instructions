@@ -1,4 +1,5 @@
 Set-StrictMode -Version 2.0
+$script:CanonicalAiInstructionsRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 
 function Import-SkillsCatalogJson {
     [CmdletBinding()]
@@ -24,6 +25,13 @@ function Get-RequiredProperty {
     $value = $property.Value
     if ($value -is [System.Array]) { return ,$value }
     return $value
+}
+
+function Assert-OnlyProperties {
+    param([Parameter(Mandatory = $true)][object] $Object,[Parameter(Mandatory = $true)][string[]] $Allowed,[Parameter(Mandatory = $true)][string] $Context)
+    foreach ($propertyName in @($Object.PSObject.Properties.Name)) {
+        if ($propertyName -cnotin $Allowed) { throw "$Context contains unsupported property '$propertyName'." }
+    }
 }
 
 function Assert-NonEmptyString {
@@ -59,6 +67,7 @@ function Assert-StableIdArray {
 
 function Assert-Capability {
     param([object] $Capability,[string] $Context)
+    Assert-OnlyProperties -Object $Capability -Allowed @('kind','id','state') -Context $Context
     $kind = Get-RequiredProperty -Object $Capability -Name 'kind' -Context $Context
     Assert-NonEmptyString -Value $kind -Context "$Context kind"
     if (@('command','connector','environment') -cnotcontains [string]$kind) { throw "Unsupported $Context kind '$kind'." }
@@ -76,6 +85,7 @@ function Assert-Array {
 
 function Assert-Sha256 {
     param([object] $Value,[string] $Context)
+    if ($Value -isnot [string]) { throw "$Context must be a string." }
     if ([string]$Value -cnotmatch '^[0-9a-f]{64}$') { throw "$Context must be a lowercase 64-character SHA-256 hash." }
 }
 
@@ -92,6 +102,7 @@ function Get-RawFileSha256 {
 
 function Assert-FullCommitSha {
     param([object] $Value,[string] $Context)
+    if ($Value -isnot [string]) { throw "$Context resolvedCommit must be a string." }
     if ([string]$Value -cnotmatch '^[0-9a-f]{40}$') { throw "$Context resolvedCommit must be a full 40-character commit SHA." }
 }
 
@@ -128,11 +139,13 @@ function Assert-GitHubRepositoryUrl {
 function Assert-SchemaVersion {
     param([object] $Document,[int] $Expected,[string] $DocumentName)
     $schemaVersion = Get-RequiredProperty -Object $Document -Name 'schemaVersion' -Context $DocumentName
+    if ($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) { throw "$DocumentName schemaVersion must be an integer." }
     if ($schemaVersion -ne $Expected) { throw "Unsupported $DocumentName schemaVersion '$schemaVersion'; expected $Expected." }
 }
 
 function Assert-SkillsCatalog {
     param([object] $Catalog)
+    Assert-OnlyProperties -Object $Catalog -Allowed @('schemaVersion','catalogId','sources','profiles','skills') -Context 'Skills Catalog'
     Assert-SchemaVersion -Document $Catalog -Expected 1 -DocumentName 'Skills Catalog'
     $catalogId = Get-RequiredProperty -Object $Catalog -Name 'catalogId' -Context 'Skills Catalog'
     Assert-StableId -Value $catalogId -Context 'Skills Catalog catalogId'
@@ -141,6 +154,7 @@ function Assert-SkillsCatalog {
     Assert-Array -Value $sources -Context 'Skills Catalog sources'
     $sourceIds = @{}
     foreach ($source in @($sources)) {
+        Assert-OnlyProperties -Object $source -Allowed @('id','repository') -Context 'Skills Catalog source'
         $sourceId = Get-RequiredProperty -Object $source -Name 'id' -Context 'Skills Catalog source'
         Assert-StableId -Value $sourceId -Context 'Skills Catalog source id'
         if ($sourceIds.ContainsKey([string]$sourceId)) { throw "Duplicate Skills Catalog source ID: $sourceId" }
@@ -153,6 +167,7 @@ function Assert-SkillsCatalog {
     Assert-Array -Value $profiles -Context 'Skills Catalog profiles'
     $profileIds = @{}; $profileDocuments = @{}
     foreach ($profile in @($profiles)) {
+        Assert-OnlyProperties -Object $profile -Allowed @('id','description','default','includes','excludes') -Context 'Skills Catalog profile'
         $profileId = Get-RequiredProperty -Object $profile -Name 'id' -Context 'Skills Catalog profile'
         Assert-StableId -Value $profileId -Context 'Skills Catalog profile id'
         if ($profileIds.ContainsKey([string]$profileId)) { throw "Duplicate Skills Catalog profile ID: $profileId" }
@@ -170,12 +185,14 @@ function Assert-SkillsCatalog {
     Assert-Array -Value $skills -Context 'Skills Catalog skills'
     $skillIds = @{}; $skillDocuments = @{}
     foreach ($skill in @($skills)) {
+        Assert-OnlyProperties -Object $skill -Allowed @('id','group','source','profiles','compatibility','dependencies','lifecycle') -Context 'Skills Catalog Skill'
         $skillId = Get-RequiredProperty -Object $skill -Name 'id' -Context 'Skills Catalog Skill'
         Assert-StableId -Value $skillId -Context 'Skills Catalog Skill id'
         if ($skillIds.ContainsKey([string]$skillId)) { throw "Duplicate stable Skill ID: $skillId" }
         $skillIds[[string]$skillId] = $true; $skillDocuments[[string]$skillId] = $skill
         Assert-StableId -Value (Get-RequiredProperty -Object $skill -Name 'group' -Context "Skills Catalog Skill '$skillId'") -Context "Skills Catalog Skill '$skillId' group"
         $source = Get-RequiredProperty -Object $skill -Name 'source' -Context "Skills Catalog Skill '$skillId'"
+        Assert-OnlyProperties -Object $source -Allowed @('sourceId','path') -Context "Skills Catalog Skill '$skillId' source"
         $sourceId = Get-RequiredProperty -Object $source -Name 'sourceId' -Context "Skills Catalog Skill '$skillId' source"
         Assert-StableId -Value $sourceId -Context "Skills Catalog Skill '$skillId' source sourceId"
         if (-not $sourceIds.ContainsKey([string]$sourceId)) { throw "Skills Catalog Skill '$skillId' references unknown source '$sourceId'." }
@@ -185,6 +202,7 @@ function Assert-SkillsCatalog {
         foreach ($profileId in @($skill.profiles)) { if (-not $profileIds.ContainsKey([string]$profileId)) { throw "Skills Catalog Skill '$skillId' references unknown profile '$profileId'." } }
 
         $compatibility = Get-RequiredProperty -Object $skill -Name 'compatibility' -Context "Skills Catalog Skill '$skillId'"
+        Assert-OnlyProperties -Object $compatibility -Allowed @('platforms','shells','requiredCapabilities','anyOfCapabilities') -Context "Skills Catalog Skill '$skillId' compatibility"
         $platforms = Get-RequiredProperty -Object $compatibility -Name 'platforms' -Context "Skills Catalog Skill '$skillId' compatibility"
         Assert-StringArray -Value $platforms -Context "Skills Catalog Skill '$skillId' compatibility platforms"
         foreach ($platform in @($platforms)) { if (@('any','linux','macos','windows') -cnotcontains [string]$platform) { throw "Unsupported Skills Catalog Skill '$skillId' compatibility platform '$platform'." } }
@@ -199,25 +217,34 @@ function Assert-SkillsCatalog {
         $dependencies = Get-RequiredProperty -Object $skill -Name 'dependencies' -Context "Skills Catalog Skill '$skillId'"
         Assert-Array -Value $dependencies -Context "Skills Catalog Skill '$skillId' dependencies" -AllowEmpty
         foreach ($dependency in @($dependencies)) {
+            Assert-OnlyProperties -Object $dependency -Allowed @('skillId','type','condition','fallback') -Context "Skills Catalog Skill '$skillId' dependency"
             $dependencySkillId = Get-RequiredProperty -Object $dependency -Name 'skillId' -Context "Skills Catalog Skill '$skillId' dependency"
             Assert-StableId -Value $dependencySkillId -Context "Skills Catalog Skill '$skillId' dependency skillId"
             $dependencyType = Get-RequiredProperty -Object $dependency -Name 'type' -Context "Skills Catalog Skill '$skillId' dependency '$dependencySkillId'"
+            Assert-NonEmptyString -Value $dependencyType -Context "Skills Catalog Skill '$skillId' dependency '$dependencySkillId' type"
             if (@('hard','conditional','recommended') -cnotcontains [string]$dependencyType) { throw "Unsupported dependency type '$dependencyType' for Skill '$skillId'." }
             if ([string]$dependencySkillId -eq [string]$skillId) { throw "Skills Catalog Skill '$skillId' cannot depend on itself." }
             if ([string]$dependencyType -eq 'conditional') {
                 $condition = Get-RequiredProperty -Object $dependency -Name 'condition' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
+                Assert-OnlyProperties -Object $condition -Allowed @('capability','operator') -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
                 Assert-StableId -Value (Get-RequiredProperty -Object $condition -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition capability"
                 $operator = Get-RequiredProperty -Object $condition -Name 'operator' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
                 Assert-NonEmptyString -Value $operator -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition operator"
                 if (@('available','missing','missing-or-invalid','unavailable') -cnotcontains [string]$operator) { throw "Unsupported conditional dependency operator '$operator' for Skill '$skillId'." }
                 $fallback = Get-RequiredProperty -Object $dependency -Name 'fallback' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
+                Assert-OnlyProperties -Object $fallback -Allowed @('capability','description') -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback"
                 Assert-StableId -Value (Get-RequiredProperty -Object $fallback -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback capability"
                 Assert-NonEmptyString -Value (Get-RequiredProperty -Object $fallback -Name 'description' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback description"
+            }
+            elseif ((Test-HasProperty -Object $dependency -Name 'condition') -or (Test-HasProperty -Object $dependency -Name 'fallback')) {
+                throw "Non-conditional dependency '$skillId' -> '$dependencySkillId' must not declare condition or fallback."
             }
         }
 
         $lifecycle = Get-RequiredProperty -Object $skill -Name 'lifecycle' -Context "Skills Catalog Skill '$skillId'"
+        Assert-OnlyProperties -Object $lifecycle -Allowed @('status','aliases','replacementId') -Context "Skills Catalog Skill '$skillId' lifecycle"
         $status = Get-RequiredProperty -Object $lifecycle -Name 'status' -Context "Skills Catalog Skill '$skillId' lifecycle"
+        Assert-NonEmptyString -Value $status -Context "Skills Catalog Skill '$skillId' lifecycle status"
         if (@('active','deprecated','removed') -cnotcontains [string]$status) { throw "Unsupported lifecycle status '$status' for Skill '$skillId'." }
         Assert-StringArray -Value (Get-RequiredProperty -Object $lifecycle -Name 'aliases' -Context "Skills Catalog Skill '$skillId' lifecycle") -Context "Skills Catalog Skill '$skillId' lifecycle aliases" -AllowEmpty
         if (Test-HasProperty -Object $lifecycle -Name 'replacementId') {
@@ -272,17 +299,20 @@ function Test-SkillsCatalogDocument {
 
 function Assert-SkillsCatalogSourcePins {
     param([Parameter(Mandatory = $true)][object] $Pins,[Parameter(Mandatory = $true)][object] $Catalog)
+    Assert-OnlyProperties -Object $Pins -Allowed @('schemaVersion','catalogId','sources') -Context 'Skills Catalog source pins'
     Assert-SchemaVersion -Document $Pins -Expected 1 -DocumentName 'Skills Catalog source pins'
-    if ([string](Get-RequiredProperty -Object $Pins -Name 'catalogId' -Context 'Skills Catalog source pins') -cne [string]$Catalog.catalogId) { throw 'Skills Catalog source pins catalogId does not match the Skills Catalog.' }
+    $pinsCatalogId = Get-RequiredProperty -Object $Pins -Name 'catalogId' -Context 'Skills Catalog source pins'; Assert-NonEmptyString -Value $pinsCatalogId -Context 'Skills Catalog source pins catalogId'
+    if ([string]$pinsCatalogId -cne [string]$Catalog.catalogId) { throw 'Skills Catalog source pins catalogId does not match the Skills Catalog.' }
     $catalogSources = @{}; foreach ($source in @($Catalog.sources)) { $catalogSources[[string]$source.id] = $source }
     $sources = Get-RequiredProperty -Object $Pins -Name 'sources' -Context 'Skills Catalog source pins'; Assert-Array -Value $sources -Context 'Skills Catalog source pins sources'
     $pinsById = @{}
     foreach ($pin in @($sources)) {
+        Assert-OnlyProperties -Object $pin -Allowed @('id','requestedRef','requestedRefType','resolvedCommit','resolvedVersion') -Context 'Skills Catalog source pin'
         $sourceId = Get-RequiredProperty -Object $pin -Name 'id' -Context 'Skills Catalog source pin'; Assert-StableId -Value $sourceId -Context 'Skills Catalog source pin id'
         if ($pinsById.ContainsKey([string]$sourceId)) { throw "Duplicate Skills Catalog source pin ID: $sourceId" }
         if (-not $catalogSources.ContainsKey([string]$sourceId)) { throw "Skills Catalog source pins reference unknown source '$sourceId'." }
         $requestedRef = Get-RequiredProperty -Object $pin -Name 'requestedRef' -Context "Skills Catalog source pin '$sourceId'"; Assert-NonEmptyString -Value $requestedRef -Context "Skills Catalog source pin '$sourceId' requestedRef"
-        $requestedRefType = Get-RequiredProperty -Object $pin -Name 'requestedRefType' -Context "Skills Catalog source pin '$sourceId'"; if (@('branch','tag','commit') -cnotcontains [string]$requestedRefType) { throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog source pin '$sourceId'." }
+        $requestedRefType = Get-RequiredProperty -Object $pin -Name 'requestedRefType' -Context "Skills Catalog source pin '$sourceId'"; Assert-NonEmptyString -Value $requestedRefType -Context "Skills Catalog source pin '$sourceId' requestedRefType"; if (@('branch','tag','commit') -cnotcontains [string]$requestedRefType) { throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog source pin '$sourceId'." }
         Assert-FullCommitSha -Value (Get-RequiredProperty -Object $pin -Name 'resolvedCommit' -Context "Skills Catalog source pin '$sourceId'") -Context "Skills Catalog source pin '$sourceId'"
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $pin -Name 'resolvedVersion' -Context "Skills Catalog source pin '$sourceId'") -Context "Skills Catalog source pin '$sourceId' resolvedVersion"
         $pinsById[[string]$sourceId] = $pin
@@ -301,22 +331,26 @@ function Test-SkillsCatalogSourcePinsDocument {
 
 function Assert-SkillsCatalogLock {
     param([object] $Lock,[object] $Catalog)
+    Assert-OnlyProperties -Object $Lock -Allowed @('schemaVersion','catalogId','catalogSha256','sources','skills') -Context 'Skills Catalog lock'
     Assert-SchemaVersion -Document $Lock -Expected 1 -DocumentName 'Skills Catalog lock'
-    if ([string](Get-RequiredProperty -Object $Lock -Name 'catalogId' -Context 'Skills Catalog lock') -cne [string]$Catalog.catalogId) { throw 'Skills Catalog lock catalogId does not match the Skills Catalog.' }
+    $lockCatalogId = Get-RequiredProperty -Object $Lock -Name 'catalogId' -Context 'Skills Catalog lock'; Assert-NonEmptyString -Value $lockCatalogId -Context 'Skills Catalog lock catalogId'
+    if ([string]$lockCatalogId -cne [string]$Catalog.catalogId) { throw 'Skills Catalog lock catalogId does not match the Skills Catalog.' }
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Lock -Name 'catalogSha256' -Context 'Skills Catalog lock') -Context 'Skills Catalog lock catalogSha256'
     $catalogSources=@{}; foreach ($source in @($Catalog.sources)) { $catalogSources[[string]$source.id]=$source }
     $sources=Get-RequiredProperty -Object $Lock -Name 'sources' -Context 'Skills Catalog lock'; Assert-Array -Value $sources -Context 'Skills Catalog lock sources'
     $lockedSources=@{}
     foreach ($source in @($sources)) {
+        Assert-OnlyProperties -Object $source -Allowed @('id','repository','requestedRef','requestedRefType','resolvedCommit','resolvedVersion','archiveSha256') -Context 'Skills Catalog lock source'
         $sourceId=Get-RequiredProperty -Object $source -Name 'id' -Context 'Skills Catalog lock source'
         Assert-StableId -Value $sourceId -Context 'Skills Catalog lock source id'
         if ($lockedSources.ContainsKey([string]$sourceId)) { throw "Duplicate Skills Catalog lock source ID: $sourceId" }
         if (-not $catalogSources.ContainsKey([string]$sourceId)) { throw "Skills Catalog lock references unknown source '$sourceId'." }
         $lockedSources[[string]$sourceId]=$source
         $repository=Get-RequiredProperty -Object $source -Name 'repository' -Context "Skills Catalog lock source '$sourceId'"
+        Assert-HttpsRepositoryUrl -Value $repository -Context "Skills Catalog lock source '$sourceId' repository"
         if ([string]$repository -cne [string]$catalogSources[[string]$sourceId].repository) { throw "Skills Catalog lock source '$sourceId' repository does not match the catalog." }
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $source -Name 'requestedRef' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId' requestedRef"
-        $requestedRefType=Get-RequiredProperty -Object $source -Name 'requestedRefType' -Context "Skills Catalog lock source '$sourceId'"; if (@('branch','tag','commit') -cnotcontains [string]$requestedRefType) { throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog lock source '$sourceId'." }
+        $requestedRefType=Get-RequiredProperty -Object $source -Name 'requestedRefType' -Context "Skills Catalog lock source '$sourceId'"; Assert-NonEmptyString -Value $requestedRefType -Context "Skills Catalog lock source '$sourceId' requestedRefType"; if (@('branch','tag','commit') -cnotcontains [string]$requestedRefType) { throw "Unsupported requestedRefType '$requestedRefType' for Skills Catalog lock source '$sourceId'." }
         Assert-FullCommitSha -Value (Get-RequiredProperty -Object $source -Name 'resolvedCommit' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId'"
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $source -Name 'resolvedVersion' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId' resolvedVersion"
         Assert-Sha256 -Value (Get-RequiredProperty -Object $source -Name 'archiveSha256' -Context "Skills Catalog lock source '$sourceId'") -Context "Skills Catalog lock source '$sourceId' archiveSha256"
@@ -326,12 +360,14 @@ function Assert-SkillsCatalogLock {
     $skills=Get-RequiredProperty -Object $Lock -Name 'skills' -Context 'Skills Catalog lock'; Assert-Array -Value $skills -Context 'Skills Catalog lock skills' -AllowEmpty
     $lockedSkills=@{}
     foreach ($skill in @($skills)) {
+        Assert-OnlyProperties -Object $skill -Allowed @('id','sourceId','sourcePath','contentSha256') -Context 'Skills Catalog lock Skill'
         $skillId=Get-RequiredProperty -Object $skill -Name 'id' -Context 'Skills Catalog lock Skill'
         Assert-StableId -Value $skillId -Context 'Skills Catalog lock Skill id'
         if ($lockedSkills.ContainsKey([string]$skillId)) { throw "Duplicate Skills Catalog lock Skill ID: $skillId" }
         if (-not $catalogSkills.ContainsKey([string]$skillId)) { throw "Skills Catalog lock references unknown or removed Skill '$skillId'." }
         $lockedSkills[[string]$skillId]=$skill
         $sourceId=Get-RequiredProperty -Object $skill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'"; $sourcePath=Get-RequiredProperty -Object $skill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'"
+        if (-not (Test-IsSafeRepositoryPath -Value $sourcePath)) { throw "Unsafe Skills Catalog lock sourcePath for Skill '$skillId': $sourcePath" }
         if ([string]$sourceId -cne [string]$catalogSkills[[string]$skillId].source.sourceId -or [string]$sourcePath -cne [string]$catalogSkills[[string]$skillId].source.path) { throw "Skills Catalog lock source does not match catalog Skill '$skillId'." }
         Assert-Sha256 -Value (Get-RequiredProperty -Object $skill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'") -Context "Skills Catalog lock Skill '$skillId' contentSha256"
     }
@@ -348,42 +384,76 @@ function Test-SkillsCatalogLockDocument {
 
 function Assert-ManagedManifestV2 {
     param([object] $Manifest)
+    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','catalogId','lockSha256','files') -Context 'managed manifest'
     Assert-SchemaVersion -Document $Manifest -Expected 2 -DocumentName 'managed manifest'
     Assert-StableId -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogId' -Context 'managed manifest') -Context 'managed manifest catalogId'; Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'managed manifest') -Context 'managed manifest lockSha256'
     $files=Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'managed manifest'; Assert-Array -Value $files -Context 'managed manifest files' -AllowEmpty; $targetPaths=@{}
     foreach ($entry in @($files)) {
-        $artifactType=Get-RequiredProperty -Object $entry -Name 'artifactType' -Context 'managed manifest file'; if (@('instruction','skill') -cnotcontains [string]$artifactType) { throw "Unsupported managed manifest artifactType '$artifactType'." }
+        Assert-OnlyProperties -Object $entry -Allowed @('artifactType','artifactId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256') -Context 'managed manifest file'
+        $artifactType=Get-RequiredProperty -Object $entry -Name 'artifactType' -Context 'managed manifest file'; Assert-NonEmptyString -Value $artifactType -Context 'managed manifest file artifactType'; if (@('instruction','skill') -cnotcontains [string]$artifactType) { throw "Unsupported managed manifest artifactType '$artifactType'." }
         $artifactId=Get-RequiredProperty -Object $entry -Name 'artifactId' -Context 'managed manifest file'; Assert-StableId -Value $artifactId -Context 'managed manifest file artifactId'; Assert-StableId -Value (Get-RequiredProperty -Object $entry -Name 'sourceId' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceId"
         Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $entry -Name 'sourceRepository' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceRepository"; Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceRef' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceRef"
-        $sourceCommit=Get-RequiredProperty -Object $entry -Name 'sourceCommit' -Context "managed manifest file '$artifactId'"; if ([string]$sourceCommit -cnotmatch '^[0-9a-f]{40}$') { throw "managed manifest file '$artifactId' sourceCommit must be a full 40-character commit SHA." }; Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceVersion"
+        $sourceCommit=Get-RequiredProperty -Object $entry -Name 'sourceCommit' -Context "managed manifest file '$artifactId'"; if ($sourceCommit -isnot [string]) { throw "managed manifest file '$artifactId' sourceCommit must be a string." }; if ([string]$sourceCommit -cnotmatch '^[0-9a-f]{40}$') { throw "managed manifest file '$artifactId' sourceCommit must be a full 40-character commit SHA." }; Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sourceVersion"
         $sourcePath=Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context "managed manifest file '$artifactId'"; $targetPath=Get-RequiredProperty -Object $entry -Name 'targetPath' -Context "managed manifest file '$artifactId'"
         if (-not (Test-IsSafeRepositoryPath -Value $sourcePath)) { throw "Unsafe source path in managed manifest: $sourcePath" }; if (-not (Test-IsSafeRepositoryPath -Value $targetPath)) { throw "Unsafe target path in managed manifest: $targetPath" }; if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in managed manifest: $targetPath" }; $targetPaths[[string]$targetPath]=$true
         Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'sha256' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sha256"
-        if ([string]$artifactType -eq 'skill') { $skillPrefix=".agents/skills/$artifactId/"; if (-not ([string]$sourcePath).StartsWith($skillPrefix,[System.StringComparison]::Ordinal) -or -not ([string]$targetPath).StartsWith($skillPrefix,[System.StringComparison]::Ordinal)) { throw "Managed Skill '$artifactId' must preserve the flat .agents/skills path." } }
+        if ([string]$artifactType -eq 'skill') {
+            $skillPrefix=".agents/skills/$artifactId/"
+            if (-not ([string]$sourcePath).StartsWith($skillPrefix,[System.StringComparison]::Ordinal) -or
+                -not ([string]$targetPath).StartsWith($skillPrefix,[System.StringComparison]::Ordinal)) {
+                throw "Managed Skill '$artifactId' must preserve the flat .agents/skills path."
+            }
+        }
+        elseif (([string]$sourcePath).StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -or
+                ([string]$targetPath).StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) {
+            throw "Managed instruction '$artifactId' must not claim a .agents/skills path."
+        }
     }
 }
 
 function Assert-SyncConfigurationV4 {
     param([object] $Configuration,[object] $Catalog)
+    Assert-OnlyProperties -Object $Configuration -Allowed @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates') -Context 'AI instruction sync configuration'
     Assert-SchemaVersion -Document $Configuration -Expected 4 -DocumentName 'AI instruction sync configuration'
     foreach ($propertyName in @('excludedRepositoryUrls','excludedRepositoryPaths')) { Assert-StringArray -Value (Get-RequiredProperty -Object $Configuration -Name $propertyName -Context 'AI instruction sync configuration') -Context "AI instruction sync configuration $propertyName" -AllowEmpty }
-    $selection=Get-RequiredProperty -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'; Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog repository'
-    $catalogRef=Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'; if ([string]$catalogRef -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instruction sync configuration catalog ref must be a full lowercase commit SHA.' }
+    $selection=Get-RequiredProperty -Object $Configuration -Name 'catalog' -Context 'AI instruction sync configuration'; Assert-OnlyProperties -Object $selection -Allowed @('repository','ref','profiles','includeSkills','excludeSkills') -Context 'AI instruction sync configuration catalog'; Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $selection -Name 'repository' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog repository'
+    if ([string]$selection.repository -cne $script:CanonicalAiInstructionsRepository) { throw "AI instruction sync configuration catalog repository must be the canonical repository '$script:CanonicalAiInstructionsRepository'." }
+    $catalogRef=Get-RequiredProperty -Object $selection -Name 'ref' -Context 'AI instruction sync configuration catalog'; Assert-NonEmptyString -Value $catalogRef -Context 'AI instruction sync configuration catalog ref'; if ([string]$catalogRef -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instruction sync configuration catalog ref must be a full lowercase commit SHA.' }
     Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'profiles' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog profiles' -AllowEmpty; Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'includeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog includeSkills' -AllowEmpty; Assert-StableIdArray -Value (Get-RequiredProperty -Object $selection -Name 'excludeSkills' -Context 'AI instruction sync configuration catalog') -Context 'AI instruction sync configuration catalog excludeSkills' -AllowEmpty
     $profileIds=@{}; foreach ($profile in @($Catalog.profiles)) { $profileIds[[string]$profile.id]=$true }; $skillIds=@{}; foreach ($skill in @($Catalog.skills)) { $skillIds[[string]$skill.id]=$true }
     foreach ($profileId in @($selection.profiles)) { if (-not $profileIds.ContainsKey([string]$profileId)) { throw "AI instruction sync configuration references unknown profile '$profileId'." } }
     foreach ($skillId in @($selection.includeSkills)+@($selection.excludeSkills)) { if (-not $skillIds.ContainsKey([string]$skillId)) { throw "AI instruction sync configuration references unknown Skill '$skillId'." } }
     foreach ($skillId in @($selection.includeSkills)) { if (@($selection.excludeSkills) -contains [string]$skillId) { throw "AI instruction sync configuration both includes and excludes Skill '$skillId'." } }
 
-    $updates=Get-RequiredProperty -Object $Configuration -Name 'updates' -Context 'AI instruction sync configuration'
-    $mode=Get-RequiredProperty -Object $updates -Name 'mode' -Context 'AI instruction sync configuration updates'; if (@('notify-only','auto-install-approved') -cnotcontains [string]$mode) { throw "Unsupported AI instruction update mode '$mode'." }
-    $channel=Get-RequiredProperty -Object $updates -Name 'channel' -Context 'AI instruction sync configuration updates'; if (@('protected-branch','github-release') -cnotcontains [string]$channel) { throw "Unsupported AI instruction update channel '$channel'." }
+    $updates=Get-RequiredProperty -Object $Configuration -Name 'updates' -Context 'AI instruction sync configuration'; Assert-OnlyProperties -Object $updates -Allowed @('mode','channel','ref','minimumCheckIntervalMinutes') -Context 'AI instruction sync configuration updates'
+    $mode=Get-RequiredProperty -Object $updates -Name 'mode' -Context 'AI instruction sync configuration updates'; Assert-NonEmptyString -Value $mode -Context 'AI instruction sync configuration updates mode'; if (@('notify-only','auto-install-approved') -cnotcontains [string]$mode) { throw "Unsupported AI instruction update mode '$mode'." }
+    $channel=Get-RequiredProperty -Object $updates -Name 'channel' -Context 'AI instruction sync configuration updates'; Assert-NonEmptyString -Value $channel -Context 'AI instruction sync configuration updates channel'; if (@('protected-branch','github-release') -cnotcontains [string]$channel) { throw "Unsupported AI instruction update channel '$channel'." }
     $updateRef=Get-RequiredProperty -Object $updates -Name 'ref' -Context 'AI instruction sync configuration updates'; Assert-NonEmptyString -Value $updateRef -Context 'AI instruction sync configuration updates ref'
     if ([string]$channel -eq 'protected-branch' -and [string]$updateRef -cne 'main') { throw "Protected-branch updates must use the canonical 'main' ref." }
     if ([string]$channel -eq 'github-release' -and [string]$updateRef -cne 'latest') { throw "GitHub release updates must use the canonical 'latest' ref." }
     $minimumCheckIntervalMinutes=Get-RequiredProperty -Object $updates -Name 'minimumCheckIntervalMinutes' -Context 'AI instruction sync configuration updates'
     if ($minimumCheckIntervalMinutes -isnot [int] -and $minimumCheckIntervalMinutes -isnot [long]) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be an integer.' }
     if ([long]$minimumCheckIntervalMinutes -lt 1) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be at least 1.' }
+}
+
+function Assert-LegacyManagedManifestV1 {
+    param([object] $Manifest)
+    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','sourceRepository','sourceRef','files') -Context 'legacy managed manifest'
+    Assert-SchemaVersion -Document $Manifest -Expected 1 -DocumentName 'legacy managed manifest'
+    Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $Manifest -Name 'sourceRepository' -Context 'legacy managed manifest') -Context 'legacy managed manifest sourceRepository'
+    Assert-NonEmptyString -Value (Get-RequiredProperty -Object $Manifest -Name 'sourceRef' -Context 'legacy managed manifest') -Context 'legacy managed manifest sourceRef'
+    $files = Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'legacy managed manifest'; Assert-Array -Value $files -Context 'legacy managed manifest files' -AllowEmpty
+    $targetPaths = @{}
+    foreach ($entry in @($files)) {
+        Assert-OnlyProperties -Object $entry -Allowed @('sourcePath','targetPath','sha256') -Context 'legacy managed manifest file'
+        $sourcePath = Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context 'legacy managed manifest file'
+        $targetPath = Get-RequiredProperty -Object $entry -Name 'targetPath' -Context 'legacy managed manifest file'
+        if (-not (Test-IsSafeRepositoryPath -Value $sourcePath)) { throw "Unsafe source path in legacy managed manifest: $sourcePath" }
+        if (-not (Test-IsSafeRepositoryPath -Value $targetPath)) { throw "Unsafe target path in legacy managed manifest: $targetPath" }
+        if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in legacy managed manifest: $targetPath" }
+        $targetPaths[[string]$targetPath] = $true
+        Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'sha256' -Context 'legacy managed manifest file') -Context "legacy managed manifest file '$targetPath' sha256"
+    }
 }
 
 function Test-SkillsCatalogContract {
@@ -396,4 +466,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifestV2, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

@@ -8,6 +8,70 @@ function Test-AiInstructionsObjectHasProperty {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
+function Assert-AiInstructionsStringValue {
+    param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[switch] $AllowNull)
+
+    if ($AllowNull -and $null -eq $Value) { return }
+    if ($Value -isnot [string]) { throw "$Context must be a string." }
+}
+
+function Get-AiInstructionsFullDirectoryPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $RejectFileSystemRoot,
+        [string] $Context = 'Directory path'
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    $isFileSystemRoot = -not [string]::IsNullOrWhiteSpace($rootPath) -and
+        $fullPath.Equals($rootPath,[System.StringComparison]::OrdinalIgnoreCase)
+    if ($RejectFileSystemRoot -and $isFileSystemRoot) { throw "$Context must not be a filesystem root: $fullPath" }
+    if ($isFileSystemRoot) { return $rootPath }
+    return $fullPath.TrimEnd([char[]]@('\','/'))
+}
+
+function Assert-AiInstructionsSafeChildDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Parent,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $LeafPrefix
+    )
+
+    $parentPath = Get-AiInstructionsFullDirectoryPath -Path $Parent
+    $childPath = Get-AiInstructionsFullDirectoryPath -Path $Path
+    $childParent = Get-AiInstructionsFullDirectoryPath -Path (Split-Path -Parent $childPath)
+    $comparison = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    if (-not $childParent.Equals($parentPath,$comparison)) { throw "Transaction cleanup path must be an immediate child of '$parentPath': $childPath" }
+    $leaf = Split-Path -Leaf $childPath
+    if (-not $leaf.StartsWith($LeafPrefix,[System.StringComparison]::Ordinal)) { throw "Transaction cleanup path does not use expected prefix '$LeafPrefix': $childPath" }
+    if (-not (Test-Path -LiteralPath $childPath -PathType Container)) { throw "Transaction cleanup path is not a directory: $childPath" }
+    $item = Get-Item -Force -LiteralPath $childPath
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Transaction cleanup path must not be a reparse point: $childPath" }
+    return $childPath
+}
+
+function Assert-AiInstructionsMutationPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('File','Directory')][string] $ExpectedType,
+        [string] $Context = 'AI instructions mutation path'
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $fullPath)) { return $fullPath }
+    $item = Get-Item -Force -LiteralPath $fullPath
+    $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    $hasExpectedType = if ($ExpectedType -ceq 'Directory') { $item.PSIsContainer } else { -not $item.PSIsContainer }
+    if ($isReparsePoint -or -not $hasExpectedType) {
+        throw "$Context '$fullPath' must be a non-reparse $($ExpectedType.ToLowerInvariant())."
+    }
+    return $fullPath
+}
+
 function Get-AiInstructionsStringArray {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string[]] $Names)
 
@@ -97,6 +161,7 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
     )
 
     Assert-AiInstructionsCanonicalRepository -Repository $CatalogRepository -CanonicalRepository $CanonicalRepository
+    $CatalogRepository = $CanonicalRepository
     if ($CatalogRef -cnotmatch '^[0-9a-f]{40}$') {
         throw 'AI instruction sync configuration catalog.ref must be a full lowercase 40-character commit SHA.'
     }
@@ -105,6 +170,9 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
     if ($null -ne $ExistingConfiguration) {
         if (-not (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'schemaVersion')) {
             throw 'AI instruction sync configuration is missing schemaVersion.'
+        }
+        if ($ExistingConfiguration.schemaVersion -isnot [int] -and $ExistingConfiguration.schemaVersion -isnot [long]) {
+            throw 'AI instruction sync configuration schemaVersion must be an integer.'
         }
         $schemaVersion = [int]$ExistingConfiguration.schemaVersion
         if ($schemaVersion -notin @(1,2,3,4)) {
@@ -136,6 +204,8 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
                 throw "AI instruction sync configuration catalog is missing '$name'."
             }
         }
+        Assert-AiInstructionsStringValue -Value $existingCatalog.repository -Context 'AI instruction sync configuration catalog.repository'
+        Assert-AiInstructionsStringValue -Value $existingCatalog.ref -Context 'AI instruction sync configuration catalog.ref'
         Assert-AiInstructionsCanonicalRepository -Repository ([string]$existingCatalog.repository) -CanonicalRepository $CanonicalRepository
         if ([string]$existingCatalog.ref -cnotmatch '^[0-9a-f]{40}$') {
             throw 'AI instruction sync configuration catalog.ref must be a full lowercase 40-character commit SHA.'
@@ -158,6 +228,7 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
     $updateRef = 'main'
     $minimumInterval = 1440
     if ($schemaVersion -eq 4) {
+        Assert-AiInstructionsSyncConfigurationV4 -Configuration $ExistingConfiguration -CanonicalRepository $CanonicalRepository -AllowCanonicalRepositoryAlias | Out-Null
         if (-not (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'updates')) {
             throw 'AI instruction sync configuration schemaVersion 4 is missing updates.'
         }
@@ -199,10 +270,13 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Configuration,
-        [string] $CanonicalRepository = $script:CanonicalRepository
+        [string] $CanonicalRepository = $script:CanonicalRepository,
+        [switch] $AllowCanonicalRepositoryAlias
     )
 
-    if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -or $Configuration.schemaVersion -ne 4) {
+    if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -or
+        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
+        $Configuration.schemaVersion -ne 4) {
         throw 'AI instruction sync configuration must use schemaVersion 4.'
     }
     $allowedTopLevel = @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates')
@@ -216,7 +290,8 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     }
     $normalizedExcludedUrls = @(Get-AiInstructionsStringArray -Object $Configuration -Names @('excludedRepositoryUrls'))
     if ($normalizedExcludedUrls.Count -ne @($Configuration.excludedRepositoryUrls).Count) { throw 'AI instruction sync configuration excludedRepositoryUrls contains duplicates.' }
-    $normalizedExcludedPaths = @(Get-AiInstructionsNormalizedExcludedPaths -Paths @($Configuration.excludedRepositoryPaths))
+    $strictExcludedPaths = @(Get-AiInstructionsStringArray -Object $Configuration -Names @('excludedRepositoryPaths'))
+    $normalizedExcludedPaths = @(Get-AiInstructionsNormalizedExcludedPaths -Paths $strictExcludedPaths)
     if ($normalizedExcludedPaths.Count -ne @($Configuration.excludedRepositoryPaths).Count) { throw 'AI instruction sync configuration excludedRepositoryPaths contains duplicates.' }
 
     $catalog = $Configuration.catalog
@@ -226,7 +301,10 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     foreach ($name in @('repository','ref','profiles','includeSkills','excludeSkills')) {
         if (-not (Test-AiInstructionsObjectHasProperty -Object $catalog -Name $name)) { throw "AI instruction sync configuration catalog is missing '$name'." }
     }
+    Assert-AiInstructionsStringValue -Value $catalog.repository -Context 'AI instruction sync configuration catalog.repository'
+    Assert-AiInstructionsStringValue -Value $catalog.ref -Context 'AI instruction sync configuration catalog.ref'
     Assert-AiInstructionsCanonicalRepository -Repository ([string]$catalog.repository) -CanonicalRepository $CanonicalRepository
+    if (-not $AllowCanonicalRepositoryAlias -and [string]$catalog.repository -cne $CanonicalRepository) { throw "AI instruction sync configuration catalog.repository must use the canonical repository '$CanonicalRepository'." }
     if ([string]$catalog.ref -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instruction sync configuration catalog.ref must be a full lowercase 40-character commit SHA.' }
     Assert-AiInstructionsStableIdArray -Value $catalog.profiles -Context 'AI instruction sync configuration catalog.profiles'
     Assert-AiInstructionsStableIdArray -Value $catalog.includeSkills -Context 'AI instruction sync configuration catalog.includeSkills'
@@ -242,6 +320,9 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     foreach ($name in @('mode','channel','ref','minimumCheckIntervalMinutes')) {
         if (-not (Test-AiInstructionsObjectHasProperty -Object $updates -Name $name)) { throw "AI instruction sync configuration updates is missing '$name'." }
     }
+    Assert-AiInstructionsStringValue -Value $updates.mode -Context 'AI instruction sync configuration updates.mode'
+    Assert-AiInstructionsStringValue -Value $updates.channel -Context 'AI instruction sync configuration updates.channel'
+    Assert-AiInstructionsStringValue -Value $updates.ref -Context 'AI instruction sync configuration updates.ref'
     if ([string]$updates.mode -cnotin @('notify-only','auto-install-approved')) { throw "Unsupported AI instruction update mode '$($updates.mode)'." }
     if ([string]$updates.channel -cnotin @('protected-branch','github-release')) { throw "Unsupported AI instruction update channel '$($updates.channel)'." }
     if ([string]$updates.ref -cnotin @('main','latest')) { throw "Unsupported AI instruction update ref '$($updates.ref)'." }
@@ -270,10 +351,17 @@ function Get-AiInstructionsRuntimeInventory {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
 
-    $root = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd([char[]]@('\','/'))
+    $root = Get-AiInstructionsFullDirectoryPath -Path $RuntimeRoot
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "AI instructions runtime root does not exist: $root" }
+    Assert-AiInstructionsMutationPath -Path $root -ExpectedType Directory -Context 'AI instructions runtime root' | Out-Null
     $entries = New-Object System.Collections.Generic.List[object]
-    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -Force -File | Sort-Object FullName)) {
+    $runtimeItems = @(Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName)
+    foreach ($item in $runtimeItems) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "AI instructions runtime inventory must not cross a reparse point: $($item.FullName)"
+        }
+    }
+    foreach ($file in @($runtimeItems | Where-Object { -not $_.PSIsContainer })) {
         $relativePath = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
         if ($relativePath -ceq 'runtime-bundle.json') { continue }
         if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath.StartsWith('../') -or $relativePath.Contains('\')) {
@@ -316,6 +404,7 @@ function New-AiInstructionsRuntimeBundleV2 {
     )
 
     Assert-AiInstructionsCanonicalRepository -Repository $Repository -CanonicalRepository $CanonicalRepository
+    $Repository = $CanonicalRepository
     if ($Commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Runtime bundle commit must be a full lowercase 40-character commit SHA.' }
     if ($Acquisition -ceq 'github-codeload' -and [string]$ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Runtime bundle archiveSha256 is required for github-codeload acquisition.'
@@ -351,8 +440,14 @@ function Assert-AiInstructionsRuntimeBundleV2 {
     foreach ($propertyName in @($Bundle.PSObject.Properties.Name)) {
         if ($propertyName -cnotin @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory')) { throw "Runtime bundle contains unsupported property '$propertyName'." }
     }
-    if ($Bundle.schemaVersion -ne 2) { throw 'Runtime bundle must use schemaVersion 2.' }
+    if (($Bundle.schemaVersion -isnot [int] -and $Bundle.schemaVersion -isnot [long]) -or $Bundle.schemaVersion -ne 2) { throw 'Runtime bundle must use integer schemaVersion 2.' }
+    Assert-AiInstructionsStringValue -Value $Bundle.repository -Context 'Runtime bundle repository'
+    Assert-AiInstructionsStringValue -Value $Bundle.commit -Context 'Runtime bundle commit'
+    Assert-AiInstructionsStringValue -Value $Bundle.acquisition -Context 'Runtime bundle acquisition'
+    Assert-AiInstructionsStringValue -Value $Bundle.archiveSha256 -Context 'Runtime bundle archiveSha256' -AllowNull
+    Assert-AiInstructionsStringValue -Value $Bundle.inventorySha256 -Context 'Runtime bundle inventorySha256'
     Assert-AiInstructionsCanonicalRepository -Repository ([string]$Bundle.repository) -CanonicalRepository $CanonicalRepository
+    if ([string]$Bundle.repository -cne $CanonicalRepository) { throw "Runtime bundle repository must use the canonical repository '$CanonicalRepository'." }
     if ([string]$Bundle.commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Runtime bundle commit must be a full lowercase 40-character commit SHA.' }
     if ([string]$Bundle.repository -cne [string]$Configuration.catalog.repository -or [string]$Bundle.commit -cne [string]$Configuration.catalog.ref) {
         throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
@@ -361,7 +456,7 @@ function Assert-AiInstructionsRuntimeBundleV2 {
     if ([string]$Bundle.acquisition -ceq 'github-codeload' -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Runtime bundle archiveSha256 is required for github-codeload acquisition.'
     }
-    if ($null -ne $Bundle.archiveSha256 -and -not [string]::IsNullOrWhiteSpace([string]$Bundle.archiveSha256) -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+    if ($null -ne $Bundle.archiveSha256 -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Runtime bundle archiveSha256 is invalid.'
     }
     if ($Bundle.inventory -isnot [System.Array]) { throw 'Runtime bundle inventory must be an array.' }
@@ -370,6 +465,8 @@ function Assert-AiInstructionsRuntimeBundleV2 {
         foreach ($propertyName in @($entry.PSObject.Properties.Name)) {
             if ($propertyName -cnotin @('path','sha256')) { throw "Runtime bundle inventory entry contains unsupported property '$propertyName'." }
         }
+        Assert-AiInstructionsStringValue -Value $entry.path -Context 'Runtime bundle inventory path'
+        Assert-AiInstructionsStringValue -Value $entry.sha256 -Context "Runtime bundle inventory hash for '$($entry.path)'"
     }
     $declaredInventory = @($Bundle.inventory | Sort-Object path)
     $declaredDigest = Get-AiInstructionsRuntimeInventorySha256 -Inventory $declaredInventory
@@ -388,6 +485,93 @@ function Assert-AiInstructionsRuntimeBundleV2 {
     return $Bundle
 }
 
+function ConvertTo-AiInstructionsUtcDateTime {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -is [datetime]) {
+        if (([datetime]$Value).Kind -eq [DateTimeKind]::Unspecified) {
+            throw "$Context must include an explicit UTC or numeric offset."
+        }
+        return ([datetime]$Value).ToUniversalTime()
+    }
+
+    $parsedValue = [datetimeoffset]::MinValue
+    if ($Value -isnot [string] -or
+            [string]$Value -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$' -or
+            -not [datetimeoffset]::TryParse(
+                [string]$Value,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$parsedValue
+            )) {
+        throw "$Context must be an ISO 8601 date-time."
+    }
+
+    return $parsedValue.UtcDateTime
+}
+
+function Assert-AiInstructionsUpdateReceiptV1 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Receipt)
+
+    $allowedProperties = @(
+        'schemaVersion','checkedAtUtc','mode','channel','ref','currentCommit',
+        'candidateCommit','outcome','archiveSha256','message'
+    )
+    foreach ($name in $allowedProperties) {
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $Receipt -Name $name)) {
+            throw "AI instructions update receipt is missing '$name'."
+        }
+    }
+    foreach ($propertyName in @($Receipt.PSObject.Properties.Name)) {
+        if ($propertyName -cnotin $allowedProperties) { throw "AI instructions update receipt contains unsupported property '$propertyName'." }
+    }
+    if (($Receipt.schemaVersion -isnot [int] -and $Receipt.schemaVersion -isnot [long]) -or $Receipt.schemaVersion -ne 1) { throw 'AI instructions update receipt must use integer schemaVersion 1.' }
+
+    ConvertTo-AiInstructionsUtcDateTime -Value $Receipt.checkedAtUtc -Context 'AI instructions update receipt checkedAtUtc' | Out-Null
+    Assert-AiInstructionsStringValue -Value $Receipt.mode -Context 'AI instructions update receipt mode'
+    Assert-AiInstructionsStringValue -Value $Receipt.channel -Context 'AI instructions update receipt channel'
+    Assert-AiInstructionsStringValue -Value $Receipt.ref -Context 'AI instructions update receipt ref'
+    Assert-AiInstructionsStringValue -Value $Receipt.currentCommit -Context 'AI instructions update receipt currentCommit'
+    Assert-AiInstructionsStringValue -Value $Receipt.candidateCommit -Context 'AI instructions update receipt candidateCommit' -AllowNull
+    Assert-AiInstructionsStringValue -Value $Receipt.outcome -Context 'AI instructions update receipt outcome'
+    Assert-AiInstructionsStringValue -Value $Receipt.archiveSha256 -Context 'AI instructions update receipt archiveSha256' -AllowNull
+    if ([string]$Receipt.mode -cnotin @('notify-only','auto-install-approved')) { throw "Unsupported AI instructions update receipt mode '$($Receipt.mode)'." }
+    if ([string]$Receipt.channel -cnotin @('protected-branch','github-release')) { throw "Unsupported AI instructions update receipt channel '$($Receipt.channel)'." }
+    if (([string]$Receipt.channel -ceq 'protected-branch' -and [string]$Receipt.ref -cne 'main') -or
+        ([string]$Receipt.channel -ceq 'github-release' -and [string]$Receipt.ref -cne 'latest')) {
+        throw 'AI instructions update receipt channel/ref combination is invalid.'
+    }
+    if ([string]$Receipt.currentCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'AI instructions update receipt currentCommit is invalid.' }
+    if ($null -ne $Receipt.candidateCommit -and [string]$Receipt.candidateCommit -cnotmatch '^[0-9a-f]{40}$') {
+        throw 'AI instructions update receipt candidateCommit is invalid.'
+    }
+    $outcome = [string]$Receipt.outcome
+    if ($outcome -cnotin @('current','available','installed','offline','stale','drift','failed')) {
+        throw "Unsupported AI instructions update receipt outcome '$outcome'."
+    }
+    if ($null -ne $Receipt.archiveSha256 -and [string]$Receipt.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'AI instructions update receipt archiveSha256 is invalid.'
+    }
+    if ($Receipt.message -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Receipt.message)) {
+        throw 'AI instructions update receipt message must be a non-empty string.'
+    }
+    if ($outcome -ceq 'current' -and $null -ne $Receipt.candidateCommit) {
+        throw 'AI instructions current receipt candidateCommit must be null because currentCommit already identifies the resolved version.'
+    }
+    if ($outcome -in @('available','installed','stale','drift') -and $null -eq $Receipt.candidateCommit) {
+        throw "AI instructions $outcome receipt requires candidateCommit."
+    }
+    if ($outcome -in @('installed','drift') -and $null -eq $Receipt.archiveSha256) {
+        throw "AI instructions $outcome receipt requires archiveSha256."
+    }
+    return $Receipt
+}
+
 function Write-AiInstructionsJsonFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Document)
@@ -397,6 +581,7 @@ function Write-AiInstructionsJsonFile {
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $json = ($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
     $temporaryPath = Join-Path $parent ('.' + (Split-Path -Leaf $fullPath) + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    $backupPath = Join-Path $parent ('.' + (Split-Path -Leaf $fullPath) + '.backup-' + [Guid]::NewGuid().ToString('N'))
     try {
         $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
         $stream = [System.IO.File]::Open($temporaryPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
@@ -405,20 +590,26 @@ function Write-AiInstructionsJsonFile {
             $stream.Flush($true)
         }
         finally { $stream.Dispose() }
-        if (Test-Path -LiteralPath $fullPath -PathType Leaf) { [System.IO.File]::Replace($temporaryPath,$fullPath,$null) }
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) { [System.IO.File]::Replace($temporaryPath,$fullPath,$backupPath) }
         else { [System.IO.File]::Move($temporaryPath,$fullPath) }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
 Export-ModuleMember -Function @(
     'Assert-AiInstructionsCanonicalRepository',
     'Assert-AiInstructionsRuntimeBundleV2',
+    'Assert-AiInstructionsMutationPath',
+    'Assert-AiInstructionsSafeChildDirectory',
     'Assert-AiInstructionsSyncConfigurationV4',
+    'Assert-AiInstructionsUpdateReceiptV1',
+    'ConvertTo-AiInstructionsUtcDateTime',
     'ConvertTo-AiInstructionsSyncConfigurationV4',
     'Get-AiInstructionsFileSha256',
+    'Get-AiInstructionsFullDirectoryPath',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
     'New-AiInstructionsRuntimeBundleV2',

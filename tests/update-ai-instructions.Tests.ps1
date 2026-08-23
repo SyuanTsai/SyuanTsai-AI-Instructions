@@ -41,7 +41,31 @@ Describe 'AI instructions updater workflow' {
             -InstallCandidate { $script:installCalls++ }
 
         $result.outcome | Should Be 'current'
+        $result.candidateCommit | Should BeNullOrEmpty
         $installCalls | Should Be 0
+    }
+
+    # Scenario: Two forced checks consecutively confirm that the installed immutable runtime is current.
+    # Purpose: Replace the prior audit receipt atomically instead of bricking every check after the first write.
+    It 'UnitT12_replaces_an_existing_receipt_after_a_repeated_current_check' {
+        $codexHome = Join-Path $TestDrive 'repeated-current'
+        New-TestUpdaterHome -Path $codexHome
+
+        $first = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+        $second = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+
+        $first.outcome | Should Be 'current'
+        $second.outcome | Should Be 'current'
+        $receipt = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json
+        $receipt.outcome | Should Be 'current'
+        $receipt.candidateCommit | Should BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $codexHome -Force -File | Where-Object { $_.Name -like '.ai-instructions-update-receipt.json.*' }).Count | Should Be 0
     }
 
     # Scenario: A newer candidate exists while the user retains the default notify-only mode.
@@ -87,11 +111,32 @@ Describe 'AI instructions updater workflow' {
         $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
             -ResolveCandidate { param($request) 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
             -AcquireCandidate { param($request) $package } `
-            -InstallCandidate { param($request) $script:installCalls++ }
+            -InstallCandidate {
+                param($request)
+                $script:installCalls++
+                New-TestUpdaterHome -Path $request.CodexHome -Mode auto-install-approved -Commit $request.CandidateCommit
+            }
 
         $result.outcome | Should Be 'installed'
         $script:installCalls | Should Be 1
         $result.archiveSha256 | Should Be ('c' * 64)
+    }
+
+    # Scenario: An installer callback returns without activating the selected candidate runtime.
+    # Purpose: Record success only after the active runtime bundle proves the candidate is actually installed.
+    It 'UnitT35_rejects_an_installer_that_does_not_activate_the_candidate' {
+        $codexHome = Join-Path $TestDrive 'installer-no-op'
+        New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $package = [pscustomobject]@{ SourceRoot='C:\fixture'; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { param($request) 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
+            -AcquireCandidate { param($request) $package } `
+            -InstallCandidate { param($request) }
+
+        $result.outcome | Should Be 'failed'
+        $result.message | Should Match 'active runtime|candidate'
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'failed'
     }
 
     # Scenario: The network is unavailable while resolving the configured update source.
@@ -126,6 +171,64 @@ Describe 'AI instructions updater workflow' {
         [string]$result.currentCommit | Should Be ('a' * 40)
     }
 
+    # Scenario: A candidate acquisition adapter returns a package object whose archive hash is not valid evidence.
+    # Purpose: Persist a schema-valid failure receipt without laundering the unverified hash into audit state.
+    It 'UnitT46_records_an_invalid_candidate_package_as_a_schema_valid_failure' {
+        $codexHome = Join-Path $TestDrive 'invalid-package'
+        New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
+        $candidate = '2222222222222222222222222222222222222222'
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { [pscustomobject]@{ Commit=$candidate; Relation='ahead' } } `
+            -AcquireCandidate { [pscustomobject]@{ ArchiveSha256='not-a-hash'; CleanupRoot=$null } } `
+            -InstallCandidate { throw 'The installer must not run for invalid candidate evidence.' }
+
+        $result.outcome | Should Be 'failed'
+        $result.archiveSha256 | Should BeNullOrEmpty
+        $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json
+        { Assert-AiInstructionsUpdateReceiptV1 -Receipt $receipt } | Should Not Throw
+        $receipt.archiveSha256 | Should BeNullOrEmpty
+    }
+
+    # Scenario: A candidate acquisition adapter returns an object without archive hash evidence.
+    # Purpose: Keep StrictMode property access from masking the original acquisition contract failure.
+    It 'UnitT46b_records_a_candidate_package_missing_its_hash_as_a_schema_valid_failure' {
+        $codexHome = Join-Path $TestDrive 'missing-package-hash'
+        New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { [pscustomobject]@{ Commit=('2' * 40); Relation='ahead' } } `
+            -AcquireCandidate { [pscustomobject]@{ CleanupRoot=$null } } `
+            -InstallCandidate { throw 'The installer must not run without candidate hash evidence.' }
+
+        $result.outcome | Should Be 'failed'
+        $result.archiveSha256 | Should BeNullOrEmpty
+        $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json
+        { Assert-AiInstructionsUpdateReceiptV1 -Receipt $receipt } | Should Not Throw
+    }
+
+    # Scenario: Resolver and acquisition adapters return singleton arrays in fields that must be scalar evidence.
+    # Purpose: Reject PowerShell string coercion at the immutable candidate boundary.
+    It 'UnitT46c_rejects_singleton_arrays_in_candidate_evidence' {
+        $candidateHome = Join-Path $TestDrive 'candidate-array'
+        New-TestUpdaterHome -Path $candidateHome -Mode 'auto-install-approved'
+        $candidateResult = Invoke-AiInstructionsUpdateWorkflow -CodexHome $candidateHome -ForceCheck `
+            -ResolveCandidate { [pscustomobject]@{ Commit=@(('2' * 40)); Relation='ahead' } } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+        $candidateResult.outcome | Should Be 'failed'
+        $candidateResult.message | Should Match 'scalar string'
+
+        $packageHome = Join-Path $TestDrive 'package-array'
+        New-TestUpdaterHome -Path $packageHome -Mode 'auto-install-approved'
+        $packageResult = Invoke-AiInstructionsUpdateWorkflow -CodexHome $packageHome -ForceCheck `
+            -ResolveCandidate { [pscustomobject]@{ Commit=('2' * 40); Relation='ahead' } } `
+            -AcquireCandidate { [pscustomobject]@{ ArchiveSha256=@(('b' * 64)); CleanupRoot=$null } } `
+            -InstallCandidate { throw 'installer must not run' }
+        $packageResult.outcome | Should Be 'failed'
+        $packageResult.archiveSha256 | Should BeNullOrEmpty
+    }
+
     # Scenario: GitHub responds but the configured channel cannot produce a valid candidate.
     # Purpose: Do not disguise integrity or configuration failures as harmless offline operation.
     It 'UnitT47_records_non_network_candidate_resolution_errors_as_failed' {
@@ -141,6 +244,64 @@ Describe 'AI instructions updater workflow' {
         $result.message | Should Match 'no valid tag'
     }
 
+    # Scenario: GitHub responds with a permanent client error such as a missing commit or unauthorized repository.
+    # Purpose: Record actionable API/configuration failures instead of disguising them as transient offline operation.
+    It 'UnitT48_records_http_client_errors_as_failed' {
+        $codexHome = Join-Path $TestDrive 'http-client-error'
+        New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { throw [System.Net.WebException]::new('HTTP 404 Not Found') } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+
+        $result.outcome | Should Be 'failed'
+        $result.message | Should Match '404'
+    }
+
+    # Scenario: GitHub temporarily refuses an unauthenticated API request because its request quota is exhausted.
+    # Purpose: Keep the verified installed runtime usable instead of treating a transient service limit as integrity failure.
+    It 'UnitT49_treats_a_GitHub_API_rate_limit_as_transient_offline_operation' {
+        $codexHome = Join-Path $TestDrive 'github-rate-limit'
+        New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { throw [System.Net.WebException]::new('GitHub API rate limit exceeded (HTTP 403)') } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+
+        $result.outcome | Should Be 'offline'
+        $result.message | Should Match 'rate limit'
+    }
+
+    # Scenario: PowerShell 7 exposes a GitHub 403 response through its native HttpResponseException and rate-limit header.
+    # Purpose: Exercise the actual Invoke-RestMethod exception shape instead of a WebException test double.
+    It 'UnitT49_treats_a_PowerShell_7_HttpResponseException_rate_limit_as_offline' -Skip:($PSVersionTable.PSVersion.Major -lt 7) {
+        $codexHome = Join-Path $TestDrive 'github-rate-limit-ps7'
+        New-TestUpdaterHome -Path $codexHome -Mode 'auto-install-approved'
+        Get-Command Invoke-RestMethod | Out-Null
+        $exceptionType = ([System.Management.Automation.PSTypeName]'Microsoft.PowerShell.Commands.HttpResponseException').Type
+        $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden)
+        [void]$response.Headers.TryAddWithoutValidation('X-RateLimit-Remaining','0')
+        $script:httpResponseException = [Activator]::CreateInstance(
+            $exceptionType,
+            [object[]]@('Response status code does not indicate success: 403 (Forbidden).',$response)
+        )
+
+        try {
+            $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                -ResolveCandidate { throw $script:httpResponseException } `
+                -AcquireCandidate { throw 'archive must not be acquired' } `
+                -InstallCandidate { throw 'installer must not run' }
+        }
+        finally {
+            $response.Dispose()
+            $script:httpResponseException = $null
+        }
+
+        $result.outcome | Should Be 'offline'
+    }
+
     # Scenario: A successful update check occurred inside the configured minimum interval.
     # Purpose: Rate-limit bootstrap-triggered network checks while keeping a manual force option.
     It 'UnitT50_rate_limits_automatic_checks' {
@@ -148,7 +309,7 @@ Describe 'AI instructions updater workflow' {
         New-TestUpdaterHome -Path $codexHome
         $receipt = [ordered]@{
             schemaVersion=1; checkedAtUtc='2026-08-23T04:00:00.0000000Z'; mode='notify-only';
-            channel='protected-branch'; ref='main'; currentCommit=('a' * 40); candidateCommit=('a' * 40);
+            channel='protected-branch'; ref='main'; currentCommit=('a' * 40); candidateCommit=$null;
             outcome='current'; archiveSha256=$null; message='current'
         }
         [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-update-receipt.json'), (($receipt | ConvertTo-Json -Depth 5) + "`n"))
@@ -167,6 +328,26 @@ Describe 'AI instructions updater workflow' {
         $codexHome = Join-Path $TestDrive 'malformed-receipt'
         New-TestUpdaterHome -Path $codexHome
         [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-update-receipt.json'),'{not-json')
+
+        $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -NowUtc ([datetime]'2026-08-23T05:00:00Z') `
+            -ResolveCandidate { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } `
+            -AcquireCandidate { throw 'archive must not be acquired' } `
+            -InstallCandidate { throw 'installer must not run' }
+
+        $result.outcome | Should Be 'current'
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'current'
+        @(Get-ChildItem -LiteralPath $codexHome -File -Filter 'ai-instructions-update-receipt.invalid-*.json').Count | Should Be 1
+    }
+
+    # Scenario: A syntactically valid receipt omits its v1 contract and claims an implausible future check time.
+    # Purpose: Quarantine semantic corruption instead of suppressing autonomous checks until the forged timestamp.
+    It 'UnitT57_self_heals_a_schema_invalid_or_future_update_receipt' {
+        $codexHome = Join-Path $TestDrive 'invalid-receipt-contract'
+        New-TestUpdaterHome -Path $codexHome
+        [System.IO.File]::WriteAllText(
+            (Join-Path $codexHome 'ai-instructions-update-receipt.json'),
+            '{"checkedAtUtc":"9999-01-01T00:00:00Z"}'
+        )
 
         $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -NowUtc ([datetime]'2026-08-23T05:00:00Z') `
             -ResolveCandidate { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } `
@@ -201,18 +382,22 @@ Describe 'AI instructions updater workflow' {
         $script:installCalls | Should Be 0
     }
 
-    # Scenario: The production updater delegates installation after selecting a candidate from the current runtime.
-    # Purpose: Pass the expected current commit so the installer can revalidate it under the installation lock.
-    It 'UnitT65_passes_the_expected_current_commit_to_the_installer' {
+    # Scenario: The production updater delegates installation after selecting a candidate under an approved update policy.
+    # Purpose: Pass the expected runtime and policy identity so the installer can revalidate both under its lock.
+    It 'UnitT65_passes_the_expected_runtime_and_update_policy_to_the_installer' {
         $sourceRoot = Join-Path $TestDrive 'installer-contract'
         $scriptsRoot = Join-Path $sourceRoot 'scripts'
         New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
         $fakeInstaller = @'
 param(
     [string]$RepositoryRoot,[string]$CodexHome,[string]$SourceRepository,[string]$SourceCommit,
-    [string]$Acquisition,[string]$ArchiveSha256,[string]$SourceArchivePath,[string]$ExpectedCurrentCommit
+    [string]$Acquisition,[string]$ArchiveSha256,[string]$SourceArchivePath,[string]$ExpectedCurrentCommit,
+    [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef
 )
-[System.IO.File]::WriteAllText((Join-Path $RepositoryRoot 'expected-current.txt'),$ExpectedCurrentCommit)
+[System.IO.File]::WriteAllText(
+    (Join-Path $RepositoryRoot 'expected-state.txt'),
+    (@($ExpectedCurrentCommit,$ExpectedUpdateMode,$ExpectedUpdateChannel,$ExpectedUpdateRef) -join "`n")
+)
 '@
         [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
         $request = [pscustomobject]@{
@@ -220,12 +405,16 @@ param(
             Repository = $script:CanonicalRepository
             CurrentCommit = ('a' * 40)
             CandidateCommit = ('b' * 40)
+            Mode = 'auto-install-approved'
+            Channel = 'protected-branch'
+            Ref = 'main'
             Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
         }
 
         Install-AiInstructionsCandidatePackage -Request $request
 
-        [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'expected-current.txt')) | Should Be ('a' * 40)
+        [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'expected-state.txt')) |
+            Should Be ((@(('a' * 40),'auto-install-approved','protected-branch','main') -join "`n"))
     }
 
     # Scenario: Another updater process holds the per-home update lock.
@@ -266,5 +455,27 @@ param(
         }
 
         $result.outcome | Should Be 'concurrent'
+    }
+
+    # Scenario: The manual update entry point encounters a concurrent installer while a launcher is waiting on it.
+    # Purpose: Return a failing process status so the launcher cannot continue fan-out during runtime swap.
+    It 'UnitT77_manual_update_command_fails_closed_on_concurrent_state' {
+        $codexHome = Join-Path $TestDrive 'concurrent-command'
+        New-TestUpdaterHome -Path $codexHome
+        $lockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+        $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') `
+                -CodexHome $codexHome `
+                -ForceCheck 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'concurrent|installer is already running'
     }
 }

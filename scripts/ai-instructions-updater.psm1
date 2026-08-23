@@ -6,14 +6,79 @@ $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instruc
 $script:RuntimeContractModule = Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1'
 Import-Module $script:RuntimeContractModule
 
+function Test-AiInstructionsTransientHttpStatusCode {
+    param([Parameter(Mandatory = $true)][int] $StatusCode)
+    return $StatusCode -in @(408,429,500,502,503,504)
+}
+
+function Get-AiInstructionsHttpHeaderValue {
+    param([AllowNull()][object] $Response,[Parameter(Mandatory = $true)][string] $Name)
+
+    if ($null -eq $Response -or $null -eq $Response.PSObject.Properties['Headers']) { return $null }
+    try {
+        $headers = $Response.Headers
+        if ($null -ne $headers.PSObject.Methods['GetValues']) {
+            return (@($headers.GetValues($Name)) -join ',')
+        }
+        return [string]$headers[$Name]
+    }
+    catch { return $null }
+}
+
 function Test-AiInstructionsTransientNetworkError {
     param([Parameter(Mandatory = $true)][System.Exception] $Exception)
 
     $current = $Exception
     while ($null -ne $current) {
-        if ($current -is [System.Net.WebException] -or $current -is [System.Net.Sockets.SocketException] -or
-            $current.GetType().FullName -eq 'System.Net.Http.HttpRequestException') { return $true }
-        if ([string]$current.Message -match '(?i)network|offline|socket|name resolution|connect(?:ion)?|timed?\s*out|temporarily unavailable') { return $true }
+        if ($current -is [System.Net.Sockets.SocketException]) { return $true }
+        if ($current -is [System.Net.WebException]) {
+            if ($null -ne $current.Response -and $null -ne $current.Response.PSObject.Properties['StatusCode']) {
+                $statusCode = [int]$current.Response.StatusCode
+                if (Test-AiInstructionsTransientHttpStatusCode -StatusCode $statusCode) { return $true }
+                if ($statusCode -eq 403) {
+                    $rateLimitRemaining = Get-AiInstructionsHttpHeaderValue -Response $current.Response -Name 'X-RateLimit-Remaining'
+                    $retryAfter = Get-AiInstructionsHttpHeaderValue -Response $current.Response -Name 'Retry-After'
+                    if ([string]$current.Message -match '(?i)rate[\s-]*limit|too many requests' -or
+                        $rateLimitRemaining -ceq '0' -or -not [string]::IsNullOrWhiteSpace($retryAfter)) {
+                        return $true
+                    }
+                }
+                return $false
+            }
+            if ($current.Status -in @(
+                [System.Net.WebExceptionStatus]::ConnectFailure,
+                [System.Net.WebExceptionStatus]::ConnectionClosed,
+                [System.Net.WebExceptionStatus]::KeepAliveFailure,
+                [System.Net.WebExceptionStatus]::NameResolutionFailure,
+                [System.Net.WebExceptionStatus]::PipelineFailure,
+                [System.Net.WebExceptionStatus]::ProxyNameResolutionFailure,
+                [System.Net.WebExceptionStatus]::ReceiveFailure,
+                [System.Net.WebExceptionStatus]::RequestCanceled,
+                [System.Net.WebExceptionStatus]::SendFailure,
+                [System.Net.WebExceptionStatus]::Timeout
+            )) { return $true }
+        }
+        if ($current.GetType().FullName -in @('System.Net.Http.HttpRequestException','Microsoft.PowerShell.Commands.HttpResponseException')) {
+            $response = if ($null -ne $current.PSObject.Properties['Response']) { $current.Response } else { $null }
+            $statusCodeProperty = $current.PSObject.Properties['StatusCode']
+            if (($null -eq $statusCodeProperty -or $null -eq $statusCodeProperty.Value) -and
+                $null -ne $response -and $null -ne $response.PSObject.Properties['StatusCode']) {
+                $statusCodeProperty = $response.PSObject.Properties['StatusCode']
+            }
+            if ($null -ne $statusCodeProperty -and $null -ne $statusCodeProperty.Value) {
+                $statusCode = [int]$statusCodeProperty.Value
+                if (Test-AiInstructionsTransientHttpStatusCode -StatusCode $statusCode) { return $true }
+                if ($statusCode -eq 403) {
+                    $rateLimitRemaining = Get-AiInstructionsHttpHeaderValue -Response $response -Name 'X-RateLimit-Remaining'
+                    $retryAfter = Get-AiInstructionsHttpHeaderValue -Response $response -Name 'Retry-After'
+                    return [string]$current.Message -match '(?i)rate[\s-]*limit|too many requests' -or
+                        $rateLimitRemaining -ceq '0' -or -not [string]::IsNullOrWhiteSpace($retryAfter)
+                }
+                return $false
+            }
+            if ($current.GetType().FullName -eq 'System.Net.Http.HttpRequestException') { return $true }
+        }
+        if ([string]$current.Message -match '(?i)network|offline|socket|name resolution|connect(?:ion)?|timed?\s*out|temporarily unavailable|rate[\s-]*limit|too many requests') { return $true }
         $current = $current.InnerException
     }
     return $false
@@ -45,7 +110,7 @@ function Get-AiInstructionsRemoteCandidate {
     if ([string]$Request.Channel -ceq 'github-release') {
         $releaseUri = "https://api.github.com/repos/$owner/$repository/releases/latest"
         $release = Invoke-RestMethod -UseBasicParsing -Uri $releaseUri -Headers $headers -Method Get
-        if ($null -eq $release -or [string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
+        if ($null -eq $release -or $release.tag_name -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
             throw 'The canonical GitHub latest release does not expose a tag_name.'
         }
         $ref = [string]$release.tag_name
@@ -53,6 +118,9 @@ function Get-AiInstructionsRemoteCandidate {
     $escapedRef = [System.Uri]::EscapeDataString($ref)
     $commitUri = "https://api.github.com/repos/$owner/$repository/commits/$escapedRef"
     $commit = Invoke-RestMethod -UseBasicParsing -Uri $commitUri -Headers $headers -Method Get
+    if ($null -eq $commit -or $commit.sha -isnot [string]) {
+        throw 'The canonical GitHub candidate did not expose a scalar commit SHA.'
+    }
     $sha = [string]$commit.sha
     if ($sha -cnotmatch '^[0-9a-f]{40}$') { throw 'The canonical GitHub candidate did not resolve to a full lowercase commit SHA.' }
     $currentCommit = [string]$Request.CurrentCommit
@@ -63,6 +131,9 @@ function Get-AiInstructionsRemoteCandidate {
         $escapedCandidate = [System.Uri]::EscapeDataString($sha)
         $compareUri = "https://api.github.com/repos/$owner/$repository/compare/$escapedCurrent...$escapedCandidate"
         $comparison = Invoke-RestMethod -UseBasicParsing -Uri $compareUri -Headers $headers -Method Get
+        if ($null -eq $comparison -or $comparison.status -isnot [string]) {
+            throw 'The canonical GitHub comparison did not expose a scalar commit relation.'
+        }
         $relation = [string]$comparison.status
         if ($relation -cnotin @('ahead','behind','diverged')) {
             throw "The canonical GitHub candidate returned an unsupported commit relation '$relation'."
@@ -84,6 +155,9 @@ function ConvertTo-AiInstructionsResolvedCandidate {
     else {
         if ($null -eq $Value -or $null -eq $Value.PSObject.Properties['Commit'] -or $null -eq $Value.PSObject.Properties['Relation']) {
             throw 'AI instructions candidate resolver returned an invalid result.'
+        }
+        if ($Value.Commit -isnot [string] -or $Value.Relation -isnot [string]) {
+            throw 'AI instructions candidate resolver must return scalar string Commit and Relation values.'
         }
         $commit = [string]$Value.Commit
         $relation = [string]$Value.Relation
@@ -156,7 +230,10 @@ function Get-AiInstructionsCandidatePackage {
         }
     }
     catch {
-        if (Test-Path -LiteralPath $workingRoot) { Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $workingRoot) {
+            $safeWorkingRoot = Assert-AiInstructionsSafeChildDirectory -Parent ([string]$Request.CodexHome) -Path $workingRoot -LeafPrefix '.ai-instructions-update-'
+            Remove-Item -LiteralPath $safeWorkingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         throw
     }
 }
@@ -174,7 +251,10 @@ function Install-AiInstructionsCandidatePackage {
         -Acquisition github-codeload `
         -ArchiveSha256 ([string]$Request.Package.ArchiveSha256) `
         -SourceArchivePath ([string]$Request.Package.ArchivePath) `
-        -ExpectedCurrentCommit ([string]$Request.CurrentCommit)
+        -ExpectedCurrentCommit ([string]$Request.CurrentCommit) `
+        -ExpectedUpdateMode ([string]$Request.Mode) `
+        -ExpectedUpdateChannel ([string]$Request.Channel) `
+        -ExpectedUpdateRef ([string]$Request.Ref)
 }
 
 function New-AiInstructionsUpdateResult {
@@ -204,6 +284,8 @@ function New-AiInstructionsUpdateResult {
 
 function Write-AiInstructionsUpdateReceipt {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Result)
+    Assert-AiInstructionsUpdateReceiptV1 -Receipt $Result | Out-Null
+    Assert-AiInstructionsMutationPath -Path $Path -ExpectedType File -Context 'AI instructions update receipt' | Out-Null
     Write-AiInstructionsJsonFile -Path $Path -Document $Result
 }
 
@@ -219,12 +301,19 @@ function Invoke-AiInstructionsUpdateWorkflow {
         [scriptblock] $InstallCandidate
     )
 
-    $codexHomePath = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd([char[]]@('\','/'))
+    $codexHomePath = Get-AiInstructionsFullDirectoryPath -Path $CodexHome -RejectFileSystemRoot -Context 'Codex Home'
     $runtimeRoot = Join-Path $codexHomePath 'hooks\ai-instructions-runtime'
     $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
     $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
     $receiptPath = Join-Path $codexHomePath 'ai-instructions-update-receipt.json'
     $lockPath = Join-Path $codexHomePath 'ai-instructions-update.lock'
+    $hookRoot = Join-Path $codexHomePath 'hooks'
+    Assert-AiInstructionsMutationPath -Path $codexHomePath -ExpectedType Directory -Context 'Codex Home' | Out-Null
+    Assert-AiInstructionsMutationPath -Path $hookRoot -ExpectedType Directory -Context 'Codex Home hooks directory' | Out-Null
+    Assert-AiInstructionsMutationPath -Path $runtimeRoot -ExpectedType Directory -Context 'Installed AI instructions runtime directory' | Out-Null
+    foreach ($stableFilePath in @($configurationPath,$bundlePath,$receiptPath,$lockPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
+        Assert-AiInstructionsMutationPath -Path $stableFilePath -ExpectedType File -Context 'AI instructions stable file' | Out-Null
+    }
     if ($null -eq $NowUtc -or $NowUtc -eq [datetime]::MinValue) { $NowUtc = (Get-Date).ToUniversalTime() }
     else { $NowUtc = $NowUtc.ToUniversalTime() }
     if ($null -eq $ResolveCandidate) { $ResolveCandidate = { param($request) Get-AiInstructionsRemoteCandidate -Request $request } }
@@ -264,7 +353,22 @@ function Invoke-AiInstructionsUpdateWorkflow {
         if (-not $ForceCheck -and (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
             try {
                 $previousReceipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
-                $checkedAt = ([datetime]::Parse([string]$previousReceipt.checkedAtUtc)).ToUniversalTime()
+                Assert-AiInstructionsUpdateReceiptV1 -Receipt $previousReceipt | Out-Null
+                $checkedAt = ConvertTo-AiInstructionsUtcDateTime `
+                    -Value $previousReceipt.checkedAtUtc `
+                    -Context 'AI instructions update receipt checkedAtUtc'
+                if ($checkedAt -gt $NowUtc.AddMinutes(5)) { throw 'AI instructions update receipt checkedAtUtc is implausibly in the future.' }
+                if ([string]$previousReceipt.mode -cne [string]$configuration.updates.mode -or
+                    [string]$previousReceipt.channel -cne [string]$configuration.updates.channel -or
+                    [string]$previousReceipt.ref -cne [string]$configuration.updates.ref) {
+                    throw 'AI instructions update receipt policy does not match the active configuration.'
+                }
+                $receiptMatchesActiveRuntime = [string]$previousReceipt.currentCommit -ceq [string]$bundle.commit
+                if ([string]$previousReceipt.outcome -ceq 'installed' -and
+                    [string]$previousReceipt.candidateCommit -ceq [string]$bundle.commit) {
+                    $receiptMatchesActiveRuntime = $true
+                }
+                if (-not $receiptMatchesActiveRuntime) { throw 'AI instructions update receipt does not describe the active runtime.' }
                 $minimumInterval = [timespan]::FromMinutes([int]$configuration.updates.minimumCheckIntervalMinutes)
                 if ($NowUtc -lt $checkedAt.Add($minimumInterval)) {
                     return [pscustomobject][ordered]@{ outcome='rate-limit'; message='The minimum update check interval has not elapsed.' }
@@ -298,7 +402,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
         }
         $candidateCommit = [string]$resolvedCandidate.Commit
         if ($candidateCommit -ceq [string]$bundle.commit) {
-            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'current' -ArchiveSha256 $null -Message 'The installed runtime is current.'
+            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $null -Outcome 'current' -ArchiveSha256 $null -Message 'The installed runtime is current.'
             Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
             return $result
         }
@@ -317,7 +421,8 @@ function Invoke-AiInstructionsUpdateWorkflow {
         try {
             $request | Add-Member -NotePropertyName CandidateCommit -NotePropertyValue $candidateCommit
             $package = & $AcquireCandidate $request
-            if ($null -eq $package -or [string]$package.ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            if ($null -eq $package -or $null -eq $package.PSObject.Properties['ArchiveSha256'] -or
+                $package.ArchiveSha256 -isnot [string] -or [string]$package.ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
                 throw 'Candidate package did not provide a valid archiveSha256.'
             }
             $resolvedAfterAcquisition = ConvertTo-AiInstructionsResolvedCandidate -Value (& $ResolveCandidate $request) -CurrentCommit ([string]$bundle.commit)
@@ -332,27 +437,61 @@ function Invoke-AiInstructionsUpdateWorkflow {
                 Repository = [string]$bundle.repository
                 CurrentCommit = [string]$bundle.commit
                 CandidateCommit = $candidateCommit
+                Mode = [string]$configuration.updates.mode
+                Channel = [string]$configuration.updates.channel
+                Ref = [string]$configuration.updates.ref
                 Package = $package
             }
             & $InstallCandidate $installRequest
-            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'installed' -ArchiveSha256 ([string]$package.ArchiveSha256) -Message 'The canonical candidate was installed transactionally.'
-            Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
-            return $result
+            try {
+                $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+            }
+            catch [System.IO.IOException] {
+                throw 'The active runtime could not be verified because another AI instructions installer is running.'
+            }
+            try {
+                try {
+                    $activeConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+                    $activeBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+                }
+                catch { throw "The active runtime could not be verified after installation: $($_.Exception.Message)" }
+                Assert-AiInstructionsRuntimeBundleV2 -Bundle $activeBundle -Configuration $activeConfiguration -RuntimeRoot $runtimeRoot | Out-Null
+                if ([string]$activeBundle.repository -cne [string]$bundle.repository -or [string]$activeBundle.commit -cne $candidateCommit) {
+                    throw 'The active runtime does not match the selected canonical candidate after installation.'
+                }
+                if ([string]$activeConfiguration.updates.mode -cne [string]$configuration.updates.mode -or
+                    [string]$activeConfiguration.updates.channel -cne [string]$configuration.updates.channel -or
+                    [string]$activeConfiguration.updates.ref -cne [string]$configuration.updates.ref) {
+                    throw 'The active runtime update policy changed during installation.'
+                }
+                $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $activeConfiguration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome 'installed' -ArchiveSha256 ([string]$package.ArchiveSha256) -Message 'The canonical candidate was installed and verified as the active runtime.'
+                Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
+                return $result
+            }
+            finally {
+                if ($null -ne $installStateLockStream) {
+                    $installStateLockStream.Dispose()
+                    $installStateLockStream = $null
+                }
+            }
         }
         catch {
             $installOutcome = if (Test-AiInstructionsTransientNetworkError -Exception $_.Exception) { 'offline' } else { 'failed' }
-            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome $installOutcome -ArchiveSha256 $(if ($null -ne $package) { [string]$package.ArchiveSha256 } else { $null }) -Message $_.Exception.Message
+            $verifiedArchiveSha256 = $null
+            if ($null -ne $package -and
+                $null -ne $package.PSObject.Properties['ArchiveSha256'] -and
+                $package.ArchiveSha256 -is [string] -and
+                [string]$package.ArchiveSha256 -cmatch '^[0-9a-f]{64}$') {
+                $verifiedArchiveSha256 = [string]$package.ArchiveSha256
+            }
+            $result = New-AiInstructionsUpdateResult -CheckedAtUtc $NowUtc -Configuration $configuration -CurrentCommit ([string]$bundle.commit) -CandidateCommit $candidateCommit -Outcome $installOutcome -ArchiveSha256 $verifiedArchiveSha256 -Message $_.Exception.Message
             Write-AiInstructionsUpdateReceipt -Path $receiptPath -Result $result
             return $result
         }
         finally {
             if ($null -ne $package -and $null -ne $package.PSObject.Properties['CleanupRoot'] -and
                 -not [string]::IsNullOrWhiteSpace([string]$package.CleanupRoot) -and (Test-Path -LiteralPath ([string]$package.CleanupRoot))) {
-                $cleanupRoot = [System.IO.Path]::GetFullPath([string]$package.CleanupRoot)
-                $expectedPrefix = $codexHomePath + [System.IO.Path]::DirectorySeparatorChar + '.ai-instructions-update-'
-                if (-not $cleanupRoot.StartsWith($expectedPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
-                    throw "Unsafe updater cleanup path: $cleanupRoot"
-                }
+                $cleanupRoot = Assert-AiInstructionsSafeChildDirectory -Parent $codexHomePath -Path ([string]$package.CleanupRoot) -LeafPrefix '.ai-instructions-update-'
                 Remove-Item -LiteralPath $cleanupRoot -Recurse -Force -ErrorAction SilentlyContinue
             }
         }

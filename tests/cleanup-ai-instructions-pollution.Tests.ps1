@@ -122,19 +122,86 @@ Describe 'tracked AI instructions pollution cleanup' {
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
     }
 
-    # Scenario: The cleanup command is run against the canonical Instructions source repository shape.
-    # Purpose: Ensure product-repository cleanup can never remove the source repository's own tracked contract files.
+    # Scenario: A committed schema-v2 manifest labels the Codex base as a Skill without a matching flat Skill path.
+    # Purpose: Refuse cleanup when the manifest cannot satisfy the shared ownership contract.
+    It 'InterT42_rejects_schema_invalid_manifest_ownership_evidence' {
+        $targetRoot = Join-Path $TestDrive 'invalid-manifest'
+        New-PollutedTestRepository -Path $targetRoot
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifest.files[0].artifactType = 'skill'
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$script:ManifestRelativePath) | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','invalid manifest fixture') | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'Managed Skill.*must preserve the flat'
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')).Count | Should Be 1
+    }
+
+    # Scenario: HEAD and the index contain product-owned bytes while the working tree is replaced with manifest-owned bytes.
+    # Purpose: Prove ownership from the Git index itself before staging a deletion, not merely from the local materialization.
+    It 'InterT45_refuses_cleanup_when_the_index_blob_is_not_manifest_owned' {
+        $targetRoot = Join-Path $TestDrive 'unowned-index'
+        New-PollutedTestRepository -Path $targetRoot
+        Set-CleanupTestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Product-owned instructions'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','product owns instructions') | Out-Null
+        Set-CleanupTestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Managed Agent'
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'index|ownership|hash'
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
+    # Scenario: The cleanup command is run against the canonical Instructions origin while one source marker is missing.
+    # Purpose: Refuse by repository identity rather than relying only on a complete source-repository file shape.
     It 'InterT50_refuses_the_canonical_instructions_source_repository' {
         $targetRoot = Join-Path $TestDrive 'source-repository'
         New-PollutedTestRepository -Path $targetRoot
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('remote','set-url','origin','git@github.com:SyuanTsai/SyuanTsai-AI-Instructions.git') | Out-Null
         Set-CleanupTestText -Path (Join-Path $targetRoot '.codex\AGENTS.en.md') -Value '# Source Codex'
-        Set-CleanupTestText -Path (Join-Path $targetRoot '.github\copilot-instructions.en.md') -Value '# Source Copilot'
 
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
         $result.ExitCode | Should Not Be 0
         $result.Output | Should Match 'source repository'
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
+    # Scenario: A legacy schema-v1 manifest and its managed bytes were committed by an older runtime.
+    # Purpose: Provide the same explicit, hash-proven cleanup path for legacy pollution without first mutating the tracked manifest.
+    It 'InterT52_cleans_manifest_proven_schema_v1_pollution' {
+        $targetRoot = Join-Path $TestDrive 'legacy-v1-pollution'
+        New-PollutedTestRepository -Path $targetRoot
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $manifestV2 = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifestV1 = [ordered]@{
+            schemaVersion = 1
+            sourceRepository = 'https://github.com/example/catalog.git'
+            sourceRef = 'main'
+            files = @(
+                foreach ($entry in @($manifestV2.files)) {
+                    [ordered]@{ sourcePath=[string]$entry.sourcePath; targetPath=[string]$entry.targetPath; sha256=[string]$entry.sha256 }
+                }
+            )
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifestV1 | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$script:ManifestRelativePath) | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','legacy manifest pollution') | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Be 0
+        $stagedChanges = @((Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-status')) | Sort-Object)
+        ($stagedChanges -contains "D`tAGENTS.md") | Should Be $true
+        ($stagedChanges -contains "D`t.codex/ai-instructions.manifest.json") | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
     }
 
     # Scenario: The product repository tracks its own Agent Skill outside the personal manifest.
@@ -203,6 +270,49 @@ Describe 'tracked AI instructions pollution cleanup' {
         ($stagedChanges -ccontains "D`tagents.md") | Should Be $true
     }
 
+    # Scenario: The shared Git exclude path is occupied by an unrelated directory when cleanup is authorized.
+    # Purpose: Preserve that filesystem entry and stop before staging any pollution deletion.
+    It 'InterT68_rejects_an_unsafe_shared_Git_exclude_mutation_path' {
+        $targetRoot = Join-Path $TestDrive 'unsafe-exclude'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        Remove-Item -LiteralPath $excludePath -Force
+        New-Item -ItemType Directory -Path $excludePath | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'unsafe shared Git exclude mutation path'
+        Test-Path -LiteralPath $excludePath -PathType Container | Should Be $true
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: A linked worktree manifest contains an unsupported schema-v2 property during authorized cleanup.
+    # Purpose: Stop before index mutation instead of letting invalid ownership evidence alter shared local ignores.
+    It 'InterT69_rejects_a_schema_invalid_linked_worktree_manifest_before_cleanup' {
+        $targetRoot = Join-Path $TestDrive 'linked-invalid-manifest'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-invalid-manifest-worktree'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','cleanup-linked-invalid-fixture',$linkedRoot) | Out-Null
+        try {
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestRelativePath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+            Set-CleanupTestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match '(?s)linked worktree manifest.*unsupported property.*unexpected'
+            @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: Bootstrap or another cleanup process holds the shared repository runtime lock.
     # Purpose: Prevent cleanup index changes from interleaving with stash, manifest, or exclude transactions.
     It 'InterT70_refuses_cleanup_while_the_repository_runtime_lock_is_held' {
@@ -222,5 +332,40 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result.ExitCode | Should Not Be 0
         $result.Output | Should Match 'another AI instruction repository operation is already running'
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
+    # Scenario: The shared exclude file contains a begin marker without its matching end marker.
+    # Purpose: Stop before index mutation instead of creating duplicate or ambiguous managed ignore blocks.
+    It 'InterT68b_rejects_a_malformed_managed_exclude_block' {
+        $targetRoot = Join-Path $TestDrive 'malformed-exclude-block'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        Set-CleanupTestText -Path $excludePath -Value "# user rule`n# BEGIN Codex AI Instructions managed paths`n/old-agent.md"
+        $excludeBefore = Get-Content -Raw -LiteralPath $excludePath
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'managed exclude block.*malformed'
+        (Get-Content -Raw -LiteralPath $excludePath) | Should Be $excludeBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
+    # Scenario: A managed manifest is reached through a directory junction after the polluted commit was created.
+    # Purpose: Treat reparse-backed ownership evidence as unsafe and stop before touching the Git index.
+    It 'InterT68c_rejects_a_reparse_backed_managed_manifest_path' {
+        $targetRoot = Join-Path $TestDrive 'reparse-manifest'
+        New-PollutedTestRepository -Path $targetRoot
+        $codexPath = Join-Path $targetRoot '.codex'
+        $externalCodexPath = Join-Path $TestDrive 'reparse-manifest-content'
+        Move-Item -LiteralPath $codexPath -Destination $externalCodexPath
+        New-Item -ItemType Junction -Path $codexPath -Target $externalCodexPath | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'reparse point'
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        Test-Path -LiteralPath (Join-Path $externalCodexPath 'ai-instructions.manifest.json') -PathType Leaf | Should Be $true
     }
 }

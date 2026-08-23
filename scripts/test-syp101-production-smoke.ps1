@@ -7,6 +7,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+Import-Module (Join-Path $PSScriptRoot 'syp101-production-smoke-contract.psm1') -Force
+
 function Invoke-SmokeGit {
     param([string]$Repository,[string[]]$Arguments)
     $previous = $ErrorActionPreference
@@ -78,6 +80,7 @@ try {
     if ($skillEntries.Count -lt 1) { throw 'Production smoke selected no real external Skills.' }
 
     $beforeSnapshot = @(Get-ManagedSnapshot -TargetRoot $targetRoot -Manifest $manifest)
+    Assert-Syp101SmokeRepositoryClean -Repository $targetRoot -Phase 'the first bootstrap'
     $beforeStatus = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('status','--porcelain')))
     $beforeStashes = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('stash','list','--format=%H%x00%gs')))
     if (@($beforeStashes | Where-Object { $_ -match 'PersonalAgent' }).Count -ne 1) {
@@ -94,6 +97,7 @@ try {
     $afterStatus = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('status','--porcelain')))
     $afterStashes = @((Invoke-SmokeGit -Repository $targetRoot -Arguments @('stash','list','--format=%H%x00%gs')))
 
+    Assert-Syp101SmokeRepositoryClean -Repository $targetRoot -Phase 'the second bootstrap'
     if (($beforeSnapshot -join "`n") -cne ($afterSnapshot -join "`n")) { throw 'Second production smoke sync changed managed file bytes.' }
     if (($beforeStatus -join "`n") -cne ($afterStatus -join "`n")) { throw 'Second production smoke sync changed working-tree status.' }
     if (($beforeStashes -join "`n") -cne ($afterStashes -join "`n")) { throw 'Second production smoke sync replaced or added a PersonalAgent stash.' }

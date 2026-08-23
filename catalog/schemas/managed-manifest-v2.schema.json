@@ -77,7 +77,42 @@
           "sha256": {
             "$ref": "#/$defs/sha256"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "artifactType": {
+                  "const": "skill"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "sourcePath": {
+                  "pattern": "^\\.agents/skills/"
+                },
+                "targetPath": {
+                  "pattern": "^\\.agents/skills/"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "sourcePath": {
+                  "not": {
+                    "pattern": "^\\.agents/skills/"
+                  }
+                },
+                "targetPath": {
+                  "not": {
+                    "pattern": "^\\.agents/skills/"
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     }
   },

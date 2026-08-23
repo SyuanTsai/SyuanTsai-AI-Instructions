@@ -12,11 +12,16 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 }
 $installedModule = Join-Path $PSScriptRoot 'ai-instructions-runtime\ai-instructions-updater.psm1'
+$installedLauncher = Join-Path $PSScriptRoot 'bootstrap-ai-instructions.ps1'
+if (Test-Path -LiteralPath $installedModule -PathType Leaf) {
+    if (-not (Test-Path -LiteralPath $installedLauncher -PathType Leaf)) { throw "Installed AI instructions preflight launcher is missing: $installedLauncher" }
+    & $installedLauncher -ValidateOnly
+}
 $modulePath = if (Test-Path -LiteralPath $installedModule -PathType Leaf) { $installedModule } else { Join-Path $PSScriptRoot 'ai-instructions-updater.psm1' }
 Import-Module $modulePath -Force
 
 $result = Invoke-AiInstructionsUpdateWorkflow -CodexHome $CodexHome -ForceCheck:$ForceCheck -InstallApproved:$InstallApproved
 Write-Output "AI instructions update outcome: $($result.outcome). $($result.message)"
-if ([string]$result.outcome -in @('failed','drift')) {
+if ([string]$result.outcome -in @('failed','drift','concurrent')) {
     throw "AI instructions update stopped: $($result.message)"
 }

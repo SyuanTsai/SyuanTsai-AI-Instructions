@@ -12,7 +12,7 @@
 | Managed manifest | 2 | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
 | Personal sync configuration | 4 | 記錄 exclusions、已安裝 AI-Instructions runtime/Catalog bundle 的 canonical GitHub Repository 與完整 commit SHA、Skill selection，以及更新 mode／channel／interval；不含任何 auto-commit 設定。 |
 | Runtime bundle metadata | 2 | 安裝時產生 `runtime-bundle.json`，記錄 Repository、commit、acquisition、archive hash，以及 runtime 精確檔案 inventory／hash；launcher 與 updater 每次執行前都必須完整驗證。 |
-| Update receipt | 1 | 記錄上次檢查時間、policy、current/candidate commit、結果、archive hash 與診斷訊息，供 rate limit、離線行為與稽核使用。 |
+| Update receipt | 1 | 記錄上次檢查時間、policy、current/candidate commit、結果、archive hash 與診斷訊息；`current` outcome 的 `candidateCommit` 固定為 `null`，已解析版本由 `currentCommit` 唯一表示。 |
 
 正式 schema 位於 [`schemas/`](schemas/)，去識別化、可通過 parser 的完整文件位於 [`examples/`](examples/)。`scripts/skills-catalog-contract.psm1` 負責 PowerShell 5.1 相容的跨文件驗證；JSON Schema 負責標準工具可讀的結構契約。
 
@@ -82,6 +82,8 @@ Conditional operator 的 production semantics：
 
 所有來源必須先下載、驗證並完成 staging，之後才可寫入目標 Repository；任一 pin 或 hash 無法驗證時不得留下部分 desired entries。
 
+Executable contract 與 JSON Schemas 採相同的 strict object／scalar boundary：Catalog、source pins、Lock、manifest、config 與其巢狀物件都拒絕未知 property；SHA、commit、enum 與其他 scalar 欄位不得以 singleton array 透過 PowerShell coercion 混入。Manifest 的 `artifactType` 必須與路徑 family 一致，`instruction` 不得宣告 `.agents/skills/**` ownership，`skill` 則必須維持同一 stable ID 的 flat Skill path。非 conditional dependency 也不得帶入 `condition` 或 `fallback`。
+
 ## Managed manifest v2 provenance
 
 每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。Skill entry 的 source 與 target 必須維持 `.agents/skills/<artifactId>/...`。Manifest v2 不使用 Git submodule metadata。
@@ -95,8 +97,9 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須至少為 1。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
-- Installed launcher 在更新檢查前、更新完成後與實際 bootstrap 前驗證 config、bundle identity、完整 inventory、Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
-- Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。離線時保留已驗證 runtime；receipt 使用原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
-- Installer 在 install lock 內重驗 expected current commit，先在 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、cleanup、runtime 與 config；任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
+- Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
+- Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。Windows PowerShell 的 WebException 與 PowerShell 7 的 HttpResponseException rate-limit 形態都會安全退回 offline。Receipt 使用同目錄原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
+- `rate-limit` 與 `concurrent` 是不落盤的 workflow 結果；前者在最小檢查間隔尚未經過時保留上一份有效 receipt，後者讓 manual command／launcher fail closed，避免與 runtime swap 交錯，因此 receipt schema 只列出實際 persisted outcomes。
+- Stable installer 先以內建 canonical identity／archive hash／git HEAD verifier 驗證 candidate source，通過後才 import candidate contract；接著在 install lock 內重驗 expected current commit 與 updater 決策時的 mode/channel/ref，並於 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、cleanup、runtime 與 config。任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
 
-Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除，既有 manifest v1 仍可在所有受管檔案未變更且未 staged 時安全升級。
+Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除，既有 manifest v1 只有通過精確 legacy parser 且所有受管檔案未變更、未 staged 時才能安全升級；相同 parser 也供明確授權的 legacy pollution cleanup 使用。

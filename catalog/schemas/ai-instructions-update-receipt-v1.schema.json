@@ -62,7 +62,6 @@
         "installed",
         "offline",
         "stale",
-        "rate-limited",
         "drift",
         "failed"
       ]
@@ -82,6 +81,96 @@
       "minLength": 1
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "channel": {
+            "const": "protected-branch"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ref": {
+            "const": "main"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "channel": {
+            "const": "github-release"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ref": {
+            "const": "latest"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "current"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "candidateCommit": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "available",
+              "installed",
+              "stale",
+              "drift"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "candidateCommit": {
+            "$ref": "#/$defs/commit"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "installed",
+              "drift"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "archiveSha256": {
+            "$ref": "#/$defs/hash"
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "commit": {
       "type": "string",

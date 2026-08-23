@@ -19,8 +19,7 @@
     },
     "repository": {
       "type": "string",
-      "format": "uri",
-      "pattern": "^https://github\\.com/"
+      "const": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git"
     },
     "commit": {
       "$ref": "#/$defs/commit"
