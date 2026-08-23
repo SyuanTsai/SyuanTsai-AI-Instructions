@@ -189,6 +189,18 @@ Describe 'install-ai-instructions-bootstrap' {
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
 
+    # Scenario: Codex uses its default home because CODEX_HOME is not set when an Agent follows the installed bootstrap instruction.
+    # Purpose: Keep the generated instruction executable for the installer's supported $HOME/.codex fallback instead of resolving a root-level hooks path.
+    It 'InterT07_installed_bootstrap_instruction_supports_the_default_Codex_Home' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $agents = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $codexHome 'AGENTS.md')
+        $agents | Should Match ([regex]::Escape("[string]::IsNullOrWhiteSpace(`$env:CODEX_HOME)"))
+        $agents | Should Match ([regex]::Escape("Join-Path `$HOME '.codex'"))
+        $agents | Should Match ([regex]::Escape("Join-Path `$codexHome 'hooks\bootstrap-ai-instructions.ps1'"))
+        $agents | Should Not Match ([regex]::Escape('$CODEX_HOME/hooks/bootstrap-ai-instructions.ps1'))
+    }
+
     # Scenario: A prior installation left an outdated stable bootstrap launcher.
     # Purpose: Replace installer-owned launcher bytes with the verified candidate version.
     It 'InterT15_overwrites_a_stale_bootstrap_hook_with_the_installed_launcher' {
