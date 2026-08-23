@@ -118,8 +118,30 @@ function Assert-InstallerSafeChildDirectory {
     return $childPath
 }
 
+function Test-InstallerOwnedBootstrapHook {
+    param(
+        [AllowNull()][object] $Hook,
+        [Parameter(Mandatory = $true)][string] $BootstrapHookPath
+    )
+    if ($null -eq $Hook -or -not (Test-InstallerHasProperty -Object $Hook -Name 'type') -or
+        [string]$Hook.type -cne 'command') { return $false }
+
+    $ownedPath = [System.IO.Path]::GetFullPath($BootstrapHookPath).Replace('/','\')
+    $ownedPathPattern = '(?i)(?<![A-Za-z0-9_.-])' + [regex]::Escape($ownedPath) + '(?![A-Za-z0-9_.-])'
+    foreach ($propertyName in @('command','commandWindows')) {
+        if ((Test-InstallerHasProperty -Object $Hook -Name $propertyName) -and $Hook.$propertyName -is [string]) {
+            $command = ([string]$Hook.$propertyName).Replace('/','\')
+            if ([regex]::IsMatch($command,$ownedPathPattern)) { return $true }
+        }
+    }
+    return $false
+}
+
 function Remove-InstallerSessionStartHook {
-    param([Parameter(Mandatory = $true)][string] $HooksPath)
+    param(
+        [Parameter(Mandatory = $true)][string] $HooksPath,
+        [Parameter(Mandatory = $true)][string] $BootstrapHookPath
+    )
     if (-not (Test-Path -LiteralPath $HooksPath -PathType Leaf)) { return }
     try { $document = Get-Content -Raw -Encoding UTF8 -LiteralPath $HooksPath | ConvertFrom-Json }
     catch { throw "Codex hooks file is not valid JSON: $HooksPath" }
@@ -133,12 +155,7 @@ function Remove-InstallerSessionStartHook {
         $retainedHooks = New-Object System.Collections.Generic.List[object]
         foreach ($hook in @($entry.hooks)) {
             if ($null -eq $hook) { $retainedHooks.Add($hook); continue }
-            $isBootstrap = $false
-            foreach ($propertyName in @('command','commandWindows')) {
-                if ((Test-InstallerHasProperty -Object $hook -Name $propertyName) -and [string]$hook.$propertyName -match 'bootstrap-ai-instructions\.ps1') {
-                    $isBootstrap = $true
-                }
-            }
+            $isBootstrap = Test-InstallerOwnedBootstrapHook -Hook $hook -BootstrapHookPath $BootstrapHookPath
             if ($isBootstrap) { $removedBootstrap = $true }
             else { $retainedHooks.Add($hook) }
         }
@@ -383,7 +400,7 @@ try {
             Move-Item -LiteralPath $stagingRuntime -Destination $runtimeDirectory; $runtimeInstalled=$true
             Copy-Item -LiteralPath $stagingConfiguration -Destination $configurationPath -Force
             Set-InstallerBootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
-            Remove-InstallerSessionStartHook -HooksPath $hooksPath
+            Remove-InstallerSessionStartHook -HooksPath $hooksPath -BootstrapHookPath $hookScript
         }
         catch {
             $installError=$_

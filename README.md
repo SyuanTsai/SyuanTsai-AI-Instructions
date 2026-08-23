@@ -92,7 +92,7 @@ Installer 的 git-checkout 模式只接受 canonical origin、完整 `HEAD` comm
 - `~/.codex/ai-instructions-sync.json`
 - 個人 `AGENTS.md` 的 `Repository Instructions Bootstrap` 區塊
 
-舊 bootstrap `SessionStart` hook 會從 entry 內精確移除；同一 entry 的其他 hooks 與個人規則保留。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`。
+舊 bootstrap `SessionStart` hook 只有在 command 指向目前 Codex Home 的 installed bootstrap path 時才會從 entry 內精確移除；不同路徑下即使檔名相同也視為個人 hook 保留，同一 entry 的其他 hooks 與個人規則也不變。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`。
 
 安裝時可追加 exclusions：
 

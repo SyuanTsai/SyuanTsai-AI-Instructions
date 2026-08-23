@@ -229,17 +229,16 @@ old bootstrap text
 
 Keep this section too.
 '@
-        Set-TestText -Path (Join-Path $codexHome 'hooks.json') -Value @'
-{
-  "hooks": {
-    "SessionStart": [
-      {"matcher":"startup","hooks":[{"type":"command","command":"powershell.exe -File \"C:\\old\\bootstrap-ai-instructions.ps1\""}]},
-      {"matcher":"other","hooks":[{"type":"command","command":"powershell.exe -File \"C:\\keep\\other.ps1\""}]}
-    ],
-    "Stop": [{"matcher":"keep-stop","hooks":[]}]
-  }
-}
-'@
+        $installedBootstrapHook = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        Set-TestJson -Path (Join-Path $codexHome 'hooks.json') -Document ([ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @(
+                    [ordered]@{matcher='startup';hooks=@([ordered]@{type='command';command="powershell.exe -File `"$installedBootstrapHook`""})},
+                    [ordered]@{matcher='other';hooks=@([ordered]@{type='command';command='powershell.exe -File "C:\keep\other.ps1"'})}
+                )
+                Stop = @([ordered]@{matcher='keep-stop';hooks=@()})
+            }
+        })
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
@@ -257,21 +256,18 @@ Keep this section too.
     # Scenario: One SessionStart entry contains both the obsolete bootstrap command and an unrelated personal command.
     # Purpose: Remove only the obsolete hook instead of deleting the user's unrelated hook from the same entry.
     It 'InterT22_preserves_unrelated_hooks_inside_a_mixed_SessionStart_entry' {
-        Set-TestText -Path (Join-Path $codexHome 'hooks.json') -Value @'
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup",
-        "hooks": [
-          {"type":"command","command":"powershell.exe -File \"C:\\old\\bootstrap-ai-instructions.ps1\""},
-          {"type":"command","command":"powershell.exe -File \"C:\\keep\\personal-startup.ps1\""}
-        ]
-      }
-    ]
-  }
-}
-'@
+        $installedBootstrapHook = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        Set-TestJson -Path (Join-Path $codexHome 'hooks.json') -Document ([ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @([ordered]@{
+                    matcher = 'startup'
+                    hooks = @(
+                        [ordered]@{type='command';command="powershell.exe -File `"$installedBootstrapHook`""},
+                        [ordered]@{type='command';command='powershell.exe -File "C:\keep\personal-startup.ps1"'}
+                    )
+                })
+            }
+        })
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
@@ -282,12 +278,38 @@ Keep this section too.
         [string]$hooks.hooks.SessionStart[0].hooks[0].command | Should Not Match 'bootstrap-ai-instructions\.ps1'
     }
 
+    # Scenario: A personal SessionStart command invokes a different script that happens to use the bootstrap filename.
+    # Purpose: Require installer ownership evidence before deleting a user hook with a colliding basename.
+    It 'InterT24_preserves_a_same_named_SessionStart_hook_outside_the_installed_path' {
+        Set-TestText -Path (Join-Path $codexHome 'hooks.json') -Value @'
+{
+  "hooks": {
+    "SessionStart": [
+      {"matcher":"personal","hooks":[{"type":"command","command":"powershell.exe -File \"C:\\personal-tools\\bootstrap-ai-instructions.ps1\""}]}
+    ]
+  }
+}
+'@
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
+        @($hooks.hooks.SessionStart).Count | Should Be 1
+        [string]$hooks.hooks.SessionStart[0].hooks[0].command | Should Match 'C:\\personal-tools\\bootstrap-ai-instructions\.ps1'
+    }
+
     # Scenario: SessionStart contains only the obsolete bootstrap command.
     # Purpose: Remove the now-empty hook category instead of leaving background bootstrap behavior.
     It 'InterT25_removes_SessionStart_when_the_legacy_bootstrap_is_its_only_entry' {
-        Set-TestText -Path (Join-Path $codexHome 'hooks.json') -Value @'
-{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","commandWindows":"powershell.exe -File \"C:\\old\\bootstrap-ai-instructions.ps1\""}]}]}}
-'@
+        $installedBootstrapHook = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        Set-TestJson -Path (Join-Path $codexHome 'hooks.json') -Document ([ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @([ordered]@{
+                    matcher = 'startup'
+                    hooks = @([ordered]@{type='command';commandWindows="powershell.exe -File `"$installedBootstrapHook`""})
+                })
+            }
+        })
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $hooks = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks.json') | ConvertFrom-Json
         ($hooks.hooks.PSObject.Properties.Name -contains 'SessionStart') | Should Be $false
