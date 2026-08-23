@@ -45,7 +45,8 @@ minimum interval active -----------> rate-limit (no network)
         |
         v
 resolve canonical candidate
-   | offline/error -----------------> offline receipt; keep current runtime
+   | transient network/rate limit --> offline receipt; keep current runtime
+   | permanent/config error --------> failed receipt; keep current runtime
    | same commit -------------------> current receipt
    | behind/diverged --------------> stale receipt; refuse downgrade
    | newer + notify-only ----------> available receipt
@@ -135,7 +136,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 
 - Config v1/v2/v3/v4 migration、unknown schema、identity/ref rejection。
 - Runtime inventory exact match、缺檔、額外檔案、byte drift、codeload archive hash requirement。
-- Update current/available/installed/offline/stale/rate-limit/drift、update/install lock concurrent 與 malformed receipt self-healing。
+- Update current/available/installed/offline/failed/stale/rate-limit/drift、update/install lock concurrent 與 malformed receipt self-healing。
 - Installer staging validation cleanup、expected-current revalidation、late failure rollback、launcher identity/inventory rejection。
 - Bootstrap branch switch、linked worktree divergent managed sets、`git clean -fdx` 後完整 re-materialization、manifest/file/exclude self-healing 與 repository lock。
 - Customized/unmanaged protection、case-variant 與 legacy-v1 tracked pollution、canonical-origin refusal、cleanup authorization/hash/staged/rollback boundaries。
