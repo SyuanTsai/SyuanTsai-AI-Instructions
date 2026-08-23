@@ -332,6 +332,7 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     }
     if ($updates.minimumCheckIntervalMinutes -isnot [int] -and $updates.minimumCheckIntervalMinutes -isnot [long]) { throw 'AI instruction update minimumCheckIntervalMinutes must be an integer.' }
     if ([long]$updates.minimumCheckIntervalMinutes -lt 1) { throw 'AI instruction update minimumCheckIntervalMinutes must be at least 1.' }
+    if ([long]$updates.minimumCheckIntervalMinutes -gt [int]::MaxValue) { throw "AI instruction update minimumCheckIntervalMinutes must be at most $([int]::MaxValue)." }
     return $Configuration
 }
 

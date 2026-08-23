@@ -149,7 +149,9 @@ function Assert-InstalledRuntime {
         $configuration.updates.ref -isnot [string] -or
         (([string]$configuration.updates.channel -ceq 'protected-branch' -and [string]$configuration.updates.ref -cne 'main') -or
          ([string]$configuration.updates.channel -ceq 'github-release' -and [string]$configuration.updates.ref -cne 'latest')) -or
-        (($configuration.updates.minimumCheckIntervalMinutes -isnot [int] -and $configuration.updates.minimumCheckIntervalMinutes -isnot [long]) -or [long]$configuration.updates.minimumCheckIntervalMinutes -lt 1)) {
+        (($configuration.updates.minimumCheckIntervalMinutes -isnot [int] -and $configuration.updates.minimumCheckIntervalMinutes -isnot [long]) -or
+         [long]$configuration.updates.minimumCheckIntervalMinutes -lt 1 -or
+         [long]$configuration.updates.minimumCheckIntervalMinutes -gt [int]::MaxValue)) {
         throw 'AI instruction sync configuration update policy is invalid.'
     }
 

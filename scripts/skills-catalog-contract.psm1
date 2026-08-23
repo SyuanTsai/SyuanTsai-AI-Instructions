@@ -434,6 +434,7 @@ function Assert-SyncConfigurationV4 {
     $minimumCheckIntervalMinutes=Get-RequiredProperty -Object $updates -Name 'minimumCheckIntervalMinutes' -Context 'AI instruction sync configuration updates'
     if ($minimumCheckIntervalMinutes -isnot [int] -and $minimumCheckIntervalMinutes -isnot [long]) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be an integer.' }
     if ([long]$minimumCheckIntervalMinutes -lt 1) { throw 'AI instruction sync configuration updates minimumCheckIntervalMinutes must be at least 1.' }
+    if ([long]$minimumCheckIntervalMinutes -gt [int]::MaxValue) { throw "AI instruction sync configuration updates minimumCheckIntervalMinutes must be at most $([int]::MaxValue)." }
 }
 
 function Assert-LegacyManagedManifestV1 {

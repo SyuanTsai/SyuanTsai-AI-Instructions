@@ -137,7 +137,7 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 }
 ```
 
-`catalog.repository/ref` 由 installer 管理；不得手動改成其他 Repository 或 mutable ref。使用者可維護 exclusions、Skill selections 與 `updates` policy。
+`catalog.repository/ref` 由 installer 管理；不得手動改成其他 Repository 或 mutable ref。使用者可維護 exclusions、Skill selections 與 `updates` policy；`minimumCheckIntervalMinutes` 的合法範圍是 1 到 2147483647。
 
 ## Runtime 更新
 

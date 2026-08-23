@@ -554,6 +554,19 @@ Describe 'Skills Catalog contract' {
         $configuration.updates.ref | Should Be 'main'
     }
 
+    # Scenario: A personal sync configuration sets the update interval above the installer-supported Int32 range.
+    # Purpose: Keep the Catalog contract parser aligned with the v4 schema and runtime migration boundary.
+    It 'UnitT92_rejects_an_update_interval_outside_the_v4_contract' {
+        $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
+        $configuration.updates.minimumCheckIntervalMinutes = [long][int]::MaxValue + 1
+        $configurationPath = Write-TestJsonDocument -Document $configuration -Name 'out-of-range-update-interval.json'
+
+        (Get-ContractValidationError `
+            -CatalogPath $script:CatalogExample `
+            -ConfigurationPath $configurationPath) |
+            Should Match 'minimumCheckIntervalMinutes must be at most 2147483647'
+    }
+
     # Scenario: A personal selection differs from a known stable ID only by invalid casing.
     # Purpose: Prevent PowerShell's case-insensitive lookup from accepting values rejected by the JSON Schema.
     It 'UnitT93_rejects_non_stable_profile_and_skill_selection_ids' {

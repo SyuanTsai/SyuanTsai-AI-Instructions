@@ -626,6 +626,22 @@ Keep this section too.
         ($output -join [Environment]::NewLine) | Should Match 'runtime bundle does not match'
     }
 
+    # Scenario: The installed configuration carries an update interval above the v4 schema and migration boundary.
+    # Purpose: Make the trusted stable-launcher preflight reject out-of-contract policy before importing runtime code.
+    It 'InterT57_installed_launcher_rejects_an_out_of_range_update_interval' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.updates.minimumCheckIntervalMinutes = [long][int]::MaxValue + 1
+        Set-TestJson -Path $configurationPath -Document $configuration
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'update policy is invalid'
+    }
+
     # Scenario: One installed runtime module is changed after its bundle inventory was created.
     # Purpose: Stop the stable launcher before executing any tampered runtime code.
     It 'InterT60_installed_launcher_rejects_runtime_inventory_tampering_before_execution' {

@@ -276,6 +276,26 @@ Describe 'AI instructions runtime contracts' {
             Should Match 'excludedRepositoryPaths must be an array'
     }
 
+    # Scenario: A schema-v4 update interval exceeds the Int32 range used by idempotent configuration migration.
+    # Purpose: Keep the portable schema and executable validator aligned so every accepted v4 document can be migrated.
+    It 'UnitT89_rejects_update_intervals_that_cannot_survive_v4_migration' {
+        $configurationSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-sync-v4.schema.json') | ConvertFrom-Json
+        [long]$configurationSchema.properties.updates.properties.minimumCheckIntervalMinutes.maximum |
+            Should Be ([long][int]::MaxValue)
+
+        $configuration = New-TestConfigurationDocument -SchemaVersion 4
+        $configuration.updates.minimumCheckIntervalMinutes = [long][int]::MaxValue + 1
+
+        (Get-RuntimeContractError { Assert-AiInstructionsSyncConfigurationV4 -Configuration $configuration }) |
+            Should Match 'at most 2147483647'
+        (Get-RuntimeContractError {
+            ConvertTo-AiInstructionsSyncConfigurationV4 `
+                -ExistingConfiguration $configuration `
+                -CatalogRepository $script:CanonicalRepository `
+                -CatalogRef ('c' * 40)
+        }) | Should Match 'at most 2147483647'
+    }
+
     # Scenario: A persisted git-checkout runtime bundle uses an empty string where the schema permits only null or SHA-256.
     # Purpose: Keep executable bundle validation aligned with the portable nullability contract.
     It 'UnitT90_rejects_schema_invalid_runtime_bundle_nullability' {

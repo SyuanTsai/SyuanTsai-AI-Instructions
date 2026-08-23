@@ -95,7 +95,7 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - 保留合法的 `excludedRepositoryUrls`、`excludedRepositoryPaths`；v3／v4 另保留 `profiles`、`includeSkills`、`excludeSkills`。
 - 所有舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 都會移除；runtime 不會 stage、commit 或 push 目標 Repository。
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
-- `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須至少為 1。
+- `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須介於 1 與 2147483647，確保所有 schema-valid v4 設定都能由 installer idempotent 遷移並交給 updater。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
 - Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
 - Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。Windows PowerShell 的 WebException 與 PowerShell 7 的 HttpResponseException rate-limit 形態都會安全退回 offline。Receipt 使用同目錄原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
