@@ -312,7 +312,7 @@ Keep this section too.
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
         }
         & git -C $cloneRoot add -- scripts
-        & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet -m 'installer fixture'
+        & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
         [System.IO.File]::AppendAllText((Join-Path $cloneRoot 'scripts\skills-selection.psm1'), "`n# dirty installer fixture`n")
 
