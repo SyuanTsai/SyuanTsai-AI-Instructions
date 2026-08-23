@@ -146,13 +146,23 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 手動強制檢查：
 
 ```powershell
-& "$env:CODEX_HOME\hooks\update-ai-instructions.ps1" -ForceCheck
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\update-ai-instructions.ps1') -ForceCheck
 ```
 
 手動核准並安裝 candidate：
 
 ```powershell
-& "$env:CODEX_HOME\hooks\update-ai-instructions.ps1" -ForceCheck -InstallApproved
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\update-ai-instructions.ps1') -ForceCheck -InstallApproved
 ```
 
 若要由 policy 自動安裝已核准 channel 的更新，將 `updates.mode` 設為 `auto-install-approved`。Updater 仍會：
@@ -176,7 +186,12 @@ Personal artifacts 必須保持 untracked。若 manifest 能證明的受管路�
 先檢查內容與 manifest，再明確授權 cleanup：
 
 ```powershell
-& "$env:CODEX_HOME\hooks\cleanup-ai-instructions-pollution.ps1" `
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\cleanup-ai-instructions-pollution.ps1') `
   -RepositoryRoot (git rev-parse --show-toplevel) `
   -Authorize
 ```
