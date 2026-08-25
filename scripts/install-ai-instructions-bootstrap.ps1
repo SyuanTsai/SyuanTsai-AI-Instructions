@@ -17,6 +17,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:InstallerMutationRoot = $null
+$script:InstallerHeldLockPath = $null
+$script:InstallerFileTransactionStates = @{}
 
 $bootstrapSection = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(
     'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOWPquacieaWsOWinuaIluabtOaWsCBwcm9kdWN0aW9uIGNvZGUg55qE5a+m5L2c6KiI55Wr5pmC77yM5omN5Z+36KGMIGAkY29kZXhIb21lID0gaWYgKC1ub3QgW3N0cmluZ106OklzTnVsbE9yV2hpdGVTcGFjZSgkZW52OkNPREVYX0hPTUUpKSB7ICRlbnY6Q09ERVhfSE9NRSB9IGVsc2UgeyBKb2luLVBhdGggJEhPTUUgJy5jb2RleCcgfTsgJiAoSm9pbi1QYXRoICRjb2RleEhvbWUgJ2hvb2tzXGJvb3RzdHJhcC1haS1pbnN0cnVjdGlvbnMucHMxJylg77yb5Zau57SU5ZWP5ZWP6aGM44CB6YeQ5riF6ZyA5rGC44CB56K66KqN5oiW6Kej6YeL5ZWP6aGM77yM5Lul5Y+K5YW25LuW5bCa5pyq6ZaL5aeL6KaP5YqDIGNvZGUg55qE5bel5L2c5LiN5b6X5Z+36KGMIGJvb3RzdHJhcOOAggotIOWQjOatpeWujOaIkOW+jO+8jOWFiOiugOWPliBSZXBvc2l0b3J5IOaWsOWinuaIluabtOaWsOeahCBgQUdFTlRTLm1kYCDoiIfnm67liY3ku7vli5npgannlKjnmoTopo/liYfmqKHntYTvvJvkvb/nlKjogIXmmI7norrmjIflrpogU2tpbGwg5oiW5Lu75YuZ56ym5ZCIIGAuYWdlbnRzL3NraWxscy9gIOS4reeahCBTa2lsbCBkZXNjcmlwdGlvbiDmmYLvvIzlho3oroDlj5blsI3mh4kgYFNLSUxMLm1kYOOAggotIOS7pSBgLmNvZGV4L2FpLWluc3RydWN0aW9ucy5tYW5pZmVzdC5qc29uYCDnrqHnkIblhbHkuqsgSW5zdHJ1Y3Rpb25zIOiIhyBBZ2VudCBTa2lsbHPvvJvlj6rmm7TmlrDmnKrooqvlgIvkurrkv67mlLnnmoTlj5fnrqHnkIbmqpTmoYjvvIzkuI3opoblr6sgY3VzdG9taXplZCBvciB1bm1hbmFnZWQgSW5zdHJ1Y3Rpb25zIG9yIEFnZW50IFNraWxsc+OAggotIFJlcG9zaXRvcnkg55qEIG9yaWdpbiDoi6XliJflnKggYH4vLmNvZGV4L2FpLWluc3RydWN0aW9ucy1zeW5jLmpzb25gIOeahCBgZXhjbHVkZWRSZXBvc2l0b3J5VXJsc2DvvIzmiJYgdGFzayDllZ/li5Xnm67pjITkvY3mlrwgYGV4Y2x1ZGVkUmVwb3NpdG9yeVBhdGhzYO+8jOebtOaOpeeVpemBjuWQjOatpeOAggotIFJlcG9zaXRvcnktbG9jYWwgSW5zdHJ1Y3Rpb25z44CBU2tpbGxzIOiIhyBtYW5pZmVzdCDmmK/miYDmnIkgYnJhbmNoIOWFseeUqOeahOWAi+S6uiBydW50aW1lIGFydGlmYWN0c++8jOW/hemgiOS/neaMgSBsb2NhbCBpZ25vcmVkIOS4lOS4jeW+lyBjb21taXQg5Yiw55Si5ZOBIFJlcG9zaXRvcnnvvJvoi6Xlj5fnrqHot6/lvpHlt7LooqsgR2l0IHRyYWNrZWTvvIxib290c3RyYXAg5b+F6aCIIGZhaWwgY2xvc2VkIOS4puWbnuWgseaxoeafk+i3r+W+ke+8jOS4jeW+l+iHquWLlSBzdGFnZeOAgWNvbW1pdCDmiJYgcHVzaOOAgg=='
@@ -35,11 +38,32 @@ function Invoke-InstallerGit {
     return $output
 }
 
+function Get-InstallerMutationRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $prefix = $rootPath + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Installer mutation path is outside Codex Home: $fullPath"
+    }
+    return $fullPath.Substring($prefix.Length).Replace('\','/')
+}
+
 function Write-InstallerUtf8File {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $Content)
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Content)
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:InstallerMutationRoot)) {
+        $relativePath = Get-InstallerMutationRelativePath -Root $script:InstallerMutationRoot -Path $Path
+        Set-InstallerTransactionalFileBytes -RelativePath $relativePath -Bytes $bytes
+        return
+    }
     $parent = Split-Path -Parent $Path
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-    [System.IO.File]::WriteAllText($Path,$Content,(New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllBytes($Path,$bytes)
 }
 
 function Set-InstallerBootstrapSection {
@@ -80,6 +104,11 @@ function Assert-InstallerMutationPath {
         $parent = Split-Path -Parent $inspectionPath
         if ([string]::IsNullOrWhiteSpace($parent) -or $parent.Equals($inspectionPath,[System.StringComparison]::OrdinalIgnoreCase)) { break }
         $inspectionPath = $parent
+    }
+    if ($ExpectedType -ceq 'File' -and (Test-Path -LiteralPath $fullPath -PathType Leaf) -and
+        ([string]::IsNullOrWhiteSpace([string]$script:InstallerHeldLockPath) -or
+            -not $fullPath.Equals([string]$script:InstallerHeldLockPath,[System.StringComparison]::OrdinalIgnoreCase))) {
+        Assert-InstallerMutationFileOwnership -Path $fullPath
     }
 }
 
@@ -267,14 +296,80 @@ function Expand-InstallerGitSnapshotArchive {
 
 function Copy-InstallerBackupFile {
     param([Parameter(Mandatory = $true)][string] $Source,[Parameter(Mandatory = $true)][string] $Destination)
-    if (Test-Path -LiteralPath $Source -PathType Leaf) { Copy-Item -LiteralPath $Source -Destination $Destination -Force; return $true }
+    if (Test-Path -LiteralPath $Source -PathType Leaf) {
+        $input = [System.IO.File]::Open($Source,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read)
+        $output = $null
+        try {
+            $output = [System.IO.File]::Open($Destination,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+            $input.CopyTo($output)
+            $output.Flush($true)
+        }
+        finally {
+            if ($null -ne $output) { $output.Dispose() }
+            $input.Dispose()
+        }
+        return $true
+    }
     return $false
 }
 
-function Restore-InstallerBackupFile {
-    param([Parameter(Mandatory = $true)][string] $Destination,[Parameter(Mandatory = $true)][string] $Backup,[Parameter(Mandatory = $true)][bool] $OriginallyExisted)
-    if ($OriginallyExisted) { Copy-Item -LiteralPath $Backup -Destination $Destination -Force }
-    elseif (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+function New-InstallerFileTransactionState {
+    param(
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Backup,
+        [Parameter(Mandatory = $true)][bool] $OriginallyExisted
+    )
+
+    if ($script:InstallerFileTransactionStates.ContainsKey($RelativePath)) {
+        throw "Duplicate installer file transaction state: $RelativePath"
+    }
+    $state = [pscustomobject][ordered]@{
+        RelativePath = $RelativePath
+        OriginallyExisted = $OriginallyExisted
+        OriginalBytes = if ($OriginallyExisted) { [System.IO.File]::ReadAllBytes($Backup) } else { $null }
+        Applied = $false
+        AppliedBytes = $null
+    }
+    $script:InstallerFileTransactionStates[$RelativePath] = $state
+    return $state
+}
+
+function Set-InstallerTransactionalFileBytes {
+    param(
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    if (-not $script:InstallerFileTransactionStates.ContainsKey($RelativePath)) {
+        throw "Installer file mutation has no original-state snapshot: $RelativePath"
+    }
+    $state = $script:InstallerFileTransactionStates[$RelativePath]
+    if ([bool]$state.Applied) { throw "Installer file transaction state was already applied: $RelativePath" }
+    if ([bool]$state.OriginallyExisted) {
+        Set-InstallerSafeFileBytes -TargetRoot $script:InstallerMutationRoot -RelativePath $RelativePath `
+            -Bytes $Bytes -ExpectedBytes ([byte[]]$state.OriginalBytes)
+    }
+    else {
+        Set-InstallerSafeFileBytes -TargetRoot $script:InstallerMutationRoot -RelativePath $RelativePath `
+            -Bytes $Bytes -ExpectMissing
+    }
+    $state.AppliedBytes = [byte[]]$Bytes.Clone()
+    $state.Applied = $true
+}
+
+function Restore-InstallerFileTransactionState {
+    param([Parameter(Mandatory = $true)][object] $State)
+
+    if (-not [bool]$State.Applied) { return }
+    if ([bool]$State.OriginallyExisted) {
+        Set-InstallerSafeFileBytes -TargetRoot $script:InstallerMutationRoot -RelativePath ([string]$State.RelativePath) `
+            -Bytes ([byte[]]$State.OriginalBytes) -ExpectedBytes ([byte[]]$State.AppliedBytes)
+    }
+    else {
+        Remove-InstallerSafeFile -TargetRoot $script:InstallerMutationRoot -RelativePath ([string]$State.RelativePath) `
+            -ExpectedBytes ([byte[]]$State.AppliedBytes)
+    }
+    $State.Applied = $false
 }
 
 $runtimeFiles = @(
@@ -285,7 +380,7 @@ $runtimeFiles = @(
     'cleanup-ai-instructions-pollution.ps1'
 )
 $stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','cleanup-ai-instructions-pollution.ps1')
-$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1')
+$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 
@@ -379,11 +474,13 @@ foreach ($relativePath in $relativeSourcePaths) {
 
 $runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
 Import-Module $runtimeContractSource -Force
+Import-Module (Join-Path $repositoryRootPath 'scripts\installer-safe-mutation.psm1') -Force
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 }
 $codexHomePath = Get-InstallerFullDirectoryPath -Path $CodexHome
+$script:InstallerMutationRoot = $codexHomePath
 $codexHomeRoot = [System.IO.Path]::GetPathRoot($codexHomePath)
 if (-not [string]::IsNullOrWhiteSpace($codexHomeRoot) -and $codexHomePath.Equals($codexHomeRoot,[System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Codex Home must not be a filesystem root: $codexHomePath"
@@ -396,15 +493,17 @@ $runtimeDirectory = Join-Path $hookDirectory 'ai-instructions-runtime'
 $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
 $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
+$installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
+$script:InstallerHeldLockPath = $installLockPath
 Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
 Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
 Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
-foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
+foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
 }
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
-$installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 $installLockStream = $null
+$activeMutationGuard = Open-InstallerMutationDirectoryGuard -TargetRoot $codexHomePath -RelativeDirectory 'hooks'
 try {
     try {
         $installLockStream = [System.IO.File]::Open($installLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
@@ -412,7 +511,6 @@ try {
     catch [System.IO.IOException] {
         throw 'Another AI instructions installer is already running for this Codex Home.'
     }
-
     Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
     Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
     Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
@@ -468,9 +566,16 @@ try {
     $stagingConfiguration = Join-Path $stagingRoot 'ai-instructions-sync.json'
     $backupRoot = Join-Path $codexHomePath ".ai-instructions-backup-$transactionId"
     $backupRuntime = Join-Path $backupRoot 'runtime'
+    $quarantinedRuntime = Join-Path $backupRoot 'failed-runtime'
     $retainRecoveryBackup = $false
+    $stagingRootGuard = $null
+    $backupRootGuard = $null
     try {
         New-Item -ItemType Directory -Force -Path $stagingRuntime,(Join-Path $stagingRuntime 'catalog'),$backupRoot | Out-Null
+        $stagingRootGuard = Open-InstallerMutationDirectoryGuard -TargetRoot $codexHomePath `
+            -RelativeDirectory (Split-Path -Leaf $stagingRoot)
+        $backupRootGuard = Open-InstallerMutationDirectoryGuard -TargetRoot $codexHomePath `
+            -RelativeDirectory (Split-Path -Leaf $backupRoot)
         Assert-InstallerMutationPath -Path $stagingRoot -ExpectedType Directory
         Assert-InstallerMutationPath -Path $stagingRuntime -ExpectedType Directory
         Assert-InstallerMutationPath -Path $backupRoot -ExpectedType Directory
@@ -502,6 +607,13 @@ try {
         $hadConfiguration = Copy-InstallerBackupFile -Source $configurationPath -Destination (Join-Path $backupRoot 'ai-instructions-sync.json')
         $hadAgents = Copy-InstallerBackupFile -Source $agentsPath -Destination (Join-Path $backupRoot 'AGENTS.md')
         $hadHooks = Copy-InstallerBackupFile -Source $hooksPath -Destination (Join-Path $backupRoot 'hooks.json')
+        $hookState = New-InstallerFileTransactionState -RelativePath 'hooks/bootstrap-ai-instructions.ps1' -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook
+        $updaterState = New-InstallerFileTransactionState -RelativePath 'hooks/update-ai-instructions.ps1' -Backup (Join-Path $backupRoot 'update-ai-instructions.ps1') -OriginallyExisted $hadUpdater
+        $cleanupState = New-InstallerFileTransactionState -RelativePath 'hooks/cleanup-ai-instructions-pollution.ps1' -Backup (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1') -OriginallyExisted $hadCleanup
+        $configurationState = New-InstallerFileTransactionState -RelativePath 'ai-instructions-sync.json' -Backup (Join-Path $backupRoot 'ai-instructions-sync.json') -OriginallyExisted $hadConfiguration
+        $agentsState = New-InstallerFileTransactionState -RelativePath 'AGENTS.md' -Backup (Join-Path $backupRoot 'AGENTS.md') -OriginallyExisted $hadAgents
+        $hooksState = New-InstallerFileTransactionState -RelativePath 'hooks.json' -Backup (Join-Path $backupRoot 'hooks.json') -OriginallyExisted $hadHooks
+        $fileTransactionStates = @($hookState,$updaterState,$cleanupState,$configurationState,$agentsState,$hooksState)
         $runtimeBackedUp=$false; $runtimeInstalled=$false
         try {
             Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
@@ -510,40 +622,89 @@ try {
             foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
                 Assert-InstallerMutationPath -Path $filePath -ExpectedType File
             }
-            Copy-Item -LiteralPath $stagingLauncher -Destination $hookScript -Force
-            Copy-Item -LiteralPath $stagingUpdater -Destination $updateScript -Force
-            Copy-Item -LiteralPath $stagingCleanup -Destination $cleanupScript -Force
+            Set-InstallerTransactionalFileBytes -RelativePath 'hooks/bootstrap-ai-instructions.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingLauncher))
+            Set-InstallerTransactionalFileBytes -RelativePath 'hooks/update-ai-instructions.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingUpdater))
+            Set-InstallerTransactionalFileBytes -RelativePath 'hooks/cleanup-ai-instructions-pollution.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingCleanup))
             if ($hadRuntime) { Move-Item -LiteralPath $runtimeDirectory -Destination $backupRuntime; $runtimeBackedUp=$true }
             Move-Item -LiteralPath $stagingRuntime -Destination $runtimeDirectory; $runtimeInstalled=$true
-            Copy-Item -LiteralPath $stagingConfiguration -Destination $configurationPath -Force
+            Set-InstallerTransactionalFileBytes -RelativePath 'ai-instructions-sync.json' -Bytes ([System.IO.File]::ReadAllBytes($stagingConfiguration))
             Set-InstallerBootstrapSection -AgentsPath $agentsPath -Section $bootstrapSection
             Remove-InstallerSessionStartHook -HooksPath $hooksPath -BootstrapHookPath $hookScript
         }
         catch {
             $installError=$_
+            $rollbackErrors = New-Object System.Collections.Generic.List[string]
+            $rollbackPathsSafe = $true
             try {
                 Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
                 Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
+                Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
+                Assert-InstallerMutationPath -Path $backupRuntime -ExpectedType Directory
                 foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
                     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
                 }
-                if ($runtimeInstalled -and (Test-Path -LiteralPath $runtimeDirectory -PathType Container)) { Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force }
-                if ($runtimeBackedUp -and (Test-Path -LiteralPath $backupRuntime -PathType Container)) { Move-Item -LiteralPath $backupRuntime -Destination $runtimeDirectory }
-                Restore-InstallerBackupFile -Destination $hookScript -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook
-                Restore-InstallerBackupFile -Destination $updateScript -Backup (Join-Path $backupRoot 'update-ai-instructions.ps1') -OriginallyExisted $hadUpdater
-                Restore-InstallerBackupFile -Destination $cleanupScript -Backup (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1') -OriginallyExisted $hadCleanup
-                Restore-InstallerBackupFile -Destination $configurationPath -Backup (Join-Path $backupRoot 'ai-instructions-sync.json') -OriginallyExisted $hadConfiguration
-                Restore-InstallerBackupFile -Destination $agentsPath -Backup (Join-Path $backupRoot 'AGENTS.md') -OriginallyExisted $hadAgents
-                Restore-InstallerBackupFile -Destination $hooksPath -Backup (Join-Path $backupRoot 'hooks.json') -OriginallyExisted $hadHooks
             }
-            catch {
+            catch { $rollbackPathsSafe = $false; $rollbackErrors.Add($_.Exception.Message) }
+            if ($rollbackPathsSafe) {
+                $runtimeQuarantined = $false
+                $quarantinedRuntimeVerified = $false
+                if ($runtimeInstalled) {
+                    try {
+                        if (-not (Test-Path -LiteralPath $runtimeDirectory -PathType Container)) {
+                            throw 'The transaction-installed runtime is missing during rollback.'
+                        }
+                        if (Test-Path -LiteralPath $quarantinedRuntime) {
+                            throw "The runtime quarantine path already exists: $quarantinedRuntime"
+                        }
+                        Move-Item -LiteralPath $runtimeDirectory -Destination $quarantinedRuntime
+                        $runtimeQuarantined = $true
+                        Assert-InstallerMutationPath -Path $quarantinedRuntime -ExpectedType Directory
+                        $quarantinedBundlePath = Join-Path $quarantinedRuntime 'runtime-bundle.json'
+                        $quarantinedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $quarantinedBundlePath | ConvertFrom-Json
+                        Assert-AiInstructionsRuntimeBundleV2 -Bundle $quarantinedBundle `
+                            -Configuration $stagedConfiguration -RuntimeRoot $quarantinedRuntime | Out-Null
+                        foreach ($identityProperty in @('repository','commit','acquisition','archiveSha256','inventorySha256')) {
+                            if ([string]$quarantinedBundle.$identityProperty -cne [string]$stagedBundle.$identityProperty) {
+                                throw "The quarantined runtime no longer matches the transaction candidate: $identityProperty"
+                            }
+                        }
+                        $quarantinedRuntimeVerified = $true
+                    }
+                    catch {
+                        $rollbackErrors.Add("Runtime rollback preserved the transaction runtime quarantine because its current contents could not be proven safe to delete: $($_.Exception.Message)")
+                    }
+                }
+                if ($runtimeBackedUp) {
+                    try {
+                        if (Test-Path -LiteralPath $runtimeDirectory) {
+                            throw "The active runtime path is occupied and the previous runtime was preserved at: $backupRuntime"
+                        }
+                        if (-not (Test-Path -LiteralPath $backupRuntime -PathType Container)) {
+                            throw "The previous runtime backup is missing: $backupRuntime"
+                        }
+                        Move-Item -LiteralPath $backupRuntime -Destination $runtimeDirectory
+                    }
+                    catch { $rollbackErrors.Add("Runtime restore: $($_.Exception.Message)") }
+                }
+                if ($runtimeQuarantined -and $quarantinedRuntimeVerified) {
+                    try { Remove-Item -LiteralPath $quarantinedRuntime -Recurse -Force }
+                    catch { $rollbackErrors.Add("Verified transaction runtime cleanup: $($_.Exception.Message)") }
+                }
+                foreach ($fileState in $fileTransactionStates) {
+                    try { Restore-InstallerFileTransactionState -State $fileState }
+                    catch { $rollbackErrors.Add("$($fileState.RelativePath): $($_.Exception.Message)") }
+                }
+            }
+            if ($rollbackErrors.Count -gt 0) {
                 $retainRecoveryBackup = $true
-                throw "AI instructions installation failed and rollback also failed. Recovery backup retained at '$backupRoot'. Original error: $($installError.Exception.Message). Rollback error: $($_.Exception.Message)"
+                throw "AI instructions installation failed and rollback also failed. Recovery backup retained at '$backupRoot'. Original error: $($installError.Exception.Message). Rollback error: $($rollbackErrors -join ' | ')"
             }
             throw $installError
         }
     }
     finally {
+        if ($null -ne $backupRootGuard) { $backupRootGuard.Dispose() }
+        if ($null -ne $stagingRootGuard) { $stagingRootGuard.Dispose() }
         if (Test-Path -LiteralPath $stagingRoot) {
             $safeStagingRoot = Assert-InstallerSafeChildDirectory -Parent $codexHomePath -Path $stagingRoot -LeafPrefix '.ai-instructions-install-'
             Remove-Item -LiteralPath $safeStagingRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -555,7 +716,11 @@ try {
     }
 }
 finally {
+    if ($null -ne $activeMutationGuard) { $activeMutationGuard.Dispose() }
     if ($null -ne $installLockStream) { $installLockStream.Dispose() }
+    $script:InstallerHeldLockPath = $null
+    $script:InstallerMutationRoot = $null
+    $script:InstallerFileTransactionStates = @{}
 }
 
 Write-Output "Installed AI instructions bootstrap launcher: $hookScript"

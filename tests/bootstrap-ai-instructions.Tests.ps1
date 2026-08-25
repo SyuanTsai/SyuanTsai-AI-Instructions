@@ -1044,6 +1044,249 @@ catch {
         Test-Path -LiteralPath (Join-Path $savedParent 'victim.md') -PathType Leaf | Should Be $true
     }
 
+    # Scenario: A managed path is a hard-link alias of a file outside the target root when bootstrap tries to update it.
+    # Purpose: Treat non-exclusive file ownership as ambiguous and preserve every alias before any managed bytes change.
+    It 'InterT106_rejects_a_hard_linked_managed_file_before_mutation' {
+        $definitionRoot = Join-Path $TestDrive 'hard-link-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'hard-link-target'
+        $managedParent = Join-Path $probeRoot 'managed'
+        $outsidePath = Join-Path $TestDrive 'hard-link-outside.md'
+        $backupRoot = Join-Path $TestDrive 'hard-link-backup'
+        New-Item -ItemType Directory -Force -Path $managedParent | Out-Null
+        Set-TestText -Path $outsidePath -Value '# original outside bytes'
+        $managedPath = Join-Path $managedParent 'victim.md'
+        New-Item -ItemType HardLink -Path $managedPath -Target $outsidePath | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'hard-link-mutation-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'hard-link-mutation-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/victim.md') -BackupRoot $BackupRoot
+try {
+    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/victim.md' `
+        -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed managed bytes'))
+    $result = 'unexpectedly-mutated'
+}
+catch { $result = $_.Exception.Message }
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership'
+        (Get-Content -Raw -LiteralPath $outsidePath).Trim() | Should Be '# original outside bytes'
+        (Get-Content -Raw -LiteralPath $managedPath).Trim() | Should Be '# original outside bytes'
+    }
+
+    # Scenario: A validated parent is replaced by a junction immediately before bootstrap creates a new managed file.
+    # Purpose: Bind creation to guarded parent handles so a stale path check cannot create or write outside the target root.
+    It 'InterT107_rejects_a_parent_junction_swap_at_the_handle_bound_create_boundary' {
+        $definitionRoot = Join-Path $TestDrive 'create-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'create-bound-root'
+        $managedParent = Join-Path $probeRoot 'managed'
+        $savedParent = Join-Path $probeRoot 'managed-original'
+        $outsideRoot = Join-Path $TestDrive 'create-bound-outside'
+        $backupRoot = Join-Path $TestDrive 'create-bound-backup'
+        New-Item -ItemType Directory -Force -Path $managedParent,$outsideRoot | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'create-bound-junction-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'create-bound-junction-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $ManagedParent,
+    [Parameter(Mandatory = $true)][string] $SavedParent,
+    [Parameter(Mandatory = $true)][string] $OutsideRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$createLine = @(
+    Select-String -LiteralPath $BootstrapScript -Pattern 'File\]::Open\(\[string\]\$state\.TargetPath.*CreateNew|Open-TargetMutationAtomicCreateStream' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($createLine.Count -ne 1) { throw 'Could not locate the managed-file create boundary.' }
+$global:CreateProbeParent = $ManagedParent
+$global:CreateProbeSavedParent = $SavedParent
+$global:CreateProbeOutside = $OutsideRoot
+$breakpoint = Set-PSBreakpoint -Script $BootstrapScript -Line $createLine[0] -Action {
+    Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
+    New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside | Out-Null
+}
+try {
+    $snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+    try {
+        Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+            -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# managed create'))
+        $result = 'unexpectedly-created'
+    }
+    catch { $result = $_.Exception.Message }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-ManagedParent',$managedParent,
+            '-SavedParent',$savedParent,
+            '-OutsideRoot',$outsideRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        Test-Path -LiteralPath (Join-Path $outsideRoot 'new.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $savedParent 'new.md') | Should Be $false
+    }
+
+    # Scenario: Another process creates a previously missing parent directory after snapshot but before managed creation.
+    # Purpose: Roll back only directories positively created by this transaction and preserve externally owned empty directories.
+    It 'InterT108_preserves_an_externally_created_parent_directory_during_rollback' {
+        $definitionRoot = Join-Path $TestDrive 'directory-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'directory-ownership-root'
+        $backupRoot = Join-Path $TestDrive 'directory-ownership-backup'
+        New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'directory-ownership-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'directory-ownership-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+$externalDirectory = Join-Path $ProbeRoot 'managed'
+New-Item -ItemType Directory -Path $externalDirectory | Out-Null
+Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
+Restore-TargetMutationSnapshot -Snapshot $snapshot
+$result = if (Test-Path -LiteralPath $externalDirectory -PathType Container) { 'preserved' } else { 'removed' }
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Be 'preserved'
+        Test-Path -LiteralPath (Join-Path $probeRoot 'managed\new.md') | Should Be $false
+    }
+
+    # Scenario: Codex fan-out is ineligible, so the managed manifest is the transaction's only reason to create .codex.
+    # Purpose: Route manifest-parent creation through the handle-bound transaction and remove it after finalization rollback.
+    It 'InterT109_rolls_back_the_transaction_created_manifest_parent_when_Codex_fan_out_is_ineligible' {
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Project-owned Codex instructions'
+        $wrapperRoot = Join-Path $TestDrive 'manifest-parent-rollback-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+exit /b 109
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $excludePath = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $excludeBytesBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n"
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-TargetRoot',$targetRoot,
+            '-GitExecutable',$gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stash list'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n") | Should Be $statusBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Project-owned Codex instructions'
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.github') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
+    }
+
     # Scenario: A formerly managed rule is customized locally before the immutable source removes that rule.
     # Purpose: Preserve both the customized bytes and historical ownership evidence until the user resolves the customization.
     It 'InterT83_preserves_manifest_ownership_for_a_customized_rule_removed_from_source' {

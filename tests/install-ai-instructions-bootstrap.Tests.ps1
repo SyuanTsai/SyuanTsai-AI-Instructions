@@ -453,7 +453,7 @@ Keep this section too.
             'safe-zip.psm1','skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
             'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
-            'cleanup-ai-instructions-pollution.ps1'
+            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
         }
@@ -485,6 +485,8 @@ Keep this section too.
         $invalidSource = Join-Path $TestDrive 'invalid-staging-source'
         & git clone --quiet $repositoryRoot $invalidSource
         if ($LASTEXITCODE -ne 0) { throw 'Failed to create invalid staging source clone.' }
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\installer-safe-mutation.psm1') `
+            -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
         [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")
 
         $result = Invoke-InstallExpectFailure -RepositoryRoot $invalidSource -CodexHome $codexHome
@@ -921,5 +923,467 @@ else {
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'installed runtime directory is missing or invalid'
         Test-Path -LiteralPath $executionEvidence | Should Be $false
+    }
+
+    # Scenario: A stable installer destination is a hard-link alias of a file outside Codex Home.
+    # Purpose: Reject ambiguous stable-file ownership before installation can change any external alias bytes.
+    It 'InterT65_installer_rejects_a_hard_linked_stable_file' {
+        $outsidePath = Join-Path $TestDrive 'installer-hard-link-outside.ps1'
+        $stablePath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stablePath) | Out-Null
+        Set-TestText -Path $outsidePath -Value "# outside original`n"
+        New-Item -ItemType HardLink -Path $stablePath -Target $outsidePath | Out-Null
+        $outsideBefore = [System.IO.File]::ReadAllBytes($outsidePath)
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'hard link|multiple file-system links|exclusive ownership'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($outsidePath)) |
+            Should Be ([Convert]::ToBase64String($outsideBefore))
+        (Get-Item -Force -LiteralPath $stablePath).LinkType | Should Be 'HardLink'
+    }
+
+    # Scenario: The hooks directory is replaced by a junction after the installer's last path check but before active copies begin.
+    # Purpose: Hold a handle-bound directory guard across the complete active swap so stable commands and runtime cannot escape Codex Home.
+    It 'InterT66_installer_blocks_a_parent_junction_swap_during_active_mutation' {
+        $archivePath = Join-Path $TestDrive 'installer-junction-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $outsideRoot = Join-Path $TestDrive 'installer-junction-outside'
+        $savedHooks = Join-Path $codexHome 'hooks-original'
+        $resultPath = Join-Path $TestDrive 'installer-junction-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-junction-probe.ps1'
+        New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $OutsideRoot,
+    [Parameter(Mandatory = $true)][string] $SavedHooks,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$mutationLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern "Set-InstallerTransactionalFileBytes.*hooks/bootstrap-ai-instructions\.ps1" |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($mutationLine.Count -ne 1) { throw 'Could not locate the installer active-mutation boundary.' }
+$global:InstallerProbeHooks = Join-Path $CodexHome 'hooks'
+$global:InstallerProbeSavedHooks = $SavedHooks
+$global:InstallerProbeOutside = $OutsideRoot
+$global:InstallerProbeSwapResult = 'not-attempted'
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $mutationLine[0] -Action {
+    try {
+        Move-Item -LiteralPath $global:InstallerProbeHooks -Destination $global:InstallerProbeSavedHooks
+        New-Item -ItemType Junction -Path $global:InstallerProbeHooks -Target $global:InstallerProbeOutside | Out-Null
+        $global:InstallerProbeSwapResult = 'swapped'
+    }
+    catch { $global:InstallerProbeSwapResult = 'blocked: ' + $_.Exception.Message }
+}
+try {
+    $installerError = ''
+    & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+        -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+        -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+    $installerExit = 0
+}
+catch {
+    $installerExit = 1
+    $installerError = $_.Exception.Message
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+}
+$result = @($installerExit,$global:InstallerProbeSwapResult,$installerError) -join "`n"
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+Remove-Variable -Name InstallerProbeHooks,InstallerProbeSavedHooks,InstallerProbeOutside,InstallerProbeSwapResult -Scope Global -ErrorAction SilentlyContinue
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-OutsideRoot',$outsideRoot,
+            '-SavedHooks',$savedHooks,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^0\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^blocked:'
+        Test-Path -LiteralPath (Join-Path $outsideRoot 'bootstrap-ai-instructions.ps1') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $outsideRoot 'ai-instructions-runtime') | Should Be $false
+        (Get-Item -Force -LiteralPath (Join-Path $codexHome 'hooks')).LinkType | Should BeNullOrEmpty
+    }
+
+    # Scenario: A user edits AGENTS.md after the installer snapshots stable files but before that file is replaced.
+    # Purpose: Compare original bytes inside the mutation handle, preserve the concurrent edit, and roll back earlier installer changes.
+    It 'InterT67_preserves_a_concurrent_stable_file_edit_before_mutation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $archivePath = Join-Path $TestDrive 'installer-cas-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $agentsPath = Join-Path $codexHome 'AGENTS.md'
+        $hookBefore = [System.IO.File]::ReadAllBytes($hookPath)
+        $bundleBefore = [System.IO.File]::ReadAllBytes($bundlePath)
+        $configurationBefore = [System.IO.File]::ReadAllBytes($configurationPath)
+        $externalAgents = "# Concurrent personal instructions`n"
+        $resultPath = Join-Path $TestDrive 'installer-cas-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-cas-probe.ps1'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $AgentsPath,
+    [Parameter(Mandatory = $true)][string] $ExternalAgents,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$mutationLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern "Set-InstallerTransactionalFileBytes.*hooks/bootstrap-ai-instructions\.ps1" |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($mutationLine.Count -ne 1) { throw 'Could not locate the installer active-mutation boundary.' }
+$global:InstallerCasAgentsPath = $AgentsPath
+$global:InstallerCasExternalAgents = $ExternalAgents
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $mutationLine[0] -Action {
+    [System.IO.File]::WriteAllText(
+        $global:InstallerCasAgentsPath,
+        $global:InstallerCasExternalAgents,
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+try {
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+        $installerExit = 0
+        $installerError = ''
+    }
+    catch {
+        $installerExit = 1
+        $installerError = $_.Exception.Message
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name InstallerCasAgentsPath,InstallerCasExternalAgents -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-AgentsPath',$agentsPath,
+            '-ExternalAgents',$externalAgents,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'changed concurrently'
+        (Get-Content -Raw -LiteralPath $agentsPath) | Should Be $externalAgents
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-*' }).Count | Should Be 0
+    }
+
+    # Scenario: A user replaces a stable launcher after a late install failure begins rollback.
+    # Purpose: Preserve external bytes, restore every unaffected transaction file, and retain recovery backup evidence.
+    It 'InterT68_preserves_concurrent_stable_file_bytes_during_rollback' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $archivePath = Join-Path $TestDrive 'installer-rollback-cas-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $agentsPath = Join-Path $codexHome 'AGENTS.md'
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        $bundleBefore = [System.IO.File]::ReadAllBytes($bundlePath)
+        $configurationBefore = [System.IO.File]::ReadAllBytes($configurationPath)
+        $agentsBefore = [System.IO.File]::ReadAllBytes($agentsPath)
+        Set-TestText -Path $hooksPath -Value '{not-json'
+        $hooksBefore = [System.IO.File]::ReadAllBytes($hooksPath)
+        $externalHook = "# Concurrent launcher replacement`n"
+        $resultPath = Join-Path $TestDrive 'installer-rollback-cas-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-rollback-cas-probe.ps1'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $HookPath,
+    [Parameter(Mandatory = $true)][string] $ExternalHook,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$rollbackLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
+$global:InstallerRollbackCasHookPath = $HookPath
+$global:InstallerRollbackCasExternalHook = $ExternalHook
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
+    [System.IO.File]::WriteAllText(
+        $global:InstallerRollbackCasHookPath,
+        $global:InstallerRollbackCasExternalHook,
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+try {
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+        $installerExit = 0
+        $installerError = ''
+    }
+    catch {
+        $installerExit = 1
+        $installerError = $_.Exception.Message
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name InstallerRollbackCasHookPath,InstallerRollbackCasExternalHook -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-HookPath',$hookPath,
+            '-ExternalHook',$externalHook,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?is)rollback also failed.*current bytes were preserved'
+        (Get-Content -Raw -LiteralPath $hookPath) | Should Be $externalHook
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($agentsPath)) | Should Be ([Convert]::ToBase64String($agentsBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hooksPath)) | Should Be ([Convert]::ToBase64String($hooksBefore))
+        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 1
+    }
+
+    # Scenario: A user adds content to the transaction-installed runtime after a late install failure begins rollback.
+    # Purpose: Quarantine and preserve unverified runtime drift instead of recursively deleting it, while restoring the previous runtime.
+    It 'InterT69_preserves_concurrent_runtime_content_during_rollback' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimePath = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $activeSourcePath = Join-Path $runtimePath 'safe-zip.psm1'
+        $activeSourceBefore = [System.IO.File]::ReadAllBytes($activeSourcePath)
+        $candidateRoot = Join-Path $TestDrive 'installer-runtime-candidate'
+        New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts') -Destination $candidateRoot -Recurse
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        $candidateSourcePath = Join-Path $candidateRoot 'scripts\safe-zip.psm1'
+        [System.IO.File]::AppendAllText($candidateSourcePath,"`n# runtime rollback candidate`n",(New-Object System.Text.UTF8Encoding($false)))
+        $candidateSourceBytes = [System.IO.File]::ReadAllBytes($candidateSourcePath)
+        $archivePath = Join-Path $TestDrive 'installer-runtime-rollback-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        Set-TestText -Path $hooksPath -Value '{not-json'
+        $externalRuntimeContent = "Concurrent runtime content`n"
+        $resultPath = Join-Path $TestDrive 'installer-runtime-rollback-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-runtime-rollback-probe.ps1'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $ExternalRuntimeContent,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$rollbackLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
+$global:InstallerRollbackRuntimeRoot = Join-Path $CodexHome 'hooks\ai-instructions-runtime'
+$global:InstallerRollbackRuntimeContent = $ExternalRuntimeContent
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
+    [System.IO.File]::WriteAllText(
+        (Join-Path $global:InstallerRollbackRuntimeRoot 'concurrent-runtime-note.txt'),
+        $global:InstallerRollbackRuntimeContent,
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+try {
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+        $installerExit = 0
+        $installerError = ''
+    }
+    catch {
+        $installerExit = 1
+        $installerError = $_.Exception.Message
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name InstallerRollbackRuntimeRoot,InstallerRollbackRuntimeContent -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-ExternalRuntimeContent',$externalRuntimeContent,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?is)rollback also failed.*runtime rollback preserved'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($activeSourcePath)) |
+            Should Be ([Convert]::ToBase64String($activeSourceBefore))
+        $backupRoot = @(Get-ChildItem -LiteralPath $codexHome -Directory -Force |
+            Where-Object { $_.Name -like '.ai-instructions-backup-*' })
+        $backupRoot.Count | Should Be 1
+        $quarantinedRuntime = Join-Path $backupRoot[0].FullName 'failed-runtime'
+        (Get-Content -Raw -LiteralPath (Join-Path $quarantinedRuntime 'concurrent-runtime-note.txt')) |
+            Should Be $externalRuntimeContent
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $quarantinedRuntime 'safe-zip.psm1'))) |
+            Should Be ([Convert]::ToBase64String($candidateSourceBytes))
+    }
+
+    # Scenario: The installer backup root is swapped for an outside junction when rollback begins.
+    # Purpose: Hold a non-delete-sharing handle on the transaction backup root until rollback and cleanup are complete.
+    It 'InterT70_blocks_a_backup_root_junction_swap_during_rollback' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $archivePath = Join-Path $TestDrive 'installer-backup-guard-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        Set-TestText -Path $hooksPath -Value '{not-json'
+        $outsideRoot = Join-Path $TestDrive 'installer-backup-guard-outside'
+        $savedBackupRoot = Join-Path $codexHome 'backup-root-swapped'
+        $resultPath = Join-Path $TestDrive 'installer-backup-guard-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-backup-guard-probe.ps1'
+        New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $OutsideRoot,
+    [Parameter(Mandatory = $true)][string] $SavedBackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$rollbackLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
+$global:InstallerBackupGuardCodexHome = $CodexHome
+$global:InstallerBackupGuardOutside = $OutsideRoot
+$global:InstallerBackupGuardSaved = $SavedBackupRoot
+$global:InstallerBackupGuardSwapResult = 'not-attempted'
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
+    try {
+        $backupRoot = @(Get-ChildItem -LiteralPath $global:InstallerBackupGuardCodexHome -Directory -Force |
+            Where-Object { $_.Name -like '.ai-instructions-backup-*' })
+        if ($backupRoot.Count -ne 1) { throw 'Could not identify the active installer backup root.' }
+        Move-Item -LiteralPath $backupRoot[0].FullName -Destination $global:InstallerBackupGuardSaved -ErrorAction Stop
+        New-Item -ItemType Junction -Path $backupRoot[0].FullName -Target $global:InstallerBackupGuardOutside -ErrorAction Stop | Out-Null
+        $global:InstallerBackupGuardSwapResult = 'swapped'
+    }
+    catch { $global:InstallerBackupGuardSwapResult = 'blocked: ' + $_.Exception.Message }
+}
+try {
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+        $installerExit = 0
+        $installerError = ''
+    }
+    catch {
+        $installerExit = 1
+        $installerError = $_.Exception.Message
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText(
+    $ResultPath,
+    (@($installerExit,$global:InstallerBackupGuardSwapResult,$installerError) -join "`n"),
+    (New-Object System.Text.UTF8Encoding($false)))
+Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,InstallerBackupGuardSaved,InstallerBackupGuardSwapResult -Scope Global -ErrorAction SilentlyContinue
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-OutsideRoot',$outsideRoot,
+            '-SavedBackupRoot',$savedBackupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^blocked:'
+        Test-Path -LiteralPath $savedBackupRoot | Should Be $false
+        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force |
+            Where-Object { $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 0
+        @(Get-ChildItem -LiteralPath $outsideRoot -Force).Count | Should Be 0
     }
 }

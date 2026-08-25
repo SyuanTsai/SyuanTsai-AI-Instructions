@@ -218,6 +218,7 @@ function Get-AiInstructionsCandidatePackage {
         finally { $archiveStream.Dispose() }
         foreach ($relativePath in @(
             'scripts\install-ai-instructions-bootstrap.ps1',
+            'scripts\installer-safe-mutation.psm1',
             'scripts\bootstrap-ai-instructions-installed.ps1',
             'scripts\ai-instructions-runtime-contract.psm1',
             'scripts\ai-instructions-updater.psm1',

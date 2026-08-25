@@ -29,6 +29,7 @@ Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -69,6 +70,70 @@ namespace CodexAiInstructions
         internal uint FileIndexLow;
     }
 
+    public sealed class CreatedDirectoryIdentity
+    {
+        public string FullPath { get; private set; }
+        public string RelativePath { get; private set; }
+        public uint VolumeSerialNumber { get; private set; }
+        public uint FileIndexHigh { get; private set; }
+        public uint FileIndexLow { get; private set; }
+
+        internal CreatedDirectoryIdentity(string fullPath, string relativePath, ByHandleFileInformation information)
+        {
+            FullPath = fullPath;
+            RelativePath = relativePath;
+            VolumeSerialNumber = information.VolumeSerialNumber;
+            FileIndexHigh = information.FileIndexHigh;
+            FileIndexLow = information.FileIndexLow;
+        }
+    }
+
+    public sealed class AtomicCreateContext : IDisposable
+    {
+        private SafeFileHandle fileHandle;
+        private List<SafeFileHandle> directoryHandles;
+
+        public CreatedDirectoryIdentity[] CreatedDirectories { get; private set; }
+
+        internal AtomicCreateContext(
+            SafeFileHandle fileHandle,
+            List<SafeFileHandle> directoryHandles,
+            List<CreatedDirectoryIdentity> createdDirectories)
+        {
+            this.fileHandle = fileHandle;
+            this.directoryHandles = directoryHandles;
+            CreatedDirectories = createdDirectories.ToArray();
+        }
+
+        public SafeFileHandle TakeFileHandle()
+        {
+            if (fileHandle == null)
+            {
+                throw new InvalidOperationException("The atomic-create file handle has already been transferred.");
+            }
+            SafeFileHandle result = fileHandle;
+            fileHandle = null;
+            return result;
+        }
+
+        public void Dispose()
+        {
+            if (fileHandle != null)
+            {
+                fileHandle.Dispose();
+                fileHandle = null;
+            }
+            if (directoryHandles != null)
+            {
+                for (int index = directoryHandles.Count - 1; index >= 0; index--)
+                {
+                    directoryHandles[index].Dispose();
+                }
+                directoryHandles = null;
+            }
+        }
+    }
+
     public static class NativeFileMutation
     {
         private const uint GenericRead = 0x80000000;
@@ -78,14 +143,17 @@ namespace CodexAiInstructions
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint FileShareDelete = 0x00000004;
+        private const uint CreateNew = 1;
         private const uint OpenExisting = 3;
         private const uint FileAttributeNormal = 0x00000080;
         private const uint FileAttributeReadOnly = 0x00000001;
+        private const uint FileAttributeDirectory = 0x00000010;
         private const uint FileAttributeReparsePoint = 0x00000400;
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
         private const int FileBasicInfoClass = 0;
         private const int FileDispositionInfoClass = 4;
+        private const int ErrorAlreadyExists = 183;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
         private static extern SafeFileHandle CreateFile(
@@ -96,6 +164,10 @@ namespace CodexAiInstructions
             uint creationDisposition,
             uint flagsAndAttributes,
             IntPtr templateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateDirectoryW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateDirectory(string path, IntPtr securityAttributes);
 
         [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -232,6 +304,209 @@ namespace CodexAiInstructions
             }
         }
 
+        public static AtomicCreateContext OpenForAtomicCreate(
+            string targetRoot,
+            string path,
+            string relativePath)
+        {
+            string safeRelativePath = NormalizeRelativePath(relativePath);
+            string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
+            string lexicalPath = Path.GetFullPath(path);
+            string expectedLexicalPath = Path.GetFullPath(Path.Combine(lexicalRoot, safeRelativePath));
+            if (!string.Equals(lexicalPath, expectedLexicalPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("The managed-file create path did not match the target-root relative path.");
+            }
+
+            List<SafeFileHandle> directoryHandles = new List<SafeFileHandle>();
+            List<SafeFileHandle> createdDirectoryHandles = new List<SafeFileHandle>();
+            List<CreatedDirectoryIdentity> createdDirectories = new List<CreatedDirectoryIdentity>();
+            SafeFileHandle fileHandle = null;
+            try
+            {
+                SafeFileHandle rootHandle = OpenValidatedDirectory(
+                    lexicalRoot,
+                    null,
+                    GenericRead,
+                    FileShareRead | FileShareWrite,
+                    "Unable to open the managed target root for atomic creation.");
+                directoryHandles.Add(rootHandle);
+                string currentLexicalPath = lexicalRoot;
+                string currentFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
+                string[] segments = safeRelativePath.Split('\\');
+                string currentRelativePath = string.Empty;
+                for (int index = 0; index < segments.Length - 1; index++)
+                {
+                    string segment = segments[index];
+                    currentRelativePath = currentRelativePath.Length == 0
+                        ? segment
+                        : currentRelativePath + "\\" + segment;
+                    currentLexicalPath = Path.Combine(currentLexicalPath, segment);
+                    bool created = CreateDirectory(currentLexicalPath, IntPtr.Zero);
+                    if (!created)
+                    {
+                        int createError = Marshal.GetLastWin32Error();
+                        if (createError != ErrorAlreadyExists)
+                        {
+                            throw new Win32Exception(createError, "Unable to create a managed target parent directory.");
+                        }
+                    }
+                    string expectedDirectoryFinalPath = currentFinalPath + "\\" + segment;
+                    SafeFileHandle directoryHandle = OpenValidatedDirectory(
+                        currentLexicalPath,
+                        expectedDirectoryFinalPath,
+                        GenericRead | (created ? Delete | FileWriteAttributes : 0),
+                        FileShareRead | FileShareWrite,
+                        "Unable to guard a managed target parent directory.");
+                    directoryHandles.Add(directoryHandle);
+                    currentFinalPath = expectedDirectoryFinalPath;
+                    if (created)
+                    {
+                        ByHandleFileInformation information = GetInformation(
+                            directoryHandle,
+                            "Unable to identify a transaction-created managed directory.");
+                        createdDirectoryHandles.Add(directoryHandle);
+                        createdDirectories.Add(new CreatedDirectoryIdentity(
+                            currentLexicalPath,
+                            currentRelativePath,
+                            information));
+                    }
+                }
+
+                fileHandle = CreateFile(
+                    lexicalPath,
+                    GenericRead | GenericWrite | Delete | FileWriteAttributes,
+                    FileShareRead,
+                    IntPtr.Zero,
+                    CreateNew,
+                    FileAttributeNormal | FileFlagOpenReparsePoint,
+                    IntPtr.Zero);
+                EnsureValidHandle(fileHandle, "Unable to acquire an atomic managed-file creation handle.");
+                ValidateFileHandle(
+                    fileHandle,
+                    currentFinalPath + "\\" + segments[segments.Length - 1],
+                    "managed-file creation");
+
+                AtomicCreateContext result = new AtomicCreateContext(
+                    fileHandle,
+                    directoryHandles,
+                    createdDirectories);
+                fileHandle = null;
+                directoryHandles = null;
+                return result;
+            }
+            catch
+            {
+                if (fileHandle != null && !fileHandle.IsInvalid)
+                {
+                    try { MarkDeleteOnClose(fileHandle); }
+                    catch { }
+                    fileHandle.Dispose();
+                    fileHandle = null;
+                }
+                for (int index = createdDirectoryHandles.Count - 1; index >= 0; index--)
+                {
+                    SafeFileHandle createdHandle = createdDirectoryHandles[index];
+                    try { MarkDeleteOnClose(createdHandle); }
+                    catch { }
+                    createdHandle.Dispose();
+                }
+                throw;
+            }
+            finally
+            {
+                if (fileHandle != null)
+                {
+                    fileHandle.Dispose();
+                }
+                if (directoryHandles != null)
+                {
+                    for (int index = directoryHandles.Count - 1; index >= 0; index--)
+                    {
+                        directoryHandles[index].Dispose();
+                    }
+                }
+            }
+        }
+
+        public static SafeFileHandle OpenCreatedDirectoryForAtomicDelete(
+            string targetRoot,
+            string path,
+            string relativePath,
+            uint volumeSerialNumber,
+            uint fileIndexHigh,
+            uint fileIndexLow)
+        {
+            string safeRelativePath = NormalizeRelativePath(relativePath);
+            string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
+            string lexicalPath = Path.GetFullPath(path);
+            string expectedLexicalPath = Path.GetFullPath(Path.Combine(lexicalRoot, safeRelativePath));
+            if (!string.Equals(lexicalPath, expectedLexicalPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("The rollback directory path did not match the target-root relative path.");
+            }
+
+            List<SafeFileHandle> ancestorHandles = new List<SafeFileHandle>();
+            SafeFileHandle resultHandle = null;
+            try
+            {
+                SafeFileHandle rootHandle = OpenValidatedDirectory(
+                    lexicalRoot,
+                    null,
+                    GenericRead,
+                    FileShareRead | FileShareWrite,
+                    "Unable to open the managed target root for rollback directory cleanup.");
+                ancestorHandles.Add(rootHandle);
+                string currentLexicalPath = lexicalRoot;
+                string currentFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
+                string[] segments = safeRelativePath.Split('\\');
+                for (int index = 0; index < segments.Length; index++)
+                {
+                    currentLexicalPath = Path.Combine(currentLexicalPath, segments[index]);
+                    currentFinalPath = currentFinalPath + "\\" + segments[index];
+                    bool isTarget = index == segments.Length - 1;
+                    SafeFileHandle directoryHandle = OpenValidatedDirectory(
+                        currentLexicalPath,
+                        currentFinalPath,
+                        GenericRead | (isTarget ? Delete | FileWriteAttributes : 0),
+                        FileShareRead | FileShareWrite,
+                        "Unable to guard a rollback directory.");
+                    if (isTarget)
+                    {
+                        ByHandleFileInformation information = GetInformation(
+                            directoryHandle,
+                            "Unable to identify a rollback directory.");
+                        if (information.VolumeSerialNumber != volumeSerialNumber ||
+                            information.FileIndexHigh != fileIndexHigh ||
+                            information.FileIndexLow != fileIndexLow)
+                        {
+                            directoryHandle.Dispose();
+                            throw new IOException("The rollback directory changed concurrently; its current identity was preserved.");
+                        }
+                        resultHandle = directoryHandle;
+                    }
+                    else
+                    {
+                        ancestorHandles.Add(directoryHandle);
+                    }
+                }
+                SafeFileHandle result = resultHandle;
+                resultHandle = null;
+                return result;
+            }
+            finally
+            {
+                if (resultHandle != null)
+                {
+                    resultHandle.Dispose();
+                }
+                for (int index = ancestorHandles.Count - 1; index >= 0; index--)
+                {
+                    ancestorHandles[index].Dispose();
+                }
+            }
+        }
+
         private static SafeFileHandle OpenValidatedTarget(
             string targetRoot,
             string path,
@@ -240,47 +515,89 @@ namespace CodexAiInstructions
             uint shareMode)
         {
             string safeRelativePath = NormalizeRelativePath(relativePath);
-            string rootFinalPath;
-            using (SafeFileHandle rootHandle = CreateFile(
+            SafeFileHandle rootHandle = CreateFile(
                 targetRoot,
-                0,
-                FileShareRead | FileShareWrite | FileShareDelete,
+                GenericRead,
+                FileShareRead | FileShareWrite,
                 IntPtr.Zero,
                 OpenExisting,
-                FileFlagBackupSemantics,
-                IntPtr.Zero))
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            try
             {
                 EnsureValidHandle(rootHandle, "Unable to open the managed target root for handle-bound validation.");
-                rootFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
-            }
+                ByHandleFileInformation rootInformation = GetInformation(
+                    rootHandle,
+                    "Unable to inspect the managed target-root handle.");
+                if ((rootInformation.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (rootInformation.FileAttributes & FileAttributeDirectory) == 0)
+                {
+                    throw new IOException("The managed target root must be a non-reparse directory.");
+                }
+                string rootFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
 
+                SafeFileHandle handle = CreateFile(
+                    path,
+                    desiredAccess,
+                    shareMode,
+                    IntPtr.Zero,
+                    OpenExisting,
+                    FileAttributeNormal | FileFlagOpenReparsePoint,
+                    IntPtr.Zero);
+                try
+                {
+                    EnsureValidHandle(handle, "Unable to acquire an atomic managed-file mutation handle.");
+                    ValidateFileHandle(handle, rootFinalPath + "\\" + safeRelativePath, "managed-file mutation");
+                    return handle;
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
+            finally
+            {
+                rootHandle.Dispose();
+            }
+        }
+
+        private static SafeFileHandle OpenValidatedDirectory(
+            string path,
+            string expectedFinalPath,
+            uint desiredAccess,
+            uint shareMode,
+            string errorMessage)
+        {
             SafeFileHandle handle = CreateFile(
                 path,
                 desiredAccess,
                 shareMode,
                 IntPtr.Zero,
                 OpenExisting,
-                FileAttributeNormal | FileFlagOpenReparsePoint,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
                 IntPtr.Zero);
             try
             {
-                EnsureValidHandle(handle, "Unable to acquire an atomic managed-file mutation handle.");
-                ByHandleFileInformation information;
-                if (!GetFileInformationByHandle(handle, out information))
-                {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to inspect the managed-file mutation handle.");
-                }
+                EnsureValidHandle(handle, errorMessage);
+                ByHandleFileInformation information = GetInformation(handle, "Unable to inspect a guarded managed directory.");
                 if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
                 {
-                    throw new IOException("The managed-file mutation handle resolves to a reparse point.");
+                    throw new IOException("A guarded managed directory resolves to a reparse point.");
                 }
-                string expectedFinalPath = rootFinalPath + "\\" + safeRelativePath;
-                string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
-                if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+                if ((information.FileAttributes & FileAttributeDirectory) == 0)
                 {
-                    throw new IOException(
-                        "The managed-file mutation handle resolved outside the expected target-root path. Expected '" +
-                        expectedFinalPath + "' but opened '" + actualFinalPath + "'.");
+                    throw new IOException("A guarded managed directory path is not a directory.");
+                }
+                if (expectedFinalPath != null)
+                {
+                    string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
+                    if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new IOException(
+                            "A guarded managed directory resolved outside the expected target-root path. Expected '" +
+                            expectedFinalPath + "' but opened '" + actualFinalPath + "'.");
+                    }
                 }
                 return handle;
             }
@@ -289,6 +606,43 @@ namespace CodexAiInstructions
                 handle.Dispose();
                 throw;
             }
+        }
+
+        private static void ValidateFileHandle(SafeFileHandle handle, string expectedFinalPath, string operation)
+        {
+            ByHandleFileInformation information = GetInformation(
+                handle,
+                "Unable to inspect the " + operation + " handle.");
+            if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+            {
+                throw new IOException("The " + operation + " handle resolves to a reparse point.");
+            }
+            if ((information.FileAttributes & FileAttributeDirectory) != 0)
+            {
+                throw new IOException("The " + operation + " handle did not open a regular file.");
+            }
+            if (information.NumberOfLinks != 1)
+            {
+                throw new IOException(
+                    "The " + operation + " handle has multiple file-system links; hard link aliases do not provide exclusive ownership.");
+            }
+            string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
+            if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException(
+                    "The " + operation + " handle resolved outside the expected target-root path. Expected '" +
+                    expectedFinalPath + "' but opened '" + actualFinalPath + "'.");
+            }
+        }
+
+        private static ByHandleFileInformation GetInformation(SafeFileHandle handle, string message)
+        {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), message);
+            }
+            return information;
         }
 
         public static void MarkDeleteOnClose(SafeFileHandle handle)
@@ -1225,7 +1579,6 @@ function New-TargetMutationSnapshot {
     $resolvedTargetRoot = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
     $targetPrefix = $resolvedTargetRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     $fileStates = New-Object System.Collections.Generic.List[object]
-    $missingDirectories = @{}
     $backupIndex = 0
 
     foreach ($relativePath in @($RelativePaths | Sort-Object -Unique)) {
@@ -1273,19 +1626,12 @@ function New-TargetMutationSnapshot {
             AppliedType = $null
             AppliedBytes = $null
         })
-
-        $parentPath = Split-Path -Parent $targetPath
-        while (-not [string]::IsNullOrWhiteSpace($parentPath) -and
-            $parentPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            if (-not (Test-Path -LiteralPath $parentPath)) { $missingDirectories[$parentPath] = $true }
-            $parentPath = Split-Path -Parent $parentPath
-        }
     }
 
     return [pscustomobject][ordered]@{
         TargetRoot = $resolvedTargetRoot
         FileStates = $fileStates.ToArray()
-        MissingDirectories = @($missingDirectories.Keys)
+        CreatedDirectories = New-Object System.Collections.Generic.List[object]
     }
 }
 
@@ -1404,6 +1750,36 @@ function Open-TargetMutationAtomicWriteStream {
     }
 }
 
+function Open-TargetMutationAtomicCreateStream {
+    param(
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)][string] $TargetPath,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Operation,
+        [Parameter(Mandatory = $true)][ref] $CreateContext
+    )
+
+    $nativeContext = $null
+    $nativeHandle = $null
+    try {
+        $nativeContext = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicCreate(
+            $TargetRoot,$TargetPath,$RelativePath)
+        $nativeHandle = $nativeContext.TakeFileHandle()
+        $stream = [System.IO.FileStream]::new($nativeHandle,[System.IO.FileAccess]::ReadWrite)
+        $nativeHandle = $null
+        $CreateContext.Value = $nativeContext
+        $nativeContext = $null
+        return $stream
+    }
+    catch {
+        throw "$Operation could not acquire the handle-bound create stream; no external path was changed: $RelativePath ($TargetPath). $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $nativeHandle) { $nativeHandle.Dispose() }
+        if ($null -ne $nativeContext) { $nativeContext.Dispose() }
+    }
+}
+
 function Close-TargetMutationStream {
     param(
         [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
@@ -1462,6 +1838,7 @@ function Set-TargetMutationFileBytes {
     Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
     $stream = $null
     $restoreReadOnly = $false
+    $createContext = $null
     try {
         if ([string]$state.OriginalType -ceq 'file') {
             [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
@@ -1479,17 +1856,27 @@ function Set-TargetMutationFileBytes {
             }
         }
         else {
-            if (Test-Path -LiteralPath ([string]$state.TargetPath)) {
-                throw "Managed target changed concurrently before creation: $RelativePath"
-            }
-            $parentPath = Split-Path -Parent ([string]$state.TargetPath)
-            if (-not [string]::IsNullOrWhiteSpace($parentPath)) { New-Item -ItemType Directory -Force -Path $parentPath | Out-Null }
-            Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
             try {
-                $stream = [System.IO.File]::Open([string]$state.TargetPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+                $stream = Open-TargetMutationAtomicCreateStream -TargetRoot ([string]$Snapshot.TargetRoot) `
+                    -TargetPath ([string]$state.TargetPath) -RelativePath $RelativePath `
+                    -Operation 'Managed target creation' -CreateContext ([ref]$createContext)
             }
             catch {
                 throw "Managed target changed concurrently before creation: $RelativePath. $($_.Exception.Message)"
+            }
+            foreach ($createdDirectory in @($createContext.CreatedDirectories)) {
+                $alreadyRecorded = @($Snapshot.CreatedDirectories | Where-Object {
+                    ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,[System.StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0
+                if (-not $alreadyRecorded) {
+                    $Snapshot.CreatedDirectories.Add([pscustomobject][ordered]@{
+                        FullPath = [string]$createdDirectory.FullPath
+                        RelativePath = [string]$createdDirectory.RelativePath
+                        VolumeSerialNumber = [uint32]$createdDirectory.VolumeSerialNumber
+                        FileIndexHigh = [uint32]$createdDirectory.FileIndexHigh
+                        FileIndexLow = [uint32]$createdDirectory.FileIndexLow
+                    })
+                }
             }
         }
 
@@ -1514,6 +1901,7 @@ function Set-TargetMutationFileBytes {
         if ($null -ne $stream) {
             Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
         }
+        if ($null -ne $createContext) { $createContext.Dispose() }
     }
 }
 
@@ -1544,6 +1932,7 @@ function Restore-TargetMutationSnapshot {
         if (-not [bool]$state.MutationApplied) { continue }
         $stream = $null
         $restoreReadOnly = $false
+        $createContext = $null
         try {
             Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Target rollback '$($state.RelativePath)'"
             switch ([string]$state.AppliedType) {
@@ -1592,12 +1981,11 @@ function Restore-TargetMutationSnapshot {
                         continue
                     }
                     if ([string]$state.OriginalType -ceq 'file') {
-                        $parentPath = Split-Path -Parent ([string]$state.TargetPath)
-                        if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) { New-Item -ItemType Directory -Force -Path $parentPath | Out-Null }
-                        Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Target rollback '$($state.RelativePath)'"
                         [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
                         try {
-                            $stream = [System.IO.File]::Open([string]$state.TargetPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+                            $stream = Open-TargetMutationAtomicCreateStream -TargetRoot ([string]$Snapshot.TargetRoot) `
+                                -TargetPath ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                                -Operation 'Target rollback creation' -CreateContext ([ref]$createContext)
                         }
                         catch {
                             $driftedPaths.Add([string]$state.RelativePath)
@@ -1615,15 +2003,29 @@ function Restore-TargetMutationSnapshot {
             if ($null -ne $stream) {
                 Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
             }
+            if ($null -ne $createContext) { $createContext.Dispose() }
         }
     }
 
     if ($driftedPaths.Count -eq 0 -and $rollbackErrors.Count -eq 0) {
-        foreach ($directoryPath in @($Snapshot.MissingDirectories | Sort-Object { $_.Length } -Descending)) {
-            if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) { continue }
-            $directoryItem = Get-Item -Force -LiteralPath $directoryPath
-            if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-            if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) { Remove-Item -LiteralPath $directoryPath -Force }
+        foreach ($directoryState in @($Snapshot.CreatedDirectories | Sort-Object { ([string]$_.RelativePath).Length } -Descending)) {
+            $directoryHandle = $null
+            try {
+                $directoryHandle = [CodexAiInstructions.NativeFileMutation]::OpenCreatedDirectoryForAtomicDelete(
+                    [string]$Snapshot.TargetRoot,
+                    [string]$directoryState.FullPath,
+                    [string]$directoryState.RelativePath,
+                    [uint32]$directoryState.VolumeSerialNumber,
+                    [uint32]$directoryState.FileIndexHigh,
+                    [uint32]$directoryState.FileIndexLow)
+                [CodexAiInstructions.NativeFileMutation]::MarkDeleteOnClose($directoryHandle)
+            }
+            catch {
+                $rollbackErrors.Add("$($directoryState.RelativePath): transaction-created directory was preserved because safe cleanup failed. $($_.Exception.Message)")
+            }
+            finally {
+                if ($null -ne $directoryHandle) { $directoryHandle.Dispose() }
+            }
         }
     }
     if ($driftedPaths.Count -gt 0 -or $rollbackErrors.Count -gt 0) {
@@ -2540,9 +2942,6 @@ try {
         $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
         $manifestChanged = $false
         if ($shouldWriteManifest) {
-        $manifestDirectory = Split-Path -Parent $manifestFullPath
-        New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
-
         $manifestObject = [ordered]@{
             schemaVersion = 2
             catalogId = [string] $provenance.catalogId
