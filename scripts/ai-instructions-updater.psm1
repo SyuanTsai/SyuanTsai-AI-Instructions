@@ -201,9 +201,21 @@ function Get-AiInstructionsCandidatePackage {
         [System.Net.ServicePointManager]::SecurityProtocol =
             [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -UseBasicParsing -Uri $archiveUri -Headers @{ 'User-Agent'='Codex-AI-Instructions-Updater' } -OutFile $archivePath
-        $archiveSha256 = Get-AiInstructionsFileSha256 -Path $archivePath
         Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
-        $sourceRoot = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $extractRoot
+        $archiveStream = [System.IO.File]::Open(
+            $archivePath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try { $archiveSha256 = ([System.BitConverter]::ToString($sha.ComputeHash($archiveStream))).Replace('-','').ToLowerInvariant() }
+            finally { $sha.Dispose() }
+            $archiveStream.Position = 0
+            $sourceRoot = Expand-SafeZipRepository -ArchiveStream $archiveStream -DestinationRoot $extractRoot
+        }
+        finally { $archiveStream.Dispose() }
         foreach ($relativePath in @(
             'scripts\install-ai-instructions-bootstrap.ps1',
             'scripts\bootstrap-ai-instructions-installed.ps1',
@@ -338,19 +350,13 @@ function Invoke-AiInstructionsUpdateWorkflow {
             return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer is already running.' }
         }
         try {
-            try {
-                $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-                $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-            }
-            catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
-            Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
+            $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+            $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
         }
-        finally {
-            $installStateLockStream.Dispose()
-            $installStateLockStream = $null
-        }
+        catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
+        Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
 
-        if (-not $ForceCheck -and (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
             try {
                 $previousReceipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
                 Assert-AiInstructionsUpdateReceiptV1 -Receipt $previousReceipt | Out-Null
@@ -369,9 +375,11 @@ function Invoke-AiInstructionsUpdateWorkflow {
                     $receiptMatchesActiveRuntime = $true
                 }
                 if (-not $receiptMatchesActiveRuntime) { throw 'AI instructions update receipt does not describe the active runtime.' }
-                $minimumInterval = [timespan]::FromMinutes([int]$configuration.updates.minimumCheckIntervalMinutes)
-                if ($NowUtc -lt $checkedAt.Add($minimumInterval)) {
-                    return [pscustomobject][ordered]@{ outcome='rate-limit'; message='The minimum update check interval has not elapsed.' }
+                if (-not $ForceCheck) {
+                    $minimumInterval = [timespan]::FromMinutes([int]$configuration.updates.minimumCheckIntervalMinutes)
+                    if ($NowUtc -lt $checkedAt.Add($minimumInterval)) {
+                        return [pscustomobject][ordered]@{ outcome='rate-limit'; message='The minimum update check interval has not elapsed.' }
+                    }
                 }
             }
             catch {
@@ -442,6 +450,8 @@ function Invoke-AiInstructionsUpdateWorkflow {
                 Ref = [string]$configuration.updates.ref
                 Package = $package
             }
+            $installStateLockStream.Dispose()
+            $installStateLockStream = $null
             & $InstallCandidate $installRequest
             try {
                 $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
@@ -476,6 +486,30 @@ function Invoke-AiInstructionsUpdateWorkflow {
             }
         }
         catch {
+            if ($null -eq $installStateLockStream) {
+                try {
+                    $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+                }
+                catch [System.IO.IOException] {
+                    return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer changed or is changing the active runtime.' }
+                }
+
+                try {
+                    $activeConfigurationAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+                    $activeBundleAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+                    Assert-AiInstructionsRuntimeBundleV2 -Bundle $activeBundleAfterFailure -Configuration $activeConfigurationAfterFailure -RuntimeRoot $runtimeRoot | Out-Null
+                }
+                catch {
+                    return [pscustomobject][ordered]@{ outcome='failed'; message="The active runtime could not be verified after candidate installation failed: $($_.Exception.Message)" }
+                }
+                if ([string]$activeBundleAfterFailure.repository -cne [string]$bundle.repository -or
+                    [string]$activeBundleAfterFailure.commit -cne [string]$bundle.commit -or
+                    [string]$activeConfigurationAfterFailure.updates.mode -cne [string]$configuration.updates.mode -or
+                    [string]$activeConfigurationAfterFailure.updates.channel -cne [string]$configuration.updates.channel -or
+                    [string]$activeConfigurationAfterFailure.updates.ref -cne [string]$configuration.updates.ref) {
+                    return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer changed the active runtime before the failed update could be recorded.' }
+                }
+            }
             $installOutcome = if (Test-AiInstructionsTransientNetworkError -Exception $_.Exception) { 'offline' } else { 'failed' }
             $verifiedArchiveSha256 = $null
             if ($null -ne $package -and

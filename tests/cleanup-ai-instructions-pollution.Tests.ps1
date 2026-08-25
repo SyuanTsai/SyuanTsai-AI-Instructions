@@ -1,6 +1,7 @@
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:CleanupScript = Join-Path $script:RepositoryRoot 'scripts\cleanup-ai-instructions-pollution.ps1'
 $script:ManifestRelativePath = '.codex/ai-instructions.manifest.json'
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
 
 function Invoke-CleanupTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -44,10 +45,11 @@ function New-PollutedTestRepository {
 }
 
 function Invoke-CleanupScript {
-    param([Parameter(Mandatory = $true)][string] $TargetRoot,[switch] $Authorize)
+    param([Parameter(Mandatory = $true)][string] $TargetRoot,[switch] $Authorize,[string] $GitExecutable)
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:CleanupScript,'-TargetRoot',$TargetRoot)
     if ($Authorize) { $arguments += '-Authorize' }
-    $output = & powershell.exe @arguments 2>&1
+    if (-not [string]::IsNullOrWhiteSpace($GitExecutable)) { $arguments += @('-GitExecutable',$GitExecutable) }
+    $output = & $script:TestPowerShellExecutable @arguments 2>&1
     return [pscustomobject]@{ ExitCode=$LASTEXITCODE; Output=($output -join [Environment]::NewLine) }
 }
 
@@ -90,6 +92,43 @@ Describe 'tracked AI instructions pollution cleanup' {
         $exclude = Get-Content -Raw -LiteralPath $excludePath
         $exclude | Should Match '(?m)^/AGENTS\.md$'
         $exclude | Should Match '(?m)^/\.codex/ai-instructions\.manifest\.json$'
+    }
+
+    # Scenario: The caller exports an alternate Git index before authorizing cleanup.
+    # Purpose: Fail before reading ownership or mutating either index, shared excludes, or local materialization.
+    It 'InterT25_rejects_an_ambient_alternate_Git_index_before_mutation' {
+        $targetRoot = Join-Path $TestDrive 'alternate-index'
+        New-PollutedTestRepository -Path $targetRoot
+        $productIndexPath = ((Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
+        if (-not [System.IO.Path]::IsPathRooted($productIndexPath)) { $productIndexPath = Join-Path $targetRoot $productIndexPath }
+        $productIndexPath = [System.IO.Path]::GetFullPath($productIndexPath)
+        $alternateIndexPath = Join-Path $targetRoot 'alternate.index'
+        [System.IO.File]::Copy($productIndexPath,$alternateIndexPath,$false)
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $productIndexBefore = (Get-FileHash -LiteralPath $productIndexPath -Algorithm SHA256).Hash
+        $alternateIndexBefore = (Get-FileHash -LiteralPath $alternateIndexPath -Algorithm SHA256).Hash
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $agentBefore = [System.IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))
+        $manifestBefore = [System.IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestRelativePath))
+        $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
+        $priorAlternateIndex = $env:GIT_INDEX_FILE
+        try {
+            $env:GIT_INDEX_FILE = $alternateIndexPath
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        }
+        finally {
+            if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
+            else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        }
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'unset GIT_INDEX_FILE'
+        (Get-FileHash -LiteralPath $productIndexPath -Algorithm SHA256).Hash | Should Be $productIndexBefore
+        (Get-FileHash -LiteralPath $alternateIndexPath -Algorithm SHA256).Hash | Should Be $alternateIndexBefore
+        [System.IO.File]::ReadAllBytes($excludePath) | Should Be $excludeBefore
+        [System.IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')) | Should Be $agentBefore
+        [System.IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestRelativePath)) | Should Be $manifestBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
     }
 
     # Scenario: A managed pollution path already has an intentional staged change.
@@ -221,6 +260,46 @@ Describe 'tracked AI instructions pollution cleanup' {
         (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')) -contains '.agents/skills/project-skill/SKILL.md') | Should Be $false
     }
 
+    # Scenario: Manifest-proven pollution includes a Unicode-named file in a recursively managed Skill.
+    # Purpose: Enumerate Git paths without quotePath escaping and stage every exact managed resource deletion.
+    It 'InterT62_cleans_a_manifest_owned_Unicode_Skill_resource' {
+        $targetRoot = Join-Path $TestDrive 'unicode-skill-pollution'
+        New-PollutedTestRepository -Path $targetRoot
+        $skillRoot = Join-Path $targetRoot '.agents\skills\unicode-skill'
+        $unicodeFileName = ([string][char]0x8AAA) + ([string][char]0x660E) + '.md'
+        $unicodeRelativePath = '.agents/skills/unicode-skill/' + $unicodeFileName
+        New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
+        $skillFiles = @(
+            [pscustomobject]@{ RelativePath='.agents/skills/unicode-skill/SKILL.md'; FullPath=(Join-Path $skillRoot 'SKILL.md'); Content='# Unicode Skill' },
+            [pscustomobject]@{ RelativePath=$unicodeRelativePath; FullPath=(Join-Path $skillRoot $unicodeFileName); Content='# Unicode path content' }
+        )
+        foreach ($skillFile in $skillFiles) { Set-CleanupTestText -Path $skillFile.FullPath -Value $skillFile.Content }
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $skillEntries = @(
+            foreach ($skillFile in $skillFiles) {
+                [ordered]@{
+                    artifactType='skill'; artifactId='unicode-skill'; sourceId='test-skills';
+                    sourceRepository='https://example.com/test-skills.git'; sourceRef=('b' * 40);
+                    sourceCommit=('b' * 40); sourceVersion='commit@bbbbbbbb'; sourcePath=$skillFile.RelativePath;
+                    targetPath=$skillFile.RelativePath; sha256=(Get-FileHash -LiteralPath $skillFile.FullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+            }
+        )
+        $manifest.files = @($manifest.files) + $skillEntries
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments (@('add','--',$script:ManifestRelativePath) + @($skillFiles.RelativePath)) | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','add unicode skill pollution') | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Be 0
+        $stagedChanges = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status'))
+        ($stagedChanges -ccontains "D`t.agents/skills/unicode-skill/SKILL.md") | Should Be $true
+        ($stagedChanges -ccontains "D`t$unicodeRelativePath") | Should Be $true
+        Test-Path -LiteralPath (Join-Path $skillRoot $unicodeFileName) -PathType Leaf | Should Be $true
+    }
+
     # Scenario: The index spelling of a manifest-owned path differs only by case on an ignore-case repository.
     # Purpose: Stage the actual polluted index entry while preserving the canonical local materialization.
     It 'InterT65_cleans_the_actual_case_variant_index_path' {
@@ -289,6 +368,48 @@ Describe 'tracked AI instructions pollution cleanup' {
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
     }
 
+    # Scenario: An external process already has the shared exclude file open for writing when cleanup reaches its exclude update.
+    # Purpose: Stop before index mutation instead of using an unlocked read-modify-write sequence that can lose user rules.
+    It 'InterT79_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
+        $targetRoot = Join-Path $TestDrive 'locked-exclude'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $excludeLock = [System.IO.File]::Open($excludePath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+        try {
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        }
+        finally {
+            $excludeLock.Dispose()
+        }
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'exclusive shared Git exclude mutation handle'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: The shared Git info directory is a junction to a location outside the repository metadata.
+    # Purpose: Stop before cleanup writes shared exclusions through a reparse-backed parent.
+    It 'InterT71_rejects_a_reparse_backed_shared_Git_info_directory' {
+        $targetRoot = Join-Path $TestDrive 'reparse-git-info'
+        New-PollutedTestRepository -Path $targetRoot
+        $gitInfoPath = Join-Path $targetRoot '.git\info'
+        $outsideInfoPath = Join-Path $TestDrive 'outside-cleanup-git-info'
+        Move-Item -LiteralPath $gitInfoPath -Destination $outsideInfoPath
+        $outsideExcludePath = Join-Path $outsideInfoPath 'exclude'
+        $outsideBytesBefore = [System.IO.File]::ReadAllBytes($outsideExcludePath)
+        New-Item -ItemType Junction -Path $gitInfoPath -Target $outsideInfoPath | Out-Null
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match '(?is)unsafe shared Git exclude mutation path.*non-reparse'
+        [System.IO.File]::ReadAllBytes($outsideExcludePath) | Should Be $outsideBytesBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
     # Scenario: A linked worktree manifest contains an unsupported schema-v2 property during authorized cleanup.
     # Purpose: Stop before index mutation instead of letting invalid ownership evidence alter shared local ignores.
     It 'InterT69_rejects_a_schema_invalid_linked_worktree_manifest_before_cleanup' {
@@ -336,7 +457,7 @@ Describe 'tracked AI instructions pollution cleanup' {
 
     # Scenario: The shared exclude file contains a begin marker without its matching end marker.
     # Purpose: Stop before index mutation instead of creating duplicate or ambiguous managed ignore blocks.
-    It 'InterT68_rejects_a_malformed_managed_exclude_block' {
+    It 'InterT72_rejects_a_malformed_managed_exclude_block' {
         $targetRoot = Join-Path $TestDrive 'malformed-exclude-block'
         New-PollutedTestRepository -Path $targetRoot
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
@@ -353,7 +474,7 @@ Describe 'tracked AI instructions pollution cleanup' {
 
     # Scenario: A managed manifest is reached through a directory junction after the polluted commit was created.
     # Purpose: Treat reparse-backed ownership evidence as unsafe and stop before touching the Git index.
-    It 'InterT68_rejects_a_reparse_backed_managed_manifest_path' {
+    It 'InterT74_rejects_a_reparse_backed_managed_manifest_path' {
         $targetRoot = Join-Path $TestDrive 'reparse-manifest'
         New-PollutedTestRepository -Path $targetRoot
         $codexPath = Join-Path $targetRoot '.codex'
@@ -367,5 +488,200 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result.Output | Should Match 'reparse point'
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         Test-Path -LiteralPath (Join-Path $externalCodexPath 'ai-instructions.manifest.json') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: Another Git process stages user bytes for a managed path after cleanup removes its original index entry and a later check fails.
+    # Purpose: Restore only entries still absent because of this transaction and never reset a concurrent user's staged blob to HEAD.
+    It 'InterT76_preserves_concurrent_staged_bytes_when_cleanup_rolls_back' {
+        $targetRoot = Join-Path $TestDrive 'concurrent-index-rollback'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-git-wrapper'
+        New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
+        $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
+        Set-CleanupTestText -Path $userBlobFile -Value '# Concurrent user staged Agent'
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $markerPath = Join-Path $wrapperRoot 'injected.marker'
+        $hashPath = Join-Path $wrapperRoot 'blob.txt'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
+if errorlevel 1 goto forward
+if exist "$markerPath" goto forward
+type nul > "$markerPath"
+"$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
+if errorlevel 1 exit /b 86
+set /p userblob=<"$hashPath"
+"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
+if errorlevel 1 exit /b 87
+exit /b 88
+:forward
+"$realGit" %*
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+        $expectedBlob = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object',$userBlobFile)) -join '').Trim()
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $markerPath | Should Be $true
+        ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--verify',':AGENTS.md')) -join '').Trim()) |
+            Should Be $expectedBlob
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--',$script:ManifestRelativePath)).Count |
+            Should Be 0
+        [System.IO.File]::ReadAllBytes($excludePath) | Should Be $excludeBefore
+    }
+
+    # Scenario: Another Git process attempts to stage a managed blob after rollback has read the current index but before it restores entries.
+    # Purpose: Hold the real index lock across rollback comparison and replacement so no successful concurrent stage can be overwritten.
+    It 'InterT78_holds_the_index_lock_across_rollback_compare_and_restore' {
+        $targetRoot = Join-Path $TestDrive 'atomic-index-rollback'
+        New-PollutedTestRepository -Path $targetRoot
+        $originalBlob = ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--verify',':AGENTS.md')) -join '').Trim())
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-atomic-rollback-wrapper'
+        New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
+        $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
+        Set-CleanupTestText -Path $userBlobFile -Value '# Rollback race user blob'
+        $userBlob = ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object','-w',$userBlobFile)) -join '').Trim())
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $rollbackMarker = Join-Path $wrapperRoot 'rollback.marker'
+        $attemptedMarker = Join-Path $wrapperRoot 'attempted.marker'
+        $blockedMarker = Join-Path $wrapperRoot 'blocked.marker'
+        $succeededMarker = Join-Path $wrapperRoot 'succeeded.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+if not exist "$rollbackMarker" goto inspect_failure
+echo %* | "$findString" /C:"ls-files --stage" >nul
+if errorlevel 1 goto forward
+if exist "$attemptedMarker" goto forward
+"$realGit" %*
+set forwardcode=%errorlevel%
+type nul > "$attemptedMarker"
+"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,$userBlob,AGENTS.md >nul 2>&1
+if errorlevel 1 (type nul > "$blockedMarker") else (type nul > "$succeededMarker")
+exit /b %forwardcode%
+:inspect_failure
+echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
+if errorlevel 1 goto forward
+type nul > "$rollbackMarker"
+exit /b 88
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $attemptedMarker | Should Be $true
+        Test-Path -LiteralPath $blockedMarker | Should Be $true
+        Test-Path -LiteralPath $succeededMarker | Should Be $false
+        ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--verify',':AGENTS.md')) -join '').Trim()) |
+            Should Be $originalBlob
+    }
+
+    # Scenario: Another Git process stages user bytes immediately after cleanup's final managed-entry snapshot but before index mutation.
+    # Purpose: Acquire the real Git index lock and recheck expected entries so cleanup cannot replace a last-moment staged blob with deletion.
+    It 'InterT77_rejects_last_moment_index_drift_before_atomic_cleanup_mutation' {
+        $targetRoot = Join-Path $TestDrive 'last-moment-index-drift'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-last-moment-wrapper'
+        New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
+        $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
+        Set-CleanupTestText -Path $userBlobFile -Value '# Last-moment concurrent staged Agent'
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $injectedMarker = Join-Path $wrapperRoot 'injected.marker'
+        $hashPath = Join-Path $wrapperRoot 'blob.txt'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"rev-parse --git-path index" >nul
+if not errorlevel 1 goto inject_after_forward
+echo %* | "$findString" /C:"rm --cached" >nul
+if errorlevel 1 goto forward
+if exist "$injectedMarker" goto forward
+goto inject_before_forward
+:inject_after_forward
+"$realGit" %*
+if errorlevel 1 exit /b %errorlevel%
+if exist "$injectedMarker" exit /b 0
+:inject_before_forward
+"$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
+if errorlevel 1 exit /b 86
+set /p userblob=<"$hashPath"
+"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
+if errorlevel 1 exit /b 87
+copy /Y "$userBlobFile" "$targetRoot\AGENTS.md" >nul
+if errorlevel 1 exit /b 88
+type nul > "$injectedMarker"
+echo %* | "$findString" /C:"rev-parse --git-path index" >nul
+if not errorlevel 1 exit /b 0
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+        $expectedBlob = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('hash-object',$userBlobFile)) -join '').Trim()
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $injectedMarker | Should Be $true
+        ((@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--verify',':AGENTS.md')) -join '').Trim()) |
+            Should Be $expectedBlob
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Last-moment concurrent staged Agent'
+        [System.IO.File]::ReadAllBytes($excludePath) | Should Be $excludeBefore
+    }
+
+    # Scenario: An external process appends a user rule after cleanup writes its managed block and a later index step fails.
+    # Purpose: Roll back the index but preserve externally changed exclude bytes instead of overwriting them with the old snapshot.
+    It 'InterT80_preserves_concurrent_shared_exclude_bytes_when_cleanup_rolls_back' {
+        $targetRoot = Join-Path $TestDrive 'concurrent-exclude-rollback'
+        New-PollutedTestRepository -Path $targetRoot
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeTextBefore = [System.IO.File]::ReadAllText($excludePath)
+        $indexPath = (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $indexHashBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-concurrent-exclude-wrapper'
+        New-Item -ItemType Directory -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $injectedMarker = Join-Path $wrapperRoot 'injected.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"rev-parse --git-path index" >nul
+if errorlevel 1 goto forward
+if exist "$injectedMarker" goto forward
+type nul > "$injectedMarker"
+echo /concurrent-user-rule>>"$excludePath"
+exit /b 86
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $injectedMarker | Should Be $true
+        $result.Output | Should Match '(?is)rollback also failed.*shared Git exclude changed concurrently'
+        (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash | Should Be $indexHashBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        $excludeAfter = [System.IO.File]::ReadAllText($excludePath)
+        $excludeAfter | Should Match '/concurrent-user-rule'
+        $excludeAfter | Should Match '# BEGIN Codex AI Instructions managed paths'
+        $excludeAfter | Should Match ([regex]::Escape(($excludeTextBefore -split "`r?`n")[0]))
     }
 }

@@ -147,6 +147,26 @@ Describe 'AI instructions runtime contracts' {
         @($bundle.inventory).Count | Should Be 2
     }
 
+    # Scenario: The checked-in configuration and runtime-bundle examples are used as executable parser inputs.
+    # Purpose: Keep documented example hashes aligned with the exact runtime fixture they describe.
+    It 'UnitT55_validates_checked_in_configuration_and_runtime_bundle_examples' {
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath `
+            (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json') | ConvertFrom-Json
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath `
+            (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v2.example.json') | ConvertFrom-Json
+        $runtimeRoot = Join-Path $TestDrive 'runtime-example'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $runtimeRoot 'bootstrap-ai-instructions.ps1'),
+            "Write-Output 'example'`n",
+            $utf8NoBom)
+
+        { Assert-AiInstructionsSyncConfigurationV4 -Configuration $configuration } | Should Not Throw
+        { Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot } |
+            Should Not Throw
+    }
+
     # Scenario: An installed runtime file is changed after installation.
     # Purpose: Fail closed before launching a bundle whose executable inventory drifted.
     It 'UnitT60_rejects_runtime_file_hash_drift' {
@@ -278,7 +298,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: A schema-v4 update interval exceeds the Int32 range used by idempotent configuration migration.
     # Purpose: Keep the portable schema and executable validator aligned so every accepted v4 document can be migrated.
-    It 'UnitT89_rejects_update_intervals_that_cannot_survive_v4_migration' {
+    It 'UnitT90_rejects_update_intervals_that_cannot_survive_v4_migration' {
         $configurationSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-sync-v4.schema.json') | ConvertFrom-Json
         [long]$configurationSchema.properties.updates.properties.minimumCheckIntervalMinutes.maximum |
             Should Be ([long][int]::MaxValue)
@@ -298,7 +318,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: A persisted git-checkout runtime bundle uses an empty string where the schema permits only null or SHA-256.
     # Purpose: Keep executable bundle validation aligned with the portable nullability contract.
-    It 'UnitT90_rejects_schema_invalid_runtime_bundle_nullability' {
+    It 'UnitT91_rejects_schema_invalid_runtime_bundle_nullability' {
         $runtimeRoot = Join-Path $TestDrive 'runtime-empty-archive-hash'
         New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $runtimeRoot 'bootstrap.ps1'), "Write-Output 'ok'`n")
@@ -313,7 +333,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: A receipt uses a date-only value that JSON Schema date-time consumers reject.
     # Purpose: Enforce the same RFC 3339 date-time shape in the executable parser.
-    It 'UnitT91_rejects_non_date_time_receipt_values' {
+    It 'UnitT92_rejects_non_date_time_receipt_values' {
         $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-update-receipt-v1.example.json') | ConvertFrom-Json
         $receipt.checkedAtUtc = '2026-08-23'
 
@@ -335,7 +355,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: JSON documents use a one-element array where the portable schemas require a scalar string.
     # Purpose: Prevent PowerShell string coercion from accepting documents rejected by JSON Schema consumers.
-    It 'UnitT92_rejects_singleton_arrays_in_scalar_string_fields' {
+    It 'UnitT93_rejects_singleton_arrays_in_scalar_string_fields' {
         $configuration = New-TestConfigurationDocument -SchemaVersion 4
         $configuration.catalog.repository = @($script:CanonicalRepository)
         (Get-RuntimeContractError { Assert-AiInstructionsSyncConfigurationV4 -Configuration $configuration }) |
@@ -364,7 +384,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: A caller supplies a filesystem root as a normalized directory path or as Codex Home.
     # Purpose: Preserve repository roots correctly while preventing installer/updater writes directly under a volume root.
-    It 'UnitT93_preserves_filesystem_roots_and_can_reject_them_for_Codex_Home' {
+    It 'UnitT94_preserves_filesystem_roots_and_can_reject_them_for_Codex_Home' {
         $fileSystemRoot = [System.IO.Path]::GetPathRoot($TestDrive)
 
         (Get-AiInstructionsFullDirectoryPath -Path $fileSystemRoot) | Should Be $fileSystemRoot
@@ -375,7 +395,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: Recursive cleanup is asked to remove a nested or reparse-backed path instead of its exact transaction root.
     # Purpose: Constrain destructive cleanup to one immediate, non-reparse child with the expected generated prefix.
-    It 'UnitT94_accepts_only_safe_immediate_transaction_cleanup_directories' {
+    It 'UnitT95_accepts_only_safe_immediate_transaction_cleanup_directories' {
         $parent = Join-Path $TestDrive 'cleanup-parent'
         $safeRoot = Join-Path $parent '.ai-instructions-update-safe'
         $nestedRoot = Join-Path $safeRoot 'nested'
@@ -390,7 +410,7 @@ Describe 'AI instructions runtime contracts' {
 
     # Scenario: Stable updater/runtime paths are replaced with the wrong filesystem type or a junction.
     # Purpose: Keep later reads, writes, and inventory traversal inside the installed Codex Home boundary.
-    It 'UnitT95_rejects_unsafe_stable_mutation_and_runtime_paths' {
+    It 'UnitT96_rejects_unsafe_stable_mutation_and_runtime_paths' {
         $parent = Join-Path $TestDrive 'stable-paths'
         $outside = Join-Path $TestDrive 'outside-runtime'
         $junction = Join-Path $parent 'runtime-junction'

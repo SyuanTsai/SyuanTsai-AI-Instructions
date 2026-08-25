@@ -9,14 +9,43 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (Test-Path Env:GIT_INDEX_FILE) {
+    throw 'Pollution cleanup requires the active worktree Git index; unset GIT_INDEX_FILE before retrying.'
+}
+
 $manifestRelativePath = '.codex/ai-instructions.manifest.json'
 $excludeBeginMarker = '# BEGIN Codex AI Instructions managed paths'
 $excludeEndMarker = '# END Codex AI Instructions managed paths'
 
+$installedRuntimeReadLock = $null
+try {
 $installedRuntimeRoot = Join-Path $PSScriptRoot 'ai-instructions-runtime'
+$entryPointDirectoryName = Split-Path -Leaf ([System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([char[]]@('\','/')))
+$isInstalledStableEntryPoint = $entryPointDirectoryName -ieq 'hooks'
+if ($isInstalledStableEntryPoint -and -not (Test-Path -LiteralPath $installedRuntimeRoot -PathType Container)) {
+    throw "Installed runtime directory is missing or invalid: $installedRuntimeRoot"
+}
 if (Test-Path -LiteralPath $installedRuntimeRoot -PathType Container) {
     $installedLauncher = Join-Path $PSScriptRoot 'bootstrap-ai-instructions.ps1'
     if (-not (Test-Path -LiteralPath $installedLauncher -PathType Leaf)) { throw "Installed AI instructions preflight launcher is missing: $installedLauncher" }
+    $installedCodexHome = Split-Path -Parent $PSScriptRoot
+    $installedLockPath = Join-Path $installedCodexHome 'ai-instructions-install.lock'
+    if (-not (Test-Path -LiteralPath $installedLockPath -PathType Leaf)) { throw 'AI instructions install lock is missing from the installed runtime.' }
+    $installedLockItem = Get-Item -Force -LiteralPath $installedLockPath
+    if ($installedLockItem.PSIsContainer -or ($installedLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AI instructions install lock must be a non-reparse file.'
+    }
+    try {
+        $installedRuntimeReadLock = [System.IO.File]::Open(
+            $installedLockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+    }
+    catch [System.IO.IOException] {
+        throw 'AI instructions runtime is being installed; cleanup stopped before reading a mixed runtime.'
+    }
     & $installedLauncher -ValidateOnly
 }
 
@@ -60,6 +89,225 @@ function Get-CleanupGitExitCode {
         return $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previousPreference }
+}
+
+function ConvertFrom-CleanupGitQuotedPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not ($Path.Length -ge 2 -and $Path[0] -eq '"' -and $Path[$Path.Length - 1] -eq '"')) {
+        return $Path
+    }
+
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    $content = $Path.Substring(1,$Path.Length - 2)
+    for ($index = 0; $index -lt $content.Length; $index++) {
+        $character = $content[$index]
+        if ($character -ne '\') {
+            if ([int]$character -gt 0x7f) { throw "Git returned a non-ASCII byte in a quoted path: $Path" }
+            $bytes.Add([byte][int]$character)
+            continue
+        }
+        if (++$index -ge $content.Length) { throw "Git returned an incomplete quoted path escape: $Path" }
+        $escape = $content[$index]
+        $simpleEscapes = @{ 'a'=0x07; 'b'=0x08; 't'=0x09; 'n'=0x0a; 'v'=0x0b; 'f'=0x0c; 'r'=0x0d; '"'=0x22; '\'=0x5c }
+        $escapeText = [string]$escape
+        if ($simpleEscapes.ContainsKey($escapeText)) {
+            $bytes.Add([byte]$simpleEscapes[$escapeText])
+            continue
+        }
+        if ($escape -lt '0' -or $escape -gt '7' -or $index + 2 -ge $content.Length) {
+            throw "Git returned an unsupported quoted path escape: $Path"
+        }
+        $octal = $content.Substring($index,3)
+        if ($octal -cnotmatch '^[0-7]{3}$') { throw "Git returned an invalid octal path escape: $Path" }
+        $bytes.Add([byte][Convert]::ToInt32($octal,8))
+        $index += 2
+    }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    try { return $utf8.GetString($bytes.ToArray()) }
+    catch { throw "Git returned a quoted path that is not valid UTF-8: $Path" }
+}
+
+function Get-CleanupIndexSnapshot {
+    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Paths)
+
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($line in @(Invoke-CleanupGit -Repository $Repository -Arguments (@('-c','core.quotePath=true','ls-files','--stage','--') + $Paths))) {
+        $match = [System.Text.RegularExpressions.Regex]::Match([string]$line,'^(?<Mode>[0-7]{6}) (?<Hash>[0-9a-f]{40,64}) (?<Stage>[0-3])\t(?<Path>.+)$')
+        if (-not $match.Success) { throw "Unable to capture an exact Git index entry for rollback: $line" }
+        $decodedPath = ConvertFrom-CleanupGitQuotedPath -Path $match.Groups['Path'].Value
+        $entries.Add([pscustomobject][ordered]@{
+            Line = "$($match.Groups['Mode'].Value) $($match.Groups['Hash'].Value) $($match.Groups['Stage'].Value)`t$decodedPath"
+            Path = $decodedPath
+            Mode = $match.Groups['Mode'].Value
+            Hash = $match.Groups['Hash'].Value
+            Stage = [int]$match.Groups['Stage'].Value
+        })
+    }
+    return $entries
+}
+
+function Remove-CleanupIndexEntriesAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $Paths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot
+    )
+
+    $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
+    $indexPath = [System.IO.Path]::GetFullPath($indexPath)
+    if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { throw "Git index file is missing: $indexPath" }
+    $indexItem = Get-Item -Force -LiteralPath $indexPath
+    if (($indexItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Git index file must not be a reparse point: $indexPath" }
+    $indexParent = Split-Path -Parent $indexPath
+    $indexParentItem = Get-Item -Force -LiteralPath $indexParent
+    if (-not $indexParentItem.PSIsContainer -or ($indexParentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Git index parent must be a non-reparse directory: $indexParent"
+    }
+
+    $indexLockPath = $indexPath + '.lock'
+    $indexLockStream = $null
+    $committed = $false
+    $temporaryIndexPath = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-cleanup-index-' + [Guid]::NewGuid().ToString('N'))
+    $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
+    $priorAlternateIndex = $env:GIT_INDEX_FILE
+    try {
+        try {
+            $indexLockStream = [System.IO.File]::Open($indexLockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        }
+        catch [System.IO.IOException] {
+            throw 'The Git index is being changed by another process; cleanup stopped before mutation.'
+        }
+
+        $currentSnapshot = @(Get-CleanupIndexSnapshot -Repository $Repository -Paths $Paths)
+        if ((@($currentSnapshot | ForEach-Object { [string]$_.Line }) -join "`n") -cne
+            (@($ExpectedSnapshot | ForEach-Object { [string]$_.Line }) -join "`n")) {
+            throw 'Tracked managed paths changed in the Git index after cleanup acquired the index lock.'
+        }
+
+        [System.IO.File]::Copy($indexPath,$temporaryIndexPath,$false)
+        $env:GIT_INDEX_FILE = $temporaryIndexPath
+        Invoke-CleanupGit -Repository $Repository -Arguments (@('update-index','--force-remove','--') + $Paths) | Out-Null
+        if (@(Get-CleanupIndexSnapshot -Repository $Repository -Paths $Paths).Count -ne 0) {
+            throw 'The prepared cleanup index still contains managed paths.'
+        }
+
+        $preparedBytes = [System.IO.File]::ReadAllBytes($temporaryIndexPath)
+        $indexLockStream.SetLength(0)
+        $indexLockStream.Write($preparedBytes,0,$preparedBytes.Length)
+        $indexLockStream.Flush($true)
+        $indexLockStream.Dispose()
+        $indexLockStream = $null
+        Move-Item -LiteralPath $indexLockPath -Destination $indexPath -Force
+        $committed = $true
+    }
+    finally {
+        if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
+        else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        if ($null -ne $indexLockStream) { $indexLockStream.Dispose() }
+        if (-not $committed -and (Test-Path -LiteralPath $indexLockPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $indexLockPath -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($temporaryPath in @($temporaryIndexPath,($temporaryIndexPath + '.lock'))) {
+            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function Restore-CleanupIndexSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $Paths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot
+    )
+
+    $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
+    $indexPath = [System.IO.Path]::GetFullPath($indexPath)
+    if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { throw "Git index file is missing during rollback: $indexPath" }
+    $indexItem = Get-Item -Force -LiteralPath $indexPath
+    if (($indexItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Git index file must not be a reparse point during rollback: $indexPath" }
+    $indexParent = Split-Path -Parent $indexPath
+    $indexParentItem = Get-Item -Force -LiteralPath $indexParent
+    if (-not $indexParentItem.PSIsContainer -or ($indexParentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Git index parent must be a non-reparse directory during rollback: $indexParent"
+    }
+
+    $indexLockPath = $indexPath + '.lock'
+    $indexLockStream = $null
+    $committed = $false
+    $temporaryIndexPath = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-cleanup-rollback-index-' + [Guid]::NewGuid().ToString('N'))
+    $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
+    $priorAlternateIndex = $env:GIT_INDEX_FILE
+    $driftedPaths = New-Object System.Collections.Generic.List[string]
+    try {
+        try {
+            $indexLockStream = [System.IO.File]::Open($indexLockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        }
+        catch [System.IO.IOException] {
+            throw 'The Git index is being changed by another process; cleanup rollback stopped before mutation.'
+        }
+
+        $current = @(Get-CleanupIndexSnapshot -Repository $Repository -Paths $Paths)
+        $restoreEntries = New-Object System.Collections.Generic.List[object]
+        foreach ($snapshotEntry in $Snapshot) {
+            $matches = @($current | Where-Object { $_.Path -ceq [string]$snapshotEntry.Path })
+            if ($matches.Count -eq 0) {
+                if ([int]$snapshotEntry.Stage -ne 0) { throw "Unable to restore a non-stage-zero Git index entry: $($snapshotEntry.Path)" }
+                $restoreEntries.Add($snapshotEntry)
+                continue
+            }
+            if ($matches.Count -ne 1 -or [string]$matches[0].Line -cne [string]$snapshotEntry.Line) {
+                $driftedPaths.Add([string]$snapshotEntry.Path)
+            }
+        }
+        foreach ($currentEntry in $current) {
+            if (@($Snapshot | Where-Object { $_.Path -ceq [string]$currentEntry.Path }).Count -eq 0) {
+                $driftedPaths.Add([string]$currentEntry.Path)
+            }
+        }
+
+        if ($restoreEntries.Count -gt 0) {
+            [System.IO.File]::Copy($indexPath,$temporaryIndexPath,$false)
+            $env:GIT_INDEX_FILE = $temporaryIndexPath
+            foreach ($restoreEntry in $restoreEntries) {
+                Invoke-CleanupGit -Repository $Repository -Arguments @(
+                    'update-index','--add','--cacheinfo',"$($restoreEntry.Mode),$($restoreEntry.Hash),$($restoreEntry.Path)"
+                ) | Out-Null
+            }
+            $prepared = @(Get-CleanupIndexSnapshot -Repository $Repository -Paths $Paths)
+            foreach ($restoreEntry in $restoreEntries) {
+                if (@($prepared | Where-Object { [string]$_.Line -ceq [string]$restoreEntry.Line }).Count -ne 1) {
+                    throw "The prepared rollback index does not contain the exact original entry: $($restoreEntry.Path)"
+                }
+            }
+
+            $preparedBytes = [System.IO.File]::ReadAllBytes($temporaryIndexPath)
+            $indexLockStream.SetLength(0)
+            $indexLockStream.Write($preparedBytes,0,$preparedBytes.Length)
+            $indexLockStream.Flush($true)
+            $indexLockStream.Dispose()
+            $indexLockStream = $null
+            Move-Item -LiteralPath $indexLockPath -Destination $indexPath -Force
+            $committed = $true
+        }
+    }
+    finally {
+        if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
+        else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        if ($null -ne $indexLockStream) { $indexLockStream.Dispose() }
+        if (-not $committed -and (Test-Path -LiteralPath $indexLockPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $indexLockPath -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($temporaryPath in @($temporaryIndexPath,($temporaryIndexPath + '.lock'))) {
+            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($driftedPaths.Count -gt 0) {
+        throw "Concurrent Git index changes were preserved and require manual resolution: $(@($driftedPaths | Sort-Object -Unique) -join ', ')"
+    }
 }
 
 function Get-CleanupGitPathComparer {
@@ -197,12 +445,172 @@ function ConvertTo-CleanupExcludePattern {
 }
 
 function Assert-CleanupExcludeMutationPath {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
 
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $item = Get-Item -Force -LiteralPath $Path
-    if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Unsafe shared Git exclude mutation path '$Path': expected a non-reparse file or a missing path."
+    $commonGitDirectory = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-common-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $Repository $commonGitDirectory }
+    $commonGitDirectory = [System.IO.Path]::GetFullPath($commonGitDirectory).TrimEnd([char[]]@('\','/'))
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $commonGitDirectory 'info\exclude'))
+    if (-not $resolvedPath.Equals($expectedPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe shared Git exclude mutation path '$resolvedPath': expected '$expectedPath'."
+    }
+
+    $inspectionPath = $resolvedPath
+    while ($true) {
+        if (Test-Path -LiteralPath $inspectionPath) {
+            $item = Get-Item -Force -LiteralPath $inspectionPath
+            $isLeaf = $inspectionPath.Equals($resolvedPath,[System.StringComparison]::OrdinalIgnoreCase)
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or ($isLeaf -and $item.PSIsContainer) -or (-not $isLeaf -and -not $item.PSIsContainer)) {
+                throw "Unsafe shared Git exclude mutation path '$resolvedPath': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { 'file' } else { 'directory' }))."
+            }
+        }
+        if ($inspectionPath.Equals($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = Split-Path -Parent $inspectionPath
+        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe shared Git exclude mutation path '$resolvedPath': parent traversal escaped the common Git directory."
+        }
+        $inspectionPath = $parent
+    }
+}
+
+function New-CleanupExcludeMutation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
+    return [pscustomobject][ordered]@{
+        Repository = $Repository
+        Path = $Path
+        MutationApplied = $false
+        Existed = $false
+        Bytes = $null
+        AppliedBytes = $null
+    }
+}
+
+function Test-CleanupExcludeBytesEqual {
+    param(
+        [AllowNull()][byte[]] $Left,
+        [AllowNull()][byte[]] $Right
+    )
+
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+    if ($Left.Length -ne $Right.Length) { return $false }
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        if ($Left[$index] -ne $Right[$index]) { return $false }
+    }
+    return $true
+}
+
+function Read-CleanupExcludeStreamBytes {
+    param([Parameter(Mandatory = $true)][System.IO.FileStream] $Stream)
+
+    $memory = New-Object System.IO.MemoryStream
+    try {
+        $Stream.Position = 0
+        $Stream.CopyTo($memory)
+        return ,([byte[]]$memory.ToArray())
+    }
+    finally { $memory.Dispose() }
+}
+
+function ConvertFrom-CleanupExcludeBytes {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes)
+
+    $memory = New-Object System.IO.MemoryStream
+    $reader = $null
+    try {
+        if ($Bytes.Length -gt 0) { $memory.Write($Bytes,0,$Bytes.Length) }
+        $memory.Position = 0
+        $reader = New-Object System.IO.StreamReader($memory,[System.Text.Encoding]::UTF8,$true)
+        return $reader.ReadToEnd()
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        $memory.Dispose()
+    }
+}
+
+function Write-CleanupExcludeStreamBytes {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    $Stream.Position = 0
+    $Stream.SetLength(0)
+    if ($Bytes.Length -gt 0) { $Stream.Write($Bytes,0,$Bytes.Length) }
+    $Stream.Flush($true)
+}
+
+function Open-CleanupExcludeMutationHandle {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $RequireExisting
+    )
+
+    Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
+    $stream = $null
+    $created = $false
+    try {
+        if ($RequireExisting) {
+            $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+        }
+        else {
+            try {
+                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+                $created = $true
+            }
+            catch [System.IO.IOException] {
+                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+            }
+        }
+        return [pscustomobject]@{ Stream=$stream; Created=$created }
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw "Unable to acquire the exclusive shared Git exclude mutation handle; another process may be changing '$Path'. $($_.Exception.Message)"
+    }
+}
+
+function Restore-CleanupExcludeMutation {
+    param([Parameter(Mandatory = $true)][object] $Mutation)
+
+    if (-not [bool]$Mutation.MutationApplied) { return }
+    $path = [string]$Mutation.Path
+    $repository = [string]$Mutation.Repository
+    Assert-CleanupExcludeMutationPath -Repository $repository -Path $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (-not [bool]$Mutation.Existed) {
+            $Mutation.MutationApplied = $false
+            return
+        }
+        throw "Shared Git exclude changed concurrently during cleanup rollback; the missing current state was preserved: $path"
+    }
+
+    $handle = Open-CleanupExcludeMutationHandle -Repository $repository -Path $path -RequireExisting
+    try {
+        if ([bool]$handle.Created) { throw "Shared Git exclude changed concurrently during cleanup rollback; the recreated current state was preserved: $path" }
+        [byte[]]$currentBytes = Read-CleanupExcludeStreamBytes -Stream $handle.Stream
+        if (-not (Test-CleanupExcludeBytesEqual -Left $currentBytes -Right ([byte[]]$Mutation.AppliedBytes))) {
+            throw "Shared Git exclude changed concurrently during cleanup rollback; current bytes were preserved: $path"
+        }
+        $restoreBytes = if ([bool]$Mutation.Existed) { [byte[]]$Mutation.Bytes } else { [byte[]]@() }
+        Write-CleanupExcludeStreamBytes -Stream $handle.Stream -Bytes $restoreBytes
+        $Mutation.MutationApplied = $false
+    }
+    finally {
+        if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
     }
 }
 
@@ -278,24 +686,48 @@ function Set-CleanupExcludeBlock {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string[]] $ManagedPaths
+        [Parameter(Mandatory = $true)][string[]] $ManagedPaths,
+        [Parameter(Mandatory = $true)][object] $Mutation
     )
-    Assert-CleanupExcludeMutationPath -Path $Path
-    $content = if (Test-Path -LiteralPath $Path -PathType Leaf) { [System.IO.File]::ReadAllText($Path).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
-    $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
-    $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
-    $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
-    if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
-        throw "The Codex AI Instructions managed exclude block is malformed: $Path"
+    if ([string]$Mutation.Path -cne $Path -or [string]$Mutation.Repository -cne $Repository) {
+        throw 'Shared Git exclude mutation state does not match the requested cleanup target.'
     }
-    $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
+    Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
     $sharedManagedPaths = @(Get-CleanupSharedManagedPaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
     $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ })
-    $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
-    $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    [System.IO.File]::WriteAllText($Path,$updated,(New-Object System.Text.UTF8Encoding($false)))
+    $handle = Open-CleanupExcludeMutationHandle -Repository $Repository -Path $Path
+    try {
+        [byte[]]$beforeBytes = Read-CleanupExcludeStreamBytes -Stream $handle.Stream
+        $Mutation.Existed = -not [bool]$handle.Created
+        $Mutation.Bytes = if ([bool]$handle.Created) { $null } else { $beforeBytes }
+        $Mutation.AppliedBytes = $beforeBytes
+        $Mutation.MutationApplied = [bool]$handle.Created
+
+        $content = (ConvertFrom-CleanupExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
+        $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
+        $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
+        $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
+        if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
+            throw "The Codex AI Instructions managed exclude block is malformed: $Path"
+        }
+        $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
+        $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
+        $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
+        [byte[]]$updatedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($updated)
+        if (-not (Test-CleanupExcludeBytesEqual -Left $beforeBytes -Right $updatedBytes)) {
+            $Mutation.AppliedBytes = $updatedBytes
+            $Mutation.MutationApplied = $true
+            try { Write-CleanupExcludeStreamBytes -Stream $handle.Stream -Bytes $updatedBytes }
+            catch {
+                try { $Mutation.AppliedBytes = [byte[]](Read-CleanupExcludeStreamBytes -Stream $handle.Stream) }
+                catch { }
+                throw
+            }
+        }
+    }
+    finally {
+        if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
@@ -342,7 +774,9 @@ foreach ($entry in @($manifest.files)) {
     $entriesByPath[$targetPath] = $entry
 }
 
-$trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('ls-files') | ForEach-Object { ([string]$_).Replace('\','/') })
+$trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files') | ForEach-Object {
+    (ConvertFrom-CleanupGitQuotedPath -Path ([string]$_)).Replace('\','/')
+})
 $gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
@@ -387,13 +821,18 @@ if (-not $Authorize) { throw 'Cleanup requires explicit authorization; re-run wi
 
 $gitExcludePath = ((Invoke-CleanupGit -Repository $targetRootPath -Arguments @('rev-parse','--git-path','info/exclude')) | Select-Object -First 1).Trim()
 if (-not [System.IO.Path]::IsPathRooted($gitExcludePath)) { $gitExcludePath = Join-Path $targetRootPath $gitExcludePath }
-Assert-CleanupExcludeMutationPath -Path $gitExcludePath
-$excludeExisted = Test-Path -LiteralPath $gitExcludePath -PathType Leaf
-$excludeBefore = if ($excludeExisted) { [System.IO.File]::ReadAllBytes($gitExcludePath) } else { $null }
+Assert-CleanupExcludeMutationPath -Repository $targetRootPath -Path $gitExcludePath
+$excludeMutation = New-CleanupExcludeMutation -Repository $targetRootPath -Path $gitExcludePath
 $cleanupPaths = @($trackedManagedPaths | Sort-Object)
+$indexSnapshot = @(Get-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths)
 try {
-    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths)
-    Invoke-CleanupGit -Repository $targetRootPath -Arguments (@('rm','--cached','--') + $cleanupPaths) | Out-Null
+    $indexAtMutation = @(Get-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths)
+    if ((@($indexAtMutation | ForEach-Object { [string]$_.Line }) -join "`n") -cne
+        (@($indexSnapshot | ForEach-Object { [string]$_.Line }) -join "`n")) {
+        throw 'Tracked managed paths changed in the Git index before cleanup mutation.'
+    }
+    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths) -Mutation $excludeMutation
+    Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot
     foreach ($cleanupPath in $cleanupPaths) {
         $fullPath = Join-Path $targetRootPath $cleanupPath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Cleanup failed to preserve local materialization: $cleanupPath" }
@@ -403,18 +842,14 @@ try {
 }
 catch {
     $cleanupError = $_
-    try {
-        Invoke-CleanupGit -Repository $targetRootPath -Arguments (@('reset','--quiet','HEAD','--') + $cleanupPaths) | Out-Null
-        if ($excludeExisted) {
-            Assert-CleanupExcludeMutationPath -Path $gitExcludePath
-            [System.IO.File]::WriteAllBytes($gitExcludePath,$excludeBefore)
-        }
-        elseif (Test-Path -LiteralPath $gitExcludePath) {
-            Assert-CleanupExcludeMutationPath -Path $gitExcludePath
-            Remove-Item -LiteralPath $gitExcludePath -Force
-        }
+    $rollbackErrors = New-Object System.Collections.Generic.List[string]
+    try { Restore-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths -Snapshot $indexSnapshot }
+    catch { $rollbackErrors.Add($_.Exception.Message) }
+    try { Restore-CleanupExcludeMutation -Mutation $excludeMutation }
+    catch { $rollbackErrors.Add($_.Exception.Message) }
+    if ($rollbackErrors.Count -gt 0) {
+        throw "Pollution cleanup failed and rollback also failed. Original: $($cleanupError.Exception.Message). Rollback: $($rollbackErrors -join ' | ')"
     }
-    catch { throw "Pollution cleanup failed and rollback also failed. Original: $($cleanupError.Exception.Message). Rollback: $($_.Exception.Message)" }
     throw $cleanupError
 }
 
@@ -422,4 +857,8 @@ Write-Output "Tracked AI instructions pollution cleanup staged deletions only; l
 }
 finally {
     $repositoryOperationLock.Dispose()
+}
+}
+finally {
+    if ($null -ne $installedRuntimeReadLock) { $installedRuntimeReadLock.Dispose() }
 }

@@ -26,6 +26,402 @@ Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 
+if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace CodexAiInstructions
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FileDispositionInfo
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        internal bool DeleteFile;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FileBasicInfo
+    {
+        internal long CreationTime;
+        internal long LastAccessTime;
+        internal long LastWriteTime;
+        internal long ChangeTime;
+        internal uint FileAttributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ByHandleFileInformation
+    {
+        internal uint FileAttributes;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        internal uint VolumeSerialNumber;
+        internal uint FileSizeHigh;
+        internal uint FileSizeLow;
+        internal uint NumberOfLinks;
+        internal uint FileIndexHigh;
+        internal uint FileIndexLow;
+    }
+
+    public static class NativeFileMutation
+    {
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint Delete = 0x00010000;
+        private const uint FileWriteAttributes = 0x00000100;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeNormal = 0x00000080;
+        private const uint FileAttributeReadOnly = 0x00000001;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const int FileBasicInfoClass = 0;
+        private const int FileDispositionInfoClass = 4;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+        private static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileDispositionByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            ref FileDispositionInfo fileInformation,
+            uint bufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileBasicInfoByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            ref FileBasicInfo fileInformation,
+            uint bufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandleEx(
+            SafeFileHandle file,
+            int fileInformationClass,
+            out FileBasicInfo fileInformation,
+            uint bufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        public static SafeFileHandle OpenForAtomicDelete(string targetRoot, string path, string relativePath)
+        {
+            return OpenValidatedTarget(
+                targetRoot,
+                path,
+                relativePath,
+                GenericRead | Delete | FileWriteAttributes,
+                FileShareRead);
+        }
+
+        public static SafeFileHandle OpenForAtomicWrite(
+            string targetRoot,
+            string path,
+            string relativePath,
+            out bool restoreReadOnly)
+        {
+            restoreReadOnly = false;
+            try
+            {
+                return OpenValidatedTarget(
+                    targetRoot,
+                    path,
+                    relativePath,
+                    GenericRead | GenericWrite | FileWriteAttributes,
+                    FileShareRead);
+            }
+            catch (Win32Exception error)
+            {
+                if (error.NativeErrorCode != 5)
+                {
+                    throw;
+                }
+            }
+
+            SafeFileHandle attributeHandle = null;
+            uint originalAttributes = 0;
+            bool attributeCleared = false;
+            try
+            {
+                attributeHandle = OpenValidatedTarget(
+                    targetRoot,
+                    path,
+                    relativePath,
+                    GenericRead | FileWriteAttributes,
+                    FileShareRead | FileShareWrite);
+                originalAttributes = GetAttributes(attributeHandle);
+                if ((originalAttributes & FileAttributeReadOnly) == 0)
+                {
+                    throw new Win32Exception(5, "Unable to acquire an atomic managed-file write handle.");
+                }
+                SetAttributes(attributeHandle, originalAttributes & ~FileAttributeReadOnly);
+                attributeCleared = true;
+
+                SafeFileHandle writeHandle = null;
+                try
+                {
+                    writeHandle = OpenValidatedTarget(
+                        targetRoot,
+                        path,
+                        relativePath,
+                        GenericRead | GenericWrite | FileWriteAttributes,
+                        FileShareRead);
+                    if (!AreSameFile(attributeHandle, writeHandle))
+                    {
+                        throw new IOException(
+                            "The managed-file write handle did not reopen the same file whose read-only attribute was cleared.");
+                    }
+                    restoreReadOnly = true;
+                    SafeFileHandle result = writeHandle;
+                    writeHandle = null;
+                    return result;
+                }
+                finally
+                {
+                    if (writeHandle != null)
+                    {
+                        writeHandle.Dispose();
+                    }
+                }
+            }
+            catch
+            {
+                restoreReadOnly = false;
+                if (attributeCleared && attributeHandle != null && !attributeHandle.IsInvalid)
+                {
+                    SetAttributes(attributeHandle, originalAttributes);
+                }
+                throw;
+            }
+            finally
+            {
+                if (attributeHandle != null)
+                {
+                    attributeHandle.Dispose();
+                }
+            }
+        }
+
+        private static SafeFileHandle OpenValidatedTarget(
+            string targetRoot,
+            string path,
+            string relativePath,
+            uint desiredAccess,
+            uint shareMode)
+        {
+            string safeRelativePath = NormalizeRelativePath(relativePath);
+            string rootFinalPath;
+            using (SafeFileHandle rootHandle = CreateFile(
+                targetRoot,
+                0,
+                FileShareRead | FileShareWrite | FileShareDelete,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagBackupSemantics,
+                IntPtr.Zero))
+            {
+                EnsureValidHandle(rootHandle, "Unable to open the managed target root for handle-bound validation.");
+                rootFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
+            }
+
+            SafeFileHandle handle = CreateFile(
+                path,
+                desiredAccess,
+                shareMode,
+                IntPtr.Zero,
+                OpenExisting,
+                FileAttributeNormal | FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            try
+            {
+                EnsureValidHandle(handle, "Unable to acquire an atomic managed-file mutation handle.");
+                ByHandleFileInformation information;
+                if (!GetFileInformationByHandle(handle, out information))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to inspect the managed-file mutation handle.");
+                }
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    throw new IOException("The managed-file mutation handle resolves to a reparse point.");
+                }
+                string expectedFinalPath = rootFinalPath + "\\" + safeRelativePath;
+                string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
+                if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException(
+                        "The managed-file mutation handle resolved outside the expected target-root path. Expected '" +
+                        expectedFinalPath + "' but opened '" + actualFinalPath + "'.");
+                }
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        public static void MarkDeleteOnClose(SafeFileHandle handle)
+        {
+            uint originalAttributes = GetAttributes(handle);
+            bool restoreReadOnly = (originalAttributes & FileAttributeReadOnly) != 0;
+            if (restoreReadOnly)
+            {
+                SetAttributes(handle, originalAttributes & ~FileAttributeReadOnly);
+            }
+            try
+            {
+                FileDispositionInfo information = new FileDispositionInfo { DeleteFile = true };
+                uint size = (uint)Marshal.SizeOf(typeof(FileDispositionInfo));
+                if (!SetFileDispositionByHandle(handle, FileDispositionInfoClass, ref information, size))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to mark the managed file for atomic deletion.");
+                }
+            }
+            catch
+            {
+                if (restoreReadOnly)
+                {
+                    SetAttributes(handle, originalAttributes);
+                }
+                throw;
+            }
+        }
+
+        public static void RestoreReadOnly(SafeFileHandle handle)
+        {
+            uint attributes = GetAttributes(handle);
+            if ((attributes & FileAttributeReadOnly) == 0)
+            {
+                SetAttributes(handle, (attributes & ~FileAttributeNormal) | FileAttributeReadOnly);
+            }
+        }
+
+        private static bool AreSameFile(SafeFileHandle first, SafeFileHandle second)
+        {
+            ByHandleFileInformation firstInformation;
+            if (!GetFileInformationByHandle(first, out firstInformation))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to identify the read-only managed-file handle.");
+            }
+            ByHandleFileInformation secondInformation;
+            if (!GetFileInformationByHandle(second, out secondInformation))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to identify the reopened managed-file write handle.");
+            }
+            return firstInformation.VolumeSerialNumber == secondInformation.VolumeSerialNumber &&
+                firstInformation.FileIndexHigh == secondInformation.FileIndexHigh &&
+                firstInformation.FileIndexLow == secondInformation.FileIndexLow;
+        }
+
+        private static uint GetAttributes(SafeFileHandle handle)
+        {
+            FileBasicInfo information;
+            uint size = (uint)Marshal.SizeOf(typeof(FileBasicInfo));
+            if (!GetFileInformationByHandleEx(handle, FileBasicInfoClass, out information, size))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read managed-file attributes from the mutation handle.");
+            }
+            return information.FileAttributes;
+        }
+
+        private static void SetAttributes(SafeFileHandle handle, uint attributes)
+        {
+            FileBasicInfo information;
+            uint size = (uint)Marshal.SizeOf(typeof(FileBasicInfo));
+            if (!GetFileInformationByHandleEx(handle, FileBasicInfoClass, out information, size))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read managed-file attributes from the mutation handle.");
+            }
+            information.FileAttributes = attributes == 0 ? FileAttributeNormal : attributes;
+            if (!SetFileBasicInfoByHandle(handle, FileBasicInfoClass, ref information, size))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to update managed-file attributes through the mutation handle.");
+            }
+        }
+
+        private static string GetFinalPath(SafeFileHandle handle)
+        {
+            uint capacity = 32768;
+            StringBuilder path = new StringBuilder((int)capacity);
+            uint length = GetFinalPathNameByHandle(handle, path, capacity, 0);
+            if (length == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve a handle-bound managed-file path.");
+            }
+            if (length >= capacity)
+            {
+                capacity = length + 1;
+                path = new StringBuilder((int)capacity);
+                length = GetFinalPathNameByHandle(handle, path, capacity, 0);
+                if (length == 0 || length >= capacity)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve a complete handle-bound managed-file path.");
+                }
+            }
+            return path.ToString().Replace('/', '\\');
+        }
+
+        private static string NormalizeRelativePath(string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
+            {
+                throw new ArgumentException("Managed-file handle validation requires a safe relative path.", "relativePath");
+            }
+            string[] segments = relativePath.Replace('/', '\\').Split('\\');
+            foreach (string segment in segments)
+            {
+                if (string.IsNullOrWhiteSpace(segment) || segment == "." || segment == "..")
+                {
+                    throw new ArgumentException("Managed-file handle validation rejected an unsafe relative path.", "relativePath");
+                }
+            }
+            return string.Join("\\", segments);
+        }
+
+        private static void EnsureValidHandle(SafeFileHandle handle, string message)
+        {
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, message);
+            }
+        }
+    }
+}
+'@
+}
+
 function Invoke-Git {
     param(
         [Parameter(Mandatory = $true)]
@@ -274,6 +670,44 @@ function Test-IsAllowedManagedPath {
     return $true
 }
 
+function ConvertFrom-GitQuotedPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not ($Path.Length -ge 2 -and $Path[0] -eq '"' -and $Path[$Path.Length - 1] -eq '"')) {
+        return $Path
+    }
+
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    $content = $Path.Substring(1,$Path.Length - 2)
+    for ($index = 0; $index -lt $content.Length; $index++) {
+        $character = $content[$index]
+        if ($character -ne '\') {
+            if ([int]$character -gt 0x7f) { throw "Git returned a non-ASCII byte in a quoted path: $Path" }
+            $bytes.Add([byte][int]$character)
+            continue
+        }
+        if (++$index -ge $content.Length) { throw "Git returned an incomplete quoted path escape: $Path" }
+        $escape = $content[$index]
+        $simpleEscapes = @{ 'a'=0x07; 'b'=0x08; 't'=0x09; 'n'=0x0a; 'v'=0x0b; 'f'=0x0c; 'r'=0x0d; '"'=0x22; '\'=0x5c }
+        $escapeText = [string]$escape
+        if ($simpleEscapes.ContainsKey($escapeText)) {
+            $bytes.Add([byte]$simpleEscapes[$escapeText])
+            continue
+        }
+        if ($escape -lt '0' -or $escape -gt '7' -or $index + 2 -ge $content.Length) {
+            throw "Git returned an unsupported quoted path escape: $Path"
+        }
+        $octal = $content.Substring($index,3)
+        if ($octal -cnotmatch '^[0-7]{3}$') { throw "Git returned an invalid octal path escape: $Path" }
+        $bytes.Add([byte][Convert]::ToInt32($octal,8))
+        $index += 2
+    }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    try { return $utf8.GetString($bytes.ToArray()) }
+    catch { throw "Git returned a quoted path that is not valid UTF-8: $Path" }
+}
+
 function Test-IsCanonicalInstructionSourceRepository {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
@@ -297,13 +731,45 @@ function Get-GitInfoExcludePath {
 }
 
 function Assert-GitInfoExcludeMutationPath {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
 
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $item = Get-Item -Force -LiteralPath $Path
-    if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Unsafe shared Git exclude mutation path '$Path': expected a non-reparse file or a missing path."
+    $commonGitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $Repository $commonGitDirectory }
+    $commonGitDirectory = [System.IO.Path]::GetFullPath($commonGitDirectory).TrimEnd([char[]]@('\','/'))
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $commonGitDirectory 'info\exclude'))
+    if (-not $resolvedPath.Equals($expectedPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe shared Git exclude mutation path '$resolvedPath': expected '$expectedPath'."
     }
+
+    $inspectionPath = $resolvedPath
+    while ($true) {
+        if (Test-Path -LiteralPath $inspectionPath) {
+            $item = Get-Item -Force -LiteralPath $inspectionPath
+            $isLeaf = $inspectionPath.Equals($resolvedPath,[System.StringComparison]::OrdinalIgnoreCase)
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or ($isLeaf -and $item.PSIsContainer) -or (-not $isLeaf -and -not $item.PSIsContainer)) {
+                throw "Unsafe shared Git exclude mutation path '$resolvedPath': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { 'file' } else { 'directory' }))."
+            }
+        }
+        if ($inspectionPath.Equals($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = Split-Path -Parent $inspectionPath
+        if ([string]::IsNullOrWhiteSpace($parent) -or -not $parent.StartsWith($commonGitDirectory,[System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unsafe shared Git exclude mutation path '$resolvedPath': parent traversal escaped the common Git directory."
+        }
+        $inspectionPath = $parent
+    }
+}
+
+function Get-StringSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Value)
+
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Value)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
 }
 
 function Get-GitPathComparer {
@@ -330,6 +796,41 @@ function Open-RepositoryOperationLock {
     catch [System.IO.IOException] {
         throw 'Another AI instruction repository operation is already running; bootstrap stopped before mutation.'
     }
+}
+
+function Open-RepositoryIndexTransactionLock {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { $gitDirectory = Join-Path $Repository $gitDirectory }
+    $gitDirectory = [System.IO.Path]::GetFullPath($gitDirectory).TrimEnd([char[]]@('\','/'))
+    if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) { throw "Git directory is missing or invalid: $gitDirectory" }
+    $gitDirectoryItem = Get-Item -Force -LiteralPath $gitDirectory
+    if (($gitDirectoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Git directory must not be a reparse point: $gitDirectory"
+    }
+
+    $indexPath = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
+    $indexPath = [System.IO.Path]::GetFullPath($indexPath)
+    $expectedIndexPath = [System.IO.Path]::GetFullPath((Join-Path $gitDirectory 'index'))
+    if (-not $indexPath.Equals($expectedIndexPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Git index path is outside the active worktree Git directory: $indexPath"
+    }
+    if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) { throw "Git index file is missing: $indexPath" }
+    $indexItem = Get-Item -Force -LiteralPath $indexPath
+    if (($indexItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Git index file must not be a reparse point: $indexPath"
+    }
+
+    $lockPath = $indexPath + '.lock'
+    try {
+        $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+    }
+    catch [System.IO.IOException] {
+        throw 'The Git index is being changed by another process; bootstrap stopped before index preflight.'
+    }
+    return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath }
 }
 
 function Assert-ManagedPathDoesNotCrossReparsePoint {
@@ -399,27 +900,134 @@ function New-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $path = Get-GitInfoExcludePath -Repository $Repository
-    Assert-GitInfoExcludeMutationPath -Path $path
-    $exists = Test-Path -LiteralPath $path -PathType Leaf
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
     return [pscustomobject][ordered]@{
         Path = $path
-        Existed = $exists
-        Bytes = if ($exists) { [System.IO.File]::ReadAllBytes($path) } else { $null }
+        Repository = $Repository
+        MutationApplied = $false
+        Existed = $false
+        Bytes = $null
+        AppliedBytes = $null
+    }
+}
+
+function Test-GitInfoExcludeBytesEqual {
+    param(
+        [AllowNull()][byte[]] $Left,
+        [AllowNull()][byte[]] $Right
+    )
+
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+    if ($Left.Length -ne $Right.Length) { return $false }
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        if ($Left[$index] -ne $Right[$index]) { return $false }
+    }
+    return $true
+}
+
+function Read-GitInfoExcludeStreamBytes {
+    param([Parameter(Mandatory = $true)][System.IO.FileStream] $Stream)
+
+    $memory = New-Object System.IO.MemoryStream
+    try {
+        $Stream.Position = 0
+        $Stream.CopyTo($memory)
+        return ,([byte[]]$memory.ToArray())
+    }
+    finally { $memory.Dispose() }
+}
+
+function ConvertFrom-GitInfoExcludeBytes {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes)
+
+    $memory = New-Object System.IO.MemoryStream
+    $reader = $null
+    try {
+        if ($Bytes.Length -gt 0) { $memory.Write($Bytes,0,$Bytes.Length) }
+        $memory.Position = 0
+        $reader = New-Object System.IO.StreamReader($memory,[System.Text.Encoding]::UTF8,$true)
+        return $reader.ReadToEnd()
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        $memory.Dispose()
+    }
+}
+
+function Write-GitInfoExcludeStreamBytes {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    $Stream.Position = 0
+    $Stream.SetLength(0)
+    if ($Bytes.Length -gt 0) { $Stream.Write($Bytes,0,$Bytes.Length) }
+    $Stream.Flush($true)
+}
+
+function Open-GitInfoExcludeMutationHandle {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $RequireExisting
+    )
+
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $Path
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $Path
+    $stream = $null
+    $created = $false
+    try {
+        if ($RequireExisting) {
+            $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+        }
+        else {
+            try {
+                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+                $created = $true
+            }
+            catch [System.IO.IOException] {
+                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+            }
+        }
+        return [pscustomobject]@{ Stream=$stream; Created=$created }
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw "Unable to acquire the exclusive shared Git exclude mutation handle; another process may be changing '$Path'. $($_.Exception.Message)"
     }
 }
 
 function Restore-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
-    if ([bool]$Snapshot.Existed) {
-        Assert-GitInfoExcludeMutationPath -Path ([string]$Snapshot.Path)
-        $parent = Split-Path -Parent ([string]$Snapshot.Path)
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
-        [System.IO.File]::WriteAllBytes([string]$Snapshot.Path,[byte[]]$Snapshot.Bytes)
+    if (-not [bool]$Snapshot.MutationApplied) { return }
+    $path = [string]$Snapshot.Path
+    $repository = [string]$Snapshot.Repository
+    Assert-GitInfoExcludeMutationPath -Repository $repository -Path $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (-not [bool]$Snapshot.Existed) {
+            $Snapshot.MutationApplied = $false
+            return
+        }
+        throw "Shared Git exclude changed concurrently during rollback; the missing current state was preserved: $path"
     }
-    elseif (Test-Path -LiteralPath ([string]$Snapshot.Path)) {
-        Assert-GitInfoExcludeMutationPath -Path ([string]$Snapshot.Path)
-        Remove-Item -LiteralPath ([string]$Snapshot.Path) -Force
+
+    $handle = Open-GitInfoExcludeMutationHandle -Repository $repository -Path $path -RequireExisting
+    try {
+        if ([bool]$handle.Created) { throw "Shared Git exclude changed concurrently during rollback; the recreated current state was preserved: $path" }
+        [byte[]]$currentBytes = Read-GitInfoExcludeStreamBytes -Stream $handle.Stream
+        if (-not (Test-GitInfoExcludeBytesEqual -Left $currentBytes -Right ([byte[]]$Snapshot.AppliedBytes))) {
+            throw "Shared Git exclude changed concurrently during rollback; current bytes were preserved: $path"
+        }
+        $restoreBytes = if ([bool]$Snapshot.Existed) { [byte[]]$Snapshot.Bytes } else { [byte[]]@() }
+        Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $restoreBytes
+        $Snapshot.MutationApplied = $false
+    }
+    finally {
+        if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
     }
 }
 
@@ -435,31 +1043,53 @@ function ConvertTo-GitExcludeLiteralPattern {
 function Set-ManagedGitInfoExclude {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ManagedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ManagedPaths,
+        [Parameter(Mandatory = $true)][object] $Snapshot
     )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
-    Assert-GitInfoExcludeMutationPath -Path $path
-    $content = if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`r","`n") } else { '' }
-    $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
-    $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
-    $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
-    if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
-        throw "The Codex AI Instructions managed exclude block is malformed: $path"
+    if ([string]$Snapshot.Path -cne $path -or [string]$Snapshot.Repository -cne $Repository) {
+        throw 'Shared Git exclude snapshot does not match the requested mutation target.'
     }
-    $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
     $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
     $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
-    $updated = $withoutBlock
-    if ($lines.Count -gt 0) {
-        $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
-        $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
+    $handle = Open-GitInfoExcludeMutationHandle -Repository $Repository -Path $path
+    try {
+        [byte[]]$beforeBytes = Read-GitInfoExcludeStreamBytes -Stream $handle.Stream
+        $Snapshot.Existed = -not [bool]$handle.Created
+        $Snapshot.Bytes = if ([bool]$handle.Created) { $null } else { $beforeBytes }
+        $Snapshot.AppliedBytes = $beforeBytes
+        $Snapshot.MutationApplied = [bool]$handle.Created
+
+        $content = (ConvertFrom-GitInfoExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
+        $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
+        $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
+        $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
+        if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
+            throw "The Codex AI Instructions managed exclude block is malformed: $path"
+        }
+        $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
+        $updated = $withoutBlock
+        if ($lines.Count -gt 0) {
+            $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
+            $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($updated)) { $updated += "`n" }
+        [byte[]]$updatedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($updated)
+        if (-not (Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right $updatedBytes)) {
+            $Snapshot.AppliedBytes = $updatedBytes
+            $Snapshot.MutationApplied = $true
+            try { Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $updatedBytes }
+            catch {
+                try { $Snapshot.AppliedBytes = [byte[]](Read-GitInfoExcludeStreamBytes -Stream $handle.Stream) }
+                catch { }
+                throw
+            }
+        }
     }
-    elseif (-not [string]::IsNullOrWhiteSpace($updated)) { $updated += "`n" }
-    if ($content -cne $updated) {
-        $parent = Split-Path -Parent $path
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
-        [System.IO.File]::WriteAllText($path,$updated,(New-Object System.Text.UTF8Encoding($false)))
+    finally {
+        if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
     }
 }
 
@@ -600,7 +1230,13 @@ function New-TargetMutationSnapshot {
 
     foreach ($relativePath in @($RelativePaths | Sort-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($relativePath)) { continue }
-        $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', '\')))
+        try {
+            $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', '\')))
+        }
+        catch {
+            $codePoints = @([char[]][string]$relativePath | ForEach-Object { ([int]$_).ToString('x4') }) -join ' '
+            throw "Invalid target mutation path '$relativePath' (UTF-16: $codePoints): $($_.Exception.Message)"
+        }
         if (-not $targetPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Unsafe target mutation snapshot path: $relativePath"
         }
@@ -633,6 +1269,9 @@ function New-TargetMutationSnapshot {
             TargetPath = $targetPath
             OriginalType = $originalType
             BackupPath = $backupPath
+            MutationApplied = $false
+            AppliedType = $null
+            AppliedBytes = $null
         })
 
         $parentPath = Split-Path -Parent $targetPath
@@ -644,45 +1283,354 @@ function New-TargetMutationSnapshot {
     }
 
     return [pscustomobject][ordered]@{
+        TargetRoot = $resolvedTargetRoot
         FileStates = $fileStates.ToArray()
         MissingDirectories = @($missingDirectories.Keys)
     }
 }
 
+function Get-TargetMutationFileState {
+    param(
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+
+    $matches = @($Snapshot.FileStates | Where-Object { [string]$_.RelativePath -ceq $RelativePath })
+    if ($matches.Count -ne 1) { throw "Target mutation snapshot does not contain exactly one state for: $RelativePath" }
+    return $matches[0]
+}
+
+function Test-TargetMutationBytesEqual {
+    param(
+        [AllowNull()][byte[]] $Left,
+        [AllowNull()][byte[]] $Right
+    )
+
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+    if ($Left.Length -ne $Right.Length) { return $false }
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        if ($Left[$index] -ne $Right[$index]) { return $false }
+    }
+    return $true
+}
+
+function Read-TargetMutationStreamBytes {
+    param([Parameter(Mandatory = $true)][System.IO.FileStream] $Stream)
+
+    $memory = New-Object System.IO.MemoryStream
+    try {
+        $Stream.Position = 0
+        $Stream.CopyTo($memory)
+        return ,([byte[]]$memory.ToArray())
+    }
+    finally { $memory.Dispose() }
+}
+
+function Write-TargetMutationStreamBytes {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    $Stream.Position = 0
+    $Stream.SetLength(0)
+    if ($Bytes.Length -gt 0) { $Stream.Write($Bytes,0,$Bytes.Length) }
+    $Stream.Flush($true)
+}
+
+function Set-TargetMutationDeleteDisposition {
+    param([Parameter(Mandatory = $true)][Microsoft.Win32.SafeHandles.SafeFileHandle] $Handle)
+
+    [CodexAiInstructions.NativeFileMutation]::MarkDeleteOnClose($Handle)
+}
+
+function Open-TargetMutationAtomicDeleteStream {
+    param(
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)][string] $TargetPath,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Operation
+    )
+
+    $nativeHandle = $null
+    try {
+        $nativeHandle = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDelete(
+            $TargetRoot,$TargetPath,$RelativePath)
+        $stream = [System.IO.FileStream]::new($nativeHandle,[System.IO.FileAccess]::Read)
+        $nativeHandle = $null
+        return $stream
+    }
+    catch {
+        throw "$Operation could not acquire the atomic delete handle; the current file was preserved: $RelativePath. $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $nativeHandle) { $nativeHandle.Dispose() }
+    }
+}
+
+function Open-TargetMutationAtomicWriteStream {
+    param(
+        [Parameter(Mandatory = $true)][string] $TargetRoot,
+        [Parameter(Mandatory = $true)][string] $TargetPath,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Operation,
+        [Parameter(Mandatory = $true)][ref] $RestoreReadOnly
+    )
+
+    $nativeHandle = $null
+    $nativeRestoreReadOnly = $false
+    try {
+        $nativeHandle = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicWrite(
+            $TargetRoot,$TargetPath,$RelativePath,[ref]$nativeRestoreReadOnly)
+        $stream = [System.IO.FileStream]::new($nativeHandle,[System.IO.FileAccess]::ReadWrite)
+        $nativeHandle = $null
+        $RestoreReadOnly.Value = [bool]$nativeRestoreReadOnly
+        return $stream
+    }
+    catch {
+        $openError = $_.Exception.Message
+        $restoreError = $null
+        if ($null -ne $nativeHandle -and $nativeRestoreReadOnly) {
+            try { [CodexAiInstructions.NativeFileMutation]::RestoreReadOnly($nativeHandle) }
+            catch { $restoreError = $_.Exception.Message }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$restoreError)) {
+            throw "$Operation could not acquire the atomic write stream and could not restore the read-only attribute: $RelativePath. $restoreError"
+        }
+        throw "$Operation could not acquire the atomic write handle; the current file was preserved: $RelativePath. $openError"
+    }
+    finally {
+        if ($null -ne $nativeHandle) { $nativeHandle.Dispose() }
+    }
+}
+
+function Close-TargetMutationStream {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][bool] $RestoreReadOnly
+    )
+
+    try {
+        if ($RestoreReadOnly) {
+            [CodexAiInstructions.NativeFileMutation]::RestoreReadOnly($Stream.SafeFileHandle)
+        }
+    }
+    finally { $Stream.Dispose() }
+}
+
+function Remove-TargetMutationFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory = $true)][string] $Operation
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw "$Operation requires the Windows atomic managed-file deletion boundary: $RelativePath"
+    }
+    $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
+    Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path `
+        ([string]$state.TargetPath) -Context "$Operation '$RelativePath'"
+    $stream = $null
+    try {
+        $stream = Open-TargetMutationAtomicDeleteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
+            -TargetPath ([string]$state.TargetPath) `
+            -RelativePath $RelativePath -Operation $Operation
+        [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
+        if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $ExpectedBytes)) {
+            throw "$Operation detected concurrent content; the current file was preserved: $RelativePath"
+        }
+        Set-TargetMutationDeleteDisposition -Handle $stream.SafeFileHandle
+        $stream.Dispose()
+        $stream = $null
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Set-TargetMutationFileBytes {
+    param(
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
+    if ([bool]$state.MutationApplied) { throw "Target mutation state was already applied: $RelativePath" }
+    Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
+    $stream = $null
+    $restoreReadOnly = $false
+    try {
+        if ([string]$state.OriginalType -ceq 'file') {
+            [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+            try {
+                $stream = Open-TargetMutationAtomicWriteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
+                    -TargetPath ([string]$state.TargetPath) -RelativePath $RelativePath `
+                    -Operation 'Managed target mutation' -RestoreReadOnly ([ref]$restoreReadOnly)
+            }
+            catch {
+                throw "Managed target changed concurrently before mutation: $RelativePath. $($_.Exception.Message)"
+            }
+            [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
+            if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $originalBytes)) {
+                throw "Managed target changed concurrently before mutation: $RelativePath"
+            }
+        }
+        else {
+            if (Test-Path -LiteralPath ([string]$state.TargetPath)) {
+                throw "Managed target changed concurrently before creation: $RelativePath"
+            }
+            $parentPath = Split-Path -Parent ([string]$state.TargetPath)
+            if (-not [string]::IsNullOrWhiteSpace($parentPath)) { New-Item -ItemType Directory -Force -Path $parentPath | Out-Null }
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
+            try {
+                $stream = [System.IO.File]::Open([string]$state.TargetPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+            }
+            catch {
+                throw "Managed target changed concurrently before creation: $RelativePath. $($_.Exception.Message)"
+            }
+        }
+
+        $state.AppliedType = 'file'
+        $state.AppliedBytes = [byte[]]$Bytes.Clone()
+        $state.MutationApplied = $true
+        try {
+            Write-TargetMutationStreamBytes -Stream $stream -Bytes $Bytes
+            [byte[]]$writtenBytes = Read-TargetMutationStreamBytes -Stream $stream
+            if (-not (Test-TargetMutationBytesEqual -Left $writtenBytes -Right $Bytes)) {
+                $state.AppliedBytes = $writtenBytes
+                throw "Managed target write did not retain the exact applied bytes: $RelativePath"
+            }
+        }
+        catch {
+            try { $state.AppliedBytes = [byte[]](Read-TargetMutationStreamBytes -Stream $stream) }
+            catch { }
+            throw
+        }
+    }
+    finally {
+        if ($null -ne $stream) {
+            Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
+        }
+    }
+}
+
+function Remove-TargetMutationFile {
+    param(
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+
+    $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
+    if ([bool]$state.MutationApplied -or [string]$state.OriginalType -cne 'file') {
+        throw "Target mutation cannot remove an unexpected snapshot state: $RelativePath"
+    }
+    [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+    Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath $RelativePath -ExpectedBytes $originalBytes `
+        -Operation 'Managed target removal'
+    $state.AppliedType = 'missing'
+    $state.AppliedBytes = $null
+    $state.MutationApplied = $true
+}
+
 function Restore-TargetMutationSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
+    $driftedPaths = New-Object System.Collections.Generic.List[string]
+    $rollbackErrors = New-Object System.Collections.Generic.List[string]
     foreach ($state in @($Snapshot.FileStates)) {
-        switch ([string]$state.OriginalType) {
-            'file' {
-                $parentPath = Split-Path -Parent ([string]$state.TargetPath)
-                if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) {
-                    New-Item -ItemType Directory -Force -Path $parentPath | Out-Null
-                }
-                Copy-Item -LiteralPath ([string]$state.BackupPath) -Destination ([string]$state.TargetPath) -Force
-            }
-            'missing' {
-                if (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Leaf) {
-                    Remove-Item -LiteralPath ([string]$state.TargetPath) -Force
-                }
-                elseif (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Container) {
-                    if (@(Get-ChildItem -LiteralPath ([string]$state.TargetPath) -Force).Count -gt 0) {
-                        throw "Target rollback found an unexpected non-empty directory: $($state.RelativePath)"
+        if (-not [bool]$state.MutationApplied) { continue }
+        $stream = $null
+        $restoreReadOnly = $false
+        try {
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Target rollback '$($state.RelativePath)'"
+            switch ([string]$state.AppliedType) {
+                'file' {
+                    if (-not (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Leaf)) {
+                        $driftedPaths.Add([string]$state.RelativePath)
+                        continue
                     }
-                    Remove-Item -LiteralPath ([string]$state.TargetPath) -Force
+                    try {
+                        $stream = Open-TargetMutationAtomicWriteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
+                            -TargetPath ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                            -Operation 'Target rollback mutation' -RestoreReadOnly ([ref]$restoreReadOnly)
+                    }
+                    catch {
+                        $driftedPaths.Add([string]$state.RelativePath)
+                        continue
+                    }
+                    [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
+                    if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right ([byte[]]$state.AppliedBytes))) {
+                        $driftedPaths.Add([string]$state.RelativePath)
+                        continue
+                    }
+                    if ([string]$state.OriginalType -ceq 'file') {
+                        [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+                        Write-TargetMutationStreamBytes -Stream $stream -Bytes $originalBytes
+                        $state.MutationApplied = $false
+                        continue
+                    }
+                    Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
+                    $stream = $null
+                    $restoreReadOnly = $false
+                    try {
+                        Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath ([string]$state.RelativePath) `
+                            -ExpectedBytes ([byte[]]$state.AppliedBytes) -Operation 'Target rollback removal'
+                    }
+                    catch {
+                        $driftedPaths.Add([string]$state.RelativePath)
+                        $rollbackErrors.Add($_.Exception.Message)
+                        continue
+                    }
+                    $state.MutationApplied = $false
                 }
-                elseif (Test-Path -LiteralPath ([string]$state.TargetPath)) {
-                    throw "Target rollback found an unexpected filesystem entry: $($state.RelativePath)"
+                'missing' {
+                    if (Test-Path -LiteralPath ([string]$state.TargetPath)) {
+                        $driftedPaths.Add([string]$state.RelativePath)
+                        continue
+                    }
+                    if ([string]$state.OriginalType -ceq 'file') {
+                        $parentPath = Split-Path -Parent ([string]$state.TargetPath)
+                        if (-not (Test-Path -LiteralPath $parentPath -PathType Container)) { New-Item -ItemType Directory -Force -Path $parentPath | Out-Null }
+                        Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Target rollback '$($state.RelativePath)'"
+                        [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+                        try {
+                            $stream = [System.IO.File]::Open([string]$state.TargetPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+                        }
+                        catch {
+                            $driftedPaths.Add([string]$state.RelativePath)
+                            continue
+                        }
+                        Write-TargetMutationStreamBytes -Stream $stream -Bytes $originalBytes
+                    }
+                    $state.MutationApplied = $false
                 }
+                default { throw "Target rollback found an unsupported applied state: $($state.RelativePath)" }
+            }
+        }
+        catch { $rollbackErrors.Add("$($state.RelativePath): $($_.Exception.Message)") }
+        finally {
+            if ($null -ne $stream) {
+                Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
             }
         }
     }
 
-    foreach ($directoryPath in @($Snapshot.MissingDirectories | Sort-Object { $_.Length } -Descending)) {
-        if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) { continue }
-        if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $directoryPath -Force
+    if ($driftedPaths.Count -eq 0 -and $rollbackErrors.Count -eq 0) {
+        foreach ($directoryPath in @($Snapshot.MissingDirectories | Sort-Object { $_.Length } -Descending)) {
+            if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) { continue }
+            $directoryItem = Get-Item -Force -LiteralPath $directoryPath
+            if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) { Remove-Item -LiteralPath $directoryPath -Force }
         }
+    }
+    if ($driftedPaths.Count -gt 0 -or $rollbackErrors.Count -gt 0) {
+        $parts = New-Object System.Collections.Generic.List[string]
+        if ($driftedPaths.Count -gt 0) { $parts.Add("Concurrent target changes were preserved and require manual resolution: $(@($driftedPaths | Sort-Object -Unique) -join ', ')") }
+        if ($rollbackErrors.Count -gt 0) { $parts.Add("Target rollback errors: $($rollbackErrors -join ' | ')") }
+        throw ($parts -join ' ')
     }
 }
 
@@ -693,22 +1641,25 @@ function Restore-TargetMutationTransaction {
         [Parameter(Mandatory = $true)][object] $Snapshot
     )
 
-    if ($Paths.Count -gt 0) {
-        Invoke-Git -Repository $Repository -Arguments (@('reset', '--quiet', 'HEAD', '--') + $Paths) | Out-Null
-    }
     Restore-TargetMutationSnapshot -Snapshot $Snapshot
 }
 
 function Get-PersonalAgentStashes {
-    param([Parameter(Mandatory = $true)][string] $Repository)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $WorktreeKey
+    )
 
     $stashes = New-Object System.Collections.Generic.List[object]
     $stashLines = @(Invoke-Git -Repository $Repository -Arguments @('stash', 'list', '--format=%gd%x09%H%x09%gs'))
     foreach ($stashLine in $stashLines) {
         $parts = ([string] $stashLine).Split(@("`t"), 3, [System.StringSplitOptions]::None)
-        if ($parts.Count -ne 3 -or $parts[2] -notmatch '(^|: )PersonalAgent$') {
-            continue
-        }
+        if ($parts.Count -ne 3) { continue }
+        $subjectMatch = [System.Text.RegularExpressions.Regex]::Match(
+            $parts[2],
+            '(?:^|: )CodexPersonalAgent:(?<Worktree>[0-9a-f]{64}):(?<Evidence>[0-9a-f]{64}):PersonalAgent$'
+        )
+        if (-not $subjectMatch.Success -or $subjectMatch.Groups['Worktree'].Value -cne $WorktreeKey) { continue }
 
         $indexMatch = [System.Text.RegularExpressions.Regex]::Match($parts[0], '^stash@\{([0-9]+)\}$')
         if (-not $indexMatch.Success) {
@@ -719,10 +1670,72 @@ function Get-PersonalAgentStashes {
             Reference = $parts[0]
             Hash = $parts[1]
             Index = [int] $indexMatch.Groups[1].Value
+            WorktreeKey = $subjectMatch.Groups['Worktree'].Value
+            EvidenceFingerprint = $subjectMatch.Groups['Evidence'].Value
         })
     }
 
     return $stashes
+}
+
+function Get-PersonalAgentWorktreeKey {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse', '--git-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { $gitDirectory = Join-Path $Repository $gitDirectory }
+    $identity = [System.IO.Path]::GetFullPath($gitDirectory).Replace('\', '/')
+    if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) { $identity = $identity.ToLowerInvariant() }
+    return Get-StringSha256 -Value $identity
+}
+
+function Get-PersonalAgentEvidenceFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $Paths
+    )
+
+    $evidenceLines = foreach ($path in @($Paths | Sort-Object -Unique)) {
+        $fullPath = Join-Path $Repository $path.Replace('/', '\')
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Cannot fingerprint PersonalAgent evidence because a managed path is missing: $path"
+        }
+        $blobId = ((Invoke-Git -Repository $Repository -Arguments @('hash-object','--no-filters','--',$path)) | Select-Object -First 1).Trim()
+        if ($blobId -cnotmatch '^[0-9a-f]{40,64}$') { throw "Cannot fingerprint PersonalAgent evidence because Git returned an invalid blob ID: $path" }
+        "$path`t$blobId"
+    }
+    return Get-StringSha256 -Value (@($evidenceLines) -join "`n")
+}
+
+function Test-PersonalAgentStashEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][object] $Stash,
+        [string[]] $Paths = @(),
+        [Parameter(Mandatory = $true)][string] $ExpectedFingerprint
+    )
+
+    try {
+        $parentLine = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%P',[string]$Stash.Hash)) |
+            Select-Object -First 1).Trim()
+        $parents = @($parentLine.Split(' ',[System.StringSplitOptions]::RemoveEmptyEntries))
+        if ($parents.Count -lt 3) { return $false }
+        $untrackedCommit = [string]$parents[2]
+        if ($untrackedCommit -cnotmatch '^[0-9a-f]{40,64}$') { return $false }
+        $treeEntries = New-Object System.Collections.Generic.List[object]
+        foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('-c','core.quotePath=true','ls-tree','-r','--full-tree',$untrackedCommit))) {
+            $match = [System.Text.RegularExpressions.Regex]::Match([string]$line,'^[0-7]{6} blob (?<Hash>[0-9a-f]{40,64})\t(?<Path>.+)$')
+            if (-not $match.Success) { return $false }
+            $treeEntries.Add([pscustomobject]@{ Path=(ConvertFrom-GitQuotedPath -Path $match.Groups['Path'].Value); Hash=$match.Groups['Hash'].Value })
+        }
+        if ($Paths.Count -gt 0) {
+            $expectedPaths = @($Paths | Sort-Object -Unique)
+            $actualPaths = @($treeEntries | ForEach-Object { [string]$_.Path } | Sort-Object -Unique)
+            if ($actualPaths.Count -ne $expectedPaths.Count -or (@($actualPaths) -join "`n") -cne (@($expectedPaths) -join "`n")) { return $false }
+        }
+        $fingerprintLines = @($treeEntries | Sort-Object Path | ForEach-Object { "$($_.Path)`t$($_.Hash)" })
+        return (Get-StringSha256 -Value ($fingerprintLines -join "`n")) -ceq $ExpectedFingerprint
+    }
+    catch { return $false }
 }
 
 function Update-PersonalAgentStash {
@@ -739,7 +1752,20 @@ function Update-PersonalAgentStash {
 
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
-        [object[]] $PriorStashes
+        [object[]] $PriorStashes,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $PriorOwnedStashes,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorktreeKey,
+
+        [Parameter(Mandatory = $true)]
+        [string] $EvidenceFingerprint,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ActiveIndexPath
     )
 
     if ($Paths.Count -eq 0) {
@@ -755,9 +1781,66 @@ function Update-PersonalAgentStash {
         $expectedRawHashes[$path] = Get-RawContentHash -Path $fullPath
     }
 
-    Invoke-Git -Repository $Repository -Arguments (@(
-        '-c', 'core.autocrlf=false', 'stash', 'push', '--all', '--quiet', '-m', 'PersonalAgent', '--'
-    ) + $Paths) | Out-Null
+    $stashMessage = "CodexPersonalAgent:$WorktreeKey`:$EvidenceFingerprint`:PersonalAgent"
+    $headCommit = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
+    $headTree = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%T','HEAD')) | Select-Object -First 1).Trim()
+    foreach ($objectId in @($headCommit,$headTree)) {
+        if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid object ID while creating PersonalAgent evidence.' }
+    }
+
+    $resolvedActiveIndexPath = [System.IO.Path]::GetFullPath($ActiveIndexPath)
+    if (-not (Test-Path -LiteralPath $resolvedActiveIndexPath -PathType Leaf)) {
+        throw "Cannot create PersonalAgent evidence because the locked Git index is missing: $resolvedActiveIndexPath"
+    }
+    $activeIndexItem = Get-Item -Force -LiteralPath $resolvedActiveIndexPath
+    if (($activeIndexItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Cannot create PersonalAgent evidence from a reparse-point Git index: $resolvedActiveIndexPath"
+    }
+
+    # Keep the product index immutable while preserving its exact tree as the stash's index parent.
+    # The private copy stays beside the real index so Git split-index shared files remain resolvable.
+    $temporaryProductIndexPath = $resolvedActiveIndexPath + '.codex-personal-agent-' + [Guid]::NewGuid().ToString('N')
+    $temporaryEvidenceIndexPath = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-personal-agent-index-' + [Guid]::NewGuid().ToString('N'))
+    $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
+    $priorAlternateIndex = $env:GIT_INDEX_FILE
+    try {
+        [System.IO.File]::Copy($resolvedActiveIndexPath,$temporaryProductIndexPath,$false)
+        $env:GIT_INDEX_FILE = $temporaryProductIndexPath
+        $indexTree = ((Invoke-Git -Repository $Repository -Arguments @('write-tree')) | Select-Object -First 1).Trim()
+        if ($indexTree -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid product index tree ID.' }
+
+        $env:GIT_INDEX_FILE = $temporaryEvidenceIndexPath
+        Invoke-Git -Repository $Repository -Arguments @('read-tree','--empty') | Out-Null
+        foreach ($path in @($Paths | Sort-Object -Unique)) {
+            $blobId = ((Invoke-Git -Repository $Repository -Arguments @('hash-object','-w','--no-filters','--',$path)) | Select-Object -First 1).Trim()
+            if ($blobId -cnotmatch '^[0-9a-f]{40,64}$') { throw "Git returned an invalid managed evidence blob ID: $path" }
+            Invoke-Git -Repository $Repository -Arguments @('update-index','--add','--cacheinfo',"100644,$blobId,$path") | Out-Null
+        }
+        $untrackedTree = ((Invoke-Git -Repository $Repository -Arguments @('write-tree')) | Select-Object -First 1).Trim()
+    }
+    finally {
+        if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
+        else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        foreach ($temporaryPath in @(
+            $temporaryProductIndexPath,
+            ($temporaryProductIndexPath + '.lock'),
+            $temporaryEvidenceIndexPath,
+            ($temporaryEvidenceIndexPath + '.lock')
+        )) {
+            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($untrackedTree -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid PersonalAgent evidence tree ID.' }
+
+    $identityArguments = @('-c','user.name=Codex Runtime','-c','user.email=codex-runtime@example.test','commit-tree')
+    $evidenceNonce = [Guid]::NewGuid().ToString('N')
+    $indexCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($indexTree,'-p',$headCommit,'-m',"PersonalAgent index $evidenceNonce"))) | Select-Object -First 1).Trim()
+    $untrackedCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($untrackedTree,'-p',$headCommit,'-m',"PersonalAgent files $evidenceNonce"))) | Select-Object -First 1).Trim()
+    $newEvidenceCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($headTree,'-p',$headCommit,'-p',$indexCommit,'-p',$untrackedCommit,'-m',$stashMessage))) | Select-Object -First 1).Trim()
+    foreach ($objectId in @($indexCommit,$untrackedCommit,$newEvidenceCommit)) {
+        if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid commit ID while creating PersonalAgent evidence.' }
+    }
+    Invoke-Git -Repository $Repository -Arguments @('stash','store','--quiet','-m',$stashMessage,$newEvidenceCommit) | Out-Null
 
     $priorStashHashCounts = @{}
     foreach ($priorStash in @($PriorStashes)) {
@@ -768,7 +1851,7 @@ function Update-PersonalAgentStash {
 
     $currentStashHashCounts = @{}
     $newStashes = New-Object System.Collections.Generic.List[object]
-    foreach ($currentStash in @(Get-PersonalAgentStashes -Repository $Repository)) {
+    foreach ($currentStash in @(Get-PersonalAgentStashes -Repository $Repository -WorktreeKey $WorktreeKey)) {
         $currentHash = [string]$currentStash.Hash
         if (-not $currentStashHashCounts.ContainsKey($currentHash)) { $currentStashHashCounts[$currentHash] = 0 }
         $currentStashHashCounts[$currentHash]++
@@ -779,8 +1862,9 @@ function Update-PersonalAgentStash {
         throw 'The newly created PersonalAgent stash could not be identified uniquely.'
     }
     $newStashHash = [string]$newStashes[0].Hash
-
-    Invoke-Git -Repository $Repository -Arguments @('-c', 'core.autocrlf=false', 'stash', 'apply', '--quiet', $newStashHash) | Out-Null
+    if (-not (Test-PersonalAgentStashEvidence -Repository $Repository -Stash $newStashes[0] -Paths $Paths -ExpectedFingerprint $EvidenceFingerprint)) {
+        throw 'The newly created PersonalAgent stash does not contain the exact fingerprinted managed evidence.'
+    }
 
     foreach ($path in $Paths) {
         $fullPath = Join-Path $Repository $path.Replace('/','\')
@@ -799,27 +1883,30 @@ function Update-PersonalAgentStash {
         }
     }
 
-    $obsoleteStashes = @(
-        Get-PersonalAgentStashes -Repository $Repository |
-            Where-Object { $_.Hash -ne $newStashHash } |
-            Sort-Object Index -Descending
-    )
+    $obsoleteStashes = @($PriorOwnedStashes | Where-Object { $_.Hash -ne $newStashHash } | Sort-Object Index -Descending)
     foreach ($obsoleteStash in $obsoleteStashes) {
         $droppedHash = $null
         try {
-            $currentMatches = @(
-                Get-PersonalAgentStashes -Repository $Repository |
-                    Where-Object { $_.Hash -ceq [string]$obsoleteStash.Hash }
-            )
-            if ($currentMatches.Count -ne 1) {
-                throw "Expected exactly one current PersonalAgent stash with hash $($obsoleteStash.Hash)."
-            }
+            $currentObsoleteStash = $null
+            foreach ($attempt in 1..3) {
+                $currentMatches = @(
+                    Get-PersonalAgentStashes -Repository $Repository -WorktreeKey $WorktreeKey |
+                        Where-Object { $_.Hash -ceq [string]$obsoleteStash.Hash }
+                )
+                if ($currentMatches.Count -ne 1) {
+                    throw "Expected exactly one current PersonalAgent stash with hash $($obsoleteStash.Hash)."
+                }
 
-            $currentObsoleteStash = $currentMatches[0]
-            $resolvedHash = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', '--verify', $currentObsoleteStash.Reference) |
-                Select-Object -First 1).Trim()
-            if ($resolvedHash -cne [string]$obsoleteStash.Hash) {
-                throw "PersonalAgent stash reference changed before cleanup: $($currentObsoleteStash.Reference)"
+                $candidateReference = $currentMatches[0]
+                $resolvedHash = (Invoke-Git -Repository $Repository -Arguments @('rev-parse', '--verify', $candidateReference.Reference) |
+                    Select-Object -First 1).Trim()
+                if ($resolvedHash -ceq [string]$obsoleteStash.Hash) {
+                    $currentObsoleteStash = $candidateReference
+                    break
+                }
+                if ($attempt -eq 3) {
+                    throw "PersonalAgent stash reference kept changing before cleanup: $($candidateReference.Reference)"
+                }
             }
 
             $dropOutput = @(Invoke-Git -Repository $Repository -Arguments @('stash', 'drop', $currentObsoleteStash.Reference))
@@ -930,7 +2017,7 @@ if ([string]::IsNullOrWhiteSpace($ConfigurationPath)) {
 $configurationFullPath = [System.IO.Path]::GetFullPath($ConfigurationPath)
 if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     try {
-        $configuration = Get-Content -Raw -LiteralPath $configurationFullPath | ConvertFrom-Json
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
     }
     catch {
         throw "AI instruction sync configuration is not valid JSON: $configurationFullPath"
@@ -987,6 +2074,7 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
 }
 
 $repositoryOperationLock = $null
+$repositoryIndexLock = $null
 try {
     $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
 
@@ -1068,7 +2156,7 @@ foreach ($skillSource in @($provenance.skills)) {
 
 if ($manifestExists) {
     try {
-        $manifest = Get-Content -Raw -LiteralPath $manifestFullPath | ConvertFrom-Json
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestFullPath | ConvertFrom-Json
     }
     catch {
         throw "Managed instruction manifest is not valid JSON: $manifestRelativePath"
@@ -1135,10 +2223,11 @@ if ($manifestExists) {
     }
 }
 
+$repositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $targetRootPath
 $gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
 $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPathComparer
-foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('ls-files'))) {
-    [void]$trackedPaths.Add(([string]$trackedPath).Replace('\','/'))
+foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files'))) {
+    [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
 }
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
@@ -1148,6 +2237,18 @@ $trackedPollutionPaths = @(@(
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0) {
     throw "Repository pollution detected: manifest-proven managed personal AI instruction paths are Git tracked: $($trackedPollutionPaths -join ', '). Bootstrap did not modify the index. Review and run cleanup-ai-instructions-pollution.ps1 with explicit authorization."
+}
+
+$stagedManagedPaths = @(
+    foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
+        if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath)) {
+            [string]$targetPath
+        }
+    }
+)
+if ($stagedManagedPaths.Count -gt 0) {
+    Write-Output "AI instruction sync skipped because a managed path has staged changes: $($stagedManagedPaths -join ', ')"
+    return
 }
 
 if ($manifestExists -and
@@ -1357,9 +2458,8 @@ try {
                     continue
                 }
 
-                $targetDirectory = Split-Path -Parent $targetFullPath
-                New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
-                Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
+                [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
+                Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
                 $updatedPaths.Add($targetPath)
                 $nextManifestEntries.Add($desiredManifestEntry)
                 continue
@@ -1374,7 +2474,8 @@ try {
             $currentHash = Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath
             if ($currentHash -eq [string] $managedEntry.sha256 -or $currentHash -eq $desiredEntry.Sha256) {
                 if ($currentHash -ne $desiredEntry.Sha256) {
-                    Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath -Force
+                    [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
+                    Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
                     $updatedPaths.Add($targetPath)
                 }
 
@@ -1393,12 +2494,8 @@ try {
                 $skippedPaths.Add($targetPath)
                 continue
             }
-            $targetDirectory = Split-Path -Parent $targetFullPath
-            if (-not [string]::IsNullOrWhiteSpace($targetDirectory)) {
-                New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
-            }
-
-            Copy-Item -LiteralPath $desiredEntry.SourceFullPath -Destination $targetFullPath
+            [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
             $createdPaths.Add($targetPath)
             $nextManifestEntries.Add($desiredManifestEntry)
             continue
@@ -1435,7 +2532,7 @@ try {
                 continue
             }
 
-            Remove-Item -LiteralPath $targetFullPath -Force
+            Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
             $removedPaths.Add($managedTargetPath)
         }
         }
@@ -1462,24 +2559,25 @@ try {
 
         if ($existingManifestJson -ne $manifestJson) {
             $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText($manifestFullPath, $manifestJson, $utf8WithoutBom)
+            [byte[]]$manifestBytes = $utf8WithoutBom.GetBytes($manifestJson)
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $manifestRelativePath -Bytes $manifestBytes
             $manifestChanged = $true
         }
         }
         $managedExcludePaths = @($nextManifestEntries | ForEach-Object { [string]$_.targetPath })
         if ($shouldWriteManifest) { $managedExcludePaths += $manifestRelativePath }
-        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths
+        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot
     }
     catch {
         $mutationError = $_
-        try {
-            Restore-TargetMutationSnapshot -Snapshot $mutationSnapshot
-            Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot
-        }
-        catch {
-            $rollbackError = $_
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        try { Restore-TargetMutationSnapshot -Snapshot $mutationSnapshot }
+        catch { $rollbackErrors.Add($_.Exception.Message) }
+        try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
+        catch { $rollbackErrors.Add($_.Exception.Message) }
+        if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
-            throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+            throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
         }
         throw $mutationError
     }
@@ -1499,38 +2597,48 @@ try {
 
     $stashPathArguments = @()
     try {
-        $personalAgentStashes = @(Get-PersonalAgentStashes -Repository $targetRootPath)
-        $shouldRefreshPersonalAgentStash = $changedPaths.Count -gt 0 -or $personalAgentStashes.Count -eq 0
-        if ($shouldRefreshPersonalAgentStash) {
-            $stashPaths = New-Object System.Collections.Generic.List[string]
-            foreach ($manifestEntry in $nextManifestEntries) {
-                $targetPath = [string]$manifestEntry.targetPath
-                $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
-                if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
-                    (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
-                    $stashPaths.Add($targetPath)
-                }
+        $stashPaths = New-Object System.Collections.Generic.List[string]
+        foreach ($manifestEntry in $nextManifestEntries) {
+            $targetPath = [string]$manifestEntry.targetPath
+            $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
+            if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
+                (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
+                $stashPaths.Add($targetPath)
             }
-            if (Test-Path -LiteralPath $manifestFullPath -PathType Leaf) { $stashPaths.Add($manifestRelativePath) }
-            $stashPathArguments = @($stashPaths | Sort-Object -Unique)
-            if ($stashPathArguments.Count -gt 0) {
+        }
+        if (Test-Path -LiteralPath $manifestFullPath -PathType Leaf) { $stashPaths.Add($manifestRelativePath) }
+        $stashPathArguments = @($stashPaths | Sort-Object -Unique)
+        if ($stashPathArguments.Count -gt 0) {
+            $worktreeKey = Get-PersonalAgentWorktreeKey -Repository $targetRootPath
+            $evidenceFingerprint = Get-PersonalAgentEvidenceFingerprint -Repository $targetRootPath -Paths $stashPathArguments
+            $personalAgentStashes = @(Get-PersonalAgentStashes -Repository $targetRootPath -WorktreeKey $worktreeKey)
+            $ownedPersonalAgentStashes = @($personalAgentStashes | Where-Object {
+                Test-PersonalAgentStashEvidence -Repository $targetRootPath -Stash $_ `
+                    -ExpectedFingerprint ([string]$_.EvidenceFingerprint)
+            })
+            $matchingEvidence = @($ownedPersonalAgentStashes | Where-Object { $_.EvidenceFingerprint -ceq $evidenceFingerprint })
+            $shouldRefreshPersonalAgentStash = $changedPaths.Count -gt 0 -or $matchingEvidence.Count -ne 1
+            if ($shouldRefreshPersonalAgentStash) {
                 $expectedStashEntries = @($nextManifestEntries | Where-Object { [string]$_.targetPath -cin $stashPathArguments })
                 $newStashHash = Update-PersonalAgentStash -Repository $targetRootPath -Paths $stashPathArguments `
-                    -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes
-                Write-Output "PersonalAgent recovery evidence updated, reapplied, and retained: $newStashHash"
+                    -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes `
+                    -PriorOwnedStashes $ownedPersonalAgentStashes `
+                    -WorktreeKey $worktreeKey -EvidenceFingerprint $evidenceFingerprint `
+                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath)
+                Write-Output "PersonalAgent recovery evidence updated and retained without index mutation: $newStashHash"
             }
         }
     }
     catch {
         $finalizationError = $_
-        try {
-            Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot
-            Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot
-        }
-        catch {
-            $rollbackError = $_
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        try { Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot }
+        catch { $rollbackErrors.Add($_.Exception.Message) }
+        try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
+        catch { $rollbackErrors.Add($_.Exception.Message) }
+        if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
-            throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackError.Exception.Message) Recovery files were preserved at: $mutationBackupRoot"
+            throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
         }
         throw $finalizationError
     }
@@ -1554,5 +2662,11 @@ finally {
 }
 }
 finally {
+    if ($null -ne $repositoryIndexLock) {
+        $repositoryIndexLock.Stream.Dispose()
+        if (Test-Path -LiteralPath ([string]$repositoryIndexLock.Path) -PathType Leaf) {
+            Remove-Item -LiteralPath ([string]$repositoryIndexLock.Path) -Force -ErrorAction SilentlyContinue
+        }
+    }
     if ($null -ne $repositoryOperationLock) { $repositoryOperationLock.Dispose() }
 }

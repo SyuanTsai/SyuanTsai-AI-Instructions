@@ -352,7 +352,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A legacy schema-v1 manifest is used as migration or pollution-cleanup ownership evidence.
     # Purpose: Accept only the exact historical shape and reject unknown fields before any ignore or index mutation.
-    It 'UnitT57_validates_the_exact_legacy_managed_manifest_v1_shape' {
+    It 'UnitT58_validates_the_exact_legacy_managed_manifest_v1_shape' {
         $legacyManifest = [pscustomobject][ordered]@{
             schemaVersion = 1
             sourceRepository = 'https://github.com/example/catalog.git'
@@ -374,7 +374,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A schema-v2 manifest uses a singleton array where sha256 must be a string.
     # Purpose: Keep executable ownership checks aligned with the portable schema instead of relying on coercion.
-    It 'UnitT57_rejects_singleton_arrays_in_manifest_hash_fields' {
+    It 'UnitT59_rejects_singleton_arrays_in_manifest_hash_fields' {
         $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
         @($manifest.files)[0].sha256 = @(('a' * 64))
         $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'manifest-array-hash.json'
@@ -385,7 +385,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A manifest labels a flat Skill path as an instruction to bypass the Skill artifact/path relationship.
     # Purpose: Prevent forged ownership evidence from overwriting or staging deletion of a Repository-owned Skill.
-    It 'UnitT57_rejects_instruction_artifacts_that_claim_skill_paths' {
+    It 'UnitT60_rejects_instruction_artifacts_that_claim_skill_paths' {
         $manifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
         $skillFile = @($manifest.files | Where-Object { $_.artifactType -eq 'skill' })[0]
         $skillFile.artifactType = 'instruction'
@@ -407,7 +407,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: Catalog, source-pin, and lock objects carry fields forbidden by their additionalProperties=false schemas.
     # Purpose: Ensure the executable verifier rejects schema drift before updater or bootstrap trust the documents.
-    It 'UnitT57_rejects_unknown_catalog_source_pin_and_lock_properties' {
+    It 'UnitT61_rejects_unknown_catalog_source_pin_and_lock_properties' {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
         @($catalog.skills)[0].compatibility | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
         $catalogPath = Write-TestJsonDocument -Document $catalog -Name 'catalog-unknown-property.json'
@@ -431,7 +431,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: Catalog and Lock identity fields differ only by letter casing.
     # Purpose: Keep authoring-time contract validation exactly as strict as runtime routing.
-    It 'UnitT58_rejects_case_variant_catalog_lock_identity_fields' {
+    It 'UnitT62_rejects_case_variant_catalog_lock_identity_fields' {
         $cases = @(
             @{ Name = 'catalog-id'; Expected = 'catalogId does not match'; Apply = { param($lock) $lock.catalogId = ([string]$lock.catalogId).ToUpperInvariant() } },
             @{ Name = 'repository'; Expected = 'repository does not match'; Apply = { param($lock) @($lock.sources)[0].repository = 'https://github.com/example/Agent-Skills-Catalog.git' } },
@@ -456,7 +456,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: Catalog and manifest Skill paths differ from their stable IDs only by case.
     # Purpose: Preserve exact flat-path identity across authoring validation and runtime routing.
-    It 'UnitT59_rejects_case_variant_catalog_and_manifest_skill_paths' {
+    It 'UnitT63_rejects_case_variant_catalog_and_manifest_skill_paths' {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
         $catalogSkill = @($catalog.skills | Where-Object { $_.id -eq 'capture-private-course-knowledge' })[0]
         $catalogSkill.source.path = ([string]$catalogSkill.source.path).Replace('/capture-', '/Capture-')
@@ -473,7 +473,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A requested ref has no immutable commit in the lock document.
     # Purpose: Prevent a mutable branch or tag from being treated as reproducible input.
-    It 'UnitT60_rejects_an_unresolved_source_pin' {
+    It 'UnitT64_rejects_an_unresolved_source_pin' {
         $errorMessage = Get-ContractValidationError `
             -CatalogPath $script:CatalogExample `
             -LockPath (Join-Path $script:FixtureRoot 'unresolved-pin.json')
@@ -556,7 +556,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A personal sync configuration sets the update interval above the installer-supported Int32 range.
     # Purpose: Keep the Catalog contract parser aligned with the v4 schema and runtime migration boundary.
-    It 'UnitT92_rejects_an_update_interval_outside_the_v4_contract' {
+    It 'UnitT93_rejects_an_update_interval_outside_the_v4_contract' {
         $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
         $configuration.updates.minimumCheckIntervalMinutes = [long][int]::MaxValue + 1
         $configurationPath = Write-TestJsonDocument -Document $configuration -Name 'out-of-range-update-interval.json'
@@ -569,7 +569,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: A personal selection differs from a known stable ID only by invalid casing.
     # Purpose: Prevent PowerShell's case-insensitive lookup from accepting values rejected by the JSON Schema.
-    It 'UnitT93_rejects_non_stable_profile_and_skill_selection_ids' {
+    It 'UnitT94_rejects_non_stable_profile_and_skill_selection_ids' {
         $cases = @(
             @{ Name = 'profile'; Property = 'profiles'; Value = 'CORE' },
             @{ Name = 'include-skill'; Property = 'includeSkills'; Value = 'Work-With-Jira' },
@@ -591,7 +591,7 @@ Describe 'Skills Catalog contract' {
 
     # Scenario: Every current Skill remains a flat, client-discoverable directory regardless of profile grouping.
     # Purpose: Ensure metadata grouping does not introduce nested packages or Git submodule requirements.
-    It 'UnitT94_preserves_the_flat_agents_skills_layout_without_submodule_metadata' {
+    It 'UnitT95_preserves_the_flat_agents_skills_layout_without_submodule_metadata' {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
 
         foreach ($skill in @($catalog.skills)) {

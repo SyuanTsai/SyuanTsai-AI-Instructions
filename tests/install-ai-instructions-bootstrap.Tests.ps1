@@ -1,5 +1,6 @@
 ﻿$script:InstallScript = Join-Path $PSScriptRoot '..\scripts\install-ai-instructions-bootstrap.ps1'
 $script:InstalledBootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions-installed.ps1'
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
 
 function New-InstallerSourceArchive {
     param(
@@ -70,7 +71,7 @@ function Invoke-InstallScript {
         foreach ($repositoryPath in $ExcludedRepositoryPaths) { $arguments += $repositoryPath }
     }
 
-    $output = & powershell.exe @arguments 2>&1
+    $output = & $script:TestPowerShellExecutable @arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Install script failed: $($output -join [Environment]::NewLine)"
     }
@@ -107,7 +108,7 @@ function Invoke-InstallExpectFailure {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedUpdateMode)) { $arguments += @('-ExpectedUpdateMode',$ExpectedUpdateMode) }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedUpdateChannel)) { $arguments += @('-ExpectedUpdateChannel',$ExpectedUpdateChannel) }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedUpdateRef)) { $arguments += @('-ExpectedUpdateRef',$ExpectedUpdateRef) }
-    $output = & powershell.exe @arguments 2>&1
+    $output = & $script:TestPowerShellExecutable @arguments 2>&1
     return [pscustomobject]@{ ExitCode=$LASTEXITCODE; Output=($output -join [Environment]::NewLine) }
 }
 
@@ -421,7 +422,7 @@ Keep this section too.
         $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome -InvalidArchiveHash
 
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'SourceArchivePath SHA-256 does not match'
+        $result.Output | Should Match '(?s)SourceArchivePath SHA-256.*does\s+not\s+match'
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | Should Be $false
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $false
     }
@@ -438,8 +439,8 @@ Keep this section too.
     }
 
     # Scenario: Git-checkout installation sources differ from their immutable HEAD commit.
-    # Purpose: Prevent uncommitted local bytes from entering the trusted Codex Home runtime.
-    It 'InterT45_rejects_dirty_installer_runtime_sources_before_mutating_CodexHome' {
+    # Purpose: Materialize the runtime directly from immutable Git objects so mutable worktree bytes never execute or install.
+    It 'InterT45_installs_immutable_HEAD_sources_when_the_worktree_is_dirty' {
         $cloneRoot = Join-Path $TestDrive 'dirty-source'
         $origin = (@(& git -C $repositoryRoot remote get-url origin) -join '').Trim()
         & git clone --quiet $repositoryRoot $cloneRoot
@@ -460,17 +461,22 @@ Keep this section too.
         & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
         $executionEvidence = Join-Path $TestDrive 'dirty-contract-executed.txt'
+        $committedRuntimeSource = [System.IO.File]::ReadAllText(
+            (Join-Path $cloneRoot 'scripts\ai-instructions-runtime-contract.psm1')
+        ).Replace("`r`n","`n").Replace("`r","`n")
         [System.IO.File]::AppendAllText(
             (Join-Path $cloneRoot 'scripts\ai-instructions-runtime-contract.psm1'),
             "`n[System.IO.File]::WriteAllText('$executionEvidence','executed')`n"
         )
 
         $result = Invoke-InstallExpectFailure -RepositoryRoot $cloneRoot -CodexHome $codexHome -GitCheckout
-        $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'differ from HEAD'
+        $result.ExitCode | Should Be 0
         Test-Path -LiteralPath $executionEvidence | Should Be $false
-        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | Should Be $false
-        Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $true
+        [System.IO.File]::ReadAllText(
+            (Join-Path $codexHome 'hooks\ai-instructions-runtime\ai-instructions-runtime-contract.psm1')
+        ).Replace("`r`n","`n").Replace("`r","`n") | Should Be $committedRuntimeSource
     }
 
     # Scenario: A malformed codeload candidate fails during staged PowerShell validation.
@@ -523,7 +529,7 @@ Keep this section too.
 
     # Scenario: The active runtime keeps the expected commit string but one inventory file drifts before install lock acquisition.
     # Purpose: Revalidate the complete active state, not only attacker-controllable bundle metadata, before candidate swap.
-    It 'InterT48_revalidates_the_complete_active_runtime_inside_the_install_lock' {
+    It 'InterT49_revalidates_the_complete_active_runtime_inside_the_install_lock' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
         $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
@@ -545,7 +551,7 @@ Keep this section too.
 
     # Scenario: A stable Codex Home script path is already an unrelated user directory.
     # Purpose: Fail before mutation rather than copying into or deleting a path whose type proves it is not installer-owned.
-    It 'InterT49_rejects_an_unsafe_existing_directory_at_a_stable_file_path' {
+    It 'InterT50_rejects_an_unsafe_existing_directory_at_a_stable_file_path' {
         $unsafePath = Join-Path $codexHome 'hooks\cleanup-ai-instructions-pollution.ps1'
         New-Item -ItemType Directory -Force -Path $unsafePath | Out-Null
         Set-TestText -Path (Join-Path $unsafePath 'personal.txt') -Value "preserve me`n"
@@ -562,7 +568,7 @@ Keep this section too.
 
     # Scenario: A late hooks-file validation failure occurs after active installer mutation begins.
     # Purpose: Restore launcher, runtime, configuration, Agent, and hook bytes as one transaction.
-    It 'InterT50_rolls_back_runtime_config_and_agent_files_when_a_late_install_step_fails' {
+    It 'InterT51_rolls_back_runtime_config_and_agent_files_when_a_late_install_step_fails' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
         $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
@@ -612,6 +618,111 @@ Keep this section too.
         (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
     }
 
+    # Scenario: A verified launcher is actively executing runtime fan-out while another installation starts for the same Codex Home.
+    # Purpose: Hold a shared runtime read lock through execution so the installer cannot swap files into a mixed running bundle.
+    It 'InterT53_blocks_runtime_installation_while_verified_fan_out_is_running' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $markerPath = Join-Path $TestDrive 'fan-out-running.marker'
+        $slowBootstrapPath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
+        Set-TestText -Path $slowBootstrapPath -Value @"
+param([string]`$CatalogPath,[string]`$LockPath,[string]`$ConfigurationPath,[string]`$TargetRoot)
+[System.IO.File]::WriteAllText('$markerPath','running')
+Start-Sleep -Seconds 15
+"@
+        $runtimeContractPath = Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
+        Import-Module $runtimeContractPath -Force
+        $updatedBundle = New-AiInstructionsRuntimeBundleV2 `
+            -RuntimeRoot $runtimeRoot `
+            -Repository ([string]$bundle.repository) `
+            -Commit ([string]$bundle.commit) `
+            -Acquisition ([string]$bundle.acquisition) `
+            -ArchiveSha256 ([string]$bundle.archiveSha256)
+        Set-TestJson -Path $bundlePath -Document $updatedBundle
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$hookPath,'-SkipUpdateCheck')
+        $fanOutProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        try {
+            $deadline = (Get-Date).AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $markerPath) -and (Get-Date) -lt $deadline -and -not $fanOutProcess.HasExited) {
+                Start-Sleep -Milliseconds 100
+            }
+            Test-Path -LiteralPath $markerPath | Should Be $true
+
+            $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match 'installer is already running|runtime is being installed'
+        }
+        finally {
+            if (-not $fanOutProcess.HasExited) { Stop-Process -Id $fanOutProcess.Id -Force }
+            $fanOutProcess.Dispose()
+        }
+    }
+
+    # Scenario: The launcher starts its automatic update check while another installation targets the same Codex Home.
+    # Purpose: Dispatch the verified stable updater so its shared runtime lock prevents a swap during child module loading and use.
+    It 'InterT54_launcher_update_check_uses_the_locked_stable_updater_path' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $stableUpdaterPath = Join-Path $codexHome 'hooks\update-ai-instructions.ps1'
+        $runtimeUpdaterPath = Join-Path $runtimeRoot 'update-ai-instructions.ps1'
+        $markerPath = Join-Path $TestDrive 'launcher-updater-running.marker'
+        $slowUpdater = @"
+param([string]`$CodexHome)
+`$entryPointDirectoryName = Split-Path -Leaf ([System.IO.Path]::GetFullPath(`$PSScriptRoot).TrimEnd([char[]]@('\','/')))
+if (`$entryPointDirectoryName -ieq 'hooks') {
+    `$lockPath = Join-Path `$CodexHome 'ai-instructions-install.lock'
+    `$runtimeReadLock = [System.IO.File]::Open(`$lockPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read)
+    try {
+        [System.IO.File]::WriteAllText('$markerPath','stable')
+        Start-Sleep -Seconds 15
+    }
+    finally { `$runtimeReadLock.Dispose() }
+}
+else {
+    [System.IO.File]::WriteAllText('$markerPath','runtime')
+    Start-Sleep -Seconds 15
+}
+"@
+        Set-TestText -Path $stableUpdaterPath -Value $slowUpdater
+        Set-TestText -Path $runtimeUpdaterPath -Value $slowUpdater
+        $runtimeContractPath = Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
+        Import-Module $runtimeContractPath -Force
+        $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $updatedBundle = New-AiInstructionsRuntimeBundleV2 `
+            -RuntimeRoot $runtimeRoot `
+            -Repository ([string]$bundle.repository) `
+            -Commit ([string]$bundle.commit) `
+            -Acquisition ([string]$bundle.acquisition) `
+            -ArchiveSha256 ([string]$bundle.archiveSha256)
+        Set-TestJson -Path $bundlePath -Document $updatedBundle
+
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$hookPath)
+        $launcherProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        try {
+            $deadline = (Get-Date).AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $markerPath) -and (Get-Date) -lt $deadline -and -not $launcherProcess.HasExited) {
+                Start-Sleep -Milliseconds 100
+            }
+            Test-Path -LiteralPath $markerPath | Should Be $true
+            (Get-Content -Raw -LiteralPath $markerPath) | Should Be 'stable'
+
+            $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match 'installer is already running|runtime is being installed'
+        }
+        finally {
+            if (-not $launcherProcess.HasExited) { Stop-Process -Id $launcherProcess.Id -Force }
+            $launcherProcess.Dispose()
+        }
+    }
+
     # Scenario: The installed configuration pin is changed without replacing the runtime bundle.
     # Purpose: Make the stable launcher reject mixed configuration/runtime identity before bootstrap.
     It 'InterT55_installed_launcher_rejects_a_runtime_bundle_pin_mismatch' {
@@ -621,14 +732,86 @@ Keep this section too.
         $configuration.catalog.ref = ('f' * 40)
         Set-TestJson -Path $configurationPath -Document $configuration
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath 2>&1
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'runtime bundle does not match'
     }
 
+    # Scenario: An interrupted swap leaves a strict configuration and verified runtime bundle pinned to different canonical commits.
+    # Purpose: Keep ordinary launch fail closed while allowing the same stable updater to repair only this proven mismatch.
+    It 'InterT56_same_updater_recovers_a_verified_bundle_configuration_pin_mismatch' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json') | ConvertFrom-Json
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.catalog.ref = ('0' * 40)
+        Set-TestJson -Path $configurationPath -Document $configuration
+        $receipt = [ordered]@{
+            schemaVersion = 1
+            checkedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            mode = [string]$configuration.updates.mode
+            channel = [string]$configuration.updates.channel
+            ref = [string]$configuration.updates.ref
+            currentCommit = [string]$bundle.commit
+            candidateCommit = $null
+            outcome = 'current'
+            archiveSha256 = $null
+            message = 'Verified runtime was current before the interrupted config write.'
+        }
+        Set-TestJson -Path (Join-Path $codexHome 'ai-instructions-update-receipt.json') -Document $receipt
+        $manualUpdater = Join-Path $codexHome 'hooks\update-ai-instructions.ps1'
+
+        $blockedOutput = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $manualUpdater -CodexHome $codexHome 2>&1
+        $blockedExitCode = $LASTEXITCODE
+        $recoveryOutput = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $manualUpdater `
+            -CodexHome $codexHome -RecoverInterruptedInstall 2>&1
+        $recoveryExitCode = $LASTEXITCODE
+
+        $blockedExitCode | Should Not Be 0
+        ($blockedOutput -join [Environment]::NewLine) | Should Match 'runtime bundle does not match'
+        ($recoveryOutput -join [Environment]::NewLine) | Should Match 'Recovered interrupted AI instructions installation'
+        ($recoveryOutput -join [Environment]::NewLine) | Should Not Match 'AI instructions update outcome'
+        $recoveryExitCode | Should Be 0
+        [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json).catalog.ref |
+            Should Be ([string]$bundle.commit)
+        @(Get-ChildItem -LiteralPath $codexHome -Force -File | Where-Object {
+            $_.Name -match '^\.ai-instructions-sync\.json\.(recovery|backup|failed)-'
+        }).Count | Should Be 0
+    }
+
+    # Scenario: A verified pin mismatch exists while another installer owns the per-home install lock.
+    # Purpose: Prevent recovery from racing a transactional runtime/config swap and writing a stale pin afterward.
+    It 'InterT57_interrupted_install_recovery_refuses_a_concurrent_installer' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.catalog.ref = ('0' * 40)
+        Set-TestJson -Path $configurationPath -Document $configuration
+        $manualUpdater = Join-Path $codexHome 'hooks\update-ai-instructions.ps1'
+        $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+        $installLock = [System.IO.File]::Open(
+            $installLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $manualUpdater `
+                -CodexHome $codexHome -RecoverInterruptedInstall 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally { $installLock.Dispose() }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'recovery refused to run while another AI instructions installer is active'
+        [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json).catalog.ref |
+            Should Be ('0' * 40)
+    }
+
     # Scenario: The installed configuration carries an update interval above the v4 schema and migration boundary.
     # Purpose: Make the trusted stable-launcher preflight reject out-of-contract policy before importing runtime code.
-    It 'InterT57_installed_launcher_rejects_an_out_of_range_update_interval' {
+    It 'InterT58_installed_launcher_rejects_an_out_of_range_update_interval' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
         $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
@@ -636,10 +819,28 @@ Keep this section too.
         Set-TestJson -Path $configurationPath -Document $configuration
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
 
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'update policy is invalid'
+    }
+
+    # Scenario: The installed updater module is missing and an unmanaged sibling module is placed beside the stable command.
+    # Purpose: Make the stable updater fail closed before importing fallback code from an incomplete installed layout.
+    It 'InterT59_manual_updater_rejects_a_missing_installed_module_before_sibling_import' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeUpdater = Join-Path $codexHome 'hooks\ai-instructions-runtime\ai-instructions-updater.psm1'
+        $siblingUpdater = Join-Path $codexHome 'hooks\ai-instructions-updater.psm1'
+        $executionEvidence = Join-Path $codexHome 'fallback-updater-executed.txt'
+        Remove-Item -LiteralPath $runtimeUpdater -Force
+        Set-Content -Encoding UTF8 -LiteralPath $siblingUpdater -Value "[System.IO.File]::WriteAllText('$executionEvidence','executed')"
+
+        $manualUpdater = Join-Path $codexHome 'hooks\update-ai-instructions.ps1'
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $manualUpdater -CodexHome $codexHome -ForceCheck 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'installed updater module is missing'
+        Test-Path -LiteralPath $executionEvidence | Should Be $false
     }
 
     # Scenario: One installed runtime module is changed after its bundle inventory was created.
@@ -651,7 +852,7 @@ Keep this section too.
         [System.IO.File]::AppendAllText($runtimeScript, "`n[System.IO.File]::WriteAllText('$executionEvidence','executed')`n")
 
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'runtime inventory'
@@ -667,7 +868,7 @@ Keep this section too.
         [System.IO.File]::AppendAllText($runtimeScript, "`n[System.IO.File]::WriteAllText('$executionEvidence','executed')`n")
 
         $manualUpdater = Join-Path $codexHome 'hooks\update-ai-instructions.ps1'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $manualUpdater -CodexHome $codexHome -ForceCheck 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $manualUpdater -CodexHome $codexHome -ForceCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'runtime inventory'
@@ -676,14 +877,14 @@ Keep this section too.
 
     # Scenario: A user runs the stable cleanup command after its runtime contracts are tampered.
     # Purpose: Refuse cleanup before importing or executing the unverified contract modules.
-    It 'InterT61_cleanup_command_preflights_runtime_before_import' {
+    It 'InterT62_cleanup_command_preflights_runtime_before_import' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimeScript = Join-Path $codexHome 'hooks\ai-instructions-runtime\skills-catalog-contract.psm1'
         $executionEvidence = Join-Path $codexHome 'tampered-cleanup-contract-executed.txt'
         [System.IO.File]::AppendAllText($runtimeScript, "`n[System.IO.File]::WriteAllText('$executionEvidence','executed')`n")
 
         $cleanupCommand = Join-Path $codexHome 'hooks\cleanup-ai-instructions-pollution.ps1'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cleanupCommand -TargetRoot $repositoryRoot -Authorize 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $cleanupCommand -TargetRoot $repositoryRoot -Authorize 2>&1
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'runtime inventory'
@@ -692,14 +893,33 @@ Keep this section too.
 
     # Scenario: The stable launcher bytes drift from the reference copy covered by the active runtime inventory.
     # Purpose: Detect an interrupted mixed-version install before update or target bootstrap code executes.
-    It 'InterT62_installed_launcher_rejects_stable_launcher_version_drift' {
+    It 'InterT63_installed_launcher_rejects_stable_launcher_version_drift' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
         [System.IO.File]::AppendAllText($hookPath,"`n# stable launcher drift`n")
 
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stable launcher does not match'
+    }
+
+    # Scenario: The installed runtime directory is replaced by a file while unmanaged cleanup contracts exist beside the stable command.
+    # Purpose: Make cleanup reject the malformed installed layout before importing fallback contract modules or mutating the target index.
+    It 'InterT64_cleanup_rejects_a_non_directory_runtime_before_sibling_import' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $siblingContract = Join-Path $codexHome 'hooks\skills-catalog-contract.psm1'
+        $executionEvidence = Join-Path $codexHome 'fallback-cleanup-contract-executed.txt'
+        Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+        Set-Content -Encoding UTF8 -LiteralPath $runtimeRoot -Value 'not a directory'
+        Set-Content -Encoding UTF8 -LiteralPath $siblingContract -Value "[System.IO.File]::WriteAllText('$executionEvidence','executed')"
+
+        $cleanupCommand = Join-Path $codexHome 'hooks\cleanup-ai-instructions-pollution.ps1'
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $cleanupCommand -TargetRoot $repositoryRoot -Authorize 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'installed runtime directory is missing or invalid'
+        Test-Path -LiteralPath $executionEvidence | Should Be $false
     }
 }

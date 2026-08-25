@@ -64,12 +64,22 @@ function Assert-InstallerMutationPath {
         [Parameter(Mandatory = $true)][ValidateSet('File','Directory')][string] $ExpectedType
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $item = Get-Item -Force -LiteralPath $Path
-    $isReparsePoint = ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-    $hasExpectedType = if ($ExpectedType -ceq 'Directory') { $item.PSIsContainer } else { -not $item.PSIsContainer }
-    if ($isReparsePoint -or -not $hasExpectedType) {
-        throw "Unsafe installer mutation path '$Path': expected a non-reparse $($ExpectedType.ToLowerInvariant())."
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $inspectionPath = $fullPath
+    while (-not [string]::IsNullOrWhiteSpace($inspectionPath)) {
+        if (Test-Path -LiteralPath $inspectionPath) {
+            $item = Get-Item -Force -LiteralPath $inspectionPath
+            $isLeaf = $inspectionPath.Equals($fullPath,[System.StringComparison]::OrdinalIgnoreCase)
+            $hasExpectedType = if (-not $isLeaf) { $item.PSIsContainer }
+                elseif ($ExpectedType -ceq 'Directory') { $item.PSIsContainer }
+                else { -not $item.PSIsContainer }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $hasExpectedType) {
+                throw "Unsafe installer mutation path '$Path': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { $ExpectedType.ToLowerInvariant() } else { 'directory' }))."
+            }
+        }
+        $parent = Split-Path -Parent $inspectionPath
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent.Equals($inspectionPath,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $inspectionPath = $parent
     }
 }
 
@@ -81,15 +91,13 @@ function Get-InstallerFullDirectoryPath {
     return $fullPath.TrimEnd([char[]]@('\','/'))
 }
 
-function Get-InstallerFileSha256 {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($Path))
-    try {
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
-        finally { $sha.Dispose() }
-    }
-    finally { $stream.Dispose() }
+function Get-InstallerStreamSha256 {
+    param([Parameter(Mandatory = $true)][System.IO.Stream] $Stream)
+
+    if (-not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'Installer archive stream must be readable and seekable.' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($Stream))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
 }
 
 function Assert-InstallerCanonicalRepository {
@@ -171,18 +179,90 @@ function Remove-InstallerSessionStartHook {
     Get-Content -Raw -Encoding UTF8 -LiteralPath $HooksPath | ConvertFrom-Json | Out-Null
 }
 
-function Assert-InstallerSourcesMatchHead {
-    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $RelativePaths)
-    foreach ($relativePath in $RelativePaths) { Invoke-InstallerGit -WorkingDirectory $Repository -Arguments @('ls-files','--error-unmatch','--',$relativePath) | Out-Null }
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $changed = & git -C $Repository @(@('diff','--name-only','HEAD','--') + $RelativePaths) 2>&1
-        $exitCode = $LASTEXITCODE
+function Expand-InstallerGitSnapshotArchive {
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $DestinationRoot,
+        [Parameter(Mandatory = $true)][string[]] $RelativePaths
+    )
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $repositoryRoot = Join-Path $DestinationRoot 'repository'
+    if (Test-Path -LiteralPath $repositoryRoot) { throw "Git snapshot extraction destination already exists: $repositoryRoot" }
+    $expectedFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $allowedDirectories = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    [void]$allowedDirectories.Add('candidate-root')
+    foreach ($relativePath in $RelativePaths) {
+        $normalizedPath = $relativePath.Replace('\','/')
+        if ($normalizedPath -match '(^|/)\.\.(/|$)' -or $normalizedPath.StartsWith('/') -or $normalizedPath.Contains(':')) {
+            throw "Unsafe Git snapshot source path: $relativePath"
+        }
+        [void]$expectedFiles.Add("candidate-root/$normalizedPath")
+        $parts = @($normalizedPath.Split('/'))
+        if ($parts.Count -gt 1) {
+            foreach ($index in 0..($parts.Count - 2)) {
+                [void]$allowedDirectories.Add('candidate-root/' + [string]::Join('/',[string[]]$parts[0..$index]))
+            }
+        }
     }
-    finally { $ErrorActionPreference = $previousPreference }
-    if ($exitCode -ne 0) { throw "Unable to verify installer source files against HEAD: $($changed -join [Environment]::NewLine)" }
-    if (@($changed).Count -gt 0) { throw "Installer source files differ from HEAD and cannot be represented by the immutable install pin: $(@($changed) -join ', ')" }
+    $seenFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $stream = [System.IO.File]::Open(
+        [System.IO.Path]::GetFullPath($ArchivePath),
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive($stream,[System.IO.Compression.ZipArchiveMode]::Read,$false)
+        try {
+            foreach ($entry in @($archive.Entries)) {
+                $entryName = ([string]$entry.FullName).TrimEnd('/')
+                $isDirectory = [string]::IsNullOrEmpty([string]$entry.Name) -or ([string]$entry.FullName).EndsWith('/')
+                if ($entryName.Contains('\') -or $entryName.StartsWith('/') -or $entryName.Contains(':') -or $entryName -match '(^|/)\.\.(/|$)') {
+                    throw "Unsafe Git snapshot archive entry: $($entry.FullName)"
+                }
+                if ($isDirectory) {
+                    if (-not $allowedDirectories.Contains($entryName)) { throw "Unexpected Git snapshot archive directory: $($entry.FullName)" }
+                    continue
+                }
+                if (-not $expectedFiles.Contains($entryName) -or -not $seenFiles.Add($entryName)) {
+                    throw "Unexpected or duplicate Git snapshot archive file: $($entry.FullName)"
+                }
+                $externalAttributes = ([int64]$entry.ExternalAttributes) -band 0xFFFFFFFFL
+                if ((($externalAttributes -shr 16) -band 0xF000L) -eq 0xA000L -or ($externalAttributes -band 0x400L) -ne 0) {
+                    throw "Git snapshot archive contains a symbolic link or reparse entry: $($entry.FullName)"
+                }
+            }
+            if ($seenFiles.Count -ne $expectedFiles.Count) { throw 'Git snapshot archive is missing required runtime source files.' }
+
+            New-Item -ItemType Directory -Path $repositoryRoot | Out-Null
+            $repositoryPrefix = $repositoryRoot + [System.IO.Path]::DirectorySeparatorChar
+            foreach ($entry in @($archive.Entries | Where-Object { -not [string]::IsNullOrEmpty([string]$_.Name) })) {
+                $relativeName = ([string]$entry.FullName).Substring('candidate-root/'.Length)
+                $destinationPath = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $relativeName.Replace('/',[System.IO.Path]::DirectorySeparatorChar)))
+                if (-not $destinationPath.StartsWith($repositoryPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Git snapshot archive entry escapes the snapshot root: $($entry.FullName)"
+                }
+                $parent = Split-Path -Parent $destinationPath
+                if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+                $input = $entry.Open()
+                try {
+                    $output = [System.IO.File]::Open($destinationPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+                    try { $input.CopyTo($output) }
+                    finally { $output.Dispose() }
+                }
+                finally { $input.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    catch {
+        if (Test-Path -LiteralPath $repositoryRoot) { Remove-Item -LiteralPath $repositoryRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+    finally { $stream.Dispose() }
+    return $repositoryRoot
 }
 
 function Copy-InstallerBackupFile {
@@ -197,20 +277,43 @@ function Restore-InstallerBackupFile {
     elseif (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
 }
 
+$runtimeFiles = @(
+    'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
+    'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
+    'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
+    'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
+    'cleanup-ai-instructions-pollution.ps1'
+)
+$stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','cleanup-ai-instructions-pollution.ps1')
+$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1')
+foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
+$relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
+
 $archiveSourceWorkingRoot = $null
 try {
 if ($Acquisition -ceq 'git-checkout') {
     if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
         $RepositoryRoot = ((Invoke-InstallerGit -WorkingDirectory (Get-Location).Path -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
     }
-    $repositoryRootPath = Get-InstallerFullDirectoryPath -Path $RepositoryRoot
-    $originUrl = ((Invoke-InstallerGit -WorkingDirectory $repositoryRootPath -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
+    $checkoutRootPath = Get-InstallerFullDirectoryPath -Path $RepositoryRoot
+    $originUrl = ((Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
     Assert-InstallerCanonicalRepository -Repository $originUrl
     $catalogRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
-    $catalogRef = ((Invoke-InstallerGit -WorkingDirectory $repositoryRootPath -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
+    $catalogRef = ((Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @('rev-parse','HEAD')) | Select-Object -First 1).Trim()
     if (-not [string]::IsNullOrWhiteSpace($SourceRepository)) { Assert-InstallerCanonicalRepository -Repository $SourceRepository }
     if (-not [string]::IsNullOrWhiteSpace($SourceCommit) -and $SourceCommit -cne $catalogRef) { throw 'SourceCommit does not match the git checkout HEAD.' }
     $ArchiveSha256 = $null
+    $tempRootPath = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
+    $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
+    $gitSnapshotArchive = Join-Path $archiveSourceWorkingRoot 'source.zip'
+    Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments (@(
+        'archive','--format=zip',"--output=$gitSnapshotArchive",'--prefix=candidate-root/',$catalogRef,'--'
+    ) + $relativeSourcePaths) | Out-Null
+    $repositoryRootPath = Expand-InstallerGitSnapshotArchive `
+        -ArchivePath $gitSnapshotArchive `
+        -DestinationRoot $archiveSourceWorkingRoot `
+        -RelativePaths $relativeSourcePaths
 }
 else {
     if ([string]::IsNullOrWhiteSpace($SourceRepository) -or [string]::IsNullOrWhiteSpace($SourceCommit)) {
@@ -222,16 +325,26 @@ else {
     if ([string]::IsNullOrWhiteSpace($SourceArchivePath) -or -not (Test-Path -LiteralPath $SourceArchivePath -PathType Leaf)) {
         throw 'github-codeload installation requires the downloaded SourceArchivePath.'
     }
-    $actualArchiveSha256 = Get-InstallerFileSha256 -Path $SourceArchivePath
-    if ($actualArchiveSha256 -cne $ArchiveSha256) {
-        throw "github-codeload SourceArchivePath SHA-256 does not match ArchiveSha256: expected $ArchiveSha256; actual $actualArchiveSha256."
-    }
     $tempRootPath = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
     $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
     try {
         Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
-        $repositoryRootPath = Expand-SafeZipRepository -ArchivePath $SourceArchivePath -DestinationRoot $archiveSourceWorkingRoot
+        $archiveStream = [System.IO.File]::Open(
+            [System.IO.Path]::GetFullPath($SourceArchivePath),
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $actualArchiveSha256 = Get-InstallerStreamSha256 -Stream $archiveStream
+            if ($actualArchiveSha256 -cne $ArchiveSha256) {
+                throw "github-codeload SourceArchivePath SHA-256 does not match ArchiveSha256: expected $ArchiveSha256; actual $actualArchiveSha256."
+            }
+            $archiveStream.Position = 0
+            $repositoryRootPath = Expand-SafeZipRepository -ArchiveStream $archiveStream -DestinationRoot $archiveSourceWorkingRoot
+        }
+        finally { $archiveStream.Dispose() }
     }
     catch {
         throw "github-codeload archive cannot supply the verified runtime sources: $($_.Exception.Message)"
@@ -257,24 +370,12 @@ if ($expectedPolicySpecified) {
     }
 }
 
-$runtimeFiles = @(
-    'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
-    'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
-    'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-    'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
-    'cleanup-ai-instructions-pollution.ps1'
-)
-$stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','cleanup-ai-instructions-pollution.ps1')
-$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1')
-foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
-$relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 foreach ($relativePath in $relativeSourcePaths) {
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRootPath $relativePath.Replace('/','\')) -PathType Leaf)) {
         if ($Acquisition -ceq 'github-codeload') { throw "github-codeload archive runtime source was not found: $relativePath" }
         throw "Installer runtime source was not found: $relativePath"
     }
 }
-if ($Acquisition -ceq 'git-checkout') { Assert-InstallerSourcesMatchHead -Repository $repositoryRootPath -RelativePaths $relativeSourcePaths }
 
 $runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
 Import-Module $runtimeContractSource -Force
@@ -310,6 +411,13 @@ try {
     }
     catch [System.IO.IOException] {
         throw 'Another AI instructions installer is already running for this Codex Home.'
+    }
+
+    Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
+    Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
+    Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
+    foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+        Assert-InstallerMutationPath -Path $filePath -ExpectedType File
     }
 
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) {
@@ -363,6 +471,9 @@ try {
     $retainRecoveryBackup = $false
     try {
         New-Item -ItemType Directory -Force -Path $stagingRuntime,(Join-Path $stagingRuntime 'catalog'),$backupRoot | Out-Null
+        Assert-InstallerMutationPath -Path $stagingRoot -ExpectedType Directory
+        Assert-InstallerMutationPath -Path $stagingRuntime -ExpectedType Directory
+        Assert-InstallerMutationPath -Path $backupRoot -ExpectedType Directory
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions-installed.ps1') -Destination $stagingLauncher -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\update-ai-instructions.ps1') -Destination $stagingUpdater -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\cleanup-ai-instructions-pollution.ps1') -Destination $stagingCleanup -Force
@@ -393,6 +504,12 @@ try {
         $hadHooks = Copy-InstallerBackupFile -Source $hooksPath -Destination (Join-Path $backupRoot 'hooks.json')
         $runtimeBackedUp=$false; $runtimeInstalled=$false
         try {
+            Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
+            Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
+            Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
+            foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+                Assert-InstallerMutationPath -Path $filePath -ExpectedType File
+            }
             Copy-Item -LiteralPath $stagingLauncher -Destination $hookScript -Force
             Copy-Item -LiteralPath $stagingUpdater -Destination $updateScript -Force
             Copy-Item -LiteralPath $stagingCleanup -Destination $cleanupScript -Force
@@ -405,6 +522,11 @@ try {
         catch {
             $installError=$_
             try {
+                Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
+                Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
+                foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+                    Assert-InstallerMutationPath -Path $filePath -ExpectedType File
+                }
                 if ($runtimeInstalled -and (Test-Path -LiteralPath $runtimeDirectory -PathType Container)) { Remove-Item -LiteralPath $runtimeDirectory -Recurse -Force }
                 if ($runtimeBackedUp -and (Test-Path -LiteralPath $backupRuntime -PathType Container)) { Move-Item -LiteralPath $backupRuntime -Destination $runtimeDirectory }
                 Restore-InstallerBackupFile -Destination $hookScript -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook

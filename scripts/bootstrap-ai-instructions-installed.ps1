@@ -2,7 +2,8 @@
 param(
     [string] $TargetRoot,
     [switch] $SkipUpdateCheck,
-    [switch] $ValidateOnly
+    [switch] $ValidateOnly,
+    [switch] $RecoverInterruptedInstall
 )
 
 Set-StrictMode -Version Latest
@@ -19,6 +20,8 @@ $launcherReferencePath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-insta
 $updaterPath = Join-Path $runtimeRoot 'update-ai-instructions.ps1'
 $bootstrapPath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
 $stableLauncherPath = [System.IO.Path]::GetFullPath($PSCommandPath)
+$stableUpdaterPath = Join-Path $PSScriptRoot 'update-ai-instructions.ps1'
+$stableCleanupPath = Join-Path $PSScriptRoot 'cleanup-ai-instructions-pollution.ps1'
 $canonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 
 function Test-TrustedProperty {
@@ -104,7 +107,9 @@ function Get-TrustedInventorySha256 {
 }
 
 function Assert-InstalledRuntime {
-    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$launcherReferencePath,$updaterPath,$bootstrapPath)) {
+    param([switch] $AllowPinMismatch)
+
+    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$launcherReferencePath,$updaterPath,$bootstrapPath,$stableUpdaterPath,$stableCleanupPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) { throw "Installed AI instruction runtime is incomplete: $requiredPath" }
     }
     $configurationItem = Get-Item -Force -LiteralPath $configurationPath
@@ -164,9 +169,7 @@ function Assert-InstalledRuntime {
         $bundle.inventory -isnot [System.Array]) {
         throw 'Installed AI instruction runtime bundle identity is invalid.'
     }
-    if ([string]$bundle.commit -cne [string]$configuration.catalog.ref) {
-        throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
-    }
+    $pinMismatch = [string]$bundle.commit -cne [string]$configuration.catalog.ref
     if (($null -ne $bundle.archiveSha256 -and ($bundle.archiveSha256 -isnot [string] -or [string]$bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$')) -or
         ([string]$bundle.acquisition -ceq 'github-codeload' -and [string]$bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Installed AI instruction runtime bundle archive identity is invalid.'
@@ -187,24 +190,130 @@ function Assert-InstalledRuntime {
         (Get-TrustedFileSha256 -Path $launcherReferencePath)) {
         throw 'Installed AI instructions stable launcher does not match the active immutable runtime.'
     }
+    if ((Get-TrustedFileSha256 -Path $stableUpdaterPath) -cne
+        (Get-TrustedFileSha256 -Path $updaterPath)) {
+        throw 'Installed AI instructions stable updater does not match the active immutable runtime.'
+    }
+    if ((Get-TrustedFileSha256 -Path $stableCleanupPath) -cne
+        (Get-TrustedFileSha256 -Path (Join-Path $runtimeRoot 'cleanup-ai-instructions-pollution.ps1'))) {
+        throw 'Installed AI instructions stable cleanup command does not match the active immutable runtime.'
+    }
+    if ($pinMismatch -and -not $AllowPinMismatch) {
+        throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
+    }
+    return [pscustomobject][ordered]@{
+        Configuration = $configuration
+        Bundle = $bundle
+        PinMismatch = $pinMismatch
+    }
 }
 
-Assert-InstalledRuntime
+function Repair-InterruptedRuntimePin {
+    param([Parameter(Mandatory = $true)][object] $State)
+
+    if (-not [bool]$State.PinMismatch) { return $false }
+    $configurationDirectory = Split-Path -Parent $configurationPath
+    $configurationName = Split-Path -Leaf $configurationPath
+    $recoveryId = [Guid]::NewGuid().ToString('N')
+    $temporaryPath = Join-Path $configurationDirectory ('.' + $configurationName + '.recovery-' + $recoveryId)
+    $backupPath = Join-Path $configurationDirectory ('.' + $configurationName + '.backup-' + $recoveryId)
+    $failedPath = Join-Path $configurationDirectory ('.' + $configurationName + '.failed-' + $recoveryId)
+    try {
+        $State.Configuration.catalog.ref = [string]$State.Bundle.commit
+        $json = ($State.Configuration | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
+        [System.IO.File]::WriteAllText($temporaryPath,$json,(New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::Replace($temporaryPath,$configurationPath,$backupPath)
+        try { Assert-InstalledRuntime | Out-Null }
+        catch {
+            $validationError = $_
+            try { [System.IO.File]::Replace($backupPath,$configurationPath,$failedPath) }
+            catch { throw "Interrupted-install recovery validation failed and configuration rollback also failed. Validation: $($validationError.Exception.Message) Rollback: $($_.Exception.Message)" }
+            throw $validationError
+        }
+    }
+    finally {
+        foreach ($cleanupPath in @($temporaryPath,$backupPath,$failedPath)) {
+            if (Test-Path -LiteralPath $cleanupPath) { Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    return $true
+}
+
+function Open-InstalledRuntimeReadLock {
+    $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+    if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
+        throw 'AI instructions install lock is missing from the installed runtime.'
+    }
+    $installLockItem = Get-Item -Force -LiteralPath $installLockPath
+    if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AI instructions install lock must be a non-reparse file.'
+    }
+    try {
+        return [System.IO.File]::Open(
+            $installLockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+    }
+    catch [System.IO.IOException] {
+        throw 'AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.'
+    }
+}
+
+if ($RecoverInterruptedInstall) {
+    $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+    if (Test-Path -LiteralPath $installLockPath) {
+        $installLockItem = Get-Item -Force -LiteralPath $installLockPath
+        if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'AI instructions install lock must be a non-reparse file.'
+        }
+    }
+    $installLockStream = $null
+    try {
+        try {
+            $installLockStream = [System.IO.File]::Open(
+                $installLockPath,
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None
+            )
+        }
+        catch [System.IO.IOException] {
+            throw 'Interrupted-install recovery refused to run while another AI instructions installer is active.'
+        }
+        $recoveryState = Assert-InstalledRuntime -AllowPinMismatch
+        if (Repair-InterruptedRuntimePin -State $recoveryState) {
+            Write-Output "Recovered interrupted AI instructions installation by aligning the verified configuration pin to runtime commit $($recoveryState.Bundle.commit)."
+        }
+        else { Write-Output 'AI instructions runtime pin is already consistent; no interrupted-install repair was required.' }
+    }
+    finally { if ($null -ne $installLockStream) { $installLockStream.Dispose() } }
+    return
+}
+
+$runtimeReadLock = Open-InstalledRuntimeReadLock
+try { Assert-InstalledRuntime | Out-Null }
+finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
 if (-not $SkipUpdateCheck) {
     $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
     $enginePath = Join-Path $PSHOME $engineName
     if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { $enginePath = $engineName }
-    $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $updaterPath -CodexHome $codexHome 2>&1
+    $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $stableUpdaterPath -CodexHome $codexHome 2>&1
     if ($LASTEXITCODE -ne 0) { throw "AI instructions update check failed: $($updateOutput -join [Environment]::NewLine)" }
     foreach ($line in @($updateOutput)) { Write-Output $line }
-    Assert-InstalledRuntime
 }
 
-$arguments = @{
-    CatalogPath = $catalogPath
-    LockPath = $lockPath
-    ConfigurationPath = $configurationPath
+$runtimeReadLock = Open-InstalledRuntimeReadLock
+try {
+    Assert-InstalledRuntime | Out-Null
+    $arguments = @{
+        CatalogPath = $catalogPath
+        LockPath = $lockPath
+        ConfigurationPath = $configurationPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) { $arguments.TargetRoot = $TargetRoot }
+    & $bootstrapPath @arguments
 }
-if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) { $arguments.TargetRoot = $TargetRoot }
-& $bootstrapPath @arguments
+finally { $runtimeReadLock.Dispose() }

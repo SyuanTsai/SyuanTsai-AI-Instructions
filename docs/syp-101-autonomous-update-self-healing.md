@@ -33,6 +33,13 @@ Manifest v2 是 ownership 證據。每個 entry 記錄 artifact identity、來�
 
 ## Update state machine
 
+### 啟用、停用與排程策略
+
+- `updates.mode = auto-install-approved` 啟用已核准 candidate 的自動安裝。
+- `updates.mode = notify-only` 停用自動安裝，但保留安全版本檢查、通知與 audit receipt。
+- Installed launcher 的 `-SkipUpdateCheck` 只略過當次 production bootstrap 的網路版本檢查；下一次未帶參數的合法 bootstrap 會恢復檢查。契約不提供永久 `disabled` mode。
+- 檢查排程由合法 production-code planning 事件驅動，並以 `minimumCheckIntervalMinutes` rate limit。Runtime 不建立 OS scheduled task、background polling 或 SessionStart hook；人工需要立即檢查時使用 updater 的 `-ForceCheck`。
+
 ```text
 validate installed state
         |
@@ -72,7 +79,7 @@ Updater 不根據 mutable ref 直接安裝內容。它先解析完整 commit，�
 
 Installer 在 Codex Home 建立同磁碟 staging/backup：
 
-1. Stable installer 先以內建 verifier 驗證 canonical identity、archive hash 或 git HEAD exact sources，通過後才 import candidate contract；接著取得 per-Codex-Home install lock。Updater 安裝另在鎖內確認 installed commit 與 mode/channel/ref 仍等於 candidate selection 時的狀態，核准撤銷或 policy drift 時在 mutation 前停止。
+1. Stable installer 先以內建 verifier 驗證 canonical identity；codeload 由同一個 exclusive file handle 完成 archive hash 與安全解壓，git-checkout 則由完整 commit SHA 的 Git objects 產生 installer-owned snapshot，不讀取 mutable worktree bytes。通過後才 import candidate contract，接著取得 per-Codex-Home install lock。Updater 安裝另在鎖內確認 installed commit 與 mode/channel/ref 仍等於 candidate selection 時的狀態，核准撤銷或 policy drift 時在 mutation 前停止。
 2. 組合 launcher、updater、cleanup、完整 runtime 與 config。
 3. 產生 runtime bundle v2。
 4. Parse 所有 PowerShell，驗證 bundle/config inventory 與 Catalog/Lock。
@@ -80,15 +87,17 @@ Installer 在 Codex Home 建立同磁碟 staging/backup：
 6. 替換 stable commands，swap runtime，寫入 config，再更新個人文件/hooks。
 7. 任一步失敗即恢復所有備份；包含 staging validation failure 在內，rollback 成功後都刪除 transaction directories。
 
-若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行。
+若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行；驗證完成後，launcher／updater snapshot／cleanup 會持有 shared runtime read lock 到 runtime 使用結束，installer 的 exclusive lock 因此不能在執行中 swap bundle。Updater 另從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤持有 install-state lock，只在把 immutable candidate 交給 installer transaction 前釋放；若安裝失敗，必須重新取得鎖並確認 active identity 未變，才可寫入 failure receipt。
 
-Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths、manifest 與 `.git/info/exclude` 都先備份。整段 mutation、stash 與 cleanup 由 common Git directory 的 repository operation lock 序列化；新 stash 以建立前後的 PersonalAgent hash multiset 唯一識別並以 immutable hash reapply，再對所有 canonical paths（包含 manifest）比較 raw SHA-256。清理舊 evidence 時會依 hash 重新解析目前 reference 並在 drop 前再次驗證；若不受 repository lock 約束的外部 Git 行程仍在最後時點移動 index，runtime 會核對 Git 實際刪除的 commit hash、還原非預期刪除的 stash 並保留舊 evidence。Fan-out、byte verification 或唯一識別失敗時則全部恢復 target transaction，其他 user stash 不會靜默遺失。
+既有受管檔案的 write/delete handle 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 final path，並拒絕 reparse file，使先前 path precheck 與 native open 間的 parent-junction swap 不能把 mutation 導向 root 外。移除會以同一個 deny-write/delete handle 讀取與驗證 bytes，再設定 delete disposition，直到關閉 handle 才完成刪除，避免最後一次驗證與 `Remove-Item` 間的 TOCTOU。Exact-hash read-only 檔案會在 handle-bound transaction 暫時清除 attribute；guard handle 保持開啟，重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復再回報。
+
+Target mutation 也有獨立 snapshot：desired paths、歷史 managed paths 與 manifest 都先備份；每次 target／manifest 寫入在同一 exclusive handle 內先驗證 original bytes，再寫入並保存 transaction-applied bytes。Rollback 只處理本交易確實變更的路徑，且只在 current state 仍等於 applied state 時還原或刪除；外部 drift 原樣保留，其他未 drift 路徑仍各自復原，並升級為需要人工處理的 rollback failure。`.git/info/exclude` 的 original/applied bytes 同樣在實際 mutation 的 exclusive handle 內擷取。整段 mutation、stash 與 cleanup 由 common Git directory 的 repository operation lock 序列化；bootstrap 另從 tracked/staged preflight 到 target、exclude、evidence finalization 結束持有 active worktree 原生 `index.lock`，已存在或中途嘗試的外部 staging 因而 fail closed。Shared exclude 的完整 parent chain 必須位於 common Git metadata 且全為 non-reparse directory，正常更新在單一 read-modify-write handle 內完成；rollback 只有在 current bytes 仍等於 applied bytes 時才還原。Manifest/config 固定以 UTF-8 讀取，Git C-quoted path 則依 octal bytes strict UTF-8 解碼，使 Unicode Skill resources 不依賴 Windows code page。Manifest-owned path 若有 staged 變更，bootstrap 在 target／stash mutation 前停止，特別是 staged deletion 會保留 exact index state 與 ignored working-tree bytes。Runtime evidence subject 包含 hashed worktree identity 與 exact managed Git-blob fingerprint；evidence 透過 private temporary index、`commit-tree` 與 `stash store` 建立三親 stash commit，不執行會修改產品 working tree/index 的 stash push/apply round-trip。驗證 stash 的 untracked tree 確實包含同一組 path/blob，並對所有 canonical live paths（包含 manifest）比較 raw SHA-256 後，才清理同一 worktree、且本次呼叫前已證明為 runtime-owned 的舊 evidence；legacy 或同名 user stash 不會被認領。清理舊 evidence 時會依 hash 重新解析目前 reference 並在 drop 前再次驗證；若不受 repository lock 約束的外部 Git 行程仍在最後時點移動 stash index，runtime 會核對 Git 實際刪除的 commit hash、還原非預期刪除的 stash 並保留舊 evidence。Fan-out、byte verification 或唯一識別失敗時依上述 CAS 邊界復原 target transaction，其他 user stash 或外部 target edits 不會靜默遺失。
 
 ## Branch 與 linked worktree
 
-一般 branch 共用同一 working directory，ignored artifacts 不受 checkout 影響，因此不需在每個 branch 建立或套用不同 stash。`PersonalAgent` 只是一份 branch-neutral recovery evidence。
+一般 branch 共用同一 working directory，ignored artifacts 不受 checkout 影響，因此不需在每個 branch 建立或套用不同 stash。每個 worktree 的 fingerprinted `PersonalAgent` evidence 都是 branch-neutral。
 
-Linked worktree 有獨立 working directory。第一次在該 worktree 啟動 production change 時執行 bootstrap，即會建立同一契約的本機 artifacts；共同 Git metadata 中的 PersonalAgent evidence 會在 repository operation lock 內安全刷新，`.git/info/exclude` 則只採所有 live worktree 通過完整 manifest v2 parser（或合法 v1 migration shape）的路徑聯集，因此不同 worktree 的 customized/unmanaged 狀態不會互相移除 ignore。兩個 worktree 的 HEAD/index 都不會改變。
+Linked worktree 有獨立 working directory。第一次在該 worktree 啟動 production change 時執行 bootstrap，即會建立同一契約的本機 artifacts；共同 Git metadata 中會各自保留 hashed worktree identity 對應的 PersonalAgent evidence，更新其中一份不會刪除其他 worktree 的復原證據。`.git/info/exclude` 只採所有 live worktree 通過完整 manifest v2 parser（或合法 v1 migration shape）的路徑聯集，因此不同 worktree 的 customized/unmanaged 狀態不會互相移除 ignore。兩個 worktree 的 HEAD/index 都不會改變。
 
 ## Config migration
 
@@ -106,12 +115,12 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 1. Bootstrap 回報 pollution 後，不要修改 manifest 或執行 hard reset。
 2. 檢查列出的 tracked paths、manifest v2（或待清理的精確 legacy v1 manifest）與 working-tree bytes。
 3. 執行 installed cleanup command 並傳入 `-Authorize`。
-4. Cleanup 以 origin identity 與 Repository 外形驗證 canonical source exclusion，再驗證完整 v2／legacy v1 manifest、safe paths、staged state 與每個檔案 hash。
-5. 對已證明且未修改的路徑執行 exact `git rm --cached`，保留 working-tree files。
-6. 寫入 `.git/info/exclude` managed block。
+4. Cleanup 先拒絕設定了 `GIT_INDEX_FILE` 的呼叫環境，確保後續只處理 active worktree index；接著以 origin identity 與 Repository 外形驗證 canonical source exclusion，再驗證完整 v2／legacy v1 manifest、safe paths、staged state 與每個檔案 hash。
+5. 以 exclusive read-modify-write handle 寫入 `.git/info/exclude` managed block，並記錄同一 handle 內觀察到的 original/applied bytes。
+6. 取得 Git 原生 `index.lock`，在鎖內重驗 managed entries，從 active index copy 產生 exact staged deletions 並 replace index；rollback 也在同一種原生 index lock/CAS 邊界內比較及還原，working-tree files 保留。
 7. 使用者檢查 `git diff --cached --name-status`，自行決定何時及如何提交產品 Repository 的污染修復。
 
-任一檔案 customized、staged、unsafe 或無法證明 ownership 時，cleanup 在 index mutation 前停止。若中途失敗，index 與 exclude snapshot 會恢復。Cleanup 本身不 commit 或 push。
+任一檔案 customized、staged、unsafe 或無法證明 ownership 時，cleanup 在 index mutation 前停止。若中途失敗，index 只還原仍由本交易移除的 entries；exclude 只在 current bytes 等於 applied bytes 時還原。Rollback 偵測到外部 index/exclude drift 時會保留外部內容、回報未完整復原並要求人工處理。Cleanup 本身不 commit 或 push。
 
 ## Failure policy
 
@@ -120,6 +129,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Network unavailable 或 GitHub API rate limit | 寫 offline receipt，保留已驗證 runtime；不降級、不安裝。 |
 | Candidate behind/diverged | 寫 stale receipt，不下載、不降級、不安裝。 |
 | GitHub candidate drift | 寫 drift receipt，刪除暫存下載，不安裝。 |
+| Verified bundle/config pin mismatch | Launcher fail closed；同一 stable updater 以 `-RecoverInterruptedInstall` 驗證兩份 strict identity、exact runtime inventory 與 stable entry-point references，然後只將 config pin 對齊 active verified runtime commit 並立即返回，不會接續 network check 或 install workflow。 |
 | Runtime inventory drift | Stable launcher／manual updater／cleanup 在載入 runtime code 前 fail closed，重新執行可信 installer。 |
 | Candidate parse/Catalog/Lock failure | 不進入 active swap。 |
 | Installer mutation failure | Transactional rollback；若 rollback 也失敗則保留 backup。 |
@@ -127,10 +137,11 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Concurrent updater/installer | 回傳不落盤的 concurrent 結果；manual command／launcher fail closed，不與 runtime swap 交錯。 |
 | Target customized file | 保留檔案與歷史 manifest entry，繼續安全更新其他檔案。 |
 | Manifest-proven tracked file | Bootstrap fail closed，要求明確 cleanup；ignore-case Repository 的 case variant 亦視為 pollution。 |
-| Stable/exclude mutation path 是目錄或 reparse point | 在寫入前 fail closed，保留原 filesystem entry。 |
+| Stable/exclude mutation path 或 exclude parent chain 是目錄類型不符或 reparse point | 在寫入前 fail closed，保留原 filesystem entry 與外部 target。 |
 | Concurrent target bootstrap/cleanup | Repository operation lock fail closed，不交錯 stash、exclude 或 index transaction。 |
+| Concurrent product index mutation | Bootstrap/cleanup 取得 active worktree 原生 `index.lock`；既有或中途 staging fail closed，不得產生成功但已 staged 的 managed artifact。 |
 | External Git process shifts stash indices | 新 evidence 以 immutable hash 套用；舊 evidence cleanup 重新解析 reference，drop hash 不符時還原實際刪除的 stash 並保留舊 evidence。 |
-| Target fan-out/stash verification failure | 恢復 target、manifest、index、exclude；保留 recovery evidence。 |
+| Target fan-out/stash verification failure | 只恢復 current==transaction-applied 的 target、manifest、index、exclude；外部 drift 原樣保留並回報人工處理，保留 recovery backup/evidence。 |
 
 ## 驗證矩陣
 
@@ -139,5 +150,5 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 - Update current/available/installed/offline/failed/stale/rate-limit/drift、update/install lock concurrent 與 malformed receipt self-healing。
 - Installer staging validation cleanup、expected-current revalidation、late failure rollback、launcher identity/inventory rejection。
 - Bootstrap branch switch、linked worktree divergent managed sets、`git clean -fdx` 後完整 re-materialization、manifest/file/exclude self-healing 與 repository lock。
-- Customized/unmanaged protection、case-variant 與 legacy-v1 tracked pollution、canonical-origin refusal、cleanup authorization/hash/staged/rollback boundaries。
+- Customized/unmanaged protection、case-variant／Unicode 與 legacy-v1 tracked pollution、canonical-origin refusal、cleanup authorization/hash/staged/atomic rollback/reparse-parent boundaries。
 - PowerShell 5.1 與 7 完整 Pester；real immutable archive production smoke。
