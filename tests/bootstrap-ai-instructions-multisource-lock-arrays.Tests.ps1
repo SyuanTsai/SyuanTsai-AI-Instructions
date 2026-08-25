@@ -107,16 +107,21 @@ function Write-LockArrayFixture {
     Set-TestUtf8Text -Path $lockPath -Value (($lock | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n")
 
     $configuration = [ordered]@{
-        schemaVersion = 3
-        autoCommitRepositoryUrls = @()
+        schemaVersion = 4
         excludedRepositoryUrls = @()
         excludedRepositoryPaths = @()
         catalog = [ordered]@{
-            repository = 'https://github.com/example/catalog.git'
+            repository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
             ref = ('d' * 40)
             profiles = @()
             includeSkills = @()
             excludeSkills = @()
+        }
+        updates = [ordered]@{
+            mode = 'notify-only'
+            channel = 'protected-branch'
+            ref = 'main'
+            minimumCheckIntervalMinutes = 1440
         }
     }
     Set-TestUtf8Text -Path $configurationPath -Value (($configuration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n")

@@ -1,8 +1,5 @@
 {
-  "schemaVersion": 3,
-  "autoCommitRepositoryUrls": [
-    "https://example.com/acme/owned-project.git"
-  ],
+  "schemaVersion": 4,
   "excludedRepositoryUrls": [
     "https://example.org/acme/planning-only-project.git"
   ],
@@ -10,7 +7,7 @@
     "docs/architecture-planning"
   ],
   "catalog": {
-    "repository": "https://github.com/example/ai-instructions.git",
+    "repository": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git",
     "ref": "89abcdef0123456789abcdef0123456789abcdef",
     "profiles": [
       "core"
@@ -21,5 +18,11 @@
     "excludeSkills": [
       "capture-private-course-knowledge"
     ]
+  },
+  "updates": {
+    "mode": "notify-only",
+    "channel": "protected-branch",
+    "ref": "main",
+    "minimumCheckIntervalMinutes": 1440
   }
 }

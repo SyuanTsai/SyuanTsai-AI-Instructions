@@ -93,16 +93,23 @@ function Assert-SafeZipEntry {
 }
 
 function Expand-SafeZipRepository {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
     param(
-        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Path')][string] $ArchivePath,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Stream')][System.IO.Stream] $ArchiveStream,
         [Parameter(Mandatory = $true)][string] $DestinationRoot,
         [string] $RepositoryDirectoryName = 'repository'
     )
 
-    $resolvedArchive = [System.IO.Path]::GetFullPath($ArchivePath)
-    if (-not (Test-Path -LiteralPath $resolvedArchive -PathType Leaf)) {
-        throw "ZIP archive does not exist: $resolvedArchive"
+    $resolvedArchive = $null
+    if ($PSCmdlet.ParameterSetName -ceq 'Path') {
+        $resolvedArchive = [System.IO.Path]::GetFullPath($ArchivePath)
+        if (-not (Test-Path -LiteralPath $resolvedArchive -PathType Leaf)) {
+            throw "ZIP archive does not exist: $resolvedArchive"
+        }
+    }
+    elseif (-not $ArchiveStream.CanRead -or -not $ArchiveStream.CanSeek -or $ArchiveStream.Position -ne 0) {
+        throw 'ZIP archive stream must be readable, seekable, and positioned at byte zero.'
     }
     if ($RepositoryDirectoryName -cnotmatch '^[a-z0-9][a-z0-9-]*$') {
         throw "Unsafe extracted repository directory name: $RepositoryDirectoryName"
@@ -117,12 +124,13 @@ function Expand-SafeZipRepository {
     Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
 
-    $stream = [System.IO.File]::OpenRead($resolvedArchive)
+    $ownsStream = $PSCmdlet.ParameterSetName -ceq 'Path'
+    $stream = if ($ownsStream) { [System.IO.File]::OpenRead($resolvedArchive) } else { $ArchiveStream }
     try {
         $archive = New-Object System.IO.Compression.ZipArchive(
             $stream,
             [System.IO.Compression.ZipArchiveMode]::Read,
-            $false
+            (-not $ownsStream)
         )
         try {
             $entries = @($archive.Entries)
@@ -204,7 +212,7 @@ function Expand-SafeZipRepository {
         }
     }
     finally {
-        $stream.Dispose()
+        if ($ownsStream) { $stream.Dispose() }
     }
 
     return $repositoryRoot

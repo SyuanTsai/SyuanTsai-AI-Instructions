@@ -1,6 +1,7 @@
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
 $script:ManifestPath = '.codex\ai-instructions.manifest.json'
 $script:TestRepositoryUrl = 'git@example.com:team/bootstrap-test.git'
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
 
 function Invoke-TestGit {
     param(
@@ -129,16 +130,13 @@ function New-TestConfiguration {
         [Parameter(Mandatory = $true)]
         [string] $Path,
 
-        [string[]] $AutoCommitRepositoryUrls = @(),
-
         [string[]] $ExcludedRepositoryUrls = @(),
 
         [string[]] $ExcludedRepositoryPaths = @()
     )
 
     $configuration = [ordered]@{
-        schemaVersion = 2
-        autoCommitRepositoryUrls = @($AutoCommitRepositoryUrls)
+        schemaVersion = 3
         excludedRepositoryUrls = @($ExcludedRepositoryUrls)
         excludedRepositoryPaths = @($ExcludedRepositoryPaths)
     }
@@ -199,7 +197,7 @@ function Invoke-BootstrapScript {
         Push-Location -LiteralPath $WorkingDirectory
     }
     try {
-        $output = & powershell.exe @arguments 2>&1
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
     }
     finally {
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
@@ -226,13 +224,16 @@ Describe 'bootstrap-ai-instructions' {
         New-TestSource -Path $sourceRoot
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         New-TestRepository -Path $targetRoot
-        New-TestConfiguration -Path $configurationPath -AutoCommitRepositoryUrls @($script:TestRepositoryUrl)
+        New-TestConfiguration -Path $configurationPath
         $script:TestConfigurationPath = $configurationPath
         $script:TestProvenancePath = $provenancePath
         New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
-    It 'creates both English instruction families and commits only those files' {
+    # Scenario: A clean product repository receives both instruction families for the first time.
+    # Purpose: Materialize the complete local ignored model without changing product history or status.
+    It 'InterT05_creates_both_English_instruction_families_without_changing_HEAD_or_status' {
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
@@ -247,20 +248,18 @@ Describe 'bootstrap-ai-instructions' {
         $manifest.lockSha256 | Should Be ('a' * 64)
         $manifest.files.Count | Should Be 4
 
-        $commitMessage = Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')
-        $commitMessage | Should Be 'chore: add shared AI instructions'
-
-        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        $committedFiles.Count | Should Be 5
-        ($committedFiles -contains 'AGENTS.md') | Should Be $true
-        ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
-        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
-        ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
-        ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join '') | Should BeNullOrEmpty
+        $exclude = Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.git\info\exclude')
+        $exclude | Should Match '# BEGIN Codex AI Instructions managed paths'
+        $exclude | Should Match '(?m)^/AGENTS\.md$'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
         Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\.gitkeep') | Should Be $false
     }
 
-    It 'commits exact managed files when instruction paths are ignored' {
+    # Scenario: A repository already ignores broad personal Agent directories and contains an unrelated ignored file.
+    # Purpose: Add only exact managed exclusions while preserving project ignore policy and personal content.
+    It 'InterT10_preserves_project_ignore_rules_and_unrelated_ignored_files' {
         Set-TestText -Path (Join-Path $targetRoot '.gitignore') -Value ".agents/`n.codex/`n.github/`n/AGENTS.md"
         New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex') | Out-Null
         Set-TestText -Path (Join-Path $targetRoot '.codex\personal-settings.json') -Value '{ "personal": true }'
@@ -269,18 +268,44 @@ Describe 'bootstrap-ai-instructions' {
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        $committedFiles.Count | Should Be 5
-        ($committedFiles -contains 'AGENTS.md') | Should Be $true
-        ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
-        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
-        ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
-        ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
-        ($committedFiles -contains '.codex/personal-settings.json') | Should Be $false
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'ignore personal agent files'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.gitignore')) | Should Match '(?m)^\.agents/$'
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\personal-settings.json') | Should Be $true
     }
 
-    It 'recursively syncs shared Agent Skill files and removes managed resources deleted from the source' {
+    # Scenario: The shared Git exclude file contains an incomplete managed marker block.
+    # Purpose: Fail closed and roll back target materialization instead of appending a second ambiguous block.
+    It 'InterT12_rejects_a_malformed_managed_exclude_block' {
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        Set-TestText -Path $excludePath -Value "# user rule`n# BEGIN Codex AI Instructions managed paths`n/old-agent.md"
+        $excludeBefore = Get-Content -Raw -LiteralPath $excludePath
+
+        try { Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null; $errorMessage = $null }
+        catch { $errorMessage = $_.Exception.Message }
+
+        $errorMessage | Should Match 'managed exclude block.*malformed'
+        (Get-Content -Raw -LiteralPath $excludePath) | Should Be $excludeBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: The canonical Instructions origin is incomplete and therefore no longer has both source-shape marker files.
+    # Purpose: Refuse source-repository fan-out by canonical identity before any personal artifact is materialized.
+    It 'InterT13_skips_the_canonical_source_origin_even_when_its_file_shape_is_incomplete' {
+        Invoke-TestGit -Repository $targetRoot -Arguments @('remote','set-url','origin','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git') | Out-Null
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        ($output -join [Environment]::NewLine) | Should Match 'shared instruction source'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: A selected shared Skill contains nested text and binary resources, then removes one managed resource in a later source version.
+    # Purpose: Preserve recursive byte-safe synchronization and safely remove only unchanged manifest-owned files.
+    It 'InterT15_recursively_syncs_shared_Skill_files_and_removes_deleted_managed_resources' {
         # Given
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\write-project-prompt'
         New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
@@ -318,11 +343,34 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\format.md') | Should Be $false
     }
 
-    It 'preserves an existing unmanaged Agent Skill while syncing other instructions' {
+    # Scenario: A selected shared Skill contains a Unicode-named resource and a no-op bootstrap revalidates its stored recovery evidence.
+    # Purpose: Parse Git tree paths without core.quotePath escaping so valid byte-safe evidence is reused instead of replaced.
+    It 'InterT16_reuses_recovery_evidence_for_a_Unicode_Skill_resource' {
+        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\unicode-resource'
+        $unicodeFileName = ([string][char]0x8AAA) + ([string][char]0x660E) + '.md'
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value "---`nname: unicode-resource`ndescription: Exercise Unicode resource paths.`n---`n`n# Unicode resource"
+        Set-TestText -Path (Join-Path (Join-Path $sourceSkillPath 'references') $unicodeFileName) -Value '# Unicode path content'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        $firstOutput = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $secondOutput = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath (Join-Path (Join-Path $targetRoot '.agents\skills\unicode-resource\references') $unicodeFileName)).Trim() | Should Be '# Unicode path content'
+        ($firstOutput -join [Environment]::NewLine) | Should Match 'PersonalAgent recovery evidence updated'
+        ($secondOutput -join [Environment]::NewLine) | Should Not Match 'PersonalAgent recovery evidence updated'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: A product Repository already tracks its own Skill at a path also present in the selected shared source.
+    # Purpose: Preserve repository-owned content and report the ownership conflict while syncing unrelated artifacts.
+    It 'InterT20_preserves_an_existing_unmanaged_Skill_while_syncing_other_instructions' {
         # Given
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\existing-skill'
-        New-Item -ItemType Directory -Force -Path $sourceSkillPath | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
         Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value '# Shared skill'
+        Set-TestText -Path (Join-Path $sourceSkillPath 'references\shared.md') -Value '# Shared nested resource'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
         $targetSkillPath = Join-Path $targetRoot '.agents\skills\existing-skill'
@@ -336,26 +384,32 @@ Describe 'bootstrap-ai-instructions' {
 
         # Then
         (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Project skill'
+        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\shared.md') | Should Be $false
         ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged.*\.agents/skills/existing-skill/SKILL.md'
     }
 
-    It 'matches the actual repository location across SSH and HTTPS origin URL formats' {
-        New-TestConfiguration -Path $configurationPath `
-            -AutoCommitRepositoryUrls @('https://example.com/team/bootstrap-test.git')
+    # Scenario: A Repository-owned AGENTS.md is tracked but currently has an intentional unstaged deletion.
+    # Purpose: Preserve the deletion and never recreate an ownership-unknown tracked path from personal runtime content.
+    It 'InterT21_preserves_a_missing_but_tracked_unmanaged_path' {
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Product-owned Agent'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','add product Agent') | Out-Null
+        Remove-Item -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
 
-        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) |
-            Should Be 'chore: add shared AI instructions'
-        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
-            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--','AGENTS.md')) -join "`n") | Should Match '^ D AGENTS\.md$'
+        ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged.*AGENTS\.md'
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files | Where-Object { $_.targetPath -eq 'AGENTS.md' }).Count | Should Be 0
     }
 
-    It 'does not allow auto commit based on a matching local folder name' {
+    # Scenario: A target folder name resembles a formerly allowlisted local path.
+    # Purpose: Prove local path identity can no longer grant stage or commit authority.
+    It 'InterT30_never_commits_based_on_a_matching_local_folder_name' {
         $namedTargetRoot = Join-Path $TestDrive 'OwnedProject'
         New-TestRepository -Path $namedTargetRoot -OriginUrl 'git@example.com:someone-else/owned-project.git'
-        New-TestConfiguration -Path $configurationPath `
-            -AutoCommitRepositoryUrls @('git@example.com:team/owned-project.git')
         $commitBefore = Invoke-TestGit -Repository $namedTargetRoot -Arguments @('rev-parse', 'HEAD')
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $namedTargetRoot
@@ -365,9 +419,10 @@ Describe 'bootstrap-ai-instructions' {
             Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
-    It 'skips synchronization when the repository is excluded' {
+    # Scenario: The current Repository origin is listed in the personal exclusion configuration.
+    # Purpose: Leave history, working-tree artifacts, manifest, and recovery evidence untouched.
+    It 'InterT35_skips_synchronization_when_the_repository_is_excluded' {
         New-TestConfiguration -Path $configurationPath `
-            -AutoCommitRepositoryUrls @($script:TestRepositoryUrl) `
             -ExcludedRepositoryUrls @('https://example.com/team/bootstrap-test.git')
         $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
 
@@ -381,11 +436,12 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'repository is excluded'
     }
 
-    It 'skips synchronization when the startup directory is excluded' {
+    # Scenario: Production planning starts below a configured excluded Repository-relative directory.
+    # Purpose: Apply path exclusions before materialization or recovery evidence creation.
+    It 'InterT40_skips_synchronization_when_the_startup_directory_is_excluded' {
         $planningDirectory = Join-Path $targetRoot 'docs\architecture-planning'
         New-Item -ItemType Directory -Force -Path $planningDirectory | Out-Null
         New-TestConfiguration -Path $configurationPath `
-            -AutoCommitRepositoryUrls @($script:TestRepositoryUrl) `
             -ExcludedRepositoryPaths @('docs/architecture-planning')
         $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
 
@@ -400,7 +456,9 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'directory is excluded'
     }
 
-    It 'does not overwrite an existing Codex family and still creates a missing GitHub family' {
+    # Scenario: A Repository tracks its own Codex family while the GitHub Copilot family is absent.
+    # Purpose: Preserve repository-owned instructions without preventing safe materialization of an independent family.
+    It 'InterT45_preserves_an_existing_Codex_family_and_creates_the_missing_GitHub_family' {
         Set-Content -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -Value '# Existing Agent'
         New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex\AI-Rules') | Out-Null
         Set-Content -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Existing Testing'
@@ -416,14 +474,13 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot '.github\copilot-instructions.md') | Should Be $true
 
-        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        $committedFiles.Count | Should Be 3
-        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
-        ($committedFiles -contains '.github/copilot-instructions.md') | Should Be $true
-        ($committedFiles -contains '.github/AI-Rules/Testing.en.md') | Should Be $true
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'Chore: add shared AI instructions'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
-    It 'preserves unrelated staged and unstaged changes' {
+    # Scenario: The target Repository contains unrelated staged and unstaged product work before bootstrap.
+    # Purpose: Keep user index and working-tree changes intact while materializing ignored personal artifacts.
+    It 'InterT50_preserves_unrelated_staged_and_unstaged_changes' {
         Set-Content -LiteralPath (Join-Path $targetRoot 'staged.txt') -Value 'staged change'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'staged.txt') | Out-Null
         Set-Content -LiteralPath (Join-Path $targetRoot 'README.md') -Value '# Unstaged change'
@@ -442,7 +499,90 @@ Describe 'bootstrap-ai-instructions' {
         ($committedFiles -contains 'README.md') | Should Be $false
     }
 
-    It 'updates managed instructions when the source Agent changes' {
+    # Scenario: A previously tracked managed file has an intentional staged deletion while its ignored working-tree materialization remains.
+    # Purpose: Stop before recovery-evidence refresh so bootstrap never resets the staged deletion or re-adds the managed path to the index.
+    It 'InterT54_preserves_a_managed_staged_deletion_when_recovery_evidence_is_missing' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $managedPath = Join-Path $targetRoot 'AGENTS.md'
+        $managedBytesBefore = [System.IO.File]::ReadAllBytes($managedPath)
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','temporary tracked managed fixture') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('rm','--cached','--quiet','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash','clear') | Out-Null
+
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-status','--','AGENTS.md')) -join "`n") |
+            Should Match '^D\s+AGENTS\.md$'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')).Count | Should Be 0
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($managedPath)) |
+            Should Be ([Convert]::ToBase64String($managedBytesBefore))
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'managed path has staged changes'
+    }
+
+    # Scenario: Another Git process attempts to stage managed-path bytes after bootstrap preflight during recovery evidence creation.
+    # Purpose: Hold the native worktree index lock through finalization so the concurrent mutation is rejected and bootstrap rolls back.
+    It 'InterT66_rejects_a_concurrent_staged_blob_during_recovery_evidence_refresh' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash','clear') | Out-Null
+        $wrapperRoot = Join-Path $TestDrive 'concurrent-evidence-index-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $userBlobFile = Join-Path $wrapperRoot 'user-agent.txt'
+        Set-TestText -Path $userBlobFile -Value '# Concurrent staged Agent bytes'
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $injectedMarker = Join-Path $wrapperRoot 'injected.marker'
+        $blockedMarker = Join-Path $wrapperRoot 'blocked.marker'
+        $hashPath = Join-Path $wrapperRoot 'blob.txt'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"hash-object --no-filters -- AGENTS.md" >nul
+if errorlevel 1 goto forward
+if exist "$injectedMarker" goto forward
+"$realGit" %*
+if errorlevel 1 exit /b %errorlevel%
+"$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
+if errorlevel 1 exit /b 86
+set /p userblob=<"$hashPath"
+"$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
+if errorlevel 1 (
+  type nul > "$blockedMarker"
+  exit /b 87
+)
+type nul > "$injectedMarker"
+exit /b 0
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-TargetRoot',$targetRoot,
+            '-GitExecutable',$gitWrapperPath
+        )
+
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Not Be 0
+        Test-Path -LiteralPath $blockedMarker | Should Be $true
+        Test-Path -LiteralPath $injectedMarker | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--','AGENTS.md')).Count | Should Be 0
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+    }
+
+    # Scenario: Immutable source instructions advance while existing target bytes still match their manifest hashes.
+    # Purpose: Refresh managed bytes without producing a product Repository commit.
+    It 'InterT55_updates_unchanged_managed_instructions_when_the_source_advances' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
@@ -453,15 +593,167 @@ Describe 'bootstrap-ai-instructions' {
 
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
         (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Codex English Testing v2'
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) | Should Be 'chore: sync shared AI instructions'
-
-        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        ($committedFiles -contains 'AGENTS.md') | Should Be $true
-        ($committedFiles -contains '.codex/AI-Rules/Testing.en.md') | Should Be $true
-        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) | Should Be 'initial commit'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
-    It 'does not create another commit when managed instructions are current' {
+    # Scenario: Managed local artifacts exist while the product repository switches between branches.
+    # Purpose: Keep one ignored working-tree materialization without branch-specific stash operations.
+    It 'InterT60_keeps_one_branch_independent_artifact_set_across_branch_switches' {
+        $startingBranch = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('branch','--show-current')) -join '').Trim()
+        $headBefore = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim()
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Invoke-TestGit -Repository $targetRoot -Arguments @('switch','--quiet','-c','fixture-branch') | Out-Null
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base branch-independent'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base branch-independent'
+
+        Invoke-TestGit -Repository $targetRoot -Arguments @('switch','--quiet',$startingBranch) | Out-Null
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base branch-independent'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim() | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        ($output -join [Environment]::NewLine) | Should Match 'up to date'
+    }
+
+    # Scenario: A linked worktree starts without its own local artifact materialization.
+    # Purpose: Create the same ignored model without changing either worktree's branch history.
+    It 'InterT65_creates_the_same_local_ignored_model_in_a_linked_worktree' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot
+
+            (Get-Content -Raw -LiteralPath (Join-Path $linkedRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+            Test-Path -LiteralPath (Join-Path $linkedRoot $script:ManifestPath) | Should Be $true
+            (@(Invoke-TestGit -Repository $linkedRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+            (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+            @(Invoke-TestGit -Repository $linkedRoot -Arguments @('stash','list','--format=%gs') | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 2
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: One linked worktree has an unmanaged Codex base while another materializes the managed base.
+    # Purpose: Keep the shared info/exclude state valid for every live worktree after either worktree bootstraps.
+    It 'InterT67_preserves_linked_worktree_exclusions_when_managed_sets_differ' {
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Unmanaged project Agent'
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-divergent-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-divergent-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot
+
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+            (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Unmanaged project Agent'
+            (Get-Content -Raw -LiteralPath (Join-Path $linkedRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+            (@(Invoke-TestGit -Repository $linkedRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: A live linked worktree carries a schema-v2 manifest with an unsupported top-level property.
+    # Purpose: Refuse schema-invalid ownership evidence before it can influence the shared Git exclude block.
+    It 'InterT68_rejects_a_schema_invalid_linked_worktree_manifest' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-invalid-manifest-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-invalid-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            $arguments = @(
+                '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+                '-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,
+                '-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot
+            )
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match '(?s)linked worktree manifest.*unsupported property.*unexpected'
+            (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: A prior local artifact set loses its manifest, one managed file, and the managed exclude block.
+    # Purpose: Reconstruct only state that immutable bytes can prove without dirtying the repository.
+    It 'InterT70_self_heals_a_missing_manifest_file_and_exclude_marker' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Remove-Item -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -Force
+        Remove-Item -LiteralPath (Join-Path $targetRoot $script:ManifestPath) -Force
+        Set-TestText -Path (Join-Path $targetRoot '.git\info\exclude') -Value '# keep personal exclude'
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files).Count | Should Be 4
+        $exclude = Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.git\info\exclude')
+        $exclude | Should Match '# keep personal exclude'
+        $exclude | Should Match '# BEGIN Codex AI Instructions managed paths'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: The shared Git exclude path is occupied by an unrelated directory before bootstrap starts.
+    # Purpose: Fail before target mutation and preserve the pre-existing filesystem entry instead of deleting it during rollback.
+    It 'InterT71_rejects_an_unsafe_shared_Git_exclude_mutation_path' {
+        $excludePath = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        Remove-Item -LiteralPath $excludePath -Force
+        New-Item -ItemType Directory -Path $excludePath | Out-Null
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'unsafe shared Git exclude mutation path'
+        Test-Path -LiteralPath $excludePath -PathType Container | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: An external process already has the shared exclude file open for writing when bootstrap reaches its exclude update.
+    # Purpose: Require one exclusive read-modify-write handle and roll back target bytes instead of losing an external writer's update.
+    It 'InterT101_fails_closed_when_the_shared_exclude_write_handle_is_unavailable' {
+        $excludePath = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $excludeLock = [System.IO.File]::Open($excludePath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+        try {
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $excludeLock.Dispose()
+        }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'exclusive shared Git exclude mutation handle'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: A second bootstrap sees the same immutable source and complete valid materialization.
+    # Purpose: Make the current-state path a zero-mutation operation with no Git commit.
+    It 'InterT69_keeps_current_managed_instructions_as_a_no_op' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
 
@@ -471,11 +763,11 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'up to date'
     }
 
-    It 'preserves customized managed files while updating other managed files' {
+    # Scenario: One manifest-owned file is customized while another unchanged file has a newer immutable source version.
+    # Purpose: Preserve customized bytes and continue updating independently provable managed files.
+    It 'InterT77_preserves_customized_files_while_updating_other_managed_files' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Project-specific Agent'
-        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md') | Out-Null
-        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'customize project agent') | Out-Null
 
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AI-Rules\Testing.en.md') -Value '# Codex English Testing v2'
@@ -488,27 +780,71 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'customized.*AGENTS.md'
     }
 
-    It 'adopts unchanged files created by the previous bootstrap and updates them' {
-        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex\AI-Rules') | Out-Null
-        New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.github\AI-Rules') | Out-Null
-        Copy-Item -LiteralPath (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Destination (Join-Path $targetRoot 'AGENTS.md')
-        Copy-Item -LiteralPath (Join-Path $sourceRoot '.codex\AI-Rules\Testing.en.md') -Destination (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')
-        Copy-Item -LiteralPath (Join-Path $sourceRoot '.github\copilot-instructions.en.md') -Destination (Join-Path $targetRoot '.github\copilot-instructions.md')
-        Copy-Item -LiteralPath (Join-Path $sourceRoot '.github\AI-Rules\Testing.en.md') -Destination (Join-Path $targetRoot '.github\AI-Rules\Testing.en.md')
-        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'AGENTS.md', '.codex/AI-Rules/Testing.en.md', '.github/copilot-instructions.md', '.github/AI-Rules/Testing.en.md') | Out-Null
-        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'chore: add shared AI instructions') | Out-Null
-
+    # Scenario: Manifest-owned personal runtime artifacts have been committed into product history.
+    # Purpose: Stop without index mutation and direct the user to explicit pollution cleanup.
+    It 'InterT72_fails_closed_when_manifest_proven_artifacts_are_Git_tracked' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md','.codex/AI-Rules/Testing.en.md','.github/copilot-instructions.md','.github/AI-Rules/Testing.en.md','.codex/ai-instructions.manifest.json') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','polluted fixture') | Out-Null
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+        $contentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
-        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
-        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
-        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('log', '-1', '--pretty=%s')) | Should Be 'chore: sync shared AI instructions'
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected.*manifest-proven'
+        ($output -join [Environment]::NewLine) | Should Match 'cleanup-ai-instructions-pollution\.ps1'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $contentBefore
     }
 
-    It 'removes an unchanged managed rule when the source removes it' {
+    # Scenario: Git tracks a case variant of a manifest-proven managed path on an ignore-case repository.
+    # Purpose: Prevent Windows path aliases from bypassing tracked pollution detection and managed ownership checks.
+    It 'InterT73_fails_closed_for_a_case_variant_tracked_managed_path' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        Invoke-TestGit -Repository $targetRoot -Arguments @('config','core.ignorecase','true') | Out-Null
+        $agentPath = Join-Path $targetRoot 'AGENTS.md'
+        $temporaryPath = Join-Path $targetRoot 'agent-case-temporary.md'
+        $caseVariantPath = Join-Path $targetRoot 'agents.md'
+        Move-Item -LiteralPath $agentPath -Destination $temporaryPath
+        Move-Item -LiteralPath $temporaryPath -Destination $caseVariantPath
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','agents.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','case-variant pollution fixture') | Out-Null
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected.*AGENTS\.md'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','agents.md')) -join '') | Should Be 'agents.md'
+    }
+
+    # Scenario: A schema-v2 manifest labels the Codex base as a Skill without a matching flat Skill path.
+    # Purpose: Reject malformed ownership evidence instead of silently adopting or rewriting it during bootstrap.
+    It 'InterT74_rejects_a_schema_invalid_managed_manifest_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifest.files[0].artifactType = 'skill'
+        $manifestJson = ($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n") + "`n"
+        [System.IO.File]::WriteAllText($manifestPath,$manifestJson,(New-Object System.Text.UTF8Encoding($false)))
+        $agentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Managed Skill.*must preserve the flat'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $agentBefore
+        [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).files[0].artifactType | Should Be 'skill'
+    }
+
+    # Scenario: A previously materialized read-only rule remains byte-identical when the immutable source removes it.
+    # Purpose: Remove obsolete manifest-owned content through the same handle without treating a read-only attribute as byte customization.
+    It 'InterT79_removes_an_unchanged_managed_rule_deleted_from_the_source' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         $sourceRulePath = Join-Path $sourceRoot '.codex\AI-Rules\CodeReview.en.md'
@@ -518,23 +854,541 @@ Describe 'bootstrap-ai-instructions' {
 
         $targetRulePath = Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md'
         Test-Path -LiteralPath $targetRulePath | Should Be $true
+        (Get-Item -Force -LiteralPath $targetRulePath).IsReadOnly = $true
 
         Remove-Item -LiteralPath $sourceRulePath
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         Test-Path -LiteralPath $targetRulePath | Should Be $false
-        $committedFiles = Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')
-        ($committedFiles -contains '.codex/AI-Rules/CodeReview.en.md') | Should Be $true
-        ($committedFiles -contains '.codex/ai-instructions.manifest.json') | Should Be $true
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'initial commit'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
-    It 'syncs files without staging or committing when the repository is not allowlisted' {
-        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+    # Scenario: An exact-hash managed file is read-only when its immutable source bytes change.
+    # Purpose: Update through a handle-bound write transaction and restore the caller's read-only attribute afterward.
+    It 'InterT104_updates_exact_hash_read_only_managed_bytes_and_restores_the_attribute' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $targetAgentPath = Join-Path $targetRoot 'AGENTS.md'
+        (Get-Item -Force -LiteralPath $targetAgentPath).IsReadOnly = $true
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath $targetAgentPath).Trim() | Should Be '# Codex English Base v2'
+        (Get-Item -Force -LiteralPath $targetAgentPath).IsReadOnly | Should Be $true
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: A second process tries to write after the atomic delete primitive has verified bytes and still holds its handle.
+    # Purpose: Prove the production primitive denies writers until the same handle has received delete disposition.
+    It 'InterT103_blocks_a_concurrent_writer_inside_the_atomic_managed_file_delete_boundary' {
+        $definitionRoot = Join-Path $TestDrive 'definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probePath = Join-Path $TestDrive 'atomic-delete-probe.md'
+        Set-TestText -Path $probePath -Value '# managed bytes'
+        $writerPath = Join-Path $TestDrive 'concurrent-target-writer.ps1'
+        $wrapperPath = Join-Path $TestDrive 'atomic-delete-probe.ps1'
+        $writerResultPath = Join-Path $TestDrive 'concurrent-target-writer-result.txt'
+        Set-TestText -Path $writerPath -Value @'
+param([Parameter(Mandatory = $true)][string] $TargetPath)
+$ErrorActionPreference = 'Stop'
+try {
+    [System.IO.File]::WriteAllText($TargetPath,"# concurrent user edit`n",(New-Object System.Text.UTF8Encoding($false)))
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.GetType().FullName + ': ' + $_.Exception.Message)
+    exit 23
+}
+'@
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $WriterScript,
+    [Parameter(Mandatory = $true)][string] $ProbePath,
+    [Parameter(Mandatory = $true)][string] $WriterResultPath,
+    [Parameter(Mandatory = $true)][string] $TestPowerShell
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$expectedBytes = [System.IO.File]::ReadAllBytes($ProbePath)
+$stream = Open-TargetMutationAtomicDeleteStream -TargetRoot (Split-Path -Parent $ProbePath) `
+    -TargetPath $ProbePath -RelativePath 'atomic-delete-probe.md' `
+    -Operation 'Atomic delete test'
+try {
+    $currentBytes = Read-TargetMutationStreamBytes -Stream $stream
+    if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $expectedBytes)) {
+        throw 'Atomic delete test fixture changed before the writer probe.'
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $writerOutput = & $TestPowerShell -NoProfile -ExecutionPolicy Bypass -File $WriterScript -TargetPath $ProbePath 2>&1
+        $writerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $result = "$writerExitCode`n$($writerOutput -join [Environment]::NewLine)"
+    [System.IO.File]::WriteAllText($WriterResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+    Set-TargetMutationDeleteDisposition -Handle $stream.SafeFileHandle
+}
+finally {
+    $stream.Dispose()
+}
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-WriterScript',$writerPath,
+            '-ProbePath',$probePath,
+            '-WriterResultPath',$writerResultPath,
+            '-TestPowerShell',$script:TestPowerShellExecutable
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -ne 0) {
+            throw "Atomic delete probe failed with exit code $exitCode`: $($output -join [Environment]::NewLine)"
+        }
+        Test-Path -LiteralPath $writerResultPath -PathType Leaf | Should Be $true
+        (Get-Content -Raw -LiteralPath $writerResultPath) |
+            Should Match '(?s)^23\r?\n.*process cannot access the file'
+        Test-Path -LiteralPath $probePath | Should Be $false
+    }
+
+    # Scenario: A validated managed parent is replaced by a junction before the native delete handle opens.
+    # Purpose: Bind final-path confinement to the actual delete handle so a stale path precheck cannot authorize an outside file.
+    It 'InterT105_rejects_a_parent_junction_swap_at_the_handle_bound_delete_boundary' {
+        $definitionRoot = Join-Path $TestDrive 'junction-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'handle-bound-root'
+        $managedParent = Join-Path $probeRoot 'managed'
+        $savedParent = Join-Path $probeRoot 'managed-original'
+        $outsideRoot = Join-Path $TestDrive 'handle-bound-outside'
+        New-Item -ItemType Directory -Force -Path $managedParent,$outsideRoot | Out-Null
+        Set-TestText -Path (Join-Path $managedParent 'victim.md') -Value '# identical managed bytes'
+        Set-TestText -Path (Join-Path $outsideRoot 'victim.md') -Value '# identical managed bytes'
+        $wrapperPath = Join-Path $TestDrive 'handle-bound-junction-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'handle-bound-junction-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $ManagedParent,
+    [Parameter(Mandatory = $true)][string] $SavedParent,
+    [Parameter(Mandatory = $true)][string] $OutsideRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$targetPath = Join-Path $ManagedParent 'victim.md'
+Assert-ManagedPathDoesNotCrossReparsePoint -Root $ProbeRoot -Path $targetPath -Context 'stale path precheck'
+Move-Item -LiteralPath $ManagedParent -Destination $SavedParent
+New-Item -ItemType Junction -Path $ManagedParent -Target $OutsideRoot | Out-Null
+try {
+    $stream = Open-TargetMutationAtomicDeleteStream -TargetRoot $ProbeRoot -TargetPath $targetPath `
+        -RelativePath 'managed/victim.md' -Operation 'Handle-bound junction probe'
+    try { Set-TargetMutationDeleteDisposition -Handle $stream.SafeFileHandle }
+    finally { $stream.Dispose() }
+    $result = 'unexpectedly-opened-and-deleted'
+}
+catch {
+    $result = $_.Exception.Message
+}
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-ManagedParent',$managedParent,
+            '-SavedParent',$savedParent,
+            '-OutsideRoot',$outsideRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -ne 0) {
+            throw "Handle-bound junction probe failed with exit code $exitCode`: $($output -join [Environment]::NewLine)"
+        }
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'resolved outside the expected target-root path'
+        Test-Path -LiteralPath (Join-Path $outsideRoot 'victim.md') -PathType Leaf | Should Be $true
+        Test-Path -LiteralPath (Join-Path $savedParent 'victim.md') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: A managed path is a hard-link alias of a file outside the target root when bootstrap tries to update it.
+    # Purpose: Treat non-exclusive file ownership as ambiguous and preserve every alias before any managed bytes change.
+    It 'InterT106_rejects_a_hard_linked_managed_file_before_mutation' {
+        $definitionRoot = Join-Path $TestDrive 'hard-link-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'hard-link-target'
+        $managedParent = Join-Path $probeRoot 'managed'
+        $outsidePath = Join-Path $TestDrive 'hard-link-outside.md'
+        $backupRoot = Join-Path $TestDrive 'hard-link-backup'
+        New-Item -ItemType Directory -Force -Path $managedParent | Out-Null
+        Set-TestText -Path $outsidePath -Value '# original outside bytes'
+        $managedPath = Join-Path $managedParent 'victim.md'
+        New-Item -ItemType HardLink -Path $managedPath -Target $outsidePath | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'hard-link-mutation-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'hard-link-mutation-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/victim.md') -BackupRoot $BackupRoot
+try {
+    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/victim.md' `
+        -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed managed bytes'))
+    $result = 'unexpectedly-mutated'
+}
+catch { $result = $_.Exception.Message }
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership'
+        (Get-Content -Raw -LiteralPath $outsidePath).Trim() | Should Be '# original outside bytes'
+        (Get-Content -Raw -LiteralPath $managedPath).Trim() | Should Be '# original outside bytes'
+    }
+
+    # Scenario: A validated parent is replaced by a junction immediately before bootstrap creates a new managed file.
+    # Purpose: Bind creation to guarded parent handles so a stale path check cannot create or write outside the target root.
+    It 'InterT107_rejects_a_parent_junction_swap_at_the_handle_bound_create_boundary' {
+        $definitionRoot = Join-Path $TestDrive 'create-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'create-bound-root'
+        $managedParent = Join-Path $probeRoot 'managed'
+        $savedParent = Join-Path $probeRoot 'managed-original'
+        $outsideRoot = Join-Path $TestDrive 'create-bound-outside'
+        $backupRoot = Join-Path $TestDrive 'create-bound-backup'
+        New-Item -ItemType Directory -Force -Path $managedParent,$outsideRoot | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'create-bound-junction-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'create-bound-junction-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $ManagedParent,
+    [Parameter(Mandatory = $true)][string] $SavedParent,
+    [Parameter(Mandatory = $true)][string] $OutsideRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$createLine = @(
+    Select-String -LiteralPath $BootstrapScript -Pattern 'File\]::Open\(\[string\]\$state\.TargetPath.*CreateNew|Open-TargetMutationAtomicCreateStream' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($createLine.Count -ne 1) { throw 'Could not locate the managed-file create boundary.' }
+$global:CreateProbeParent = $ManagedParent
+$global:CreateProbeSavedParent = $SavedParent
+$global:CreateProbeOutside = $OutsideRoot
+$breakpoint = Set-PSBreakpoint -Script $BootstrapScript -Line $createLine[0] -Action {
+    Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
+    New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside | Out-Null
+}
+try {
+    $snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+    try {
+        Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+            -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# managed create'))
+        $result = 'unexpectedly-created'
+    }
+    catch { $result = $_.Exception.Message }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-ManagedParent',$managedParent,
+            '-SavedParent',$savedParent,
+            '-OutsideRoot',$outsideRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        Test-Path -LiteralPath (Join-Path $outsideRoot 'new.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $savedParent 'new.md') | Should Be $false
+    }
+
+    # Scenario: Another process creates a previously missing parent directory after snapshot but before managed creation.
+    # Purpose: Roll back only directories positively created by this transaction and preserve externally owned empty directories.
+    It 'InterT108_preserves_an_externally_created_parent_directory_during_rollback' {
+        $definitionRoot = Join-Path $TestDrive 'directory-definition-source'
+        New-TestRepository -Path $definitionRoot
+        New-Item -ItemType Directory -Force -Path (Join-Path $definitionRoot '.codex'),(Join-Path $definitionRoot '.github') | Out-Null
+        Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
+        Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
+        $probeRoot = Join-Path $TestDrive 'directory-ownership-root'
+        $backupRoot = Join-Path $TestDrive 'directory-ownership-backup'
+        New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+        $wrapperPath = Join-Path $TestDrive 'directory-ownership-probe.ps1'
+        $resultPath = Join-Path $TestDrive 'directory-ownership-result.txt'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $SourceArchivePath,
+    [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+    [Parameter(Mandatory = $true)][string] $ProvenancePath,
+    [Parameter(Mandatory = $true)][string] $DefinitionRoot,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+. $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
+    -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
+$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+$externalDirectory = Join-Path $ProbeRoot 'managed'
+New-Item -ItemType Directory -Path $externalDirectory | Out-Null
+Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
+Restore-TargetMutationSnapshot -Snapshot $snapshot
+$result = if (Test-Path -LiteralPath $externalDirectory -PathType Container) { 'preserved' } else { 'removed' }
+[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+'@
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-DefinitionRoot',$definitionRoot,
+            '-ProbeRoot',$probeRoot,
+            '-BackupRoot',$backupRoot,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Be 'preserved'
+        Test-Path -LiteralPath (Join-Path $probeRoot 'managed\new.md') | Should Be $false
+    }
+
+    # Scenario: Codex fan-out is ineligible, so the managed manifest is the transaction's only reason to create .codex.
+    # Purpose: Route manifest-parent creation through the handle-bound transaction and remove it after finalization rollback.
+    It 'InterT109_rolls_back_the_transaction_created_manifest_parent_when_Codex_fan_out_is_ineligible' {
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Project-owned Codex instructions'
+        $wrapperRoot = Join-Path $TestDrive 'manifest-parent-rollback-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+exit /b 109
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $excludePath = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude')
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $excludeBytesBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n"
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-TargetRoot',$targetRoot,
+            '-GitExecutable',$gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stash list'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n") | Should Be $statusBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Project-owned Codex instructions'
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.github') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
+    }
+
+    # Scenario: A formerly managed rule is customized locally before the immutable source removes that rule.
+    # Purpose: Preserve both the customized bytes and historical ownership evidence until the user resolves the customization.
+    It 'InterT83_preserves_manifest_ownership_for_a_customized_rule_removed_from_source' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $sourceRulePath = Join-Path $sourceRoot '.codex\AI-Rules\CodeReview.en.md'
+        Set-TestText -Path $sourceRulePath -Value '# Codex English Code Review'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $targetRulePath = Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md'
+        Set-TestText -Path $targetRulePath -Value '# Project customized Code Review'
+
+        Remove-Item -LiteralPath $sourceRulePath
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath $targetRulePath).Trim() | Should Be '# Project customized Code Review'
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files | Where-Object { $_.targetPath -ceq '.codex/AI-Rules/CodeReview.en.md' }).Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged'
+    }
+
+    # Scenario: A broad Git cleanup removes every ignored managed artifact from an already bootstrapped repository.
+    # Purpose: Re-materialize the complete immutable file set and recovery evidence after git clean -fdx.
+    It 'InterT84_self_heals_the_complete_materialization_after_git_clean_fdx' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $headBefore = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim()
+
+        Invoke-TestGit -Repository $targetRoot -Arguments @('clean','-fdx') | Out-Null
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files).Count | Should Be 4
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim() | Should Be $headBefore
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: A newly cloned product repository has no branch-independent personal runtime artifacts.
+    # Purpose: Materialize the complete ignored artifact set in a fresh clone without changing its branch history or status.
+    It 'InterT98_materializes_the_complete_artifact_set_in_a_new_clone' {
+        $cloneRoot = Join-Path $TestDrive 'new-clone'
+        Invoke-TestGit -Repository $TestDrive -Arguments @('clone','--quiet',$targetRoot,$cloneRoot) | Out-Null
+        Invoke-TestGit -Repository $cloneRoot -Arguments @('config','user.name','Bootstrap Clone Test') | Out-Null
+        Invoke-TestGit -Repository $cloneRoot -Arguments @('config','user.email','bootstrap-clone@example.test') | Out-Null
+        $headBefore = (@(Invoke-TestGit -Repository $cloneRoot -Arguments @('rev-parse','HEAD')) -join '').Trim()
+
+        Test-Path -LiteralPath (Join-Path $cloneRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $cloneRoot $script:ManifestPath) | Should Be $false
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $cloneRoot
+
+        (Get-Content -Raw -LiteralPath (Join-Path $cloneRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $cloneRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files).Count | Should Be 4
+        (@(Invoke-TestGit -Repository $cloneRoot -Arguments @('rev-parse','HEAD')) -join '').Trim() | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $cloneRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        @(Invoke-TestGit -Repository $cloneRoot -Arguments @('stash','list','--format=%gs') | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: Git restore, reset --hard, and clean -fd run after branch-independent artifacts are materialized.
+    # Purpose: Prove ordinary tracked and untracked cleanup leaves every ignored managed byte and its recovery evidence intact.
+    It 'InterT99_preserves_managed_artifacts_across_restore_reset_hard_and_clean_fd' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $headBefore = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim()
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        $managedPaths = @(@($manifest.files | ForEach-Object { [string]$_.targetPath }) + '.codex/ai-instructions.manifest.json')
+        $hashesBefore = @($managedPaths | Sort-Object | ForEach-Object {
+            $path = Join-Path $targetRoot $_.Replace('/','\')
+            "$_=$((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash)"
+        }) -join "`n"
+
+        Set-TestText -Path (Join-Path $targetRoot 'README.md') -Value '# Restore fixture'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('restore','--worktree','--','README.md') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'README.md') -Value '# Reset fixture'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('reset','--hard','HEAD') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'ordinary-untracked.txt') -Value 'remove me'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('clean','-fd') | Out-Null
+
+        Test-Path -LiteralPath (Join-Path $targetRoot 'ordinary-untracked.txt') | Should Be $false
+        $hashesAfter = @($managedPaths | Sort-Object | ForEach-Object {
+            $path = Join-Path $targetRoot $_.Replace('/','\')
+            "$_=$((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash)"
+        }) -join "`n"
+        $hashesAfter | Should Be $hashesBefore
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) -join '').Trim() | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: Bootstrap runs with no legacy routing configuration present.
+    # Purpose: Still materialize branch-independent files and recovery evidence without staging or committing.
+    It 'InterT75_syncs_branch_independent_files_without_staging_or_committing' {
+        $runtimeConfigurationPath = Join-Path $TestDrive 'missing-config-defaults.json'
         $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
 
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
@@ -542,21 +1396,23 @@ Describe 'bootstrap-ai-instructions' {
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff', '--cached', '--name-only')).Count | Should Be 0
         $personalAgentStashes = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs') | Where-Object { $_ -match 'PersonalAgent$' })
         $personalAgentStashes.Count | Should Be 1
-        ($output -join [Environment]::NewLine) | Should Match 'without commit'
-        ($output -join [Environment]::NewLine) | Should Match 'PersonalAgent stash'
+        ($output -join [Environment]::NewLine) | Should Match 'without Git commit'
+        ($output -join [Environment]::NewLine) | Should Match 'PersonalAgent recovery evidence'
     }
 
-    It 'stashes exact managed files when instruction paths are ignored in a non-allowlisted repository' {
+    # Scenario: Broad project ignore rules cover instructions, Skills, and the managed manifest.
+    # Purpose: Store only exact manifest-owned paths as byte-safe recovery evidence.
+    It 'InterT76_stores_exact_managed_files_as_recovery_evidence' {
         Set-TestText -Path (Join-Path $targetRoot '.gitignore') -Value ".agents/`n.codex/`n.github/`n/AGENTS.md"
         New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex') | Out-Null
         Set-TestText -Path (Join-Path $targetRoot '.codex\personal-settings.json') -Value '{ "personal": true }'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', '.gitignore') | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'ignore personal agent files') | Out-Null
         $commitBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
-        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+        $runtimeConfigurationPath = Join-Path $TestDrive 'missing-config-defaults.json'
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $commitBefore
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff', '--cached', '--name-only')).Count | Should Be 0
@@ -572,9 +1428,9 @@ Describe 'bootstrap-ai-instructions' {
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\personal-settings.json') | Should Be $true
     }
 
-    # Scenario: A non-PersonalAgent stash exists before a non-allowlisted repository is synchronized.
+    # Scenario: A non-PersonalAgent stash exists before branch-independent artifacts are synchronized.
     # Purpose: Ensure refreshing PersonalAgent state never deletes unrelated user stashes.
-    It 'InterT75_preserves an unrelated stash when creating a PersonalAgent stash' {
+    It 'InterT78_preserves_an_unrelated_stash_when_creating_a_PersonalAgent_stash' {
         # Given
         Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
@@ -583,11 +1439,11 @@ Describe 'bootstrap-ai-instructions' {
         Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
         $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
             Select-Object -First 1).Trim()
-        $noCommitConfigurationPath = Join-Path $TestDrive 'missing-config-defaults-to-no-commit.json'
+        $runtimeConfigurationPath = Join-Path $TestDrive 'missing-config-defaults.json'
 
         # When
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         # Then
         $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
@@ -597,22 +1453,297 @@ Describe 'bootstrap-ai-instructions' {
         @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
-    It 'continues refreshing managed files while prior sync changes remain uncommitted' {
+    # Scenario: A user-owned stash happens to use the legacy PersonalAgent subject before synchronization.
+    # Purpose: Claim and delete only fingerprinted runtime evidence, never a user stash with an ambiguous legacy name.
+    It 'InterT79_preserves_a_user_owned_stash_named_PersonalAgent' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'user work with a legacy stash name'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'PersonalAgent', '--', 'notes.txt') | Out-Null
+        $userStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object { $_ -match "^$([regex]::Escape($userStashHash))`t.*PersonalAgent$" }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'CodexPersonalAgent:[0-9a-f]{64}:[0-9a-f]{64}:PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: A user stash copies the runtime evidence subject but its tree contains unrelated bytes.
+    # Purpose: Validate the stash path/blob inventory before reuse or deletion so a forged subject cannot suppress refresh or lose user work.
+    It 'InterT80_preserves_a_spoofed_runtime_subject_and_refreshes_real_evidence' {
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $runtimeLine = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gd%x09%H%x09%gs') |
+            Where-Object { $_ -match 'CodexPersonalAgent:[0-9a-f]{64}:[0-9a-f]{64}:PersonalAgent$' })[0]
+        $runtimeParts = ([string]$runtimeLine).Split(@("`t"),3,[System.StringSplitOptions]::None)
+        $runtimeHash = $runtimeParts[1]
+        $runtimeMessage = [System.Text.RegularExpressions.Regex]::Match(
+            $runtimeParts[2],
+            'CodexPersonalAgent:[0-9a-f]{64}:[0-9a-f]{64}:PersonalAgent$'
+        ).Value
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'user work with a spoofed runtime subject'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash','push','--quiet','-m',$runtimeMessage,'--','notes.txt') | Out-Null
+        $spoofedHash = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','stash@{0}')) -join '').Trim()
+        $runtimeReference = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gd%x09%H') |
+            Where-Object { $_ -match "`t$([regex]::Escape($runtimeHash))$" })[0] -split "`t")[0]
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash','drop',$runtimeReference) | Out-Null
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        $runtimeEvidence = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%H%x09%gs') |
+            Where-Object { $_ -match 'CodexPersonalAgent:[0-9a-f]{64}:[0-9a-f]{64}:PersonalAgent$' })
+        $runtimeEvidence.Count | Should Be 2
+        @($runtimeEvidence | Where-Object { $_ -match "^$([regex]::Escape($spoofedHash))`t" }).Count | Should Be 1
+        $realEvidenceLine = @($runtimeEvidence | Where-Object { $_ -notmatch "^$([regex]::Escape($spoofedHash))`t" })[0]
+        $realEvidenceHash = ($realEvidenceLine -split "`t")[0]
+        $realEvidenceFiles = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','show','--name-only','--include-untracked',$realEvidenceHash))
+        ($realEvidenceFiles -contains 'AGENTS.md') | Should Be $true
+    }
+
+    # Scenario: Another Git process inserts a stash after obsolete PersonalAgent references are enumerated.
+    # Purpose: Re-resolve recovery evidence by immutable hash so index drift cannot delete unrelated user work.
+    It 'InterT88_preserves_unrelated_stashes_when_cleanup_references_shift' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-index-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+        $secondListMarker = Join-Path $wrapperRoot 'second-list.marker'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+if not exist "$firstListMarker" (
+  type nul > "$firstListMarker"
+  goto forward
+)
+if not exist "$secondListMarker" (
+  type nul > "$secondListMarker"
+  goto forward
+)
+if not exist "$insertionMarker" (
+  type nul > "$insertionMarker"
+  "$realGit" %*
+  if errorlevel 1 exit /b 86
+  "$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$unrelatedStashHash"
+  if errorlevel 1 exit /b 87
+  exit /b 0
+)
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object {
+            $_ -match "^$([regex]::Escape($unrelatedStashHash))`t.*ProjectWork$"
+        }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Not Match 'cleanup failed'
+    }
+
+    # Scenario: Another Git process inserts a stash after the new PersonalAgent evidence commit is stored.
+    # Purpose: Identify the new evidence by immutable hash instead of whichever stash later occupies index zero.
+    It 'InterT96_identifies_new_recovery_evidence_by_hash_when_the_latest_stash_shifts' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-apply-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $storeMarker = Join-Path $wrapperRoot 'store.marker'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash store" >nul
+if errorlevel 1 goto maybe_insert
+"$realGit" %*
+if errorlevel 1 exit /b 86
+type nul > "$storeMarker"
+exit /b 0
+:maybe_insert
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+if not exist "$storeMarker" goto forward
+if exist "$insertionMarker" goto forward
+type nul > "$insertionMarker"
+"$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$unrelatedStashHash"
+if errorlevel 1 exit /b 87
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object { $_ -match 'ProjectWork$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+        ($output -join [Environment]::NewLine) | Should Not Match 'evidence.*changed'
+    }
+
+    # Scenario: A stash index changes after cleanup identity verification but before Git executes the drop.
+    # Purpose: Restore any unexpectedly dropped immutable commit and retain old recovery evidence rather than lose user work.
+    It 'InterT97_restores_an_unexpected_stash_dropped_during_last_moment_index_drift' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'committed notes'
+        Set-TestText -Path (Join-Path $targetRoot 'concurrent.txt') -Value 'committed concurrent notes'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', 'notes.txt', 'concurrent.txt') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit', '--quiet', '-m', 'add notes') | Out-Null
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        Set-TestText -Path (Join-Path $targetRoot 'notes.txt') -Value 'personal work in progress'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'push', '--quiet', '-m', 'ProjectWork', '--', 'notes.txt') | Out-Null
+        $unrelatedStashHash = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}') |
+            Select-Object -First 1).Trim()
+        Set-TestText -Path (Join-Path $targetRoot 'concurrent.txt') -Value 'concurrent work in progress'
+        $concurrentStashHash = [string](@(
+            Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'create', 'ConcurrentUser') |
+                ForEach-Object { [string]$_ } |
+                Where-Object { $_ -match '^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$' } |
+                Select-Object -First 1
+        )[0])
+        $concurrentStashHash = $concurrentStashHash.Trim()
+        [string]::IsNullOrWhiteSpace($concurrentStashHash) | Should Be $false
+        Invoke-TestGit -Repository $targetRoot -Arguments @('restore', '--worktree', '--', 'concurrent.txt') | Out-Null
+
+        Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+
+        $wrapperRoot = Join-Path $TestDrive 'stash-last-moment-shift-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $insertionMarker = Join-Path $wrapperRoot 'inserted.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash drop" >nul
+if errorlevel 1 goto forward
+if exist "$insertionMarker" goto forward
+type nul > "$insertionMarker"
+"$realGit" -C "$targetRoot" stash store -m ConcurrentUser "$concurrentStashHash"
+if errorlevel 1 exit /b 87
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Be 0
+        Test-Path -LiteralPath $insertionMarker | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        $stashLines = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%H%x09%gs'))
+        @($stashLines | Where-Object { $_ -match "^$([regex]::Escape($unrelatedStashHash))`t" }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match "^$([regex]::Escape($concurrentStashHash))`t" }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ProjectWork$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'ConcurrentUser$' }).Count | Should Be 1
+        @($stashLines | Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 2
+        ($output -join [Environment]::NewLine) | Should Match 'concurrent stash index drift.*restored'
+    }
+
+    # Scenario: Prior branch-independent materialization exists locally and one managed file is subsequently customized.
+    # Purpose: Refresh other provable files without relying on product commits or overwriting local customization.
+    It 'InterT81_refreshes_provable_files_while_prior_materialization_remains_uncommitted' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $committedHead = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
-        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit.json'
-        New-TestConfiguration -Path $noCommitConfigurationPath
+        $runtimeConfigurationPath = Join-Path $TestDrive 'branch-independent-runtime.json'
+        New-TestConfiguration -Path $runtimeConfigurationPath
 
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         Set-TestText -Path (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Project customized Testing'
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v3'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $committedHead
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v3'
@@ -621,26 +1752,28 @@ Describe 'bootstrap-ai-instructions' {
         $personalAgentStashes.Count | Should Be 1
         $stashPaths = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'show', '--name-only', '--include-untracked', 'stash@{0}'))
         ($stashPaths -contains '.codex/AI-Rules/Testing.en.md') | Should Be $false
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('show', 'stash@{0}:AGENTS.md')) -join "`n" | Should Match '# Codex English Base v3'
-        ($output -join [Environment]::NewLine) | Should Match 'without commit'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Match '# Codex English Base v3'
+        ($output -join [Environment]::NewLine) | Should Match 'without Git commit'
     }
 
-    It 'keeps and reapplies the existing PersonalAgent stash when no source update is needed' {
-        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit.json'
-        New-TestConfiguration -Path $noCommitConfigurationPath
+    # Scenario: Current materialization and its branch-neutral PersonalAgent recovery evidence are already complete.
+    # Purpose: Reuse the same evidence and avoid rotating stash state on a no-op bootstrap.
+    It 'InterT82_reuses_existing_PersonalAgent_evidence_when_no_update_is_needed' {
+        $runtimeConfigurationPath = Join-Path $TestDrive 'branch-independent-runtime.json'
+        New-TestConfiguration -Path $runtimeConfigurationPath
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
         $stashBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')
 
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot `
-            -ConfigurationPath $noCommitConfigurationPath
+            -ConfigurationPath $runtimeConfigurationPath
 
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
         ($output -join [Environment]::NewLine) | Should Match 'up to date'
     }
 
-    # Scenario: Git is configured to rewrite text files to CRLF in a non-allowlisted repository.
+    # Scenario: Git is configured to rewrite text files to CRLF for local runtime artifacts.
     # Purpose: Preserve the exact locked bytes of Agent Skill files across PersonalAgent stash push/apply.
     It 'InterT80_preserves_raw_skill_bytes_with_core_autocrlf_enabled' {
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\raw-byte-skill'
@@ -653,10 +1786,10 @@ description: Verify raw bytes.
 '@
         Set-TestText -Path (Join-Path $sourceSkillPath 'references\data.txt') -Value ("first{0}second" -f [char]10)
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
-        $noCommitConfigurationPath = Join-Path $TestDrive 'no-auto-commit-eol.json'
-        New-TestConfiguration -Path $noCommitConfigurationPath
+        $runtimeConfigurationPath = Join-Path $TestDrive 'branch-independent-runtime-eol.json'
+        New-TestConfiguration -Path $runtimeConfigurationPath
 
-        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $noCommitConfigurationPath
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $runtimeConfigurationPath
 
         $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
         $entry = @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/raw-byte-skill/references/data.txt' })[0]
@@ -664,7 +1797,7 @@ description: Verify raw bytes.
         (Get-FileHash -LiteralPath $targetSkillFile -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$entry.sha256)
         $stashBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')
 
-        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $noCommitConfigurationPath
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $runtimeConfigurationPath
 
         (Get-FileHash -LiteralPath $targetSkillFile -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$entry.sha256)
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
@@ -691,7 +1824,7 @@ description: Verify raw bytes.
             '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
-        $output = & powershell.exe @arguments 2>&1
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
         $exitCode = $LASTEXITCODE
 
         # Then
@@ -702,6 +1835,60 @@ description: Verify raw bytes.
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github\AI-Rules')).Trim() | Should Be '# Existing path blocker'
+    }
+
+    # Scenario: Git cannot enumerate existing PersonalAgent evidence after target files, manifest, and exclusions have been written.
+    # Purpose: Keep stash discovery inside the target transaction so every live mutation is restored when finalization cannot begin.
+    It 'InterT86_rolls_back_target_and_exclusions_when_stash_discovery_fails' {
+        # Given
+        $wrapperRoot = Join-Path $TestDrive 'stash-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $excludePath = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', '--git-path', 'info/exclude')
+        if (-not [System.IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $excludeBytesBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $excludeTextBefore = [System.IO.File]::ReadAllText($excludePath)
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash list" >nul
+if errorlevel 1 goto forward
+echo /concurrent-user-rule>>"$excludePath"
+exit /b 86
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+
+        # When
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
+            '-SourceArchivePath', $sourceArchive,
+            '-ConfigurationPath', $configurationPath,
+            '-ProvenancePath', $script:TestProvenancePath,
+            '-TargetRoot', $targetRoot,
+            '-GitExecutable', $gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stash list'
+        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*shared Git exclude changed concurrently'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Not Be ([Convert]::ToBase64String($excludeBytesBefore))
+        $excludeAfter = [System.IO.File]::ReadAllText($excludePath)
+        $excludeAfter | Should Match '/concurrent-user-rule'
+        $excludeAfter | Should Match '# BEGIN Codex AI Instructions managed paths'
+        $excludeAfter | Should Match ([regex]::Escape(($excludeTextBefore -split "`r?`n")[0]))
     }
 
     # Scenario: A managed file target is already occupied by a project-owned directory.
@@ -723,7 +1910,7 @@ description: Verify raw bytes.
             '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
-        $output = & powershell.exe @arguments 2>&1
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
         $exitCode = $LASTEXITCODE
 
         # Then
@@ -753,7 +1940,7 @@ description: Verify raw bytes.
             '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
-        $output = & powershell.exe @arguments 2>&1
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
         $exitCode = $LASTEXITCODE
 
         # Then
@@ -797,16 +1984,18 @@ description: Verify raw bytes.
 
         # Then
         $exitCode | Should Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'synchronized without commit'
+        ($output -join [Environment]::NewLine) | Should Match 'synchronized as local ignored runtime artifacts without Git commit'
         $invocations = Get-Content -Raw -LiteralPath $gitInvocationLog
         $invocations | Should Match 'rev-parse --show-toplevel'
         $invocations | Should Match 'rev-parse --verify HEAD'
-        $invocations | Should Match 'stash apply'
+        $invocations | Should Match 'commit-tree'
+        $invocations | Should Match 'stash store'
+        $invocations | Should Not Match 'stash push|stash apply'
     }
 
-    # Scenario: An allowlisted repository rejects the generated commit through a pre-commit hook.
-    # Purpose: Restore managed files, manifest, and index when Git finalization fails after target mutation.
-    It 'InterT91_rolls_back_target_and_index_when_auto_commit_fails' {
+    # Scenario: A repository has a failing pre-commit hook and unrelated staged/unstaged work.
+    # Purpose: Prove bootstrap never invokes commit and therefore never depends on repository commit policy.
+    It 'InterT91_never_invokes_commit_or_the_repository_pre_commit_hook' {
         # Given
         $hookPath = Join-Path $targetRoot '.git\hooks\pre-commit'
         Set-TestText -Path $hookPath -Value "#!/bin/sh`nexit 1"
@@ -824,29 +2013,32 @@ description: Verify raw bytes.
             '-ProvenancePath', $script:TestProvenancePath,
             '-TargetRoot', $targetRoot
         )
-        $output = & powershell.exe @arguments 2>&1
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
         $exitCode = $LASTEXITCODE
 
         # Then
-        $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'git commit'
+        $exitCode | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'without Git commit'
+        ($output -join [Environment]::NewLine) | Should Not Match 'git commit failed'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
-        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
-        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
     }
 
-    # Scenario: A non-allowlisted repository cannot reapply the newly created PersonalAgent stash.
-    # Purpose: Restore target and index state while retaining the new stash as recovery evidence.
-    It 'InterT92_rolls_back_target_and_index_when_personal_agent_stash_apply_fails' {
+    # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
+    # Purpose: Restore read-only transaction-created bytes and exclusions without changing the product index.
+    It 'InterT92_rolls_back_target_when_personal_agent_stash_store_fails' {
         # Given
         New-TestConfiguration -Path $configurationPath
         $wrapperRoot = Join-Path $TestDrive 'git-wrapper'
         New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
         $realGit = (Get-Command git.exe).Source
         $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $attributeExecutable = Join-Path $env:SystemRoot 'System32\attrib.exe'
+        $agentPath = Join-Path $targetRoot 'AGENTS.md'
         $powerShellExe = (Get-Command powershell.exe).Source
-        $gitWrapper = "@echo off`necho %* | `"$findString`" /C:`"stash apply`" >nul`nif not errorlevel 1 exit /b 86`n`"$realGit`" %*"
+        $gitWrapper = "@echo off`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 goto forward`n`"$attributeExecutable`" +R `"$agentPath`"`nexit /b 86`n:forward`n`"$realGit`" %*"
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
@@ -866,23 +2058,106 @@ description: Verify raw bytes.
 
         # Then
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'stash apply'
+        ($output -join [Environment]::NewLine) | Should Match 'stash store'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+    }
+
+    # Scenario: Git reports stash store success but an external process replaces the managed manifest afterward.
+    # Purpose: Detect drift, restore unaffected transaction paths, and preserve the external manifest instead of deleting it.
+    It 'InterT93_rolls_back_when_stash_store_changes_only_manifest_bytes' {
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot = Join-Path $TestDrive 'git-manifest-tamper-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-manifest-edit>`"$manifestPath`"`nexit /b 0"
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-TargetRoot',$targetRoot,
+            '-GitExecutable',$gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match '(?s)raw bytes.*ai-instructions\.manifest\.json'
+        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*concurrent target changes'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath $manifestPath -PathType Leaf | Should Be $true
+        (Get-Content -Raw -LiteralPath $manifestPath).Trim() | Should Be 'concurrent-user-manifest-edit'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n") |
+            Should Match '\?\? \.codex/ai-instructions\.manifest\.json'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
             Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
-    # Scenario: A caller has staged an intentional managed-manifest edit before synchronization.
-    # Purpose: Stop before target mutation so the manifest and managed files cannot diverge.
-    It 'InterT93_skips_before_mutation_when_the_managed_manifest_is_staged' {
+    # Scenario: Git reports stash store success but an external process replaces a newly created managed instruction afterward.
+    # Purpose: Preserve the external instruction while rolling back the unaffected manifest and shared exclude mutation.
+    It 'InterT102_preserves_a_concurrent_managed_file_edit_during_finalization_rollback' {
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot = Join-Path $TestDrive 'git-managed-target-tamper-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $agentPath = Join-Path $targetRoot 'AGENTS.md'
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-agent-edit>`"$agentPath`"`nexit /b 0"
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,
+            '-SourceArchivePath',$sourceArchive,
+            '-ConfigurationPath',$configurationPath,
+            '-ProvenancePath',$script:TestProvenancePath,
+            '-TargetRoot',$targetRoot,
+            '-GitExecutable',$gitWrapperPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match '(?s)raw bytes.*AGENTS\.md'
+        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*concurrent target changes'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        Test-Path -LiteralPath $agentPath -PathType Leaf | Should Be $true
+        (Get-Content -Raw -LiteralPath $agentPath).Trim() | Should Be 'concurrent-user-agent-edit'
+        Test-Path -LiteralPath $manifestPath | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--untracked-files=all')) -join "`n") |
+            Should Match '\?\? AGENTS\.md'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+    }
+
+    # Scenario: A caller force-stages the personal managed manifest into the product index.
+    # Purpose: Treat the staged manifest as proven tracked pollution and fail before target mutation.
+    It 'InterT94_fails_closed_when_the_managed_manifest_is_force_staged' {
         # Given
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $manifestPath = Join-Path $targetRoot $script:ManifestPath
         [System.IO.File]::AppendAllText($manifestPath, "`n")
-        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--', $script:ManifestPath) | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--force', '--', $script:ManifestPath) | Out-Null
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
         $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
         $managedContentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
@@ -890,18 +2165,85 @@ description: Verify raw bytes.
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
         # When
-        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         # Then
-        ($output -join [Environment]::NewLine) | Should Match 'sync skipped.*manifest has staged changes'
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $managedContentBefore
     }
 
+    # Scenario: Another worktree holds the repository-wide personal runtime transaction lock.
+    # Purpose: Serialize shared stash and info/exclude mutation before any target bytes are changed.
+    It 'InterT95_fails_closed_when_the_repository_runtime_lock_is_held' {
+        $commonGitDirectory = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-common-dir')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($commonGitDirectory)) { $commonGitDirectory = Join-Path $targetRoot $commonGitDirectory }
+        $runtimeLockPath = Join-Path ([System.IO.Path]::GetFullPath($commonGitDirectory)) 'codex-ai-instructions.lock'
+        $lockStream = [System.IO.File]::Open($runtimeLockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'another AI instruction repository operation is already running'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+    }
+
+    # Scenario: Another Git process already owns the active worktree index lock.
+    # Purpose: Stop before index preflight or target mutation instead of racing a product staging operation.
+    It 'InterT100_fails_closed_when_the_product_index_lock_is_held' {
+        $indexPath = (@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index')) -join '').Trim()
+        if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $indexLockPath = [System.IO.Path]::GetFullPath($indexPath) + '.lock'
+        $indexLockStream = [System.IO.File]::Open($indexLockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $indexLockStream.Dispose()
+            Remove-Item -LiteralPath $indexLockPath -Force
+        }
+
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Git index is being changed by another process'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+    }
+
+    # Scenario: The shared Git info directory is replaced with a junction to a location outside the repository metadata.
+    # Purpose: Reject an unsafe exclude ancestor before fan-out can write through the junction.
+    It 'InterT72_rejects_a_reparse_backed_shared_Git_info_directory' {
+        $gitInfoPath = Join-Path $targetRoot '.git\info'
+        $outsideInfoPath = Join-Path $TestDrive 'outside-bootstrap-git-info'
+        Move-Item -LiteralPath $gitInfoPath -Destination $outsideInfoPath
+        $outsideExcludePath = Join-Path $outsideInfoPath 'exclude'
+        $outsideBytesBefore = [System.IO.File]::ReadAllBytes($outsideExcludePath)
+        New-Item -ItemType Junction -Path $gitInfoPath -Target $outsideInfoPath | Out-Null
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match '(?is)unsafe shared Git exclude mutation path.*non-reparse'
+        [System.IO.File]::ReadAllBytes($outsideExcludePath) | Should Be $outsideBytesBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
+    }
+
     # Scenario: The target is a Git work tree without an initial commit.
     # Purpose: Stop before mutation when Git cannot isolate or roll back a generated commit safely.
-    It 'InterT95_skips_an_unborn_repository_before_target_mutation' {
+    It 'InterT04_skips_an_unborn_repository_before_target_mutation' {
         # Given
         $unbornRoot = Join-Path $TestDrive 'unborn-target'
         New-Item -ItemType Directory -Force -Path $unbornRoot | Out-Null

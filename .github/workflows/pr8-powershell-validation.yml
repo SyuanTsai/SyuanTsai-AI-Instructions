@@ -5,6 +5,7 @@ on:
     branches:
       - syp-79-multi-source-routing
       - syp-86
+      - syp-101
       - main
   pull_request:
     branches:

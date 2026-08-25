@@ -74,7 +74,7 @@ Base Agent 只描述載入條件：
 - bootstrap 必須忽略 instruction archive 中可能存在的 Skill source，並只組合經 Catalog selection、immutable archive hash 與 per-Skill content hash 驗證的 external Skills。
 - Skill source 與目標仍維持 `.agents/skills/<skill-id>/**` 平面路徑；同步支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
 
-bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 可繼續用 Git ignore 規則排除個人 Agent 設定；即使規則同時排除 `AGENTS.md`、`.codex/**`、GitHub Copilot Instructions 或 `.agents/skills/**`，也不代表 manifest 管理的共享檔案是 customized 或 unmanaged。同步、allowlist commit 與非 allowlist `PersonalAgent` stash 必須只對精確的受管理路徑與 manifest 越過 ignore，不得納入同目錄中的個人設定、unmanaged 檔案或其他 ignored 內容，也不得因受管理路徑被 ignore 而停止。
+bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 中的受管 Instructions、Skills 與 manifest 是 branch-independent 的個人本機 runtime artifacts；bootstrap 必須把精確路徑寫入 `.git/info/exclude`、保留 `PersonalAgent` recovery evidence，且不得 stage、commit 或 push。若 manifest 能證明的受管路徑已被 Git tracked，必須 fail closed 並要求使用者明確授權 cleanup；不得把同目錄中的個人設定、unmanaged 或 Repository 自己追蹤的 Agent Skill 誤判為污染。
 
 ## Agent 職責拆分
 

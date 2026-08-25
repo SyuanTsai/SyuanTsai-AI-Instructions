@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - syp-86
+      - syp-101
     paths:
       - 'catalog/skills-catalog.json'
       - 'catalog/skills-catalog.sources.json'
