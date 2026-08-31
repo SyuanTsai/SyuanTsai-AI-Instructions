@@ -2,7 +2,7 @@
 
 這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source。共用 Agent Skills 只由 Catalog 指向的 external repositories 提供，本 Repository 不保存 Skill source 副本。
 
-目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions、`.agents/skills/**` 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。Bootstrap 永遠不會替產品 Repository stage、commit 或 push。
+目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions、`.agents/skills/**` 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。
 
 ## Production 契約
 
@@ -34,8 +34,9 @@ Test-SkillsCatalogContract `
 2. 依更新 policy 檢查 canonical protected `main` 或 latest GitHub release；預設只通知，不自動安裝。
 3. 依 Catalog selection 解析 external Skills，只取得 lock 中的 immutable commits，驗證 archive 與每個 Skill content inventory。
 4. 將 Codex、GitHub Copilot 與選中的 Skills 組成已驗證 archive，再交給 mutation engine。
-5. Mutation engine 依 manifest hash 更新未被自訂的檔案、建立新檔、移除來源已刪除且未被修改的檔案。既有 target／manifest 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 mutation handle，並拒絕 reparse file 與多重 hard-link alias；寫入在同一 deny-write/delete handle 驗證 snapshot original bytes、寫入並保存 applied bytes。新檔建立會從 target root 起逐層持有可阻擋 rename 的 parent handles，建立後再核對 file handle identity，因此 parent-junction swap 不能把 create 導向 root 外。受管檔案移除同樣在 handle-bound root confinement 內驗證 bytes，再由該 handle 設定 delete disposition，關閉後才完成刪除，不留下 verify-to-delete 或 stale-precheck path-swap 窗口。Exact-hash read-only 檔案會在 handle-bound transaction 內暫時清除 attribute；guard handle 保持開啟，且重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復。Rollback 只處理本交易確實變更且 current state 仍等於 applied state 的路徑；父目錄只在能以 volume/file ID 證明由本交易建立時才會刪除。
-6. 在 common Git directory 的 repository operation lock 內，bootstrap 另取得 active worktree 原生 `index.lock`，從 tracked/staged preflight 持有到 target、exclude 與 recovery evidence finalization 完成，使外部 staging 無法在成功交易中途插入。它先驗證 `info/exclude` 的完整 parent chain 都是 common Git metadata 內的 non-reparse directory，再以單一 exclusive read-modify-write handle 將所有 live worktree manifest 的精確受管路徑聯集寫入 managed marker block；manifest/config 固定以 UTF-8 讀取，Git C-quoted path 也以 strict UTF-8 bytes 解碼，因此 Unicode Skill resource 不受 Windows code page 影響。最後以不修改 active working tree/index 的 Git plumbing 建立 branch-neutral `PersonalAgent` recovery stash，並再次驗證 bytes 與 stash tree。
+5. 在 common Git directory 的 repository operation lock 內先辨識 reserved tracked Agent artifacts。若存在，於 Repository 外保存 HEAD、branch、完整 active index、status、diff、檔案 bytes 與 SHA-256 inventory；加入精確 `info/exclude` 規則，以 task-scoped identity 建立只含 reserved path deletions 的 `chore: stop tracking local AI instructions` 本機 commit，再依最新來源替換精確 runtime files。無 remote、缺少永久 Git identity 或 detached HEAD 都可安全完成；detached HEAD 會建立 `codex/ai-instructions-remediation-*` 本機 branch。任何後續同步失敗會以 applied-state CAS 還原 HEAD、index、檔案與 exclude snapshot；若外部程序已變更其中狀態則保留外部內容並回報 backup，且 consumer commit 永不自動 push。
+6. Mutation engine 依 manifest hash 更新未被自訂的檔案、建立新檔、移除來源已刪除且未被修改的檔案。既有 target／manifest 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 mutation handle，並拒絕 reparse file 與多重 hard-link alias；寫入在同一 deny-write/delete handle 驗證 snapshot original bytes、寫入並保存 applied bytes。新檔建立會從 target root 起逐層持有可阻擋 rename 的 parent handles，建立後再核對 file handle identity，因此 parent-junction swap 不能把 create 導向 root 外。受管檔案移除同樣在 handle-bound root confinement 內驗證 bytes，再由該 handle 設定 delete disposition，關閉後才完成刪除，不留下 verify-to-delete 或 stale-precheck path-swap 窗口。Exact-hash read-only 檔案會在 handle-bound transaction 內暫時清除 attribute；guard handle 保持開啟，且重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復。Rollback 只處理本交易確實變更且 current state 仍等於 applied state 的路徑；父目錄只在能以 volume/file ID 證明由本交易建立時才會刪除。
+7. Bootstrap 另取得 active worktree 原生 `index.lock`，從 tracked/staged preflight 持有到 target、exclude 與 recovery evidence finalization 完成，使外部 staging 無法在成功交易中途插入。它先驗證 `info/exclude` 的完整 parent chain 都是 common Git metadata 內的 non-reparse directory，再以單一 exclusive read-modify-write handle 將所有 live worktree manifest 的精確受管路徑聯集寫入 managed marker block；manifest/config 固定以 UTF-8 讀取，Git C-quoted path 也以 strict UTF-8 bytes 解碼，因此 Unicode Skill resource 不受 Windows code page 影響。最後以不修改 active working tree/index 的 Git plumbing 建立 branch-neutral `PersonalAgent` recovery stash，並再次驗證 bytes 與 stash tree。
 
 來源與目標 mapping：
 
@@ -45,7 +46,18 @@ Test-SkillsCatalogContract `
 - `.github/AI-Rules/*.en.md` → `.github/AI-Rules/*.en.md`
 - external `.agents/skills/<skill-id>/**` → `.agents/skills/<skill-id>/**`
 
-既有 project-owned 或 customized 檔案不覆寫。若 manifest 缺失，但本機未追蹤檔案的 bytes 精確等於 immutable source，bootstrap 可安全重建 manifest；Git tracked 的同名檔案不會因此被接管。
+未被 Git 追蹤、且沒有 manifest ownership 的 project-owned 或 customized 檔案不覆寫。若 manifest 缺失，但本機未追蹤檔案的 bytes 精確等於 immutable source，bootstrap 可安全重建 manifest。Reserved Agent path 一旦已 tracked，則依上一節流程先完整備份並遷移，不再要求逐 Repository 人工清理。
+
+## 官方 Felo replacement
+
+自建 `search-with-felo` 只保留 lifecycle `removed` 的 stable-ID tombstone，不屬於任何 profile，也不出現在 production lock。官方 system Skills 維持在 Repository 外，不複製到本 Repository 或 Skill-General：
+
+- `~/.agents/skills/felo-search/SKILL.md`
+- `~/.agents/skills/felo-slides/SKILL.md`
+- `~/.agents/skills/felo-x-search/SKILL.md`
+- `~/.agents/skills/felo-landingpage/SKILL.md`
+
+官方 CLI 維持 npm `felo-ai`。`felo-landingpage` 的允許來源為 `https://github.com/Felo-Inc/felo-skills.git`，本次核准 pin 為 `b42c3c0183cef64275ddda7ed7c5518ef54f2b05`。Runtime 不建立 wrapper、自建 fallback 或新的 FELO API key。
 
 ## Branch、worktree 與自癒
 
@@ -55,6 +67,7 @@ Linked worktree 有自己的 working directory，因此第一次使用時仍需�
 
 Bootstrap 會自動修復：
 
+- 已 tracked 的 reserved Agent artifacts（repo 外 backup、隔離本機 untracking commit、最新 runtime 重建）；
 - manifest 管理但遺失的檔案；
 - 遺失的 manifest（僅安全接管未追蹤且 bytes 精確匹配的檔案）；
 - 遺失或過期的 `.git/info/exclude` managed marker；
@@ -63,9 +76,9 @@ Bootstrap 會自動修復：
 
 `git clean -fdx` 會刻意刪除 ignored personal artifacts；下一次合法 bootstrap 會依 immutable source 重新建立完整檔案、manifest、exclude marker 與 recovery evidence，且不改變產品 Repository 的 HEAD 或 index。
 
-若既有 manifest-owned path 有 staged 變更，bootstrap 會在 target、stash 或 index mutation 前停止；若其他 Git 行程已持有 index lock 或在 bootstrap finalization 期間嘗試 staging，也會 fail closed。已 staged deletion 的 managed file 會保留 exact index deletion 與 ignored working-tree bytes，不會為了重建 recovery evidence 執行 `git reset`。請先完成或還原該 staged 操作，再重新執行 bootstrap。
+若 reserved Agent path 已 staged，bootstrap 會把它納入相同的精確 remediation；既有 staged deletion 會成為隔離 commit 的 deletion，index-only addition 則移出 index 而不建立空 commit。所有無關 staged、unstaged 與 untracked product work完整保留。若其他 Git 行程已持有 index lock 或在 bootstrap finalization 期間嘗試 staging，仍會 fail closed。
 
-若受管檔案有使用者修改，會保留其內容與歷史 manifest entry，並在輸出列出；不會 force overwrite。
+未被追蹤的受管檔案若有使用者修改，會保留其內容與歷史 manifest entry，並在輸出列出；不會 force overwrite。已 tracked 且位於 reserved scope 的 customized／unmanaged artifact 則先完整備份，再依最新中央來源遷移。
 
 ## 新電腦安裝
 
@@ -93,6 +106,16 @@ Installer 的 git-checkout 模式只接受 canonical origin 與完整 `HEAD` com
 - `~/.codex/hooks/ai-instructions-runtime/**`
 - `~/.codex/ai-instructions-sync.json`
 - 個人 `AGENTS.md` 的 `Repository Instructions Bootstrap` 區塊
+
+安裝完成後可由 immutable runtime 執行本機全 Repository rollout：
+
+```powershell
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+& (Join-Path $codexHome 'hooks\ai-instructions-runtime\invoke-ai-instructions-rollout.ps1') `
+  -ReportPath (Join-Path ([System.IO.Path]::GetTempPath()) 'ai-instructions-rollout-report.json')
+```
+
+預設只掃描 ready 的本機 fixed drives，跳過系統目錄、AppData、package caches、Codex／Agent system roots、temp／test fixtures、`node_modules`、`bin`、`obj`、reparse points 與兩個 authority repositories。Repository 以 Git common directory、worktree root 與 branch identity 去重；單一 Repository 失敗不會中止後續處理。每次 bootstrap 後會驗證 custom FELO、舊 route／manifest、tracked reserved path、非 Agent Git drift 與 official Felo inventory，並輸出可供 Jira 記錄的 JSON 統計；rollout 不執行任何 push。
 
 舊 bootstrap `SessionStart` hook 只有在 command 指向目前 Codex Home 的 installed bootstrap path 時才會從 entry 內精確移除；不同路徑下即使檔名相同也視為個人 hook 保留，同一 entry 的其他 hooks 與個人規則也不變。Installer 在 active transaction 全程持有 Codex Home、`hooks` 與本次 staging／backup roots 的 non-reparse directory handles；stable file 透過 handle-bound create/write/delete 更新，且任何多重 hard-link alias 都在 mutation 前 fail closed。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`；失敗後的 transaction runtime 會先移入 recovery backup，只有 exact bundle/inventory 仍等於已驗證 candidate 時才刪除，否則保留並回報 drift。
 
@@ -197,31 +220,13 @@ Recovery 只會將個人 config 的 bundle pin 對齊目前完整驗證的 activ
 
 網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
 
-## Tracked pollution 與 cleanup
+## Tracked Agent artifact 自癒
 
-Personal artifacts 必須保持 untracked。若 manifest 能證明的受管路徑已進入 Git index，bootstrap 會在任何 target/index mutation 前停止，列出污染路徑，且不會自動修復 index。Windows 或 `core.ignorecase=true` Repository 會把大小寫不同但等價的 index path 一併視為 pollution；cleanup 使用 index 的實際 spelling 精確 stage 刪除。
+Personal artifacts 必須保持 untracked。Bootstrap 以 `git rev-parse --show-toplevel`、Git common directory、worktree 與 branch identity 序列化每個 Repository；Windows 或 `core.ignorecase=true` 會使用 Git index 的實際 spelling 處理大小寫變體。允許的範圍只包含 root `AGENTS*.md`、`.agents/**`、明確 Codex/GitHub Agent runtime paths，以及舊 manifest 安全列出的 Agent／Skill targets。Manifest 若把 tracked production file 指到 scope 外，會在任何 mutation 前 fail closed。
 
-先檢查內容與 manifest，再明確授權 cleanup：
+自癒先把精確目標 bytes、HEAD／branch、active index、porcelain-v2 status、staged／unstaged diff 與 SHA-256 inventory 保存到系統 temp 下的 `codex-agent-artifact-backups`，再更新獨立的 remediated exclude block。取得 Git 原生 `index.lock` 後會先比對 backup index SHA-256；備份後插入的外部 staging 會原樣保留並讓本次 remediation 停止。Commit tree 從原 HEAD 的 private index 建立，只允許 `D` 狀態的 reserved paths；active index 則獨立移除相同 paths，因此無關 staged changes 不會進入 commit。刪除檔案前也會重驗 backup hash。Retired `search-with-felo` 只移除已知舊 implementation 檔名，包含僅存在於 working tree 的舊 implementation；未知鄰近檔案不會被推論式刪除。成功後立即執行正常同步；重跑在沒有 tracked reserved artifact 或已知 retired artifact 時不建立 commit。
 
-```powershell
-$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-  $env:CODEX_HOME
-} else {
-  Join-Path $HOME '.codex'
-}
-& (Join-Path $codexHome 'hooks\cleanup-ai-instructions-pollution.ps1') `
-  -RepositoryRoot (git rev-parse --show-toplevel) `
-  -Authorize
-```
-
-Cleanup 僅處理通過完整 manifest v2 parser（或精確 legacy v1 migration parser）、目前仍 tracked、未 staged、且 index／本機 bytes 都等於 manifest hash 的檔案與 manifest 本身。呼叫環境若設定 `GIT_INDEX_FILE`，cleanup 會在 preflight 前 fail closed，避免把 alternate index 誤認為 active worktree index。Mutation 會取得 Git 原生 `index.lock`，在鎖內重查 expected entries，從 current index 的 private copy 產生精確刪除結果，再以 lock file replace active index；最後時點的外部 staged blob 會使 CAS 失敗並完整保留。Mutation 前也會保存 exact index mode/blob/path；`.git/info/exclude` 則在單一 exclusive handle 內擷取原始與 applied bytes、合成並寫入。Rollback 同樣持有原生 `index.lock`，只在鎖內還原仍由本 transaction 移除的 entry；exclude 也只在 current bytes 仍等於 applied bytes 時還原。偵測到外部 index 或 exclude drift 時會保留外部內容、回報 rollback 未完整完成並要求人工處理。Unicode index paths 由 Git C-quoted bytes 以 strict UTF-8 解碼，且 shared exclude 的 common-directory parent chain 必須全為 non-reparse directory。Cleanup 會保留 working-tree files，但不 commit 或 push。若有 staged conflict、customized bytes、schema-invalid manifest、unsafe path/reparse point，或 origin／Repository 外形表明目標是本 canonical source Repository，整次操作會停止並 rollback index/exclude。
-
-Cleanup 後由使用者自行檢查並決定產品 Repository 的 commit：
-
-```powershell
-git status --short
-git diff --cached --name-status
-```
+`cleanup-ai-instructions-pollution.ps1` 保留作為舊版 runtime 的明確授權診斷工具，但不是新版 bootstrap 的前置步驟。Consumer remediation commit 只留在本機，任何 runtime 都不得自動 push。
 
 ## Rollback 與復原
 
@@ -261,7 +266,8 @@ CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lo
 - `scripts/ai-instructions-runtime-contract.psm1`：config v4、bundle v2 與 exact inventory 契約。
 - `scripts/ai-instructions-updater.psm1`、`scripts/update-ai-instructions.ps1`：更新 workflow 與 installed command。
 - `scripts/bootstrap-ai-instructions-multisource.ps1`：Catalog selection、immutable acquisition 與 composition。
-- `scripts/bootstrap-ai-instructions.ps1`：manifest protection、self-healing、local ignore、recovery stash 與 rollback。
-- `scripts/cleanup-ai-instructions-pollution.ps1`：明確授權的 tracked pollution cleanup。
+- `scripts/bootstrap-ai-instructions.ps1`、`scripts/agent-artifact-remediation.psm1`：manifest protection、tracked reserved artifact 自癒、local ignore、recovery evidence 與 rollback。
+- `scripts/ai-instructions-rollout.psm1`、`scripts/invoke-ai-instructions-rollout.ps1`：fixed-drive Repository discovery、逐 Repo bootstrap、post-scan 與結構化 rollout report。
+- `scripts/cleanup-ai-instructions-pollution.ps1`：舊 runtime 使用的明確授權 tracked pollution 診斷／cleanup。
 - `catalog/`：schemas、examples、Catalog、source pins 與 Lock。
 - `tests/`：PowerShell 5.1／7 Pester suites。

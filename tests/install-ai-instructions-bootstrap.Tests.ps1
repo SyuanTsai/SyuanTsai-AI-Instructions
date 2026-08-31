@@ -144,7 +144,8 @@ Describe 'install-ai-instructions-bootstrap' {
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
             'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
+            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-updater.psm1','update-ai-instructions.ps1',
             'cleanup-ai-instructions-pollution.ps1',
             'runtime-bundle.json','catalog\skills-catalog.json','catalog\skills-catalog-lock.json'
         )) {
@@ -166,6 +167,9 @@ Describe 'install-ai-instructions-bootstrap' {
         [string]$bundle.archiveSha256 | Should Match '^[0-9a-f]{64}$'
         [string]$bundle.inventorySha256 | Should Match '^[0-9a-f]{64}$'
         @($bundle.inventory).Count | Should BeGreaterThan 10
+        @($bundle.inventory | Where-Object { [string]$_.path -ceq 'agent-artifact-remediation.psm1' }).Count | Should Be 1
+        @($bundle.inventory | Where-Object { [string]$_.path -ceq 'ai-instructions-rollout.psm1' }).Count | Should Be 1
+        @($bundle.inventory | Where-Object { [string]$_.path -ceq 'invoke-ai-instructions-rollout.ps1' }).Count | Should Be 1
         @($configuration.catalog.profiles) | Should Be @('core')
         @($configuration.catalog.includeSkills).Count | Should Be 0
         @($configuration.catalog.excludeSkills).Count | Should Be 0
@@ -180,13 +184,17 @@ Describe 'install-ai-instructions-bootstrap' {
         $agents | Should Match 'Repository Instructions Bootstrap'
         $agents | Should Match 'production code'
         $agents | Should Match '問問題'
+        $agents | Should Match 'reserved Agent artifact'
+        $agents | Should Match 'remediation commit'
+        $agents | Should Match '不得自動 push'
+        $agents | Should Not Match 'fail closed.*污染路徑'
         $agents | Should Not Match 'SessionStart'
         $agents | Should Match 'excludedRepositoryUrls'
         $agents | Should Match 'excludedRepositoryPaths'
         $agents | Should Match 'Agent Skills'
         $agents | Should Match 'customized or unmanaged Instructions or Agent Skills'
         $agents | Should Match '所有 branch 共用的個人 runtime artifacts'
-        $agents | Should Match '不得自動 stage、commit 或 push'
+        $agents | Should Match '只包含精確 reserved path deletions 的一次性本機 remediation commit'
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
 
@@ -452,7 +460,8 @@ Keep this section too.
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1',
             'safe-zip.psm1','skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','ai-instructions-updater.psm1','update-ai-instructions.ps1',
+            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-updater.psm1','update-ai-instructions.ps1',
             'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
@@ -487,6 +496,10 @@ Keep this section too.
         if ($LASTEXITCODE -ne 0) { throw 'Failed to create invalid staging source clone.' }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\installer-safe-mutation.psm1') `
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
+        foreach ($fileName in @('agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1')) {
+            Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
+                -Destination (Join-Path $invalidSource "scripts\$fileName") -Force
+        }
         [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")
 
         $result = Invoke-InstallExpectFailure -RepositoryRoot $invalidSource -CodexHome $codexHome
@@ -644,14 +657,24 @@ Start-Sleep -Seconds 15
             -ArchiveSha256 ([string]$bundle.archiveSha256)
         Set-TestJson -Path $bundlePath -Document $updatedBundle
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$hookPath,'-SkipUpdateCheck')
-        $fanOutProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + $hookPath + '"'),'-SkipUpdateCheck')
+        $fanOutOutput = Join-Path $TestDrive 'fan-out-running.stdout.txt'
+        $fanOutError = Join-Path $TestDrive 'fan-out-running.stderr.txt'
+        $fanOutProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $fanOutOutput -RedirectStandardError $fanOutError
         try {
             $deadline = (Get-Date).AddSeconds(10)
             while (-not (Test-Path -LiteralPath $markerPath) -and (Get-Date) -lt $deadline -and -not $fanOutProcess.HasExited) {
                 Start-Sleep -Milliseconds 100
             }
-            Test-Path -LiteralPath $markerPath | Should Be $true
+            if (-not (Test-Path -LiteralPath $markerPath)) {
+                $diagnostic = @(
+                    "exit=$(if ($fanOutProcess.HasExited) { $fanOutProcess.ExitCode } else { '<still running>' })",
+                    $(if (Test-Path -LiteralPath $fanOutOutput) { Get-Content -Raw -LiteralPath $fanOutOutput } else { '<no stdout>' }),
+                    $(if (Test-Path -LiteralPath $fanOutError) { Get-Content -Raw -LiteralPath $fanOutError } else { '<no stderr>' })
+                ) -join [Environment]::NewLine
+                throw "Verified fan-out did not start: $diagnostic"
+            }
 
             $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
@@ -704,14 +727,24 @@ else {
         Set-TestJson -Path $bundlePath -Document $updatedBundle
 
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$hookPath)
-        $launcherProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + $hookPath + '"'))
+        $launcherOutput = Join-Path $TestDrive 'launcher-updater-running.stdout.txt'
+        $launcherError = Join-Path $TestDrive 'launcher-updater-running.stderr.txt'
+        $launcherProcess = Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $launcherOutput -RedirectStandardError $launcherError
         try {
             $deadline = (Get-Date).AddSeconds(10)
             while (-not (Test-Path -LiteralPath $markerPath) -and (Get-Date) -lt $deadline -and -not $launcherProcess.HasExited) {
                 Start-Sleep -Milliseconds 100
             }
-            Test-Path -LiteralPath $markerPath | Should Be $true
+            if (-not (Test-Path -LiteralPath $markerPath)) {
+                $diagnostic = @(
+                    "exit=$(if ($launcherProcess.HasExited) { $launcherProcess.ExitCode } else { '<still running>' })",
+                    $(if (Test-Path -LiteralPath $launcherOutput) { Get-Content -Raw -LiteralPath $launcherOutput } else { '<no stdout>' }),
+                    $(if (Test-Path -LiteralPath $launcherError) { Get-Content -Raw -LiteralPath $launcherError } else { '<no stderr>' })
+                ) -join [Environment]::NewLine
+                throw "Verified launcher update check did not start: $diagnostic"
+            }
             (Get-Content -Raw -LiteralPath $markerPath) | Should Be 'stable'
 
             $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome

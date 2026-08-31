@@ -31,9 +31,9 @@
 - 提供交給 GitHub Copilot 的實作提示詞 → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
 - 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `.agents/skills/work-with-jira/SKILL.md`
 - 查詢或聚合 Datadog LOG、分析 APM trace、處理 Logs Explorer／trace／investigation widget URL，或以 Datadog telemetry 調查 incident → `.agents/skills/investigate-datadog-logs/SKILL.md`
-- 透過 FELO 搜尋符合外部研究規則的公開資料 → `.agents/skills/search-with-felo/SKILL.md`
+- 使用官方 Felo 搜尋、簡報、X 搜尋或 landing page 工作流程 → `~/.agents/skills/felo-search/SKILL.md`、`~/.agents/skills/felo-slides/SKILL.md`、`~/.agents/skills/felo-x-search/SKILL.md`、`~/.agents/skills/felo-landingpage/SKILL.md`
 
-上述非 `core` Skill 可能未依目前 profile 或 capability 安裝。若適用 Skill 不存在，不得將缺檔本身視為任務失敗：GitHub Copilot 提示詞改依目前 Repository 證據與 Instructions 直接整理；Jira／Datadog 只在已有核准 connector 或 API capability 時直接使用該能力；FELO 改依 `ExternalResearch` 規則使用已核准 connector 或平台網路搜尋。沒有安全可用 fallback 時，明確指出能力未安裝或未設定，不得臆測 Skill 流程。
+上述非 `core` Skill 可能未依目前 profile 或 capability 安裝。若適用 Skill 不存在，不得將缺檔本身視為任務失敗：GitHub Copilot 提示詞改依目前 Repository 證據與 Instructions 直接整理；Jira／Datadog 只在已有核准 connector 或 API capability 時直接使用該能力；官方 Felo Skill 不存在時，依 `ExternalResearch` 規則使用已核准 connector 或平台網路搜尋。沒有安全可用 fallback 時，明確指出能力未安裝或未設定，不得臆測 Skill 流程。
 
 Jira 憑證不得輸出、記錄或寫入檔案；建立、修改、轉移或刪除 Jira 資料只在使用者明確要求時執行。
 
