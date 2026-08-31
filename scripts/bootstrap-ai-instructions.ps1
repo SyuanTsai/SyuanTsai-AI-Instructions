@@ -25,6 +25,7 @@ $excludeEndMarker = '# END Codex AI Instructions managed paths'
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -2392,11 +2393,7 @@ if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
     return
 }
 
-$sourceCodexBaseInTarget = Join-Path $targetRootPath '.codex\AGENTS.en.md'
-$sourceCopilotBaseInTarget = Join-Path $targetRootPath '.github\copilot-instructions.en.md'
-if ((Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) -or
-    ((Test-Path -LiteralPath $sourceCodexBaseInTarget -PathType Leaf) -and
-     (Test-Path -LiteralPath $sourceCopilotBaseInTarget -PathType Leaf))) {
+if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
     Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
     return
 }
@@ -2477,8 +2474,24 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
 
 $repositoryOperationLock = $null
 $repositoryIndexLock = $null
+$remediationTransaction = $null
 try {
     $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+    $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
+    if ($null -ne $remediationTransaction) {
+        if (@($remediationTransaction.Paths).Count -gt 0) {
+            Write-Output "Backed up and migrated tracked Agent artifacts: $($remediationTransaction.Paths -join ', '). Backup: $($remediationTransaction.Backup.Root)"
+            if ([string]::IsNullOrWhiteSpace([string]$remediationTransaction.NewCommit)) {
+                Write-Output 'Tracked Agent artifact index-only remediation required no commit.'
+            }
+            else {
+                Write-Output "Agent artifact remediation commit created: $($remediationTransaction.NewCommit)"
+            }
+        }
+        else {
+            Write-Output "Backed up and removed retired custom FELO artifacts: $($remediationTransaction.MutationPaths -join ', '). Backup: $($remediationTransaction.Backup.Root)"
+        }
+    }
 
 $families = @(
     @{
@@ -2638,7 +2651,7 @@ $trackedPollutionPaths = @(@(
     }
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0) {
-    throw "Repository pollution detected: manifest-proven managed personal AI instruction paths are Git tracked: $($trackedPollutionPaths -join ', '). Bootstrap did not modify the index. Review and run cleanup-ai-instructions-pollution.ps1 with explicit authorization."
+    throw "Tracked reserved Agent artifacts remain after controlled remediation: $($trackedPollutionPaths -join ', ')."
 }
 
 $stagedManagedPaths = @(
@@ -3045,6 +3058,16 @@ try {
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
     else { Write-Output "AI instructions synchronized as local ignored runtime artifacts without Git commit: $($changedPaths -join ', ')" }
 }
+catch {
+    $syncError = $_
+    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
+        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
+        catch {
+            throw "AI instruction sync failed after Agent artifact remediation: $($syncError.Exception.Message) $($_.Exception.Message)"
+        }
+    }
+    throw $syncError
+}
 finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)
     $expectedPrefix = $tempRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
@@ -3059,6 +3082,16 @@ finally {
         Remove-Item -LiteralPath $resolvedWorkingPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+}
+catch {
+    $bootstrapError = $_
+    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
+        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
+        catch {
+            throw "AI instruction bootstrap failed after Agent artifact remediation: $($bootstrapError.Exception.Message) $($_.Exception.Message)"
+        }
+    }
+    throw $bootstrapError
 }
 finally {
     if ($null -ne $repositoryIndexLock) {

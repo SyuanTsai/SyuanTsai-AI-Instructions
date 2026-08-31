@@ -93,7 +93,7 @@ Executable contract 與 JSON Schemas 採相同的 strict object／scalar boundar
 Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 
 - 保留合法的 `excludedRepositoryUrls`、`excludedRepositoryPaths`；v3／v4 另保留 `profiles`、`includeSkills`、`excludeSkills`。
-- 所有舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 都會移除；runtime 不會 stage、commit 或 push 目標 Repository。
+- 所有舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 都會移除；正常同步不會 stage 或 commit 目標 Repository。唯一例外是 tracked reserved Agent artifact 的一次性隔離 remediation commit，且 runtime 永遠不會 push consumer Repository。
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須介於 1 與 2147483647，確保所有 schema-valid v4 設定都能由 installer idempotent 遷移並交給 updater。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
@@ -102,4 +102,4 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - `rate-limit` 與 `concurrent` 是不落盤的 workflow 結果；前者在最小檢查間隔尚未經過時保留上一份有效 receipt，後者讓 manual command／launcher fail closed，避免與 runtime swap 交錯，因此 receipt schema 只列出實際 persisted outcomes。
 - Stable installer 先以內建 canonical identity／archive hash／git HEAD verifier 驗證 candidate source，通過後才 import candidate contract；接著在 install lock 內重驗 expected current commit 與 updater 決策時的 mode/channel/ref，並於 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、cleanup、runtime 與 config。任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
 
-Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除，既有 manifest v1 只有通過精確 legacy parser 且所有受管檔案未變更、未 staged 時才能安全升級；相同 parser 也供明確授權的 legacy pollution cleanup 使用。
+Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除。Tracked reserved artifact 會先由隔離 remediation 備份並解除追蹤，再進入正常 v1／v2 migration；相同 strict legacy parser 也供舊 runtime 的明確授權 pollution cleanup 使用。

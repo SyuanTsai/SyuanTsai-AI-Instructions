@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "dc8cbe3e0775e8deac4a561aa89ae44d68709a405549f1b95236fa47cd6debf9",
+  "catalogSha256": "c9f870199a3eeca74f3db6aaa9a4b4f7619003c76a886b0bad79dab43c4face4",
   "sources": [
     {
       "id": "agent-skills",
@@ -61,12 +61,6 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/review-bitbucket-pull-request",
       "contentSha256": "8888888888888888888888888888888888888888888888888888888888888888"
-    },
-    {
-      "id": "search-with-felo",
-      "sourceId": "agent-skills",
-      "sourcePath": ".agents/skills/search-with-felo",
-      "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
     },
     {
       "id": "verify-data-access-performance",

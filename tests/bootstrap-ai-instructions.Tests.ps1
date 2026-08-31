@@ -363,9 +363,9 @@ Describe 'bootstrap-ai-instructions' {
             Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
-    # Scenario: A product Repository already tracks its own Skill at a path also present in the selected shared source.
-    # Purpose: Preserve repository-owned content and report the ownership conflict while syncing unrelated artifacts.
-    It 'InterT20_preserves_an_existing_unmanaged_Skill_while_syncing_other_instructions' {
+    # Scenario: A product Repository tracks a customized Skill at a path also present in the selected shared source.
+    # Purpose: Back up and untrack the reserved artifact before replacing it with the immutable shared Skill.
+    It 'InterT20_backs_up_and_migrates_a_tracked_customized_Skill' {
         # Given
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\existing-skill'
         New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
@@ -383,14 +383,16 @@ Describe 'bootstrap-ai-instructions' {
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         # Then
-        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Project skill'
-        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\shared.md') | Should Be $false
-        ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged.*\.agents/skills/existing-skill/SKILL.md'
+        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Shared skill'
+        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\shared.md') | Should Be $true
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.agents/skills/existing-skill/SKILL.md')).Count | Should Be 0
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*\.agents/skills/existing-skill/SKILL\.md'
     }
 
-    # Scenario: A Repository-owned AGENTS.md is tracked but currently has an intentional unstaged deletion.
-    # Purpose: Preserve the deletion and never recreate an ownership-unknown tracked path from personal runtime content.
-    It 'InterT21_preserves_a_missing_but_tracked_unmanaged_path' {
+    # Scenario: A tracked AGENTS.md is missing from the worktree when bootstrap starts.
+    # Purpose: Commit its isolated untracking and restore the latest ignored runtime content.
+    It 'InterT21_migrates_a_missing_tracked_AGENTS_path_and_restores_runtime_content' {
         Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Product-owned Agent'
         Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','add product Agent') | Out-Null
@@ -398,11 +400,12 @@ Describe 'bootstrap-ai-instructions' {
 
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
-        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain','--','AGENTS.md')) -join "`n") | Should Match '^ D AGENTS\.md$'
-        ($output -join [Environment]::NewLine) | Should Match 'customized or unmanaged.*AGENTS\.md'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')).Count | Should Be 0
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*AGENTS\.md'
         $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
-        @($manifest.files | Where-Object { $_.targetPath -eq 'AGENTS.md' }).Count | Should Be 0
+        @($manifest.files | Where-Object { $_.targetPath -eq 'AGENTS.md' }).Count | Should Be 1
     }
 
     # Scenario: A target folder name resembles a formerly allowlisted local path.
@@ -456,9 +459,9 @@ Describe 'bootstrap-ai-instructions' {
         ($output -join [Environment]::NewLine) | Should Match 'directory is excluded'
     }
 
-    # Scenario: A Repository tracks its own Codex family while the GitHub Copilot family is absent.
-    # Purpose: Preserve repository-owned instructions without preventing safe materialization of an independent family.
-    It 'InterT45_preserves_an_existing_Codex_family_and_creates_the_missing_GitHub_family' {
+    # Scenario: A Repository tracks AGENTS.md and a non-reserved Codex rule while the GitHub Copilot family is absent.
+    # Purpose: Migrate only the reserved base, preserve the out-of-scope rule, and synchronize safe missing artifacts.
+    It 'InterT45_migrates_the_reserved_Codex_base_without_touching_an_out_of_scope_rule' {
         Set-Content -LiteralPath (Join-Path $targetRoot 'AGENTS.md') -Value '# Existing Agent'
         New-Item -ItemType Directory -Force -Path (Join-Path $targetRoot '.codex\AI-Rules') | Out-Null
         Set-Content -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') -Value '# Existing Testing'
@@ -469,12 +472,14 @@ Describe 'bootstrap-ai-instructions' {
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Existing Agent'
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
         (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Existing Testing'
-        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\CodeReview.en.md') | Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot '.github\copilot-instructions.md') | Should Be $true
 
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'Chore: add shared AI instructions'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')) -join '') | Should BeNullOrEmpty
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.codex/AI-Rules/Testing.en.md')) -join '') | Should Be '.codex/AI-Rules/Testing.en.md'
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
@@ -499,9 +504,9 @@ Describe 'bootstrap-ai-instructions' {
         ($committedFiles -contains 'README.md') | Should Be $false
     }
 
-    # Scenario: A previously tracked managed file has an intentional staged deletion while its ignored working-tree materialization remains.
-    # Purpose: Stop before recovery-evidence refresh so bootstrap never resets the staged deletion or re-adds the managed path to the index.
-    It 'InterT54_preserves_a_managed_staged_deletion_when_recovery_evidence_is_missing' {
+    # Scenario: A previously tracked managed file already has an intentional staged index deletion.
+    # Purpose: Isolate that deletion in the remediation commit and continue runtime recovery without touching other index entries.
+    It 'InterT54_commits_an_existing_managed_staged_deletion_and_continues_sync' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $managedPath = Join-Path $targetRoot 'AGENTS.md'
         $managedBytesBefore = [System.IO.File]::ReadAllBytes($managedPath)
@@ -513,13 +518,14 @@ Describe 'bootstrap-ai-instructions' {
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-status','--','AGENTS.md')) -join "`n") |
-            Should Match '^D\s+AGENTS\.md$'
+            Should BeNullOrEmpty
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')).Count | Should Be 0
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($managedPath)) |
             Should Be ([Convert]::ToBase64String($managedBytesBefore))
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
-            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'managed path has staged changes'
+            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*AGENTS\.md'
     }
 
     # Scenario: Another Git process attempts to stage managed-path bytes after bootstrap preflight during recovery evidence creation.
@@ -781,29 +787,28 @@ exit /b 0
     }
 
     # Scenario: Manifest-owned personal runtime artifacts have been committed into product history.
-    # Purpose: Stop without index mutation and direct the user to explicit pollution cleanup.
-    It 'InterT72_fails_closed_when_manifest_proven_artifacts_are_Git_tracked' {
+    # Purpose: Back up, untrack, commit only reserved deletions, and immediately synchronize the latest ignored runtime.
+    It 'InterT72_self_heals_manifest_proven_tracked_artifacts' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md','.codex/AI-Rules/Testing.en.md','.github/copilot-instructions.md','.github/AI-Rules/Testing.en.md','.codex/ai-instructions.manifest.json') | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','polluted fixture') | Out-Null
-        $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
-        $contentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
-        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected.*manifest-proven'
-        ($output -join [Environment]::NewLine) | Should Match 'cleanup-ai-instructions-pollution\.ps1'
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
-        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $contentBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md','.codex/AI-Rules/Testing.en.md','.github/copilot-instructions.md','.github/AI-Rules/Testing.en.md',$script:ManifestPath)).Count | Should Be 0
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        $commitChanges = @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree','--no-commit-id','--name-status','-r','HEAD'))
+        @($commitChanges | Where-Object { $_ -notmatch '^D\s+(AGENTS\.md|\.codex/AI-Rules/Testing\.en\.md|\.github/copilot-instructions\.md|\.github/AI-Rules/Testing\.en\.md|\.codex/ai-instructions\.manifest\.json)$' }).Count | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated'
+        ($output -join [Environment]::NewLine) | Should Match 'remediation commit created'
     }
 
-    # Scenario: Git tracks a case variant of a manifest-proven managed path on an ignore-case repository.
-    # Purpose: Prevent Windows path aliases from bypassing tracked pollution detection and managed ownership checks.
-    It 'InterT73_fails_closed_for_a_case_variant_tracked_managed_path' {
+    # Scenario: Git tracks a case variant of a reserved managed path on an ignore-case repository.
+    # Purpose: Migrate the exact index spelling while restoring the canonical latest runtime path.
+    It 'InterT73_self_heals_a_case_variant_tracked_managed_path' {
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         Invoke-TestGit -Repository $targetRoot -Arguments @('config','core.ignorecase','true') | Out-Null
         $agentPath = Join-Path $targetRoot 'AGENTS.md'
@@ -814,12 +819,232 @@ exit /b 0
         Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','agents.md') | Out-Null
         Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','case-variant pollution fixture') | Out-Null
 
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','agents.md')) -join '') | Should BeNullOrEmpty
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree','--no-commit-id','--name-status','-r','HEAD')) -join "`n") | Should Match '^D\s+agents\.md$'
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*agents\.md'
+    }
+
+    # Scenario: A legacy manifest, Copilot Instructions, and the retired custom FELO Skill are tracked together.
+    # Purpose: Migrate the supported runtime, delete the retired implementation, and replace schema-v1 ownership evidence.
+    It 'InterT110_migrates_tracked_Copilot_legacy_manifest_and_retired_custom_FELO' {
+        # Given
+        $copilotPath = Join-Path $targetRoot '.github\copilot-instructions.md'
+        $legacyManifestPath = Join-Path $targetRoot $script:ManifestPath
+        $retiredSkillPath = Join-Path $targetRoot '.agents\skills\search-with-felo'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $copilotPath),(Split-Path -Parent $legacyManifestPath),$retiredSkillPath | Out-Null
+        Set-TestText -Path $copilotPath -Value '# Legacy Copilot Instructions'
+        Set-TestText -Path (Join-Path $retiredSkillPath 'SKILL.md') -Value '# Retired custom FELO'
+        New-Item -ItemType Directory -Force -Path (Join-Path $retiredSkillPath 'scripts') | Out-Null
+        Set-TestText -Path (Join-Path $retiredSkillPath 'scripts\search-with-felo.ps1') -Value 'throw "retired"'
+        $legacyManifest = [ordered]@{
+            schemaVersion = 1
+            sourceRepository = 'https://example.com/legacy-ai-instructions.git'
+            sourceRef = 'legacy-pin'
+            files = @([ordered]@{
+                sourcePath = '.github/copilot-instructions.en.md'
+                targetPath = '.github/copilot-instructions.md'
+                sha256 = ('a' * 64)
+            })
+        }
+        $legacyJson = ($legacyManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n") + "`n"
+        [System.IO.File]::WriteAllText($legacyManifestPath,$legacyJson,(New-Object System.Text.UTF8Encoding($false)))
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','.github/copilot-instructions.md','.agents/skills/search-with-felo/SKILL.md','.agents/skills/search-with-felo/scripts/search-with-felo.ps1',$script:ManifestPath) | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','legacy Agent runtime') | Out-Null
+
+        # When
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        (Get-Content -Raw -LiteralPath $copilotPath).Trim() | Should Be '# Copilot English Base'
+        Test-Path -LiteralPath $retiredSkillPath | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.github/copilot-instructions.md','.agents/skills/search-with-felo',$script:ManifestPath)).Count | Should Be 0
+        (Get-Content -Raw -Encoding UTF8 -LiteralPath $legacyManifestPath | ConvertFrom-Json).schemaVersion | Should Be 2
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated'
+    }
+
+    # Scenario: A customized tracked Agent coexists with unrelated staged, unstaged, and untracked product work in a Repository with no remote or identity.
+    # Purpose: Preserve every unrelated byte and index entry while using task-scoped commit identity and retaining a recoverable external backup.
+    It 'InterT111_preserves_unrelated_work_and_uses_scoped_identity_without_a_remote' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Tracked Agent v1'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked Agent') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Customized tracked Agent v2'
+        Set-TestText -Path (Join-Path $targetRoot 'staged.txt') -Value 'unrelated staged'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','staged.txt') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'README.md') -Value '# Unrelated unstaged'
+        Set-TestText -Path (Join-Path $targetRoot 'untracked.txt') -Value 'unrelated untracked'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('remote','remove','origin') | Out-Null
+        & git -C $targetRoot config --unset-all user.name 2>$null
+        & git -C $targetRoot config --unset-all user.email 2>$null
+
+        # When
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')) -join "`n") | Should Be 'staged.txt'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--name-only')) -join "`n") | Should Match 'README\.md'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'untracked.txt')).Trim() | Should Be 'unrelated untracked'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%an <%ae>')) | Should Be 'Codex AI Instructions <codex-ai-instructions@example.invalid>'
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('diff-tree','--no-commit-id','--name-status','-r','HEAD')) -join "`n") | Should Be "D`tAGENTS.md"
+        $outputText = $output -join [Environment]::NewLine
+        $outputText | Should Match 'Backup:\s*(?<Backup>[^\r\n]+)'
+        $null = $outputText -match 'Backup:\s*(?<Backup>[^\r\n]+)'
+        $backupPath = $Matches['Backup'].Trim()
+        Test-Path -LiteralPath $backupPath -PathType Container | Should Be $true
+        (Get-Content -Raw -LiteralPath (Join-Path $backupPath 'files\AGENTS.md')).Trim() | Should Be '# Customized tracked Agent v2'
+        Test-Path -LiteralPath (Join-Path $backupPath 'metadata.json') -PathType Leaf | Should Be $true
+        Test-Path -LiteralPath (Join-Path $backupPath 'index') -PathType Leaf | Should Be $true
+        Test-Path -LiteralPath (Join-Path $backupPath 'sha256-inventory.json') -PathType Leaf | Should Be $true
+    }
+
+    # Scenario: Bootstrap starts from detached HEAD with a tracked reserved Agent artifact.
+    # Purpose: Anchor remediation on a dedicated local branch without changing any remote state.
+    It 'InterT112_anchors_detached_HEAD_remediation_on_a_safe_local_branch' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Detached tracked Agent'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','detached fixture') | Out-Null
+        $fixtureHead = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+        Invoke-TestGit -Repository $targetRoot -Arguments @('checkout','--quiet','--detach',$fixtureHead) | Out-Null
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+
+        # Then
+        $branch = (Invoke-TestGit -Repository $targetRoot -Arguments @('symbolic-ref','--short','HEAD') | Select-Object -First 1).Trim()
+        $branch | Should Match '^codex/ai-instructions-remediation-'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD^')) | Should Be $fixtureHead
+    }
+
+    # Scenario: Normal source validation fails after tracked-artifact remediation begins.
+    # Purpose: Restore HEAD, branch, index, worktree bytes, and shared exclude bytes from the pre-remediation snapshot.
+    It 'InterT113_rolls_back_the_complete_remediation_when_follow_on_sync_fails' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Rollback Agent'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','rollback fixture') | Out-Null
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Rollback customized Agent'
+        $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain=v2','--untracked-files=all')) -join "`n"
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+        $missingArchive = Join-Path $TestDrive 'missing-source.zip'
+
+        # When
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$missingArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'Source archive does not exist'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain=v2','--untracked-files=all')) -join "`n") | Should Be $statusBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','AGENTS.md')) -join '') | Should Be 'AGENTS.md'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Rollback customized Agent'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+    }
+
+    # Scenario: A completed remediation is followed by a second bootstrap and an official FELO sentinel exists outside the Repository.
+    # Purpose: Keep repeated startup idempotent and prove Repository-scoped retirement never touches official/system Skills.
+    It 'InterT114_is_idempotent_and_preserves_official_FELO_outside_the_Repository' {
+        # Given
+        $retiredPath = Join-Path $targetRoot '.agents\skills\search-with-felo'
+        New-Item -ItemType Directory -Force -Path $retiredPath | Out-Null
+        Set-TestText -Path (Join-Path $retiredPath 'SKILL.md') -Value '# Retired custom FELO'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','.agents/skills/search-with-felo/SKILL.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','retired FELO fixture') | Out-Null
+        $officialPath = Join-Path $TestDrive 'official-system-skills\felo-search\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $officialPath) | Out-Null
+        Set-TestText -Path $officialPath -Value '# Official FELO sentinel'
+
+        # When
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $headAfterFirst = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+        $secondOutput = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+        # Then
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headAfterFirst
+        Test-Path -LiteralPath $retiredPath | Should Be $false
+        (Get-Content -Raw -LiteralPath $officialPath).Trim() | Should Be '# Official FELO sentinel'
+        ($secondOutput -join [Environment]::NewLine) | Should Match 'up to date'
+        ($secondOutput -join [Environment]::NewLine) | Should Not Match 'remediation commit created'
+    }
+
+    # Scenario: Two linked worktrees on different branches both inherit a tracked AGENTS.md from their branch history.
+    # Purpose: Remediate each branch independently under the shared operation lock without moving or rewriting the other worktree.
+    It 'InterT115_remediates_different_worktree_branches_without_cross_branch_damage' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'AGENTS.md') -Value '# Shared tracked Agent fixture'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--','AGENTS.md') | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','multi-worktree fixture') | Out-Null
+        $otherWorktree = Join-Path $TestDrive 'other-remediation-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','remediation-other',$otherWorktree,'HEAD') | Out-Null
+        $otherHeadBefore = (Invoke-TestGit -Repository $otherWorktree -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+        try {
+            # When
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+            $firstWorktreeHead = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            # Then
+            (Invoke-TestGit -Repository $otherWorktree -Arguments @('rev-parse','HEAD')) | Should Be $otherHeadBefore
+            (@(Invoke-TestGit -Repository $otherWorktree -Arguments @('ls-files','--','AGENTS.md')) -join '') | Should Be 'AGENTS.md'
+
+            # When
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $otherWorktree | Out-Null
+
+            # Then
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $firstWorktreeHead
+            (@(Invoke-TestGit -Repository $otherWorktree -Arguments @('ls-files','--','AGENTS.md')) -join '') | Should BeNullOrEmpty
+            (Invoke-TestGit -Repository $otherWorktree -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
+            (Get-Content -Raw -LiteralPath (Join-Path $otherWorktree 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove',$otherWorktree) | Out-Null
+        }
+    }
+
+    # Scenario: A tracked legacy manifest claims a tracked production file outside every reserved Agent artifact path.
+    # Purpose: Fail closed before backup, index, HEAD, exclude, or runtime mutation instead of expanding remediation scope.
+    It 'InterT116_rejects_a_tracked_manifest_target_outside_reserved_Agent_paths' {
+        # Given
+        Set-TestText -Path (Join-Path $targetRoot 'production.txt') -Value 'production bytes'
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | Out-Null
+        $unsafeManifest = [ordered]@{
+            schemaVersion=1
+            sourceRepository='https://example.com/legacy-ai-instructions.git'
+            sourceRef='legacy-pin'
+            files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
+        }
+        [System.IO.File]::WriteAllText($manifestPath,(($unsafeManifest | ConvertTo-Json -Depth 10) + "`n"),(New-Object System.Text.UTF8Encoding($false)))
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','unsafe manifest fixture') | Out-Null
+        $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain=v2','--untracked-files=all')) -join "`n"
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
+
+        # When
         $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode = $LASTEXITCODE
 
-        $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected.*AGENTS\.md'
-        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','agents.md')) -join '') | Should Be 'agents.md'
+        # Then
+        $exitCode | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'outside the reserved Agent artifact scope.*production\.txt'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain=v2','--untracked-files=all')) -join "`n") | Should Be $statusBefore
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'production.txt')).Trim() | Should Be 'production bytes'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
     }
 
     # Scenario: A schema-v2 manifest labels the Codex base as a Skill without a matching flat Skill path.
@@ -2150,30 +2375,29 @@ exit /b %errorlevel%
             Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 1
     }
 
-    # Scenario: A caller force-stages the personal managed manifest into the product index.
-    # Purpose: Treat the staged manifest as proven tracked pollution and fail before target mutation.
-    It 'InterT94_fails_closed_when_the_managed_manifest_is_force_staged' {
+    # Scenario: A caller force-stages the personal managed manifest as an index-only addition.
+    # Purpose: Remove the reserved index entry without creating an empty commit, then rebuild a valid ignored manifest.
+    It 'InterT94_self_heals_an_index_only_force_staged_manifest' {
         # Given
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $manifestPath = Join-Path $targetRoot $script:ManifestPath
         [System.IO.File]::AppendAllText($manifestPath, "`n")
         Invoke-TestGit -Repository $targetRoot -Arguments @('add', '--force', '--', $script:ManifestPath) | Out-Null
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
-        $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
-        $managedContentBefore = Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')
         Set-TestText -Path (Join-Path $sourceRoot '.codex\AGENTS.en.md') -Value '# Codex English Base v2'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
         # When
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
-        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         # Then
-        $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'Repository pollution detected'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
-        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
-        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $managedContentBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--',$script:ManifestPath)) -join '') | Should BeNullOrEmpty
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should BeNullOrEmpty
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base v2'
+        (Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).schemaVersion | Should Be 2
+        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*ai-instructions\.manifest\.json'
+        ($output -join [Environment]::NewLine) | Should Match 'index-only remediation required no commit'
     }
 
     # Scenario: Another worktree holds the repository-wide personal runtime transaction lock.

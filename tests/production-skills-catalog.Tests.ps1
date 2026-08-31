@@ -42,16 +42,16 @@ Describe 'production Skills Catalog' {
         }
     }
 
-    # Scenario: All active migrated Skills are resolved from the tracked production catalog.
-    # Purpose: Detect missing, duplicated, or incorrectly routed production Skill assignments.
-    It 'InterT15_maps_all_twelve_migrated_Skills_to_external_sources' {
-        @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' }).Count | Should Be 12
+    # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
+    # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
+    It 'InterT15_maps_eleven_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+        $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
+        $activeSkills.Count | Should Be 11
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
             'verify-data-access-performance' = 'general'
             'investigate-datadog-logs' = 'general'
-            'search-with-felo' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
@@ -62,13 +62,46 @@ Describe 'production Skills Catalog' {
             'work-with-jira' = 'atlassian-ecosystem'
         }
 
-        foreach ($skill in @($script:catalog.skills)) {
+        foreach ($skill in $activeSkills) {
             $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should Be $true
             [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
             [string]$skill.source.path | Should Be ".agents/skills/$($skill.id)"
         }
 
+        $removedFelo = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'search-with-felo' })
+        $removedFelo.Count | Should Be 1
+        [string]$removedFelo[0].lifecycle.status | Should Be 'removed'
+        @($removedFelo[0].lifecycle.aliases).Count | Should Be 0
+        @($removedFelo[0].lifecycle.PSObject.Properties.Name | Where-Object { $_ -eq 'replacementId' }).Count | Should Be 0
+        @($removedFelo[0].profiles).Count | Should Be 0
+
+        $externalResearch = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'external-research' })
+        $externalResearch.Count | Should Be 1
+        @($externalResearch[0].includes | Where-Object { $_ -eq 'search-with-felo' }).Count | Should Be 0
+
         @($script:catalog.skills | Where-Object { [string]$_.id -match 'darktide' }).Count | Should Be 0
+    }
+
+    # Scenario: Both Codex and Copilot runtime Instructions publish the official FELO replacement routes.
+    # Purpose: Keep system-level official Skills canonical and prevent any route back to the retired repository-local wrapper.
+    It 'InterT16_routes_FELO_workflows_only_to_the_four_official_canonical_Skills' {
+        $instructionPaths = @(
+            '.codex/AGENTS.md',
+            '.codex/AGENTS.en.md',
+            '.github/copilot-instructions.md',
+            '.github/copilot-instructions.en.md'
+        )
+        $officialPaths = @(
+            '~/.agents/skills/felo-search/SKILL.md',
+            '~/.agents/skills/felo-slides/SKILL.md',
+            '~/.agents/skills/felo-x-search/SKILL.md',
+            '~/.agents/skills/felo-landingpage/SKILL.md'
+        )
+        foreach ($instructionPath in $instructionPaths) {
+            $content = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repositoryRoot $instructionPath)
+            $content | Should Not Match '\.agents/skills/search-with-felo/SKILL\.md'
+            foreach ($officialPath in $officialPaths) { $content | Should Match ([regex]::Escape($officialPath)) }
+        }
     }
 
     # Scenario: Bitbucket PR review can repair missing or invalid API access without forcing setup when a connector is available.
@@ -133,5 +166,6 @@ Describe 'production Skills Catalog' {
         foreach ($skill in @($script:lock.skills)) {
             [string]$skill.contentSha256 | Should Match '^[0-9a-f]{64}$'
         }
+        @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should Be 0
     }
 }
