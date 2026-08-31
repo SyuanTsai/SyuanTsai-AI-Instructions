@@ -44,8 +44,8 @@ Describe 'production Skills Catalog' {
 
     # Scenario: All active migrated Skills are resolved from the tracked production catalog.
     # Purpose: Detect missing, duplicated, or incorrectly routed production Skill assignments.
-    It 'InterT15_maps_all_ten_migrated_Skills_to_external_sources' {
-        @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' }).Count | Should Be 10
+    It 'InterT15_maps_all_twelve_migrated_Skills_to_external_sources' {
+        @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' }).Count | Should Be 12
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
@@ -54,6 +54,8 @@ Describe 'production Skills Catalog' {
             'search-with-felo' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
+            'configure-bitbucket-api-access' = 'atlassian-ecosystem'
+            'configure-confluence-api-access' = 'atlassian-ecosystem'
             'configure-jira-api-access' = 'atlassian-ecosystem'
             'publish-requirements-to-confluence' = 'atlassian-ecosystem'
             'review-bitbucket-pull-request' = 'atlassian-ecosystem'
@@ -67,6 +69,30 @@ Describe 'production Skills Catalog' {
         }
 
         @($script:catalog.skills | Where-Object { [string]$_.id -match 'darktide' }).Count | Should Be 0
+    }
+
+    # Scenario: Bitbucket PR review can repair missing or invalid API access without forcing setup when a connector is available.
+    # Purpose: Keep API setup conditional and preserve the connector fallback boundary.
+    It 'InterT17_routes_Bitbucket_API_failures_to_the_setup_Skill_conditionally' {
+        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'review-bitbucket-pull-request' })[0]
+        @($skill.dependencies).Count | Should Be 1
+        [string]$skill.dependencies[0].skillId | Should Be 'configure-bitbucket-api-access'
+        [string]$skill.dependencies[0].type | Should Be 'conditional'
+        [string]$skill.dependencies[0].condition.capability | Should Be 'bitbucket-cloud-api'
+        [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
+        [string]$skill.dependencies[0].fallback.capability | Should Be 'bitbucket-cloud-connector'
+    }
+
+    # Scenario: Confluence publishing can repair missing or invalid scoped API access without forcing setup when a connector is available.
+    # Purpose: Keep API setup conditional and preserve the connector fallback boundary.
+    It 'InterT18_routes_Confluence_API_failures_to_the_setup_Skill_conditionally' {
+        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'publish-requirements-to-confluence' })[0]
+        @($skill.dependencies).Count | Should Be 1
+        [string]$skill.dependencies[0].skillId | Should Be 'configure-confluence-api-access'
+        [string]$skill.dependencies[0].type | Should Be 'conditional'
+        [string]$skill.dependencies[0].condition.capability | Should Be 'confluence-cloud-api'
+        [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
+        [string]$skill.dependencies[0].fallback.capability | Should Be 'confluence-cloud-connector'
     }
 
     # Scenario: The production catalog contains the profiles used by a new installation.
