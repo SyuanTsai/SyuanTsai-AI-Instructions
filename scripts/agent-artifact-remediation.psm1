@@ -612,7 +612,7 @@ function Restore-RemediationFiles {
 }
 
 function Restore-RemediationExclude {
-    param([Parameter(Mandatory = $true)][object] $Snapshot)
+    param([Parameter(Mandatory = $true)][AllowNull()][object] $Snapshot)
 
     if ($null -eq $Snapshot) { return }
     [byte[]]$current = if (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) { [System.IO.File]::ReadAllBytes($Snapshot.Path) } else { [byte[]]@() }

@@ -4,7 +4,17 @@ $script:RemediationModule = Join-Path $script:RepositoryRoot 'scripts\agent-arti
 Describe 'Agent artifact remediation transaction' {
     BeforeAll {
         $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-        Import-Module (Join-Path $repositoryRoot 'scripts\agent-artifact-remediation.psm1') -Force
+        $script:RemediationModule = Join-Path $repositoryRoot 'scripts\agent-artifact-remediation.psm1'
+        Import-Module $script:RemediationModule -Force
+
+        function script:Assert-TestCondition {
+            param(
+                [Parameter(Mandatory = $true)][bool] $Condition,
+                [Parameter(Mandatory = $true)][string] $Message
+            )
+
+            if (-not $Condition) { throw "Assertion failed: $Message" }
+        }
     }
 
     # Given: Remediation removed a tracked Agent file, then an external editor recreates it and an external Git process stages product work.
@@ -31,15 +41,15 @@ Describe 'Agent artifact remediation transaction' {
             try { Restore-AgentArtifactRemediation -Transaction $transaction }
             catch { $failure = $_.Exception.Message }
 
-            $failure | Should -Match 'rollback failed'
-            $failure | Should -Match 'index changed after remediation'
-            $failure | Should -Match 'Agent artifact path changed after remediation'
-            (Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim() | Should -Be 'external Agent bytes'
+            Assert-TestCondition -Condition ($failure -match 'rollback failed') -Message 'The rollback failure was not reported.'
+            Assert-TestCondition -Condition ($failure -match 'index changed after remediation') -Message 'Concurrent index drift was not reported.'
+            Assert-TestCondition -Condition ($failure -match 'Agent artifact path changed after remediation') -Message 'Concurrent Agent file drift was not reported.'
+            Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim() -eq 'external Agent bytes') -Message 'External Agent bytes were not preserved.'
             $stagedPaths = @(& git -C $repository diff --cached --name-only)
-            $stagedPaths | Should -Contain 'product.txt'
-            $stagedPaths | Should -Contain 'AGENTS.md'
-            [bool]$transaction.RollbackAttempted | Should -Be $true
-            [bool]$transaction.RolledBack | Should -Be $false
+            Assert-TestCondition -Condition (@($stagedPaths | Where-Object { $_ -eq 'product.txt' }).Count -eq 1) -Message 'The concurrently staged product file was not preserved.'
+            Assert-TestCondition -Condition (@($stagedPaths | Where-Object { $_ -eq 'AGENTS.md' }).Count -eq 1) -Message 'The staged Agent file was not preserved after rollback drift.'
+            Assert-TestCondition -Condition ([bool]$transaction.RollbackAttempted) -Message 'The transaction did not record the rollback attempt.'
+            Assert-TestCondition -Condition (-not [bool]$transaction.RolledBack) -Message 'A drifted rollback was incorrectly marked as successful.'
         }
         finally {
             if (Test-Path -LiteralPath $transaction.Backup.Root) { Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force }
@@ -68,14 +78,14 @@ Describe 'Agent artifact remediation transaction' {
 
         $transaction = Invoke-AgentArtifactRemediation -Repository $repository
         try {
-            $transaction | Should -Not -BeNullOrEmpty
-            @($transaction.Paths).Count | Should -Be 0
-            [string]$transaction.NewCommit | Should -BeNullOrEmpty
-            (@(& git -C $repository rev-parse HEAD) -join '').Trim() | Should -Be $headBefore
-            Test-Path -LiteralPath (Join-Path $repository '.agents\skills\search-with-felo') | Should -BeFalse
-            (Get-Content -Raw -LiteralPath (Join-Path $transaction.Backup.Root 'files\.agents\skills\search-with-felo\SKILL.md')).Trim() |
-                Should -Be 'customized retired FELO'
-            (Get-Content -Raw -LiteralPath $officialPath).Trim() | Should -Be 'official FELO'
+            Assert-TestCondition -Condition ($null -ne $transaction) -Message 'The remediation transaction was not returned.'
+            Assert-TestCondition -Condition (@($transaction.Paths).Count -eq 0) -Message 'Untracked FELO cleanup was incorrectly treated as tracked remediation.'
+            Assert-TestCondition -Condition ([string]::IsNullOrEmpty([string]$transaction.NewCommit)) -Message 'Untracked-only cleanup created a commit.'
+            Assert-TestCondition -Condition (((@(& git -C $repository rev-parse HEAD) -join '').Trim()) -eq $headBefore) -Message 'Untracked-only cleanup changed HEAD.'
+            Assert-TestCondition -Condition (-not (Test-Path -LiteralPath (Join-Path $repository '.agents\skills\search-with-felo'))) -Message 'The retired customized FELO directory remains active.'
+            $retiredBackup = (Get-Content -Raw -LiteralPath (Join-Path $transaction.Backup.Root 'files\.agents\skills\search-with-felo\SKILL.md')).Trim()
+            Assert-TestCondition -Condition ($retiredBackup -eq 'customized retired FELO') -Message 'The retired customized FELO file was not backed up exactly.'
+            Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath $officialPath).Trim() -eq 'official FELO') -Message 'The official FELO file was changed.'
         }
         finally {
             if ($null -ne $transaction -and (Test-Path -LiteralPath $transaction.Backup.Root)) {
@@ -88,8 +98,8 @@ Describe 'Agent artifact remediation transaction' {
     # When: The reserved-path classifier validates it.
     # Then: It rejects the absolute path instead of silently converting it to a Repository-relative path.
     It 'InterT30_rejects_rooted_paths_before_reserved_path_classification' {
-        Test-IsReservedAgentArtifactPath -Path '/.agents/skills/example/SKILL.md' | Should -BeFalse
-        Test-IsReservedAgentArtifactPath -Path '\.codex\AGENTS.md' | Should -BeFalse
+        Assert-TestCondition -Condition (-not (Test-IsReservedAgentArtifactPath -Path '/.agents/skills/example/SKILL.md')) -Message 'A rooted slash path was accepted.'
+        Assert-TestCondition -Condition (-not (Test-IsReservedAgentArtifactPath -Path '\.codex\AGENTS.md')) -Message 'A rooted backslash path was accepted.'
     }
 
     # Given: Another Git process stages product work after remediation creates its backup but before it mutates the index.
@@ -107,23 +117,27 @@ Describe 'Agent artifact remediation transaction' {
         & git -C $repository commit --quiet -m 'fixture'
         $headBefore = (@(& git -C $repository rev-parse HEAD) -join '').Trim()
 
-        $failure = InModuleScope agent-artifact-remediation -Parameters @{ RepositoryPath = $repository } {
-            param($RepositoryPath)
+        $global:RemediationTestRepositoryPath = $repository
+        try {
             Mock Set-RemediationGitInfoExclude {
-                [System.IO.File]::WriteAllText((Join-Path $RepositoryPath 'product.txt'),"product v2`n",(New-Object System.Text.UTF8Encoding($false)))
-                & git -C $RepositoryPath add -- product.txt
+                [System.IO.File]::WriteAllText((Join-Path $global:RemediationTestRepositoryPath 'product.txt'),"product v2`n",(New-Object System.Text.UTF8Encoding($false)))
+                & git -C $global:RemediationTestRepositoryPath add -- product.txt
                 return $null
-            }
-            try { Invoke-AgentArtifactRemediation -Repository $RepositoryPath }
-            catch { return $_.Exception.Message }
-            return $null
+            } -ModuleName agent-artifact-remediation
+            try { $failure = Invoke-AgentArtifactRemediation -Repository $repository }
+            catch { $failure = $_.Exception.Message }
+        }
+        finally {
+            Remove-Variable -Name RemediationTestRepositoryPath -Scope Global -ErrorAction SilentlyContinue
+            Import-Module $script:RemediationModule -Force
         }
 
-        $failure | Should -Match 'Git index changed after the remediation backup'
-        Test-Path -LiteralPath (Join-Path $repository 'AGENTS.md') | Should -BeTrue
-        (Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim() | Should -Be 'tracked Agent'
-        @(& git -C $repository diff --cached --name-only) | Should -Contain 'product.txt'
-        (@(& git -C $repository rev-parse HEAD) -join '').Trim() | Should -Be $headBefore
+        Assert-TestCondition -Condition ($failure -match 'Git index changed after the remediation backup') -Message 'The compare-and-swap index guard did not stop remediation.'
+        Assert-TestCondition -Condition ($failure -notmatch 'rollback failed|Cannot bind argument') -Message 'A pre-mutation failure caused a secondary rollback error.'
+        Assert-TestCondition -Condition (Test-Path -LiteralPath (Join-Path $repository 'AGENTS.md')) -Message 'The Agent file was changed before the index guard stopped remediation.'
+        Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim() -eq 'tracked Agent') -Message 'The tracked Agent file bytes changed.'
+        Assert-TestCondition -Condition (@(& git -C $repository diff --cached --name-only | Where-Object { $_ -eq 'product.txt' }).Count -eq 1) -Message 'Concurrent product index work was not preserved.'
+        Assert-TestCondition -Condition (((@(& git -C $repository rev-parse HEAD) -join '').Trim()) -eq $headBefore) -Message 'The remediation guard unexpectedly changed HEAD.'
     }
 
     # Given: A tracked legacy manifest explicitly owns a Traditional Chinese Codex rule runtime file.
@@ -143,8 +157,8 @@ Describe 'Agent artifact remediation transaction' {
 
         $transaction = Invoke-AgentArtifactRemediation -Repository $repository
         try {
-            @(& git -C $repository diff-tree --no-commit-id --name-only -r HEAD) | Should -Contain '.codex/AI-Rules/Testing.md'
-            @(& git -C $repository ls-files -- '.codex/AI-Rules/Testing.md' '.codex/ai-instructions.manifest.json').Count | Should -Be 0
+            Assert-TestCondition -Condition (@(& git -C $repository diff-tree --no-commit-id --name-only -r HEAD | Where-Object { $_ -eq '.codex/AI-Rules/Testing.md' }).Count -eq 1) -Message 'The localized Codex rule was not included in the remediation commit.'
+            Assert-TestCondition -Condition (@(& git -C $repository ls-files -- '.codex/AI-Rules/Testing.md' '.codex/ai-instructions.manifest.json').Count -eq 0) -Message 'Managed localized runtime artifacts remain tracked.'
         }
         finally {
             if ($null -ne $transaction -and (Test-Path -LiteralPath $transaction.Backup.Root)) {
@@ -167,11 +181,11 @@ Describe 'Agent artifact remediation transaction' {
         $transaction = Invoke-AgentArtifactRemediation -Repository $repository
         try {
             $null = & git -C $repository rev-parse --verify HEAD 2>$null
-            $LASTEXITCODE | Should -Not -Be 0
-            @(& git -C $repository diff --cached --name-only) | Should -Contain 'product.txt'
-            @(& git -C $repository diff --cached --name-only) | Should -Not -Contain 'AGENTS.md'
-            Test-Path -LiteralPath (Join-Path $repository 'AGENTS.md') | Should -BeFalse
-            [string]$transaction.NewCommit | Should -BeNullOrEmpty
+            Assert-TestCondition -Condition ($LASTEXITCODE -ne 0) -Message 'Remediation invented a commit on the unborn branch.'
+            Assert-TestCondition -Condition (@(& git -C $repository diff --cached --name-only | Where-Object { $_ -eq 'product.txt' }).Count -eq 1) -Message 'Unborn-branch product index work was not preserved.'
+            Assert-TestCondition -Condition (@(& git -C $repository diff --cached --name-only | Where-Object { $_ -eq 'AGENTS.md' }).Count -eq 0) -Message 'The reserved Agent artifact remains staged.'
+            Assert-TestCondition -Condition (-not (Test-Path -LiteralPath (Join-Path $repository 'AGENTS.md'))) -Message 'The index-only Agent artifact remains in the worktree.'
+            Assert-TestCondition -Condition ([string]::IsNullOrEmpty([string]$transaction.NewCommit)) -Message 'Index-only remediation created a commit without a parent.'
         }
         finally {
             if ($null -ne $transaction -and (Test-Path -LiteralPath $transaction.Backup.Root)) {
