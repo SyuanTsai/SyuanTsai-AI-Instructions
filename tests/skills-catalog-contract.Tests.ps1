@@ -73,7 +73,7 @@ Describe 'Skills Catalog contract' {
             -ManifestPath $script:ManifestExample `
             -ConfigurationPath $script:ConfigurationExample
 
-        $result.SkillCount | Should Be 10
+        $result.SkillCount | Should Be 12
         $result.ProfileCount | Should Be 6
         $result.SourceCount | Should Be 1
         $result.ManifestFileCount | Should Be 2

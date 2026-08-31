@@ -35,6 +35,7 @@
       "description": "Code delegation and pull-request collaboration workflows.",
       "default": false,
       "includes": [
+        "configure-bitbucket-api-access",
         "review-bitbucket-pull-request",
         "write-copilot-implementation-prompt"
       ],
@@ -45,6 +46,7 @@
       "description": "Jira and Confluence work-management workflows.",
       "default": false,
       "includes": [
+        "configure-confluence-api-access",
         "configure-jira-api-access",
         "publish-requirements-to-confluence",
         "work-with-jira"
@@ -153,6 +155,30 @@
       }
     },
     {
+      "id": "configure-bitbucket-api-access",
+      "group": "code-collaboration",
+      "source": {
+        "sourceId": "atlassian-ecosystem",
+        "path": ".agents/skills/configure-bitbucket-api-access"
+      },
+      "profiles": [
+        "code-collaboration"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
       "id": "review-bitbucket-pull-request",
       "group": "code-collaboration",
       "source": {
@@ -189,7 +215,20 @@
           ]
         ]
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "skillId": "configure-bitbucket-api-access",
+          "type": "conditional",
+          "condition": {
+            "capability": "bitbucket-cloud-api",
+            "operator": "missing-or-invalid"
+          },
+          "fallback": {
+            "capability": "bitbucket-cloud-connector",
+            "description": "Use an approved configured Bitbucket connector when API-token setup is not required."
+          }
+        }
+      ],
       "lifecycle": {
         "status": "active",
         "aliases": []
@@ -257,6 +296,30 @@
       }
     },
     {
+      "id": "configure-confluence-api-access",
+      "group": "atlassian-work-management",
+      "source": {
+        "sourceId": "atlassian-ecosystem",
+        "path": ".agents/skills/configure-confluence-api-access"
+      },
+      "profiles": [
+        "atlassian"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
       "id": "publish-requirements-to-confluence",
       "group": "atlassian-work-management",
       "source": {
@@ -287,7 +350,20 @@
           ]
         ]
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "skillId": "configure-confluence-api-access",
+          "type": "conditional",
+          "condition": {
+            "capability": "confluence-cloud-api",
+            "operator": "missing-or-invalid"
+          },
+          "fallback": {
+            "capability": "confluence-cloud-connector",
+            "description": "Use an approved configured Confluence connector when API-token setup is not required."
+          }
+        }
+      ],
       "lifecycle": {
         "status": "active",
         "aliases": []

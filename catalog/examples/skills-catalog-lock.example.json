@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "89e8253597bc2961dd74e047e57095576376a0ba2e5a2d9591e858fa06467350",
+  "catalogSha256": "dc8cbe3e0775e8deac4a561aa89ae44d68709a405549f1b95236fa47cd6debf9",
   "sources": [
     {
       "id": "agent-skills",
@@ -21,58 +21,70 @@
       "contentSha256": "1111111111111111111111111111111111111111111111111111111111111111"
     },
     {
+      "id": "configure-bitbucket-api-access",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/configure-bitbucket-api-access",
+      "contentSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "id": "configure-confluence-api-access",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/configure-confluence-api-access",
+      "contentSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
       "id": "configure-jira-api-access",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/configure-jira-api-access",
-      "contentSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      "contentSha256": "4444444444444444444444444444444444444444444444444444444444444444"
     },
     {
       "id": "investigate-datadog-logs",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/investigate-datadog-logs",
-      "contentSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
     {
       "id": "plan-production-change",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/plan-production-change",
-      "contentSha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      "contentSha256": "6666666666666666666666666666666666666666666666666666666666666666"
     },
     {
       "id": "publish-requirements-to-confluence",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/publish-requirements-to-confluence",
-      "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      "contentSha256": "7777777777777777777777777777777777777777777777777777777777777777"
     },
     {
       "id": "review-bitbucket-pull-request",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/review-bitbucket-pull-request",
-      "contentSha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      "contentSha256": "8888888888888888888888888888888888888888888888888888888888888888"
     },
     {
       "id": "search-with-felo",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/search-with-felo",
-      "contentSha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
     },
     {
       "id": "verify-data-access-performance",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/verify-data-access-performance",
-      "contentSha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     {
       "id": "work-with-jira",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/work-with-jira",
-      "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     {
       "id": "write-copilot-implementation-prompt",
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/write-copilot-implementation-prompt",
-      "contentSha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+      "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     }
   ]
 }
