@@ -196,6 +196,19 @@ Describe 'AI instructions all-repository rollout' {
         [string]$result.SearchRoots[0] | Should Be ([System.IO.Path]::GetFullPath($repository))
     }
 
+    # Given: Default discovery obtains ready fixed-drive roots from the operating system.
+    # When: Those roots pass through rollout path canonicalization.
+    # Then: Each value remains an absolute filesystem root instead of becoming drive-relative (for example, C:).
+    It 'InterT75_preserves_absolute_fixed_drive_roots' {
+        $roots = @(Get-AiInstructionsFixedSearchRoots)
+
+        $roots.Count | Should BeGreaterThan 0
+        foreach ($root in $roots) {
+            $expectedRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath([string]$root))
+            [string]$root | Should Be $expectedRoot
+        }
+    }
+
     # Given: A reserved Agent artifact remains tracked in HEAD but already has a staged index deletion.
     # When: Post-rollout verification checks for unresolved tracked artifacts.
     # Then: It inspects the HEAD/index union and does not mistake the staged deletion for completed remediation.

@@ -16,17 +16,7 @@ on:
       - 'scripts/skills-source-retrieval.psm1'
       - 'scripts/skills-source-acquisition.psm1'
       - '.github/workflows/syp86-production-lock.yml'
-  pull_request:
-    paths:
-      - 'catalog/skills-catalog.json'
-      - 'catalog/skills-catalog.sources.json'
-      - 'catalog/skills-catalog-lock.json'
-      - 'scripts/update-skills-catalog-lock.ps1'
-      - 'scripts/skills-catalog-contract.psm1'
-      - 'scripts/safe-zip.psm1'
-      - 'scripts/skills-source-retrieval.psm1'
-      - 'scripts/skills-source-acquisition.psm1'
-      - '.github/workflows/syp86-production-lock.yml'
+  pull_request: {}
   workflow_dispatch:
 
 jobs:

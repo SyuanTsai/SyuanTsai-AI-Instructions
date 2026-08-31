@@ -13,7 +13,10 @@ $script:RolloutExcludedDirectoryNames = @(
 
 function Get-RolloutFullPath {
     param([Parameter(Mandatory = $true)][string] $Path)
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\','/'))
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Equals($root,[System.StringComparison]::OrdinalIgnoreCase)) { return $root }
+    return $fullPath.TrimEnd([char[]]@('\','/'))
 }
 
 function ConvertTo-RolloutRepositoryUrl {
