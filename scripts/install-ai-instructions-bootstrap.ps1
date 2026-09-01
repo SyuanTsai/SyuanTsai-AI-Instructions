@@ -377,10 +377,10 @@ $runtimeFiles = @(
     'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
     'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
     'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
-    'ai-instructions-updater.psm1','update-ai-instructions.ps1',
+    'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
     'cleanup-ai-instructions-pollution.ps1'
 )
-$stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','cleanup-ai-instructions-pollution.ps1')
+$stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')
 $relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
@@ -489,6 +489,7 @@ if (-not [string]::IsNullOrWhiteSpace($codexHomeRoot) -and $codexHomePath.Equals
 $hookDirectory = Join-Path $codexHomePath 'hooks'
 $hookScript = Join-Path $hookDirectory 'bootstrap-ai-instructions.ps1'
 $updateScript = Join-Path $hookDirectory 'update-ai-instructions.ps1'
+$environmentUpdateScript = Join-Path $hookDirectory 'update-agent-environment.ps1'
 $cleanupScript = Join-Path $hookDirectory 'cleanup-ai-instructions-pollution.ps1'
 $runtimeDirectory = Join-Path $hookDirectory 'ai-instructions-runtime'
 $agentsPath = Join-Path $codexHomePath 'AGENTS.md'
@@ -499,7 +500,7 @@ $script:InstallerHeldLockPath = $installLockPath
 Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
 Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
 Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
-foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
 }
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
@@ -515,7 +516,7 @@ try {
     Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
     Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
     Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
-    foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+    foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
         Assert-InstallerMutationPath -Path $filePath -ExpectedType File
     }
 
@@ -563,6 +564,7 @@ try {
     $stagingRuntime = Join-Path $stagingRoot 'runtime'
     $stagingLauncher = Join-Path $stagingRoot 'bootstrap-ai-instructions.ps1'
     $stagingUpdater = Join-Path $stagingRoot 'update-ai-instructions.ps1'
+    $stagingEnvironmentUpdater = Join-Path $stagingRoot 'update-agent-environment.ps1'
     $stagingCleanup = Join-Path $stagingRoot 'cleanup-ai-instructions-pollution.ps1'
     $stagingConfiguration = Join-Path $stagingRoot 'ai-instructions-sync.json'
     $backupRoot = Join-Path $codexHomePath ".ai-instructions-backup-$transactionId"
@@ -582,6 +584,7 @@ try {
         Assert-InstallerMutationPath -Path $backupRoot -ExpectedType Directory
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\bootstrap-ai-instructions-installed.ps1') -Destination $stagingLauncher -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\update-ai-instructions.ps1') -Destination $stagingUpdater -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\update-agent-environment.ps1') -Destination $stagingEnvironmentUpdater -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'scripts\cleanup-ai-instructions-pollution.ps1') -Destination $stagingCleanup -Force
         foreach ($fileName in $runtimeFiles) { Copy-Item -LiteralPath (Join-Path $repositoryRootPath "scripts\$fileName") -Destination (Join-Path $stagingRuntime $fileName) -Force }
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
@@ -595,7 +598,7 @@ try {
         Assert-AiInstructionsRuntimeBundleV2 -Bundle $stagedBundle -Configuration $stagedConfiguration -RuntimeRoot $stagingRuntime | Out-Null
         Import-Module (Join-Path $stagingRuntime 'skills-catalog-contract.psm1') -Force
         Test-SkillsCatalogLockDocument -LockPath (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -CatalogPath (Join-Path $stagingRuntime 'catalog\skills-catalog.json') | Out-Null
-        foreach ($scriptPath in @($stagingLauncher,$stagingUpdater,$stagingCleanup) + @(Get-ChildItem -LiteralPath $stagingRuntime -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | Select-Object -ExpandProperty FullName)) {
+        foreach ($scriptPath in @($stagingLauncher,$stagingUpdater,$stagingEnvironmentUpdater,$stagingCleanup) + @(Get-ChildItem -LiteralPath $stagingRuntime -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | Select-Object -ExpandProperty FullName)) {
             $tokens=$null; $errors=$null
             [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$errors)
             if (@($errors).Count -gt 0) { throw "Staged installer runtime contains a PowerShell parse error in '$scriptPath': $(@($errors)[0].Message)" }
@@ -604,27 +607,30 @@ try {
         $hadRuntime = Test-Path -LiteralPath $runtimeDirectory -PathType Container
         $hadHook = Copy-InstallerBackupFile -Source $hookScript -Destination (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1')
         $hadUpdater = Copy-InstallerBackupFile -Source $updateScript -Destination (Join-Path $backupRoot 'update-ai-instructions.ps1')
+        $hadEnvironmentUpdater = Copy-InstallerBackupFile -Source $environmentUpdateScript -Destination (Join-Path $backupRoot 'update-agent-environment.ps1')
         $hadCleanup = Copy-InstallerBackupFile -Source $cleanupScript -Destination (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1')
         $hadConfiguration = Copy-InstallerBackupFile -Source $configurationPath -Destination (Join-Path $backupRoot 'ai-instructions-sync.json')
         $hadAgents = Copy-InstallerBackupFile -Source $agentsPath -Destination (Join-Path $backupRoot 'AGENTS.md')
         $hadHooks = Copy-InstallerBackupFile -Source $hooksPath -Destination (Join-Path $backupRoot 'hooks.json')
         $hookState = New-InstallerFileTransactionState -RelativePath 'hooks/bootstrap-ai-instructions.ps1' -Backup (Join-Path $backupRoot 'bootstrap-ai-instructions.ps1') -OriginallyExisted $hadHook
         $updaterState = New-InstallerFileTransactionState -RelativePath 'hooks/update-ai-instructions.ps1' -Backup (Join-Path $backupRoot 'update-ai-instructions.ps1') -OriginallyExisted $hadUpdater
+        $environmentUpdaterState = New-InstallerFileTransactionState -RelativePath 'hooks/update-agent-environment.ps1' -Backup (Join-Path $backupRoot 'update-agent-environment.ps1') -OriginallyExisted $hadEnvironmentUpdater
         $cleanupState = New-InstallerFileTransactionState -RelativePath 'hooks/cleanup-ai-instructions-pollution.ps1' -Backup (Join-Path $backupRoot 'cleanup-ai-instructions-pollution.ps1') -OriginallyExisted $hadCleanup
         $configurationState = New-InstallerFileTransactionState -RelativePath 'ai-instructions-sync.json' -Backup (Join-Path $backupRoot 'ai-instructions-sync.json') -OriginallyExisted $hadConfiguration
         $agentsState = New-InstallerFileTransactionState -RelativePath 'AGENTS.md' -Backup (Join-Path $backupRoot 'AGENTS.md') -OriginallyExisted $hadAgents
         $hooksState = New-InstallerFileTransactionState -RelativePath 'hooks.json' -Backup (Join-Path $backupRoot 'hooks.json') -OriginallyExisted $hadHooks
-        $fileTransactionStates = @($hookState,$updaterState,$cleanupState,$configurationState,$agentsState,$hooksState)
+        $fileTransactionStates = @($hookState,$updaterState,$environmentUpdaterState,$cleanupState,$configurationState,$agentsState,$hooksState)
         $runtimeBackedUp=$false; $runtimeInstalled=$false
         try {
             Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
             Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
             Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
-            foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+            foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
                 Assert-InstallerMutationPath -Path $filePath -ExpectedType File
             }
             Set-InstallerTransactionalFileBytes -RelativePath 'hooks/bootstrap-ai-instructions.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingLauncher))
             Set-InstallerTransactionalFileBytes -RelativePath 'hooks/update-ai-instructions.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingUpdater))
+            Set-InstallerTransactionalFileBytes -RelativePath 'hooks/update-agent-environment.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingEnvironmentUpdater))
             Set-InstallerTransactionalFileBytes -RelativePath 'hooks/cleanup-ai-instructions-pollution.ps1' -Bytes ([System.IO.File]::ReadAllBytes($stagingCleanup))
             if ($hadRuntime) { Move-Item -LiteralPath $runtimeDirectory -Destination $backupRuntime; $runtimeBackedUp=$true }
             Move-Item -LiteralPath $stagingRuntime -Destination $runtimeDirectory; $runtimeInstalled=$true
@@ -641,7 +647,7 @@ try {
                 Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
                 Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
                 Assert-InstallerMutationPath -Path $backupRuntime -ExpectedType Directory
-                foreach ($filePath in @($hookScript,$updateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
+                foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
                     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
                 }
             }

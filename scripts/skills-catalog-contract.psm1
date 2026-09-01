@@ -411,6 +411,38 @@ function Assert-ManagedManifestV2 {
     }
 }
 
+function Assert-UserSkillsManagedManifestV1 {
+    param([object] $Manifest)
+    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','catalogRepository','catalogCommit','catalogId','lockSha256','files') -Context 'user Skills managed manifest'
+    Assert-SchemaVersion -Document $Manifest -Expected 1 -DocumentName 'user Skills managed manifest'
+    Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogRepository' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogRepository'
+    $catalogCommit = Get-RequiredProperty -Object $Manifest -Name 'catalogCommit' -Context 'user Skills managed manifest'
+    if ($catalogCommit -isnot [string] -or [string]$catalogCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'user Skills managed manifest catalogCommit must be a full 40-character commit SHA.' }
+    Assert-StableId -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogId' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogId'
+    Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest lockSha256'
+    $files = Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'user Skills managed manifest'
+    Assert-Array -Value $files -Context 'user Skills managed manifest files' -AllowEmpty
+    $targetPaths = @{}
+    foreach ($entry in @($files)) {
+        Assert-OnlyProperties -Object $entry -Allowed @('skillId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256') -Context 'user Skills managed manifest file'
+        $skillId = Get-RequiredProperty -Object $entry -Name 'skillId' -Context 'user Skills managed manifest file'
+        Assert-StableId -Value $skillId -Context 'user Skills managed manifest file skillId'
+        Assert-StableId -Value (Get-RequiredProperty -Object $entry -Name 'sourceId' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceId"
+        Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $entry -Name 'sourceRepository' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceRepository"
+        Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceRef' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceRef"
+        $sourceCommit = Get-RequiredProperty -Object $entry -Name 'sourceCommit' -Context "user Skills managed manifest file '$skillId'"
+        if ($sourceCommit -isnot [string] -or [string]$sourceCommit -cnotmatch '^[0-9a-f]{40}$') { throw "user Skills managed manifest file '$skillId' sourceCommit must be a full 40-character commit SHA." }
+        Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceVersion"
+        $sourcePath = Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context "user Skills managed manifest file '$skillId'"
+        $targetPath = Get-RequiredProperty -Object $entry -Name 'targetPath' -Context "user Skills managed manifest file '$skillId'"
+        if (-not (Test-IsSafeRepositoryPath -Value $sourcePath)) { throw "Unsafe source path in user Skills managed manifest: $sourcePath" }
+        if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or -not ([string]$targetPath).StartsWith(".agents/skills/$skillId/",[System.StringComparison]::Ordinal)) { throw "User-managed Skill '$skillId' must preserve the flat .agents/skills path." }
+        if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in user Skills managed manifest: $targetPath" }
+        $targetPaths[[string]$targetPath] = $true
+        Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'sha256' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sha256"
+    }
+}
+
 function Assert-SyncConfigurationV4 {
     param([object] $Configuration,[object] $Catalog)
     Assert-OnlyProperties -Object $Configuration -Allowed @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates') -Context 'AI instruction sync configuration'
@@ -467,4 +499,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifestV2, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifestV2, Assert-UserSkillsManagedManifestV1, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

@@ -10,6 +10,7 @@
 | Catalog source pins | 1 | 記錄維護者選定的 requested ref、完整 resolved commit 與顯示版本，供 lock generator 重現與 stale-check。 |
 | Catalog lock | 1 | 將 catalog 及每個來源的 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash 與每個 Skill 的 deterministic content hash。 |
 | Managed manifest | 2 | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
+| User Skills managed manifest | 1 | 記錄 `$HOME/.agents/skills` 中由 Catalog 管理的檔案、Catalog commit、來源 pin 與逐檔 hash；未列入此 manifest 的個人 Skill 永遠視為 unmanaged。 |
 | Personal sync configuration | 4 | 記錄 exclusions、已安裝 AI-Instructions runtime/Catalog bundle 的 canonical GitHub Repository 與完整 commit SHA、Skill selection，以及更新 mode／channel／interval；不含任何 auto-commit 設定。 |
 | Runtime bundle metadata | 2 | 安裝時產生 `runtime-bundle.json`，記錄 Repository、commit、acquisition、archive hash，以及 runtime 精確檔案 inventory／hash；launcher 與 updater 每次執行前都必須完整驗證。 |
 | Update receipt | 1 | 記錄上次檢查時間、policy、current/candidate commit、結果、archive hash 與診斷訊息；`current` outcome 的 `candidateCommit` 固定為 `null`，已解析版本由 `currentCommit` 唯一表示。 |
