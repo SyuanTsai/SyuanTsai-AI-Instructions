@@ -27,8 +27,8 @@
       "id": "atlassian-ecosystem",
       "requestedRef": "main",
       "requestedRefType": "branch",
-      "resolvedCommit": "78f04c21ed5cd84d716be2350d62e7e80069277f",
-      "resolvedVersion": "main@78f04c21"
+      "resolvedCommit": "975661f8c9e64cea21e6b8109329888d3f5697da",
+      "resolvedVersion": "main@975661f8"
     }
   ]
 }
