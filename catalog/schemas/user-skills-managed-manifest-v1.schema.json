@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/user-skills-managed-manifest-v1.schema.json",
+  "title": "User-scoped managed Agent Skills manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogRepository",
+    "catalogCommit",
+    "catalogId",
+    "lockSha256",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "catalogRepository": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "catalogCommit": { "$ref": "#/$defs/commit" },
+    "catalogId": { "$ref": "#/$defs/stableId" },
+    "lockSha256": { "$ref": "#/$defs/sha256" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skillId",
+          "sourceId",
+          "sourceRepository",
+          "sourceRef",
+          "sourceCommit",
+          "sourceVersion",
+          "sourcePath",
+          "targetPath",
+          "sha256"
+        ],
+        "properties": {
+          "skillId": { "$ref": "#/$defs/stableId" },
+          "sourceId": { "$ref": "#/$defs/stableId" },
+          "sourceRepository": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://"
+          },
+          "sourceRef": { "type": "string", "minLength": 1 },
+          "sourceCommit": { "$ref": "#/$defs/commit" },
+          "sourceVersion": { "type": "string", "minLength": 1 },
+          "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+          "targetPath": {
+            "allOf": [
+              { "$ref": "#/$defs/repositoryPath" },
+              { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" }
+            ]
+          },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    },
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

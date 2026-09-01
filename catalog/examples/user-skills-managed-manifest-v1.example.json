@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "catalogRepository": "https://github.com/example/ai-instructions.git",
+  "catalogCommit": "89abcdef0123456789abcdef0123456789abcdef",
+  "catalogId": "example-agent-skills",
+  "lockSha256": "45eaeb72246fb39aaabfa3d30e2f54ea5da19bd66a70d74d7c3f7efc770f0678",
+  "files": [
+    {
+      "skillId": "work-with-jira",
+      "sourceId": "agent-skills",
+      "sourceRepository": "https://github.com/example/agent-skills-catalog.git",
+      "sourceRef": "v1.0.0",
+      "sourceCommit": "0123456789abcdef0123456789abcdef01234567",
+      "sourceVersion": "1.0.0",
+      "sourcePath": ".agents/skills/work-with-jira/SKILL.md",
+      "targetPath": ".agents/skills/work-with-jira/SKILL.md",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}

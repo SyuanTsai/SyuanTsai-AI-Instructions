@@ -223,6 +223,8 @@ function Get-AiInstructionsCandidatePackage {
             'scripts\ai-instructions-runtime-contract.psm1',
             'scripts\ai-instructions-updater.psm1',
             'scripts\update-ai-instructions.ps1',
+            'scripts\agent-environment-reconciler.psm1',
+            'scripts\update-agent-environment.ps1',
             'catalog\skills-catalog.json',
             'catalog\skills-catalog-lock.json'
         )) {

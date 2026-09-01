@@ -102,6 +102,7 @@ Installer 的 git-checkout 模式只接受 canonical origin 與完整 `HEAD` com
 
 - `~/.codex/hooks/bootstrap-ai-instructions.ps1`
 - `~/.codex/hooks/update-ai-instructions.ps1`
+- `~/.codex/hooks/update-agent-environment.ps1`
 - `~/.codex/hooks/cleanup-ai-instructions-pollution.ps1`
 - `~/.codex/hooks/ai-instructions-runtime/**`
 - `~/.codex/ai-instructions-sync.json`
@@ -220,6 +221,29 @@ Recovery 只會將個人 config 的 bundle pin 對齊目前完整驗證的 activ
 
 網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
 
+## 使用者層級 Agent 環境升級
+
+完成 runtime 安裝後，可從任何目錄以單一命令更新 runtime 並同步 `$HOME/.agents/skills`：
+
+```powershell
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -OutputFormat Json
+```
+
+先預覽或只驗證目前狀態：
+
+```powershell
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -WhatIf -OutputFormat Json
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -VerifyOnly -OutputFormat Json
+```
+
+第一次納管舊 Catalog 目錄時需明確加上 `-MigrateLegacyCatalogSkills`；已受管理但內容被本機修改時，只有 `-ForceReinstallManagedSkills` 會在留下 recovery backup 後重裝。Manifest 未列出的個人 Skill 永遠視為 unmanaged，不會因 prune、rename、removal 或 tombstone 被推論式刪除。更新會先完成 selection／dependency closure、所有來源下載、immutable pin、archive hash、Skill content hash 與安全 ZIP 驗證，再取得 user-scope global lock 並進入 transaction；中斷留下 journal 時必須先執行：
+
+```powershell
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Recover -OutputFormat Json
+```
+
+JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已一致、`1` 表示失敗、`2` 表示 VerifyOnly 偵測到 drift、`3` 表示同一使用者已有更新程序持有 global lock。
+
 ## Tracked Agent artifact 自癒
 
 Personal artifacts 必須保持 untracked。Bootstrap 以 `git rev-parse --show-toplevel`、Git common directory、worktree 與 branch identity 序列化每個 Repository；Windows 或 `core.ignorecase=true` 會使用 Git index 的實際 spelling 處理大小寫變體。允許的範圍只包含 root `AGENTS*.md`、`.agents/**`、明確 Codex/GitHub Agent runtime paths，以及舊 manifest 安全列出的 Agent／Skill targets。Manifest 若把 tracked production file 指到 scope 外，會在任何 mutation 前 fail closed。
@@ -265,6 +289,7 @@ CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lo
 - `scripts/bootstrap-ai-instructions-installed.ps1`：stable launcher、更新前後 runtime validation。
 - `scripts/ai-instructions-runtime-contract.psm1`：config v4、bundle v2 與 exact inventory 契約。
 - `scripts/ai-instructions-updater.psm1`、`scripts/update-ai-instructions.ps1`：更新 workflow 與 installed command。
+- `scripts/agent-environment-reconciler.psm1`、`scripts/update-agent-environment.ps1`：使用者層級 Catalog Skills transaction、recovery 與單一升級入口。
 - `scripts/bootstrap-ai-instructions-multisource.ps1`：Catalog selection、immutable acquisition 與 composition。
 - `scripts/bootstrap-ai-instructions.ps1`、`scripts/agent-artifact-remediation.psm1`：manifest protection、tracked reserved artifact 自癒、local ignore、recovery evidence 與 rollback。
 - `scripts/ai-instructions-rollout.psm1`、`scripts/invoke-ai-instructions-rollout.ps1`：fixed-drive Repository discovery、逐 Repo bootstrap、post-scan 與結構化 rollout report。
