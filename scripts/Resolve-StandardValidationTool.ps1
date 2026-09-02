@@ -138,6 +138,7 @@ function Get-Policy {
         -not [bool]$skillSpector.pythonDistribution.onlyBinary -or
         -not [bool]$skillSpector.pythonDistribution.disableCache -or
         [string]$skillSpector.pythonDistribution.dependencyAcquisition -cne 'verified-wheelhouse' -or
+        [string]$skillSpector.pythonDistribution.installEnvironment -cne 'isolated-venv' -or
         -not [bool]$skillSpector.pythonDistribution.installNoIndex -or
         -not [bool]$skillSpector.pythonDistribution.requireHashes -or
         -not [bool]$skillSpector.pythonDistribution.recordDependencyClosureHashes) {
@@ -596,6 +597,7 @@ function Resolve-SkillSpector {
     [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
 
     $closure = $null
+    $installEnvironment = $null
     try {
         $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
         Invoke-WebRequest -Uri ([string]$wheel.browser_download_url) -Headers $headers -OutFile $wheelPath -UseBasicParsing
@@ -609,9 +611,22 @@ function Resolve-SkillSpector {
         Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
 
         if ($ShouldInstall) {
+            $venvPath = Join-Path $tempRoot 'venv'
+            [void](Invoke-CheckedCommand -Command 'python' -Arguments @('-m', 'venv', $venvPath))
+            $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                Join-Path $venvPath 'Scripts\python.exe'
+            }
+            else {
+                Join-Path $venvPath 'bin/python'
+            }
+            if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+                throw "SkillSpector isolated virtual environment Python was not created: $venvPython"
+            }
+            $installEnvironment = 'isolated-venv'
+
             $closure = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
                 $indexArgument = "--index-url=$approvedIndex"
-                [void](Invoke-CheckedCommand -Command 'python' -Arguments @(
+                [void](Invoke-CheckedCommand -Command $venvPython -Arguments @(
                     '-m', 'pip', 'download', '--disable-pip-version-check', '--no-cache-dir',
                     '--only-binary=:all:', '--dest', $wheelhouse, $indexArgument, $wheelPath
                 ))
@@ -632,13 +647,13 @@ function Resolve-SkillSpector {
                     throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
                 }
 
-                [void](Invoke-CheckedCommand -Command 'python' -Arguments @(
+                [void](Invoke-CheckedCommand -Command $venvPython -Arguments @(
                     '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
                     '--no-index', "--find-links=$wheelhouse", '--require-hashes', '--no-deps', '--force-reinstall',
                     '-r', $lockPath
                 ))
 
-                $installedVersion = ((Invoke-CheckedCommand -Command 'python' -Arguments @(
+                $installedVersion = ((Invoke-CheckedCommand -Command $venvPython -Arguments @(
                     '-c', "import importlib.metadata as m; print(m.version('skillspector'))"
                 )) -join '').Trim()
                 if ($installedVersion -cne $version) {
@@ -655,7 +670,7 @@ function Resolve-SkillSpector {
 
     $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version"
     if ($null -ne $closure) {
-        $identity += "#pythonIndex=$approvedIndex#dependencyClosureSha256=$($closure.closureSha256)"
+        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#dependencyClosureSha256=$($closure.closureSha256)"
     }
 
     return [ordered]@{
@@ -663,6 +678,7 @@ function Resolve-SkillSpector {
         resolvedIdentity = $identity
         identityKind = 'release-commit-asset-metadata-and-dependency-closure'
         pythonPackageIndex = $approvedIndex
+        installEnvironment = $installEnvironment
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
     }
@@ -718,6 +734,7 @@ else {
     }
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
+        $result.installEnvironment = $resolved.installEnvironment
         $result.dependencyClosureSha256 = $resolved.dependencyClosureSha256
         $result.dependencyClosure = $resolved.dependencyClosure
     }
