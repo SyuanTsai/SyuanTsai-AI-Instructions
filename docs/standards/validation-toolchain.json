@@ -24,6 +24,7 @@
     },
     "skill-tools": {
       "source": "npm:skill-tools",
+      "registry": "https://registry.npmjs.org/",
       "channel": "latest-stable"
     },
     "pester": {
