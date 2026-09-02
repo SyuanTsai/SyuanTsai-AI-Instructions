@@ -31,6 +31,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate central tool sources and policy
         shell: pwsh
@@ -62,6 +63,8 @@ jobs:
           if ($receipt.resolvedIdentity -notmatch 'metadata=skillspector@') { throw 'SkillSpector wheel METADATA identity was not recorded.' }
           if ($receipt.interpreterIsolation -ne 'python-isolated-mode') { throw 'SkillSpector Python subprocesses were not isolated.' }
           if ($receipt.resolvedIdentity -notmatch 'interpreterIsolation=python-isolated-mode') { throw 'SkillSpector identity does not record Python interpreter isolation.' }
+          if (-not [bool]$receipt.credentialIsolation) { throw 'SkillSpector package-manager subprocesses inherited a GitHub credential.' }
+          if ($receipt.resolvedIdentity -notmatch 'credentialIsolation=github-token-not-inherited') { throw 'SkillSpector identity does not record credential isolation.' }
           if ([bool]$receipt.directReferencesAllowed) { throw 'SkillSpector direct dependency references were not blocked.' }
           if ($receipt.resolvedIdentity -notmatch 'directReferences=blocked') { throw 'SkillSpector identity does not record direct-reference blocking.' }
           if ([string]$receipt.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure SHA-256 was not recorded.' }
@@ -74,8 +77,6 @@ jobs:
 
       - name: Resolve latest stable Pester from central policy
         shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $receiptPath = Join-Path $env:RUNNER_TEMP 'standard-validation-pester.json'
