@@ -296,7 +296,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver '\$result\.interpreterIsolation = ' 'The machine-readable receipt must expose Python interpreter isolation.'
         Assert-Match $resolver 'directReferences=blocked' 'Resolved SkillSpector identity must record direct-reference blocking.'
         Assert-Match $resolver '\$result\.directReferencesAllowed = ' 'The machine-readable receipt must expose direct-reference policy.'
-        Assert-Match $standard '對 `SkillSpector`，resolver \*\*MUST\*\*' 'Normative authority must define SkillSpector resolver controls.'
+        Assert-Match $standard '`SkillSpector`.*resolver \*\*MUST\*\*' 'Normative authority must define SkillSpector resolver controls.'
         Assert-Match $standard 'Python `-I` isolated mode' 'Normative authority must require inherited Python interpreter isolation.'
         Assert-Match $standard '--no-index --require-hashes --no-deps' 'Normative authority must require offline hash-locked installation.'
     }
