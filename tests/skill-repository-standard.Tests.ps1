@@ -6,6 +6,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:StandardPath = Join-Path $script:StandardsRoot 'skill-repository-standard.md'
         $script:MatrixPath = Join-Path $script:StandardsRoot 'skill-repository-review-matrix.md'
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
+        $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -21,21 +22,28 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
         }
+
+        function Assert-NotMatch {
+            param([string] $Actual, [string] $Pattern, [string] $Message)
+            if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
     }
 
-    It 'UnitT10_keeps_the_normative_standard_evidence_and_toolchain_documents_together' {
+    It 'UnitT10_keeps_the_normative_standard_evidence_toolchain_and_resolver_together' {
         Assert-True (Test-Path -LiteralPath $script:IndexPath -PathType Leaf) 'Missing standards index.'
         Assert-True (Test-Path -LiteralPath $script:StandardPath -PathType Leaf) 'Missing normative Standard.'
         Assert-True (Test-Path -LiteralPath $script:MatrixPath -PathType Leaf) 'Missing cross-repository review matrix.'
         Assert-True (Test-Path -LiteralPath $script:ToolchainPath -PathType Leaf) 'Missing validation toolchain policy.'
+        Assert-True (Test-Path -LiteralPath $script:ResolverPath -PathType Leaf) 'Missing central validation tool resolver.'
 
         $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
         Assert-Match $index 'skill-repository-standard\.md' 'Standards index must link the normative Standard.'
         Assert-Match $index 'skill-repository-review-matrix\.md' 'Standards index must link the review matrix.'
         Assert-Match $index 'validation-toolchain\.json' 'Standards index must link the toolchain policy.'
+        Assert-Match $index 'Resolve-StandardValidationTool\.ps1' 'Standards index must name the central validation tool resolver.'
     }
 
-    It 'UnitT20_requires_latest_stable_validation_tools_and_freezes_each_resolved_run' {
+    It 'UnitT20_requires_latest_stable_tools_trusted_sources_and_resolved_identity_evidence' {
         $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ToolchainPath | ConvertFrom-Json
 
         Assert-Equal $toolchain.schemaVersion 1 'Unexpected toolchain schemaVersion.'
@@ -43,10 +51,19 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ([bool]$toolchain.resolution.resolveAtRunStart) 'Toolchain must resolve at run start.'
         Assert-True ([bool]$toolchain.resolution.freezeForRun) 'Resolved toolchain must freeze for one run.'
         Assert-True ([bool]$toolchain.resolution.recordResolvedVersion) 'Resolved version must be recorded.'
+        Assert-True ([bool]$toolchain.resolution.recordResolvedIdentityWhenAvailable) 'Resolved immutable/package identity must be recorded when available.'
         Assert-True (-not [bool]$toolchain.resolution.allowPrerelease) 'Prerelease tools must not be the default.'
 
-        foreach ($toolName in @('skillspector', 'skill-validator', 'skill-tools', 'pester')) {
-            Assert-Equal $toolchain.tools.$toolName.channel 'latest-stable' "$toolName must use latest-stable."
+        $expectedSources = [ordered]@{
+            'skillspector' = 'NVIDIA/SkillSpector'
+            'skill-validator' = 'github.com/agent-ecosystem/skill-validator/cmd/skill-validator'
+            'skill-tools' = 'npm:skill-tools'
+            'pester' = 'PowerShellGallery:Pester'
+        }
+
+        foreach ($entry in $expectedSources.GetEnumerator()) {
+            Assert-Equal $toolchain.tools.($entry.Key).source $entry.Value "$($entry.Key) must use its approved source."
+            Assert-Equal $toolchain.tools.($entry.Key).channel 'latest-stable' "$($entry.Key) must use latest-stable."
         }
 
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
@@ -54,13 +71,32 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'
     }
 
-    It 'UnitT30_validates_openai_agent_metadata_beyond_file_presence' {
+    It 'UnitT25_rejects_an_unapproved_validation_tool_source_before_resolution' {
+        $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ToolchainPath | ConvertFrom-Json
+        $toolchain.tools.skillspector.source = 'example.invalid/SkillSpector'
+        $unapprovedPath = Join-Path $TestDrive 'unapproved-validation-toolchain.json'
+        $json = $toolchain | ConvertTo-Json -Depth 20
+        [IO.File]::WriteAllText($unapprovedPath, $json, (New-Object Text.UTF8Encoding($false)))
+
+        $errorMessage = $null
+        try {
+            & $script:ResolverPath -PolicyPath $unapprovedPath -ValidatePolicyOnly | Out-Null
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+        }
+
+        Assert-Match $errorMessage 'Untrusted validation tool source.*skillspector' 'Unapproved tool source must fail closed.'
+    }
+
+    It 'UnitT30_validates_openai_agent_metadata_against_the_OpenAI_minimum_contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
         Assert-Match $standard 'agents/openai\.yaml.*contract' 'Standard must define an openai.yaml content contract.'
         Assert-Match $standard 'syntactically valid YAML' 'Standard must require valid YAML.'
+        Assert-Match $standard 'all string scalar values.*MUST.*quoted' 'Standard must require quoted YAML string values.'
         Assert-Match $standard 'interface\.display_name' 'Standard must require display_name.'
-        Assert-Match $standard 'interface\.short_description' 'Standard must require short_description.'
+        Assert-Match $standard 'interface\.short_description.*25.*64' 'Standard must require the OpenAI 25-64 character short_description bound.'
         Assert-Match $standard 'interface\.default_prompt' 'Standard must require default_prompt.'
         Assert-Match $standard '\$<skill-id>' 'Standard must bind default_prompt to the Skill ID.'
     }
@@ -79,5 +115,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $standard '本 normative authority 的 conformance regression.*MUST.*同一 PR' 'Standard changes must update authority regression in the same PR.'
         Assert-Match $index 'tests/skill-repository-standard\.Tests\.ps1' 'Standards index must name the authority regression test.'
+    }
+
+    It 'UnitT60_keeps_the_review_matrix_current_with_the_SYP167_authority_deliverables' {
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+
+        Assert-Match $matrix 'Validation tool policy' 'Review matrix must record the validation tool policy decision.'
+        Assert-Match $matrix 'latest stable' 'Review matrix must record latest-stable validation tooling.'
+        Assert-Match $matrix 'authority-level regression' 'Review matrix must record SYP-167 authority regression/CI deliverables.'
+        Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
     }
 }
