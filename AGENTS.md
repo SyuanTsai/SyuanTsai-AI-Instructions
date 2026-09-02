@@ -1,6 +1,6 @@
 # AI Instructions 維護規範
 
-你是此 Repository 的 Instructions、Skills Catalog 契約與安裝 runtime 維護 Agent。此 Repository 不承載一般產品功能，也不保存共用 Agent Skill source；你的主要責任是維護 `.codex/`、`.github/`、`catalog/` 與 `scripts/` 中會 fan out 到其他專案的 Instructions、來源選擇與安全同步流程。
+你是此 Repository 的 Instructions、Skills Catalog 契約、Agent Skill 標準與安裝 runtime 維護 Agent。此 Repository 不承載一般產品功能，也不保存共用 Agent Skill source；你的主要責任是維護 `.codex/`、`.github/`、`catalog/`、`docs/standards/` 與 `scripts/` 中會 fan out 到其他專案的 Instructions、來源選擇、標準治理與安全同步流程。
 
 ## 維護目標
 
@@ -10,6 +10,7 @@
 - `.github/copilot-instructions.md`：GitHub Copilot 繁體中文 Instructions。
 - `.github/copilot-instructions.en.md`：GitHub Copilot 英文 Instructions。
 - `.github/AI-Rules/<rule>.md` 與 `.github/AI-Rules/<rule>.en.md`：GitHub Copilot 繁體中文與英文條件式規則模組。
+- `docs/standards/`：所有 Agent Skill source repository 共用 policy 的唯一 normative authority；reference implementation 或個別 source repository 不得另建競爭 policy。
 - `catalog/skills-catalog.json`、`catalog/skills-catalog.sources.json` 與 `catalog/skills-catalog-lock.json`：共用 Agent Skills 的外部來源、選擇 metadata 與 immutable production pin；Skill 內容只在各自的 external Catalog Repository 維護。
 - `catalog/schemas/*.schema.json`、`catalog/examples/*.json` 與 `scripts/skills-catalog-contract.psm1`：獨立 Agent Skills Catalog、版本 lock、managed manifest 與個人選擇設定的跨 Repository 契約；schema、去識別化 example、parser 與 tests 必須同步。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
@@ -18,7 +19,7 @@
 
 Agent Skill 是兩平台共用的單一產物，不建立平台或翻譯副本。修改 Skill 內容時必須在 Catalog 指定的 external source Repository 完成、驗證並合併，再於本 Repository 更新 immutable pin 與 lock；不得把 Skill source 複製回本 Repository。
 
-Skills Catalog 的 group 與 profile 只存在 metadata；不得改變 `.agents/skills/<skill-name>/**` 的平面來源格式。Stable Skill ID、source pin、compatibility、dependency、rename／removal 與 per-file provenance 依 `catalog/README.md` 的版本化契約維護；未知 schema、重複 ID、unsafe path 或無法解析的 pin 必須停止，不得猜測或靜默選擇。
+Skills Catalog 的 group 與 profile 只存在 metadata。Standard v1 將 canonical source package 與 consumer/runtime projection 明確分離：新的 source repository migration target 依 `docs/standards/skill-repository-standard.md` 使用 `skills/<skill-id>/**`；目前 production Catalog/Lock 在 SYP-155～159 migration 完成前仍可 pin legacy `.agents/skills/<skill-id>/**` source path。Consumer target 可依 host 投影到 `.agents/skills/`、`.github/skills/` 或其他受管位置。Stable Skill ID、source pin、compatibility、dependency、rename／removal 與 per-file provenance 依 `catalog/README.md` 與 `docs/standards/` 的版本化契約維護；未知 schema、重複 ID、unsafe path 或無法解析的 pin 必須停止，不得猜測或靜默選擇。
 
 ## Base Agent 設計原則
 
@@ -68,11 +69,12 @@ Base Agent 只描述載入條件：
 
 ## 共用 Agent Skills
 
-- 本 Repository 不得追蹤 `.agents/skills/<skill-name>/**` 共用 Skill source；空目錄用的 `.gitkeep` 若存在也不得 fan out。
-- 新增或修改 Skill 時，先在 `catalog/skills-catalog.json` 對應的 external source Repository 維護 lowercase kebab-case 目錄、`SKILL.md`、metadata 與所需資源；合併後才更新 source pin、lock、profiles 或 lifecycle。
+- 本 Repository 不得追蹤共用 Skill source；空目錄用的 `.gitkeep` 若存在也不得 fan out。
+- 新增或修改 Skill 時，先在 `catalog/skills-catalog.json` 對應的 external source Repository 依 `docs/standards/skill-repository-standard.md` 維護 stable package、`SKILL.md`、`agents/openai.yaml`、source inventory 與所需資源；合併後才更新 source pin、lock、profiles 或 lifecycle。
+- SYP-155～159 migration 完成前，production Catalog/Lock 可繼續指向 legacy `.agents/skills/<skill-id>` source path；migration 後 canonical source root 為 `skills/<skill-id>`。不得在 SYP-167 階段先修改 production pin 造成 runtime 中斷。
 - Catalog 只列入明確供 AI-Instructions consumers 選取的共用 Skill。`Skill-Darktide-Translate`（SYP-88／SYP-92）維持獨立產品，不得加入本 Repository 的 source、Catalog、profile、lock 或 bootstrap fan-out。
 - bootstrap 必須忽略 instruction archive 中可能存在的 Skill source，並只組合經 Catalog selection、immutable archive hash 與 per-Skill content hash 驗證的 external Skills。
-- Skill source 與目標仍維持 `.agents/skills/<skill-id>/**` 平面路徑；同步支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
+- Consumer target path 仍依 host/runtime contract 管理；目前 production bootstrap 的受管 Skill target 為 `.agents/skills/<skill-id>/**`。同步支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
 
 bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 中的受管 Instructions、Skills 與 manifest 是 branch-independent 的個人本機 runtime artifacts；bootstrap 必須把精確路徑寫入 `.git/info/exclude` 並保留 `PersonalAgent` recovery evidence。正常同步不得 stage、commit 或 push；若 reserved Agent artifact 已被 Git tracked，bootstrap 必須先在 Repository 外完整備份檔案與 Git 狀態，以隔離 index 建立只包含精確 reserved path deletions 的一次性本機 remediation commit，再重建最新 runtime 並繼續同步，且永遠不得自動 push consumer Repository。Reserved 範圍內的 customized／unmanaged artifact 必須先備份再遷移；範圍外 tracked file 或無法安全隔離的狀態仍須 fail closed，不得擴大刪除或納入無關 staged、unstaged、untracked 變更。
 
@@ -98,13 +100,14 @@ bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標
 
 ## 修改流程
 
-1. 判斷內容屬於共通 Base、條件式模組、共用 Agent Skill 或平台專屬內容。
-2. 依「正向規則設計原則」確認規則以期望結果、判斷依據與可採用行為為核心。
-3. 先修改繁體中文來源，再同步適用的平台與英文版本。
-4. 確認各版本的規則、例外與載入條件一致。
-5. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
-6. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
-7. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
-8. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
+1. 判斷內容屬於共通 Base、條件式模組、Agent Skill Standard、共用 Agent Skill 或平台專屬內容。
+2. 若涉及 Agent Skill repository lifecycle/security/conformance policy，先修改 `docs/standards/` normative authority，再同步 reference implementation / source repositories；不得反向從單一 implementation 私自建立 policy。
+3. 依「正向規則設計原則」確認規則以期望結果、判斷依據與可採用行為為核心。
+4. 先修改繁體中文來源，再同步適用的平台與英文版本。
+5. 確認各版本的規則、例外與載入條件一致。
+6. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
+7. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
+8. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
+9. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
 
-純 Markdown Instructions 修改不需要單元測試。若新舊要求衝突，或 fan-out 範圍不明且會影響產物，停止修改並詢問使用者。
+純 Markdown Instructions / Standard 文件修改不需要額外建立產品單元測試；若修改 executable Catalog/runtime contract，仍必須執行對應 contract tests。若新舊要求衝突，以 `docs/standards/` 已核准的較新 normative Standard 為共用 Skill policy authority；若 fan-out/runtime migration 範圍不明且會影響 production，停止 mutation 並先保留現行 immutable pins。
