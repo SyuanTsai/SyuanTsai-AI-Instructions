@@ -37,16 +37,6 @@ $trustedGoEnvironment = [ordered]@{
     'GOINSECURE' = ''
 }
 
-$pipSourceOverrideNames = @(
-    'PIP_EXTRA_INDEX_URL',
-    'PIP_CONFIG_FILE',
-    'PIP_FIND_LINKS',
-    'PIP_TRUSTED_HOST',
-    'PIP_NO_INDEX',
-    'PIP_CERT',
-    'PIP_CLIENT_CERT'
-)
-
 function Normalize-RegistryUri {
     param([Parameter(Mandatory = $true)][string] $Value)
 
@@ -134,7 +124,10 @@ function Get-Policy {
     if ((Normalize-RegistryUri -Value ([string]$skillSpector.pythonPackageIndex)) -cne (Normalize-RegistryUri -Value $trustedPythonIndex)) {
         throw "Untrusted SkillSpector Python package index '$($skillSpector.pythonPackageIndex)'. Expected '$trustedPythonIndex'."
     }
+    $allowedInherited = @($skillSpector.pythonDistribution.allowedInheritedEnvironment)
     if ([string]$skillSpector.pythonDistribution.configIsolation -cne 'os.devnull' -or
+        [string]$skillSpector.pythonDistribution.environmentOverridePolicy -cne 'deny-by-default' -or
+        $allowedInherited.Count -ne 1 -or [string]$allowedInherited[0] -cne 'PIP_INDEX_URL' -or
         -not [bool]$skillSpector.pythonDistribution.onlyBinary -or
         -not [bool]$skillSpector.pythonDistribution.disableCache -or
         [string]$skillSpector.pythonDistribution.dependencyAcquisition -cne 'verified-wheelhouse' -or
@@ -273,23 +266,30 @@ function Assert-SkillSpectorWheelIdentity {
     }
 }
 
+function Get-ProcessPipEnvironmentNames {
+    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $_ -match '^PIP_' } |
+        Sort-Object -Unique)
+}
+
 function Assert-NoConflictingPipEnvironment {
     param([Parameter(Mandatory = $true)][string] $ApprovedIndex)
 
     $expectedIndex = Normalize-RegistryUri -Value $ApprovedIndex
-    $indexOverride = [Environment]::GetEnvironmentVariable('PIP_INDEX_URL', [EnvironmentVariableTarget]::Process)
-    if (-not [string]::IsNullOrWhiteSpace($indexOverride)) {
-        $actualIndex = Normalize-RegistryUri -Value $indexOverride
-        if ($actualIndex -cne $expectedIndex) {
-            throw "Untrusted pip environment override for 'PIP_INDEX_URL': '$actualIndex'. Expected '$expectedIndex'."
-        }
-    }
-
-    foreach ($name in $pipSourceOverrideNames) {
+    foreach ($name in Get-ProcessPipEnvironmentNames) {
         $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
-        if (-not [string]::IsNullOrWhiteSpace($actual)) {
-            throw "Untrusted pip environment override for '$name': '$actual'."
+        if ([string]::IsNullOrWhiteSpace($actual)) {
+            continue
         }
+        if ($name -ceq 'PIP_INDEX_URL') {
+            $actualIndex = Normalize-RegistryUri -Value $actual
+            if ($actualIndex -cne $expectedIndex) {
+                throw "Untrusted pip environment override for 'PIP_INDEX_URL': '$actualIndex'. Expected '$expectedIndex'."
+            }
+            continue
+        }
+        throw "Untrusted pip environment override for '$name': '$actual'."
     }
 }
 
@@ -301,13 +301,13 @@ function Invoke-WithApprovedPipEnvironment {
 
     Assert-NoConflictingPipEnvironment -ApprovedIndex $ApprovedIndex
 
-    $names = @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') + $pipSourceOverrideNames
+    $names = @((Get-ProcessPipEnvironmentNames) + @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') | Sort-Object -Unique)
     $previous = [ordered]@{}
     $nullDevice = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'NUL' } else { '/dev/null' }
     $normalizedIndex = Normalize-RegistryUri -Value $ApprovedIndex
 
     try {
-        foreach ($name in $names | Select-Object -Unique) {
+        foreach ($name in $names) {
             $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
         }
