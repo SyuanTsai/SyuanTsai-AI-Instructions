@@ -172,6 +172,36 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
     }
 
+    It 'UnitT29a_accepts_the_approved_Go_environment_and_executes_the_action' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $expectedEnvironment = [ordered]@{
+            'GOENV' = 'off'
+            'GOPROXY' = 'https://proxy.golang.org'
+            'GOSUMDB' = 'sum.golang.org'
+            'GOPRIVATE' = ''
+            'GONOPROXY' = 'none'
+            'GONOSUMDB' = 'none'
+            'GOINSECURE' = ''
+        }
+
+        $previous = [ordered]@{}
+        try {
+            foreach ($entry in $expectedEnvironment.GetEnumerator()) {
+                $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $null, [EnvironmentVariableTarget]::Process)
+            }
+
+            $result = Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -Action { 'approved-action-ran' }
+            Assert-Equal $result 'approved-action-ran' 'Approved Go environment must reach the action.'
+        }
+        finally {
+            foreach ($entry in $previous.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+            }
+        }
+    }
+
     It 'UnitT30_validates_openai_agent_metadata_against_the_OpenAI_minimum_contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
