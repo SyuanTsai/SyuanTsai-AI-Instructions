@@ -979,6 +979,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
+        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$fixtureRoot)")) 'Shared gate must explicitly allow only the Standard-required agents metadata directory during skill-validator structure validation.'
+        Assert-Match $gate "mode='structure-json-allow-agents'" 'Authority evidence must record the exact skill-validator compatibility mode.'
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
         Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$fixtureRoot' 'Shared gate must pass the frozen skill-tools entry point and check command without a wrapper re-resolution.'
         Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'

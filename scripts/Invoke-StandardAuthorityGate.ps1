@@ -939,7 +939,7 @@ Assert-AuthoritySkillSpectorReport `
 
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
-    -Arguments @('-o', 'json', 'validate', 'structure', $fixtureRoot) `
+    -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $fixtureRoot) `
     -Context 'skill-validator package validation' `
     -DiagnosticRoot $runRoot
 $skillValidatorOutputPath = Join-Path $runRoot 'skill-validator-report.json'
@@ -999,7 +999,7 @@ $summary = [ordered]@{
     })
     stages = @(
         [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm'; report='skillspector-report.json' },
-        [ordered]@{ name='skill-validator-package'; result='passed'; exitCode=0; mode='structure-json'; report='skill-validator-report.json' },
+        [ordered]@{ name='skill-validator-package'; result='passed'; exitCode=0; mode='structure-json-allow-agents'; report='skill-validator-report.json' },
         [ordered]@{ name='skill-tools-check'; result='passed'; exitCode=0; mode='sarif-error'; report='skill-tools-report.sarif.json' },
         [ordered]@{
             name='pester-authority'; result='passed'; exitCode=0; mode='authority-inventory'; total=[int]$authorityResult.TotalCount

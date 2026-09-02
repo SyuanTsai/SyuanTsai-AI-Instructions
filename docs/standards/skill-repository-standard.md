@@ -330,6 +330,8 @@ Canonical authority workflow **MUST** 在中央 resolver 前，以 full commit S
 
 `skill-validator` 的 module resolution 與 installation **MUST** 使用該次 resolver invocation 專用、初始為空的暫存 `GOMODCACHE` 與 `GOCACHE`，並在 invocation 結束後移除。Resolver **MUST** 在任何 `go list` / `go install` 前拒絕 inherited `GOMODCACHE`、inherited `GOCACHE`、`GOROOT`、`GOTOOLDIR`、target/build selector 與非空 `GOFLAGS`：shared module cache 可能重用 caller-controlled 的下載/解壓縮內容，shared build cache 可能重用非本次 trusted resolution 產生的 compilation output，`GOROOT` / target selectors 可替換 compiler、stdlib 或產物目標，而 `GOFLAGS` 可注入改變 build behavior 的參數。鎖定 `GOPROXY` / `GOSUMDB` 不能取代這些 build-input 與 cache isolation controls。
 
+當受驗 package 包含本 Standard 定義的 `agents/openai.yaml` 時，central adapter **MUST** 以 exact `--allow-dirs=agents` 執行 `skill-validator validate structure`，明確宣告這個 platform metadata directory；不得以接受 exit code `2`、忽略 warning 或允許任意其他目錄取代。Machine-readable report 仍 **MUST** 為 `passed = true`、`errors = 0`、`warnings = 0`，且 central gate **MUST** 另外驗證 exact fixture/package inventory 與 `agents/openai.yaml` contract。
+
 Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver 可以使用 provider-specific package manager，但 provider、package/repository identity 與 validation semantics 由中央 resolver 決定。
 
 `validation-toolchain.json` 的 `recordResolvedIdentityWhenAvailable` **MUST** 為 `true`，並由 authority regression 保護。
