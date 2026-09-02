@@ -1,0 +1,65 @@
+name: Standards Conformance
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/standards/**'
+      - 'tests/skill-repository-standard.Tests.ps1'
+      - '.github/workflows/standards-conformance.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/standards/**'
+      - 'tests/skill-repository-standard.Tests.ps1'
+      - '.github/workflows/standards-conformance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-stable-authority-regression:
+    name: Standard v1 (latest stable tooling)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest stable Pester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
+          $pester = Get-Module Pester -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Latest stable Pester could not be resolved.' }
+          Import-Module $pester.Path -Force
+          Write-Host "Resolved Pester version: $($pester.Version)"
+          "PESTER_RESOLVED_VERSION=$($pester.Version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Validate toolchain latest-stable policy
+        shell: pwsh
+        run: |
+          $policy = Get-Content -Raw -Encoding UTF8 ./docs/standards/validation-toolchain.json | ConvertFrom-Json
+          if ($policy.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
+          foreach ($property in $policy.tools.PSObject.Properties) {
+            if ($property.Value.channel -ne 'latest-stable') {
+              throw "Tool '$($property.Name)' is not configured for latest-stable."
+            }
+          }
+          Write-Host "Canonical validation policy: $($policy.policy)"
+          Write-Host "Pester frozen for this run: $env:PESTER_RESOLVED_VERSION"
+
+      - name: Run Standard v1 authority regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
+          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ($result.FailedCount -gt 0) { exit 1 }
+
+      - name: Check whitespace
+        shell: bash
+        run: git diff --check origin/main...HEAD
