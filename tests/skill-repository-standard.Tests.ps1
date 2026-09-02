@@ -321,7 +321,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
     }
 
-    It 'UnitT26f_rejects_direct_Python_dependency_references_before_network_resolution' {
+    It 'UnitT26f_distinguishes_root_pre_network_and_transitive_post_materialization_direct_reference_checks' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
         $wheelhouse = Join-Path $TestDrive 'direct-reference-wheelhouse'
@@ -348,6 +348,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $directReferenceCheck = $resolveBody.IndexOf('Assert-NoPythonDirectReferences')
         $dependencyDownload = $resolveBody.IndexOf("'pip', 'download'")
         Assert-True ($directReferenceCheck -ge 0 -and $directReferenceCheck -lt $dependencyDownload) 'Root direct references must be rejected before pip dependency download.'
+
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        Assert-Match $standard 'root wheel.*direct URL.*dependency network resolution' 'Standard must preserve root direct-reference pre-network rejection.'
+        Assert-Match $standard 'post-materialization check.*不得被描述成' 'Standard must state the transitive direct-reference check is post-materialization, not a pre-network proof.'
+        Assert-Match $standard 'transport/sandbox egress control' 'Stronger transitive network-egress claims must require an actual transport or sandbox control.'
     }
 
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
@@ -358,6 +363,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Workflow must resolve Pester through the central resolver.'
         Assert-Match $workflow 'interpreterIsolation=python-isolated-mode' 'Workflow must verify Python isolation in resolved SkillSpector identity.'
         Assert-Match $workflow 'directReferences=blocked' 'Workflow must verify SkillSpector direct-reference blocking.'
+        Assert-Match $workflow 'persist-credentials:\s*false' 'Authority checkout must not persist repository credentials.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
 
         Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
@@ -369,6 +375,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $requiredWorkflow 'directReferences=blocked' 'Required context must verify SkillSpector direct-reference blocking.'
         Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Required context must obtain latest Pester through the resolver.'
         Assert-Match $requiredWorkflow 'skill-repository-standard\.Tests\.ps1' 'Required context must run the authority regression.'
+        Assert-Equal ([regex]::Matches($requiredWorkflow, 'persist-credentials:\s*false')).Count 3 'Every checkout lane must avoid persisted repository credentials.'
+        Assert-Match $requiredWorkflow 'Remove-Item Env:GITHUB_TOKEN' 'Required authority gate must drop the API token before third-party module import/tests.'
     }
 
     It 'UnitT28_rejects_prerelease_and_pseudo_versions_for_skill_validator' {
@@ -549,6 +557,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'pypi.org/simple' 'Review matrix must record the approved Python package index.'
         Assert-Match $matrix 'Python `-I` isolated mode' 'Review matrix must record inherited Python interpreter isolation.'
         Assert-Match $matrix 'direct references' 'Review matrix must record direct-reference blocking.'
+        Assert-Match $matrix 'post-materialization' 'Review matrix must distinguish transitive post-materialization checking from root pre-network rejection.'
+        Assert-Match $matrix 'persist-credentials' 'Review matrix must record CI checkout credential isolation.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
     }
