@@ -288,11 +288,13 @@ function ConvertFrom-PythonMetadataText {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    $unfoldedText = [regex]::Replace($Text, "\r?\n[ `t]+", ' ')
-    $nameMatches = @([regex]::Matches($unfoldedText, '(?m)^Name:\s*(.+?)\s*$'))
-    $versionMatches = @([regex]::Matches($unfoldedText, '(?m)^Version:\s*(.+?)\s*$'))
+    $headerBoundary = [regex]::Match($Text, '\r?\n\r?\n')
+    $headerText = if ($headerBoundary.Success) { $Text.Substring(0, $headerBoundary.Index) } else { $Text }
+    $unfoldedHeaders = [regex]::Replace($headerText, "\r?\n[ `t]+", ' ')
+    $nameMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Name:[ \t]*([^\r\n]+?)[ \t]*\r?$'))
+    $versionMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Version:[ \t]*([^\r\n]+?)[ \t]*\r?$'))
     if ($nameMatches.Count -ne 1 -or $versionMatches.Count -ne 1) {
-        throw "$Context must contain exactly one Name field and one Version field. Found Name=$($nameMatches.Count), Version=$($versionMatches.Count)."
+        throw "$Context must contain exactly one Name field and one Version field in its metadata header section. Found Name=$($nameMatches.Count), Version=$($versionMatches.Count)."
     }
 
     $name = $nameMatches[0].Groups[1].Value.Trim()
@@ -305,7 +307,7 @@ function ConvertFrom-PythonMetadataText {
         throw "$Context contains an unsafe Python distribution Version '$version'."
     }
 
-    $requiresDist = @([regex]::Matches($unfoldedText, '(?m)^Requires-Dist:\s*(.+?)\s*$') | ForEach-Object {
+    $requiresDist = @([regex]::Matches($unfoldedHeaders, '(?im)^Requires-Dist:[ \t]*([^\r\n]+?)[ \t]*\r?$') | ForEach-Object {
         $_.Groups[1].Value.Trim()
     })
 
@@ -607,10 +609,10 @@ function Invoke-WithApprovedGoEnvironment {
         throw "Untrusted Go environment override for 'GOCACHE': '$inheritedBuildCache'. Expected an unset value."
     }
     if ([string]$DistributionPolicy.moduleCacheIsolation -cne 'temporary-empty') {
-        throw "Unsupported Go module cache isolation '$($DistributionPolicy.moduleCacheIsolation)'."
+        throw "Unsupported Go module cache isolation '$($DistributionPolicy.moduleCacheIsolation)."
     }
     if ([string]$DistributionPolicy.buildCacheIsolation -cne 'temporary-empty') {
-        throw "Unsupported Go build cache isolation '$($DistributionPolicy.buildCacheIsolation)'."
+        throw "Unsupported Go build cache isolation '$($DistributionPolicy.buildCacheIsolation)."
     }
 
     $previous = [ordered]@{}
