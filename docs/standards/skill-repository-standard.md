@@ -107,13 +107,13 @@ Skill-specific `scripts/`、`references/`、`assets/` **MAY** 存在。Repositor
 
 - 檔案 **MUST** 是 syntactically valid YAML；
 - root **MUST** 是 mapping/object；
-- YAML keys **SHOULD** 保持 unquoted；all string scalar values **MUST** be quoted；
+- YAML keys **MUST** remain unquoted；all string scalar values **MUST** be quoted；
 - `interface` **MUST** 存在且為 mapping/object；
 - `interface.display_name` **MUST** 是 non-empty quoted string；
 - `interface.short_description` **MUST** 是 25～64 characters inclusive 的 quoted string；
 - `interface.default_prompt` **MUST** 是 non-empty quoted string；
 - `interface.default_prompt` **MUST** 明確 reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；
-- malformed YAML、unquoted string value、缺欄位、空白欄位、`short_description` 長度超界或錯誤 Skill identity **MUST** fail closed。
+- malformed YAML、quoted key、unquoted string value、缺欄位、空白欄位、`short_description` 長度超界或錯誤 Skill identity **MUST** fail closed。
 
 Optional `interface` / dependency string fields若存在，也 **MUST** 遵守上游 quoted-string rule。Repository **MAY** 驗證額外 host metadata，但不得降低上述最低 contract。
 
@@ -248,33 +248,42 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 
 - SkillSpector → `NVIDIA/SkillSpector`；
 - skill-validator → `github.com/agent-ecosystem/skill-validator/cmd/skill-validator`；
-- skill-tools → `npm:skill-tools`；
+- skill-tools → `npm:skill-tools`，且 approved registry **MUST** 為 `https://registry.npmjs.org/`；
 - Pester → `PowerShellGallery:Pester`。
 
-Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。任一 source 偏離 trust anchor，即使 channel 仍為 `latest-stable`，整個 canonical validation **MUST** fail closed。
+Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source 或 endpoint 偏離 trust anchor，即使 package name 與 channel 不變，整個 canonical validation **MUST** fail closed。
 
-Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver可以使用 provider-specific package manager，但 provider、package/repository identity與 validation semantics由中央 resolver決定。
+對 `skill-tools`，resolver **MUST**：
+
+- 驗證中央 policy 的 registry 為 `https://registry.npmjs.org/`；
+- 在任何 package lookup 前拒絕不符的 `NPM_CONFIG_REGISTRY` 或 `npm config get registry`；
+- 每個 `npm view` / `npm install` **MUST** 明確指定 approved registry；
+- resolved identity **MUST** 包含 package integrity 與 registry evidence。
+
+對 `skill-validator`，Go `@latest` 解析結果只有純 release SemVer（例如 `v1.6.1`）可視為 latest stable；prerelease（例如 `v1.7.0-rc1`）與 pseudo-version **MUST** fail closed，不得因 Go 能解析就當成 stable release。
+
+Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver 可以使用 provider-specific package manager，但 provider、package/repository identity 與 validation semantics 由中央 resolver 決定。
 
 `validation-toolchain.json` 的 `recordResolvedIdentityWhenAvailable` **MUST** 為 `true`，並由 authority regression 保護。
 
 每次 canonical validation run **MUST**：
 
 1. 在 run 開始時驗證所有 tool source trust anchors；
-2. 依中央 policy 從 approved source 解析該 run 所需工具的 latest stable version；
+2. 依中央 policy 從 approved source / endpoint 解析該 run 所需工具的 latest stable version；
 3. 記錄 resolved version；
 4. provider 可提供 immutable identity、module/package coordinate、package integrity、release commit 或 asset digest 時 **MUST** 記錄 resolved identity；
 5. 將 resolved toolset freeze 到該次 run 結束，避免同一 candidate 的不同 stage 在 run 中途漂移；
-6. 顯示足以 audit 的 source、version 與 identity evidence；
-7. 若 approved source、latest stable、identity/integrity evidence無法依 provider contract 解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version或另一個 source。
+6. 顯示足以 audit 的 source、endpoint、version 與 identity evidence；
+7. 若 approved source/endpoint、latest stable、identity/integrity evidence 無法依 provider contract 解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version 或另一個 source。
 
-合法 validation tool source 變更是**trust-root change**。此類 PR **MUST** 同時修改：
+合法 validation tool source / endpoint 變更是**trust-root change**。此類 PR **MUST** 同時修改：
 
 - `validation-toolchain.json`；
 - `Resolve-StandardValidationTool.ps1` trust anchor / resolver adapter；
 - authority regression；
 - 變更理由與供應鏈 review evidence。
 
-只修改 JSON `source` 而沒有同步更新 resolver/test **MUST** 被 conformance gate 阻擋。
+只修改 JSON `source` / registry 而沒有同步更新 resolver/test **MUST** 被 conformance gate 阻擋。
 
 Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 自然重新解析當時 latest stable。
 
@@ -379,7 +388,7 @@ Repository Validation **MUST** 驗證至少：
 - package inventory exact match；
 - required files；
 - `SKILL.md` name identity；
-- `agents/openai.yaml` YAML syntax、quoted string values、required fields、`short_description` 25～64 character bound 與 `$<skill-id>` identity binding；
+- `agents/openai.yaml` YAML syntax、unquoted keys、quoted string values、required fields、`short_description` 25～64 character bound 與 `$<skill-id>` identity binding；
 - safe relative paths；
 - source/inventory integrity contract；
 - repository-specific declared adapters/config；
@@ -390,10 +399,11 @@ Repository Validation **MUST** 驗證至少：
 本 authority repository **MUST** 維護 `tests/skill-repository-standard.Tests.ps1`，至少保護：
 
 - normative documents / evidence index；
-- validation-tool approved sources；
-- latest-stable channel、resolved identity recording與 central resolver trust boundary；
-- 負向 source-tampering fail-closed behavior；
-- `agents/openai.yaml` quoted-string / 25～64 / identity contract；
+- validation-tool approved sources 與 approved distribution endpoints；
+- latest-stable channel、resolved identity recording 與 central resolver trust boundary；
+- 負向 source / registry tampering fail-closed behavior；
+- stable Go release semantics，包含 prerelease / pseudo-version rejection；
+- `agents/openai.yaml` unquoted-key / quoted-string / 25～64 / identity contract；
 - release/install approval boundary；
 - Standard self-conformance requirement；
 - review matrix 與 SYP-167 authority deliverables 不得過期。
@@ -522,8 +532,8 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 2. `SKILL.md` 與 `agents/openai.yaml` metadata contract；
 3. canonical lifecycle stage ordering；
 4. single validation entry contract；
-5. validation tool approved-source enforcement；
-6. latest-stable resolution / resolved identity / per-run freeze evidence；
+5. validation tool approved-source / approved-endpoint enforcement；
+6. latest-stable resolution / stable-release semantics / resolved identity / per-run freeze evidence；
 7. SkillSpector Static Gate + analyzer completeness；
 8. severity/fail-closed semantics；
 9. tests/regression/conformance；
@@ -571,7 +581,9 @@ Migration 順序：
 - hard-code CI Skill list 造成新增 Skill 可繞過 security gate；
 - local、pre-push、CI 使用不同 pass/block policy；
 - scanner/analyzer 未完整執行仍 pass；
-- 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source`；
+- 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
+- `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
+- 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
 - 同一 validation run 中途漂移 tool version；
@@ -581,5 +593,5 @@ Migration 順序：
 - 將 legitimate network/MCP/script capability 一律視為 vulnerability；
 - 將 AI Review 當作 Human Release Approval；
 - 將每次 approved release installation 誤當成新的 release approval；
-- 只檢查 `agents/openai.yaml` 存在而不驗證 YAML、quoted strings、25～64 `short_description`、required fields 與 Skill identity；
+- 只檢查 `agents/openai.yaml` 存在而不驗證 YAML、unquoted keys、quoted strings、25～64 `short_description`、required fields 與 Skill identity；
 - 在 source repository 私自建立與本標準競爭的 lifecycle/security/tool policy。
