@@ -21,7 +21,7 @@
 | Validation entry point | repo contract + Pester | `scripts/validate.ps1` + Pester | catalog validation + pin script | pre-push orchestration + component diagnostics | repository/API validation + quality gates | Each repo **MUST** expose one canonical validation entry contract used by local/CI; diagnostic subcommands **MAY** exist |
 | Local validation | PowerShell contract + Pester | PowerShell validator + Pester | PowerShell scripts | HEAD-bound pre-push gate | PowerShell tests | Local gate **MUST** execute same policy as CI; no divergent judgment logic |
 | CI workflow | `skill-validator` / `skill-tools` + repository tests | shared quality gate + repo tests | shared quality gate + catalog tests | shared quality gate + strict domain tests | shared quality gate + `gh skill publish --dry-run` + routing tests | Common spec/security/repo/test stages **MUST** be shared contract; host/domain checks are extensions |
-| Validation tool policy | quality tools currently resolve latest while Pester compatibility lanes may pin older versions | mixed repository-local tool resolution | mixed repository-local tool resolution | strong gates but repository-local tool acquisition | latest quality tools plus host-specific checks | Formal validation **MUST** resolve central approved tool sources at latest stable per run, record version/identity and freeze that run; older pins are compatibility-only |
+| Validation tool policy | quality tools currently resolve latest while Pester compatibility lanes may pin older versions | mixed repository-local tool resolution | mixed repository-local tool resolution | strong gates but repository-local tool acquisition | latest quality tools plus host-specific checks | Formal validation **MUST** resolve central approved sources/endpoints at latest stable per run, record version/identity and freeze that run; `skill-tools` is bound to `https://registry.npmjs.org/`; Go prerelease/pseudo versions are not stable releases; older pins are compatibility-only |
 | Tests / regression | repository and Skill regressions | repository contract | catalog regressions | extensive functional/state/provenance regressions | API safety/routing/host regressions | Conformance + repository regression **MUST**; domain regression **MUST** when domain behavior exists |
 | Release / publish | immutable SHA/tag consumer pin | release/rollback contract | explicit `VERSION`, release/rollback | strong release/pin/rollback evidence | GitHub Skill publishing/install path | Publish **MUST** follow immutable validated candidate; GitHub-hosted Skill repos **SHOULD** dry-run publish compatibility |
 | Security checks | current general quality gates | limited repository safety | limited repository safety | high-risk external-write/state controls | credential/network/MCP/API safety controls | Security policy **MUST** be centralized; legitimate capability is not automatically a vulnerability |
@@ -51,9 +51,9 @@ All repositories need common Skill/package validation and repository contract va
 
 Jira/MCP/network/environment variables/executable scripts are legitimate capabilities in some repositories. Static or semantic scanners may flag them, but capability presence alone must not equal BLOCK. Standard v1 requires deterministic severity policy, analyzer completeness, explicit suppression/exception evidence, and Human Release Approval for accepted risk.
 
-### 6. Validation tool source and version are both supply-chain properties
+### 6. Validation tool source, distribution endpoint and version are supply-chain properties
 
-Existing repositories resolve quality/security/test tools differently. Checking only a tool's version channel is insufficient because a changed package or repository source could still claim `latest-stable`. SYP-167 therefore adds central `validation-toolchain.json`, `scripts/Resolve-StandardValidationTool.ps1`, authority-level regression tests and Standards Conformance CI. Canonical runs validate approved sources first, resolve latest stable from those sources, record resolved version/identity, and freeze the resolved tool for that run.
+Existing repositories resolve quality/security/test tools differently. Checking only a tool's version channel is insufficient because a changed package/repository source or package-manager endpoint could still claim `latest-stable`. SYP-167 therefore adds central `validation-toolchain.json`, `scripts/Resolve-StandardValidationTool.ps1`, authority-level regression tests and Standards Conformance CI. Canonical runs validate approved sources/endpoints first, resolve latest stable from those sources, reject prerelease/pseudo versions where provider semantics require a stable release, record resolved version/identity, and freeze the resolved tool for that run.
 
 ## SYP-167 authority deliverables
 
@@ -62,8 +62,8 @@ SYP-167 now establishes more than prose policy. The authority repository contain
 - normative Standard v1;
 - cross-repository review evidence;
 - machine-readable validation tool policy;
-- trusted-source validation tool resolver;
-- authority-level regression tests;
+- trusted-source / trusted-endpoint validation tool resolver;
+- authority-level regression tests, including source/registry/version negative cases;
 - Standards Conformance CI using the central resolver.
 
 These are authority-level controls only; SYP-167 still does **not** migrate any external Skill repository or repin production Catalog/Lock content.
