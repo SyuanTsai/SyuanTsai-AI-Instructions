@@ -57,7 +57,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
     It 'UnitT30_validates_openai_agent_metadata_beyond_file_presence' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
-        Assert-Match $standard 'agents/openai\.yaml.*MUST.*valid YAML' 'Standard must require valid YAML.'
+        Assert-Match $standard 'agents/openai\.yaml.*contract' 'Standard must define an openai.yaml content contract.'
+        Assert-Match $standard 'syntactically valid YAML' 'Standard must require valid YAML.'
         Assert-Match $standard 'interface\.display_name' 'Standard must require display_name.'
         Assert-Match $standard 'interface\.short_description' 'Standard must require short_description.'
         Assert-Match $standard 'interface\.default_prompt' 'Standard must require default_prompt.'
