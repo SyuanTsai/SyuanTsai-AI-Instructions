@@ -8,6 +8,11 @@ Describe 'Agent Skill authority workflow contract' {
             '.github\workflows\syp101-production-smoke.yml' = 2
             '.github\workflows\syp86-production-lock.yml' = 2
         }
+        $script:AuthorityTests = @(
+            'skill-repository-standard.Tests.ps1'
+            'skill-repository-workflows.Tests.ps1'
+            'standard-validation-resolver-hardening.Tests.ps1'
+        )
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -42,10 +47,17 @@ Describe 'Agent Skill authority workflow contract' {
         }
     }
 
-    It 'UnitT20_runs_dedicated_authority_CI_when_the_required_bridge_changes' {
-        $path = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
-        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $path
-        Assert-Equal ([regex]::Matches($workflow, "'\.github/workflows/pr8-powershell-validation\.yml'")).Count 2 'Push and pull-request path filters must both include the required authority bridge.'
+    It 'UnitT20_runs_dedicated_authority_CI_for_every_authority_file_and_bridge_change' {
+        $standardsPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $requiredPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+
+        Assert-Equal ([regex]::Matches($standards, "'\.github/workflows/pr8-powershell-validation\.yml'")).Count 2 'Push and pull-request path filters must both include the required authority bridge.'
+        foreach ($testName in $script:AuthorityTests) {
+            Assert-Equal ([regex]::Matches($standards, [regex]::Escape($testName))).Count 3 "Dedicated authority workflow must watch and execute '$testName'."
+            Assert-Equal ([regex]::Matches($required, [regex]::Escape($testName))).Count 1 "Required Composition gate must execute '$testName'."
+        }
     }
 
     It 'UnitT30_checks_the_actual_event_commit_range_instead_of_an_empty_main_range' {
@@ -58,6 +70,17 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Match $workflow 'GITHUB_EVENT_NAME' "Workflow '$path' must select the commit range by event type."
             Assert-Match $workflow 'git diff --check' "Workflow '$path' must run a whitespace check."
             Assert-NotMatch $workflow 'git diff --check origin/main\.\.\.HEAD' "Workflow '$path' must not use a range that becomes empty on a main-branch push."
+        }
+    }
+
+    It 'UnitT40_enforces_verification_only_install_and_static_metadata_receipts' {
+        $standardsPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $requiredPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
+        foreach ($path in @($standardsPath, $requiredPath)) {
+            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $path
+            Assert-Match $workflow 'installDisposition.*ephemeral-verification' "Workflow '$path' must enforce verification-only resolver installation."
+            Assert-Match $workflow 'credentialIsolation.*github-token-cleared-before-python' "Workflow '$path' must enforce GitHub credential isolation before Python."
+            Assert-Match $workflow 'installedMetadataVerification.*static-dist-info-metadata' "Workflow '$path' must enforce static installed metadata verification."
         }
     }
 }
