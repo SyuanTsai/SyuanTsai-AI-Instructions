@@ -129,7 +129,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run required Standard v1 authority gate
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policyReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-policy.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ValidatePolicyOnly -OutputPath $policyReceipt | Out-Host
+          $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $policyReceipt | ConvertFrom-Json
+          if ($policy.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
+          if ($policy.sourceTrust.enforcement -ne 'exact-approved-source') { throw 'Unexpected source trust enforcement.' }
+          if (-not [bool]$policy.sourceTrust.failClosedOnMismatch) { throw 'Source trust must fail closed.' }
+
+          $skillSpectorReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-skillspector.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName skillspector -Install -OutputPath $skillSpectorReceipt | Out-Host
+          $skillSpector = Get-Content -Raw -Encoding UTF8 -LiteralPath $skillSpectorReceipt | ConvertFrom-Json
+          if ($skillSpector.source -ne 'NVIDIA/SkillSpector') { throw 'Unexpected SkillSpector source.' }
+          if ($skillSpector.installEnvironment -ne 'isolated-venv') { throw 'SkillSpector was not installed in the approved isolated environment.' }
+          if ([string]$skillSpector.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure identity is missing.' }
+          if (@($skillSpector.dependencyClosure).Count -le 1) { throw 'SkillSpector runtime dependency closure is incomplete.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector identity does not bind the dependency closure.' }
+
+          $pesterReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-pester.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName pester -Install -OutputPath $pesterReceipt | Out-Host
+          $pester = Get-Content -Raw -Encoding UTF8 -LiteralPath $pesterReceipt | ConvertFrom-Json
+          if ($pester.source -ne 'PowerShellGallery:Pester') { throw 'Unexpected Pester source.' }
+          if ([string]::IsNullOrWhiteSpace([string]$pester.resolvedVersion)) { throw 'Pester version was not recorded.' }
+          Import-Module Pester -RequiredVersion $pester.resolvedVersion -Force
+          $authority = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
+          Write-Host "Authority tests: Total=$($authority.TotalCount) Passed=$($authority.PassedCount) Failed=$($authority.FailedCount)"
+          if ($authority.FailedCount -gt 0) { exit 1 }
+          git diff --check origin/main...HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
