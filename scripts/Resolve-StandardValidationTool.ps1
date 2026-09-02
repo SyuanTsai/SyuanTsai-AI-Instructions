@@ -25,6 +25,8 @@ $trustedRegistries = [ordered]@{
     'skill-tools' = 'https://registry.npmjs.org/'
 }
 
+$trustedPythonIndex = 'https://pypi.org/simple'
+
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
     'GOPROXY' = 'https://proxy.golang.org'
@@ -34,6 +36,16 @@ $trustedGoEnvironment = [ordered]@{
     'GONOSUMDB' = 'none'
     'GOINSECURE' = ''
 }
+
+$pipSourceOverrideNames = @(
+    'PIP_EXTRA_INDEX_URL',
+    'PIP_CONFIG_FILE',
+    'PIP_FIND_LINKS',
+    'PIP_TRUSTED_HOST',
+    'PIP_NO_INDEX',
+    'PIP_CERT',
+    'PIP_CLIENT_CERT'
+)
 
 function Normalize-RegistryUri {
     param([Parameter(Mandatory = $true)][string] $Value)
@@ -115,6 +127,23 @@ function Get-Policy {
         }
     }
 
+    $skillSpector = $policy.tools.skillspector
+    if ([string]$skillSpector.releaseVersionRule -cne 'v-semver-release-only') {
+        throw "Unexpected SkillSpector releaseVersionRule '$($skillSpector.releaseVersionRule)'."
+    }
+    if ((Normalize-RegistryUri -Value ([string]$skillSpector.pythonPackageIndex)) -cne (Normalize-RegistryUri -Value $trustedPythonIndex)) {
+        throw "Untrusted SkillSpector Python package index '$($skillSpector.pythonPackageIndex)'. Expected '$trustedPythonIndex'."
+    }
+    if ([string]$skillSpector.pythonDistribution.configIsolation -cne 'os.devnull' -or
+        -not [bool]$skillSpector.pythonDistribution.onlyBinary -or
+        -not [bool]$skillSpector.pythonDistribution.disableCache -or
+        [string]$skillSpector.pythonDistribution.dependencyAcquisition -cne 'verified-wheelhouse' -or
+        -not [bool]$skillSpector.pythonDistribution.installNoIndex -or
+        -not [bool]$skillSpector.pythonDistribution.requireHashes -or
+        -not [bool]$skillSpector.pythonDistribution.recordDependencyClosureHashes) {
+        throw 'SkillSpector Python dependency distribution policy is incomplete or untrusted.'
+    }
+
     $skillValidator = $policy.tools.'skill-validator'
     if ([string]$skillValidator.stableVersionRule -cne 'release-semver-only') {
         throw "Unexpected skill-validator stableVersionRule '$($skillValidator.stableVersionRule)'."
@@ -174,6 +203,176 @@ function Test-StableGoModuleVersion {
     param([Parameter(Mandatory = $true)][string] $Version)
 
     return $Version -match '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'
+}
+
+function Normalize-PythonPackageName {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    return (($Name.Trim().ToLowerInvariant()) -replace '[-_.]+', '-')
+}
+
+function Get-PythonWheelMetadata {
+    param([Parameter(Mandatory = $true)][string] $WheelPath)
+
+    if (-not (Test-Path -LiteralPath $WheelPath -PathType Leaf)) {
+        throw "Python wheel not found: $WheelPath"
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($WheelPath)
+    try {
+        $metadataEntries = @($archive.Entries | Where-Object { $_.FullName -match '[^/]+\.dist-info/METADATA$' })
+        if ($metadataEntries.Count -ne 1) {
+            throw "Expected exactly one dist-info/METADATA entry in '$WheelPath'; found $($metadataEntries.Count)."
+        }
+
+        $stream = $metadataEntries[0].Open()
+        $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+        try {
+            $text = $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+            $stream.Dispose()
+        }
+
+        $nameMatch = [regex]::Match($text, '(?m)^Name:\s*(.+?)\s*$')
+        $versionMatch = [regex]::Match($text, '(?m)^Version:\s*(.+?)\s*$')
+        if (-not $nameMatch.Success -or -not $versionMatch.Success) {
+            throw "Wheel METADATA in '$WheelPath' does not contain Name and Version."
+        }
+
+        return [ordered]@{
+            name = $nameMatch.Groups[1].Value.Trim()
+            version = $versionMatch.Groups[1].Value.Trim()
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Assert-SkillSpectorWheelIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string] $ReleaseVersion,
+        [Parameter(Mandatory = $true)][string] $WheelFileName,
+        [Parameter(Mandatory = $true)][string] $MetadataName,
+        [Parameter(Mandatory = $true)][string] $MetadataVersion
+    )
+
+    $expectedWheelName = "skillspector-$ReleaseVersion-py3-none-any.whl"
+    if ($WheelFileName -cne $expectedWheelName) {
+        throw "SkillSpector release/wheel version mismatch. Expected '$expectedWheelName', got '$WheelFileName'."
+    }
+    if ((Normalize-PythonPackageName -Name $MetadataName) -cne 'skillspector') {
+        throw "SkillSpector wheel METADATA Name mismatch. Expected 'skillspector', got '$MetadataName'."
+    }
+    if ($MetadataVersion -cne $ReleaseVersion) {
+        throw "SkillSpector wheel METADATA Version mismatch. Expected '$ReleaseVersion', got '$MetadataVersion'."
+    }
+}
+
+function Assert-NoConflictingPipEnvironment {
+    param([Parameter(Mandatory = $true)][string] $ApprovedIndex)
+
+    $expectedIndex = Normalize-RegistryUri -Value $ApprovedIndex
+    $indexOverride = [Environment]::GetEnvironmentVariable('PIP_INDEX_URL', [EnvironmentVariableTarget]::Process)
+    if (-not [string]::IsNullOrWhiteSpace($indexOverride)) {
+        $actualIndex = Normalize-RegistryUri -Value $indexOverride
+        if ($actualIndex -cne $expectedIndex) {
+            throw "Untrusted pip environment override for 'PIP_INDEX_URL': '$actualIndex'. Expected '$expectedIndex'."
+        }
+    }
+
+    foreach ($name in $pipSourceOverrideNames) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrWhiteSpace($actual)) {
+            throw "Untrusted pip environment override for '$name': '$actual'."
+        }
+    }
+}
+
+function Invoke-WithApprovedPipEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][string] $ApprovedIndex,
+        [Parameter(Mandatory = $true)][scriptblock] $Action
+    )
+
+    Assert-NoConflictingPipEnvironment -ApprovedIndex $ApprovedIndex
+
+    $names = @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') + $pipSourceOverrideNames
+    $previous = [ordered]@{}
+    $nullDevice = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'NUL' } else { '/dev/null' }
+    $normalizedIndex = Normalize-RegistryUri -Value $ApprovedIndex
+
+    try {
+        foreach ($name in $names | Select-Object -Unique) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        }
+        [Environment]::SetEnvironmentVariable('PIP_INDEX_URL', $normalizedIndex, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('PIP_CONFIG_FILE', $nullDevice, [EnvironmentVariableTarget]::Process)
+
+        return & $Action
+    }
+    finally {
+        foreach ($entry in $previous.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+        }
+    }
+}
+
+function New-PythonWheelhouseLock {
+    param(
+        [Parameter(Mandatory = $true)][string] $WheelhousePath,
+        [Parameter(Mandatory = $true)][string] $LockPath
+    )
+
+    $files = @(Get-ChildItem -LiteralPath $WheelhousePath -File | Sort-Object Name)
+    if ($files.Count -eq 0) {
+        throw 'Python wheelhouse is empty.'
+    }
+
+    $seen = @{}
+    $entries = @()
+    foreach ($file in $files) {
+        if ($file.Extension -cne '.whl') {
+            throw "Non-wheel artifact found in verified wheelhouse: '$($file.Name)'."
+        }
+        $metadata = Get-PythonWheelMetadata -WheelPath $file.FullName
+        $normalizedName = Normalize-PythonPackageName -Name ([string]$metadata.name)
+        if ($seen.ContainsKey($normalizedName)) {
+            throw "Duplicate Python distribution '$normalizedName' in wheelhouse."
+        }
+        $seen[$normalizedName] = $true
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        $entries += [pscustomobject][ordered]@{
+            name = [string]$metadata.name
+            normalizedName = $normalizedName
+            version = [string]$metadata.version
+            file = $file.Name
+            sha256 = $hash
+        }
+    }
+
+    $entries = @($entries | Sort-Object normalizedName)
+    $lockLines = @($entries | ForEach-Object { "$($_.name)==$($_.version) --hash=sha256:$($_.sha256)" })
+    [IO.File]::WriteAllText($LockPath, (($lockLines -join [Environment]::NewLine) + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+
+    $canonical = ($entries | ForEach-Object { "$($_.normalizedName)`t$($_.version)`t$($_.file)`t$($_.sha256)`n" }) -join ''
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $closureHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return [ordered]@{
+        lockPath = $LockPath
+        closureSha256 = $closureHash
+        entries = $entries
+    }
 }
 
 function Assert-ApprovedNpmRegistry {
@@ -346,8 +545,12 @@ function Resolve-SkillValidator {
 }
 
 function Resolve-SkillSpector {
-    param([bool] $ShouldInstall)
+    param(
+        [bool] $ShouldInstall,
+        [Parameter(Mandatory = $true)] $ToolPolicy
+    )
 
+    [void](Assert-Command -Name 'python')
     $headers = Get-GitHubHeaders
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Method Get
     if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) {
@@ -355,10 +558,10 @@ function Resolve-SkillSpector {
     }
 
     $tag = [string]$release.tag_name
-    if ([string]::IsNullOrWhiteSpace($tag)) {
-        throw 'SkillSpector latest release has no tag.'
+    if ($tag -notmatch '^v(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$') {
+        throw "SkillSpector stable release tag '$tag' does not match v-semver-release-only policy."
     }
-    $version = $tag.TrimStart('v')
+    $version = [string]$Matches.version
 
     $tagRef = Invoke-RestMethod -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/ref/tags/{0}" -f $tag) -Headers $headers -Method Get
     $commitSha = [string]$tagRef.object.sha
@@ -377,34 +580,91 @@ function Resolve-SkillSpector {
         throw "Expected exactly one SkillSpector universal wheel asset; found $($wheelAssets.Count)."
     }
     $wheel = $wheelAssets[0]
+    $expectedWheelName = "skillspector-$version-py3-none-any.whl"
+    if ([string]$wheel.name -cne $expectedWheelName) {
+        throw "SkillSpector release tag/wheel filename mismatch. Tag '$tag' requires '$expectedWheelName', got '$($wheel.name)'."
+    }
+
     $digest = [string]$wheel.digest
     if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
         throw 'SkillSpector release wheel does not expose a SHA-256 digest.'
     }
 
-    if ($ShouldInstall) {
-        [void](Assert-Command -Name 'python')
-        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("skillspector-{0}-{1}" -f $version, [guid]::NewGuid().ToString('N'))
-        [void](New-Item -ItemType Directory -Path $tempRoot -Force)
-        try {
-            $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
-            Invoke-WebRequest -Uri ([string]$wheel.browser_download_url) -Headers $headers -OutFile $wheelPath -UseBasicParsing
-            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
-            $expectedHash = $digest.Substring('sha256:'.Length)
-            if ($actualHash -cne $expectedHash) {
-                throw "SkillSpector wheel hash mismatch. Expected '$expectedHash', got '$actualHash'."
+    $approvedIndex = Normalize-RegistryUri -Value ([string]$ToolPolicy.pythonPackageIndex)
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("skillspector-{0}-{1}" -f $version, [guid]::NewGuid().ToString('N'))
+    $wheelhouse = Join-Path $tempRoot 'wheelhouse'
+    [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
+
+    $closure = $null
+    try {
+        $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
+        Invoke-WebRequest -Uri ([string]$wheel.browser_download_url) -Headers $headers -OutFile $wheelPath -UseBasicParsing
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
+        $expectedHash = $digest.Substring('sha256:'.Length)
+        if ($actualHash -cne $expectedHash) {
+            throw "SkillSpector wheel hash mismatch. Expected '$expectedHash', got '$actualHash'."
+        }
+
+        $wheelMetadata = Get-PythonWheelMetadata -WheelPath $wheelPath
+        Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
+
+        if ($ShouldInstall) {
+            $closure = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
+                $indexArgument = "--index-url=$approvedIndex"
+                [void](Invoke-CheckedCommand -Command 'python' -Arguments @(
+                    '-m', 'pip', 'download', '--disable-pip-version-check', '--no-cache-dir',
+                    '--only-binary=:all:', '--dest', $wheelhouse, $indexArgument, $wheelPath
+                ))
+
+                $wheelhouseRoot = Join-Path $wheelhouse ([string]$wheel.name)
+                if (-not (Test-Path -LiteralPath $wheelhouseRoot -PathType Leaf)) {
+                    Copy-Item -LiteralPath $wheelPath -Destination $wheelhouseRoot -Force
+                }
+                $wheelhouseRootHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelhouseRoot).Hash.ToLowerInvariant()
+                if ($wheelhouseRootHash -cne $expectedHash) {
+                    throw "SkillSpector root wheel changed during dependency acquisition. Expected '$expectedHash', got '$wheelhouseRootHash'."
+                }
+
+                $lockPath = Join-Path $tempRoot 'skillspector-dependency-lock.txt'
+                $manifest = New-PythonWheelhouseLock -WheelhousePath $wheelhouse -LockPath $lockPath
+                $rootEntry = @($manifest.entries | Where-Object { $_.normalizedName -eq 'skillspector' })
+                if ($rootEntry.Count -ne 1 -or [string]$rootEntry[0].version -cne $version -or [string]$rootEntry[0].sha256 -cne $expectedHash) {
+                    throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
+                }
+
+                [void](Invoke-CheckedCommand -Command 'python' -Arguments @(
+                    '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
+                    '--no-index', "--find-links=$wheelhouse", '--require-hashes', '--no-deps', '--force-reinstall',
+                    '-r', $lockPath
+                ))
+
+                $installedVersion = ((Invoke-CheckedCommand -Command 'python' -Arguments @(
+                    '-c', "import importlib.metadata as m; print(m.version('skillspector'))"
+                )) -join '').Trim()
+                if ($installedVersion -cne $version) {
+                    throw "Installed SkillSpector version mismatch. Expected '$version', got '$installedVersion'."
+                }
+
+                return $manifest
             }
-            [void](Invoke-CheckedCommand -Command 'python' -Arguments @('-m', 'pip', 'install', '--disable-pip-version-check', $wheelPath))
         }
-        finally {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    }
+    finally {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version"
+    if ($null -ne $closure) {
+        $identity += "#pythonIndex=$approvedIndex#dependencyClosureSha256=$($closure.closureSha256)"
     }
 
     return [ordered]@{
         resolvedVersion = $version
-        resolvedIdentity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest"
-        identityKind = 'release-commit-and-asset-digest'
+        resolvedIdentity = $identity
+        identityKind = 'release-commit-asset-metadata-and-dependency-closure'
+        pythonPackageIndex = $approvedIndex
+        dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
+        dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
     }
 }
 
@@ -421,6 +681,7 @@ if ($ValidatePolicyOnly) {
         }
         trustedSources = $trustedSources
         trustedRegistries = $trustedRegistries
+        trustedPythonIndex = $trustedPythonIndex
         trustedGoEnvironment = $trustedGoEnvironment
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
     }
@@ -434,7 +695,7 @@ else {
         'pester' { Resolve-Pester -ShouldInstall ([bool]$Install) }
         'skill-tools' { Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) }
         'skill-validator' { Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' }
-        'skillspector' { Resolve-SkillSpector -ShouldInstall ([bool]$Install) }
+        'skillspector' { Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector }
     }
 
     $toolPolicy = $policy.tools.$ToolName
@@ -455,9 +716,14 @@ else {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
     }
+    if ($ToolName -eq 'skillspector') {
+        $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
+        $result.dependencyClosureSha256 = $resolved.dependencyClosureSha256
+        $result.dependencyClosure = $resolved.dependencyClosure
+    }
 }
 
-$json = $result | ConvertTo-Json -Depth 8
+$json = $result | ConvertTo-Json -Depth 20
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $directory = Split-Path -Parent $OutputPath
     if (-not [string]::IsNullOrWhiteSpace($directory)) {
