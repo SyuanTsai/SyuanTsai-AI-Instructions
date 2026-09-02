@@ -389,12 +389,11 @@ function Invoke-CheckedCommand {
     try {
         $output = & $commandPath @Arguments 2> $stderrPath
         $exitCode = $LASTEXITCODE
-        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-            @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ })
-        }
-        else {
-            @()
-        }
+        $stderr = @(
+            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ }
+            }
+        )
         if ($exitCode -ne 0) {
             throw "$commandPath $($Arguments -join ' ') failed: $($stderr -join [Environment]::NewLine)"
         }

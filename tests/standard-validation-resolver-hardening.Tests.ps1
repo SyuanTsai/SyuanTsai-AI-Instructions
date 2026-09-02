@@ -234,6 +234,13 @@ Version: this line also belongs to the description body
         Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
         Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
+
+        $pythonCommand = Assert-Command -Name 'python'
+        $commandOutput = @(Invoke-CheckedCommand -Command $pythonCommand -Arguments @(
+            '-c', "import sys; print('resolver-stderr', file=sys.stderr); print('resolver-stdout')"
+        ))
+        Assert-Equal $commandOutput.Count 1 'A single stderr line must remain an array and must not corrupt stdout capture.'
+        Assert-Equal $commandOutput[0] 'resolver-stdout' 'Native stdout must remain available when one diagnostic line is written to stderr.'
     }
 
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
