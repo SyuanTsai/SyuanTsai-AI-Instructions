@@ -155,12 +155,15 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $manifest.closureSha256 '^[0-9a-f]{64}$' 'Dependency closure must retain a deterministic SHA-256 identity.'
     }
 
-    It 'UnitT50_rejects_unsafe_metadata_identity_text_before_lock_generation' {
+    It 'UnitT50_rejects_unsafe_or_ambiguous_metadata_identity_text_before_lock_generation' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
         $cases = @(
             @{ Text = "Name: unsafe/package`nVersion: 1.0.0`n"; Pattern = 'unsafe Python distribution Name' },
-            @{ Text = "Name: safe-package`nVersion: 1.0.0;--hash=sha256:00`n"; Pattern = 'unsafe Python distribution Version' }
+            @{ Text = "Name: safe-package`nVersion: 1.0.0;--hash=sha256:00`n"; Pattern = 'unsafe Python distribution Version' },
+            @{ Text = "Name: safe-package`nName: other-package`nVersion: 1.0.0`n"; Pattern = 'exactly one Name field and one Version field' },
+            @{ Text = "Name: safe-package`nVersion: 1.0.0`nVersion: 2.0.0`n"; Pattern = 'exactly one Name field and one Version field' },
+            @{ Text = "Name: safe-package`n"; Pattern = 'exactly one Name field and one Version field' }
         )
         foreach ($case in $cases) {
             $errorMessage = $null
@@ -170,7 +173,63 @@ Describe 'Standard validation resolver hardening' {
             catch {
                 $errorMessage = $_.Exception.Message
             }
-            Assert-Match $errorMessage $case.Pattern 'Unsafe metadata identity text must fail closed.'
+            Assert-Match $errorMessage $case.Pattern 'Unsafe or ambiguous metadata identity text must fail closed.'
+        }
+    }
+
+    It 'UnitT60_resolves_only_native_applications_and_ignores_command_shadowing' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        Set-Item -Path Function:shadowed-standard-tool -Value { 'function-shadow' }
+        Set-Alias -Name shadowed-standard-alias -Value Get-Date
+        try {
+            foreach ($name in @('shadowed-standard-tool', 'shadowed-standard-alias')) {
+                $errorMessage = $null
+                try {
+                    Assert-Command -Name $name | Out-Null
+                }
+                catch {
+                    $errorMessage = $_.Exception.Message
+                }
+                Assert-Match $errorMessage 'Required native command.*is unavailable' "PowerShell command shadow '$name' must not satisfy a native prerequisite."
+            }
+        }
+        finally {
+            Remove-Item Function:shadowed-standard-tool -ErrorAction SilentlyContinue
+            Remove-Item Alias:shadowed-standard-alias -ErrorAction SilentlyContinue
+        }
+
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
+        Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
+        Assert-NotMatch $resolver '\$output = & \$Command' 'Native execution must not re-resolve the caller-supplied command name.'
+    }
+
+    It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $tag = 'v2.11.0'
+        $file = 'skillspector-2.11.0-py3-none-any.whl'
+        $expected = "https://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file"
+        Assert-Equal (Get-ApprovedSkillSpectorAssetUri -Value $expected -Tag $tag -FileName $file) $expected 'The exact GitHub release asset URI must be accepted.'
+
+        $cases = @(
+            "http://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file",
+            "https://example.invalid/NVIDIA/SkillSpector/releases/download/$tag/$file",
+            "https://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file?download=1",
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.10.0/$file",
+            "https://user@github.com/NVIDIA/SkillSpector/releases/download/$tag/$file",
+            "https://github.com:444/NVIDIA/SkillSpector/releases/download/$tag/$file"
+        )
+        foreach ($value in $cases) {
+            $errorMessage = $null
+            try {
+                Get-ApprovedSkillSpectorAssetUri -Value $value -Tag $tag -FileName $file | Out-Null
+            }
+            catch {
+                $errorMessage = $_.Exception.Message
+            }
+            Assert-Match $errorMessage 'Untrusted SkillSpector release asset URI' "Untrusted release asset URI '$value' must fail closed."
         }
     }
 }
