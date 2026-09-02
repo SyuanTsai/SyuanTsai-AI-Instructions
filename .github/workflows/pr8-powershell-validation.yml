@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -78,7 +78,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -143,6 +143,8 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           $ErrorActionPreference = 'Stop'
           $policyReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-policy.json'
@@ -179,7 +181,22 @@ jobs:
           $authority = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
           Write-Host "Authority tests: Total=$($authority.TotalCount) Passed=$($authority.PassedCount) Failed=$($authority.FailedCount)"
           if ($authority.FailedCount -gt 0) { exit 1 }
-          git diff --check origin/main...HEAD
+
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+              & git diff --check "$($env:PULL_REQUEST_BASE_SHA)...HEAD"
+          }
+          elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:PUSH_BEFORE_SHA -notmatch '^0+$') {
+              & git diff --check "$($env:PUSH_BEFORE_SHA)..HEAD"
+          }
+          else {
+              & git rev-parse HEAD^ 2>$null | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                  & git diff --check 'HEAD^..HEAD'
+              }
+              else {
+                  & git diff-tree --check --root -r HEAD
+              }
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ensure Pester 4.10.1
