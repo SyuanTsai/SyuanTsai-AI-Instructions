@@ -21,6 +21,10 @@
       "pythonPackageIndex": "https://pypi.org/simple",
       "pythonDistribution": {
         "configIsolation": "os.devnull",
+        "environmentOverridePolicy": "deny-by-default",
+        "allowedInheritedEnvironment": [
+          "PIP_INDEX_URL"
+        ],
         "onlyBinary": true,
         "disableCache": true,
         "dependencyAcquisition": "verified-wheelhouse",
