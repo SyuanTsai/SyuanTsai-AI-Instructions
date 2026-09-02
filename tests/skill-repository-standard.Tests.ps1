@@ -862,6 +862,90 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $identity.closureSha256 '^[0-9a-f]{64}$' 'The canonical dependency closure must be hashed separately.'
         Assert-Equal @($identity.entries).Count 2 'Every locked npm package must be represented in closure evidence.'
         Assert-Equal $identity.rootBinTarget 'dist/cli.js' 'The lock must bind the canonical skill-tools bin target.'
+        $typedJson = ConvertFrom-NpmJsonStrict -Text '{"integer":3,"number":3.0,"string":"3","boolean":true,"object":{},"array":[]}'
+        foreach ($typeCase in @(
+            @{ Name='integer'; Expected='Integer' }, @{ Name='number'; Expected='Number' },
+            @{ Name='string'; Expected='String' }, @{ Name='boolean'; Expected='Boolean' },
+            @{ Name='object'; Expected='Object' }, @{ Name='array'; Expected='Array' }
+        )) {
+            Assert-Equal `
+                (Get-NpmJsonTokenType -Token (Get-NpmJsonObjectProperty -Token $typedJson -Name $typeCase.Name)) `
+                $typeCase.Expected `
+                "Strict npm JSON parsing must preserve the '$($typeCase.Name)' token type."
+        }
+        foreach ($jsonCase in @(
+            @{ Json='{"key":1,"key":2}'; Pattern='duplicate object key' },
+            @{ Json='{"key":1,"\u006bey":2}'; Pattern='duplicate object key' },
+            @{ Json='{"key":"\uD800"}'; Pattern='unpaired high surrogate' },
+            @{ Json=('"' + [char]0xD800 + '"'); Pattern='unpaired raw high surrogate' },
+            @{ Json=('"' + [char]0xDC00 + '"'); Pattern='unpaired raw low surrogate' },
+            @{ Json='{"key":01}'; Pattern='leading zero' },
+            @{ Json='{"key":1} trailing'; Pattern='trailing content' }
+        )) {
+            $jsonError = $null
+            try { ConvertFrom-NpmJsonStrict -Text $jsonCase.Json | Out-Null }
+            catch { $jsonError = $_.Exception.Message }
+            Assert-Match $jsonError $jsonCase.Pattern 'Strict npm JSON parsing must reject ambiguous or malformed input.'
+        }
+        $rawPair = [char]::ConvertFromUtf32(0x1F600)
+        Assert-Equal `
+            (Get-NpmJsonTokenType -Token (ConvertFrom-NpmJsonStrict -Text ('"' + $rawPair + '"'))) `
+            'String' `
+            'Strict npm JSON parsing must accept a paired raw Unicode scalar.'
+        $duplicatePairError = $null
+        try { ConvertFrom-NpmJsonStrict -Text ('{"' + $rawPair + '":1,"\uD83D\uDE00":2}') | Out-Null }
+        catch { $duplicatePairError = $_.Exception.Message }
+        Assert-Match $duplicatePairError 'duplicate object key' 'Equivalent raw and escaped Unicode keys must collide ordinally after decoding.'
+
+        $tokenLimitError = $null
+        try { ConvertFrom-NpmJsonStrict -Text '[0,0,0]' -MaxTokens 3 | Out-Null }
+        catch { $tokenLimitError = $_.Exception.Message }
+        Assert-Match $tokenLimitError 'maximum semantic token count of 3' 'Strict npm JSON parsing must bound array node amplification independently of byte size.'
+        $memberLimitError = $null
+        try { ConvertFrom-NpmJsonStrict -Text '{"key":0}' -MaxTokens 2 | Out-Null }
+        catch { $memberLimitError = $_.Exception.Message }
+        Assert-Match $memberLimitError 'maximum semantic token count of 2' 'Strict npm JSON parsing must count object member names in its amplification budget.'
+        $lock.packages[' '] = [ordered]@{
+            version = '9.9.9'
+            resolved = 'https://registry.example.invalid/ignored.tgz'
+            integrity = $integrity
+        }
+        [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $whitespacePathError = $null
+        try {
+            Get-NpmLockIdentity -LockPath $lockPath -ApprovedRegistry 'https://registry.npmjs.org/' -ExpectedRootIntegrity $integrity -ExpectedVersion '0.4.1' | Out-Null
+        }
+        catch { $whitespacePathError = $_.Exception.Message }
+        Assert-Match $whitespacePathError 'non-root whitespace package path' 'Only the exact empty root key may be excluded from npm closure validation.'
+        $lock.packages.Remove(' ')
+        $dependencyEntry = $lock.packages.'node_modules/@skill-tools/dependency'
+        foreach ($controlField in @('version','resolved','integrity')) {
+            $originalFieldValue = [string]$dependencyEntry[$controlField]
+            $dependencyEntry[$controlField] = $originalFieldValue + "`tidentity-collision"
+            [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+            $controlIdentityError = $null
+            try {
+                Get-NpmLockIdentity -LockPath $lockPath -ApprovedRegistry 'https://registry.npmjs.org/' -ExpectedRootIntegrity $integrity -ExpectedVersion '0.4.1' | Out-Null
+            }
+            catch { $controlIdentityError = $_.Exception.Message }
+            Assert-Match $controlIdentityError 'control characters in closure identity fields' "Closure identity field '$controlField' must not embed canonical record delimiters."
+            $dependencyEntry[$controlField] = $originalFieldValue
+        }
+        $controlPath = "node_modules/control`tpath"
+        $lock.packages[$controlPath] = [ordered]@{
+            version = '9.9.9'
+            resolved = 'https://registry.npmjs.org/control/-/control-9.9.9.tgz'
+            integrity = $integrity
+        }
+        [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $controlPathError = $null
+        try {
+            Get-NpmLockIdentity -LockPath $lockPath -ApprovedRegistry 'https://registry.npmjs.org/' -ExpectedRootIntegrity $integrity -ExpectedVersion '0.4.1' | Out-Null
+        }
+        catch { $controlPathError = $_.Exception.Message }
+        Assert-Match $controlPathError 'package path with control characters' 'Closure package paths must not embed canonical field delimiters.'
+        $lock.packages.Remove($controlPath)
+        [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
         foreach ($acceptedBin in @(
             @{ Value='dist/cli.js'; Expected='dist/cli.js' },
             @{ Value='./dist/cli.js'; Expected='dist/cli.js' },
@@ -897,6 +981,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         Assert-Match $resolver '\$installedBinTarget = Get-CanonicalNpmBinTarget' 'Installed and lockfile bin targets must share the same canonicalization rule.'
+        Assert-Match $resolver 'packageLockSha256 = Get-BytesSha256 -Bytes \$lockBytes' 'npm lock evidence must hash the exact bytes parsed for closure identity.'
+        Assert-NotMatch $resolver 'packageLockSha256 = Get-FileSha256' 'npm lock evidence must not re-read a mutable path after validation.'
 
         $lock.packages.'node_modules/skill-tools'.bin['skill-tools'] = '../dist/cli.js'
         [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))

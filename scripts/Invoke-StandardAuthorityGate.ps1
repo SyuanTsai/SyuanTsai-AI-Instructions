@@ -380,7 +380,7 @@ function Resolve-AuthorityReportedFilePath {
         }
         $candidate = $uri.LocalPath
     }
-    elseif ($candidate -cmatch '^[a-zA-Z][a-zA-Z0-9+.-]*:') {
+    elseif (-not [System.IO.Path]::IsPathRooted($candidate) -and $candidate -cmatch '^[a-zA-Z][a-zA-Z0-9+.-]*:') {
         throw "$Context must be a local fixture path."
     }
     if (-not [System.IO.Path]::IsPathRooted($candidate)) {
@@ -601,8 +601,15 @@ function Get-AuthorityCandidateCommit {
     )
 
     $git = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    $candidateCommit = (& $git.Source -C $RepositoryRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim()
-    if ($LASTEXITCODE -ne 0 -or $candidateCommit -cnotmatch '^[0-9a-f]{40}$') {
+    $gitPathValue = if ($null -ne $git.PSObject.Properties['Path']) { [string]$git.Path } else { [string]$git.Source }
+    if ([string]::IsNullOrWhiteSpace($gitPathValue) -or -not [System.IO.Path]::IsPathRooted($gitPathValue)) {
+        throw 'Authority gate could not resolve Git to an absolute application path.'
+    }
+    $gitPath = [System.IO.Path]::GetFullPath($gitPathValue)
+    $candidateOutput = @(& $gitPath -C $RepositoryRoot rev-parse HEAD 2>$null)
+    $gitExitCode = $LASTEXITCODE
+    $candidateCommit = ([string]($candidateOutput | Select-Object -First 1)).Trim()
+    if ($gitExitCode -ne 0 -or $candidateCommit -cnotmatch '^[0-9a-f]{40}$') {
         throw 'Authority gate could not bind its candidate commit to checkout HEAD.'
     }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCommit)) {

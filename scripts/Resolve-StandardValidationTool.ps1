@@ -389,13 +389,26 @@ function Invoke-CheckedCommand {
 
     $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("standard-command-stderr-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     try {
-        $output = & $commandPath @Arguments 2> $stderrPath
-        $exitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # Windows PowerShell 5.1 promotes native stderr to NativeCommandError when
+            # the caller uses Stop. The native exit code remains authoritative here.
+            $ErrorActionPreference = 'Continue'
+            $global:LASTEXITCODE = $null
+            $output = & $commandPath @Arguments 2> $stderrPath
+            $exitCode = $global:LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $stderr = @(
             if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
                 Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ }
             }
         )
+        if ($null -eq $exitCode) {
+            throw "$commandPath could not be started: $($stderr -join [Environment]::NewLine)"
+        }
         if ($exitCode -ne 0) {
             throw "$commandPath $($Arguments -join ' ') failed: $($stderr -join [Environment]::NewLine)"
         }
@@ -440,6 +453,18 @@ function Get-FileSha256 {
         throw "File not found for hashing: $Path"
     }
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
 }
 
 function Get-DirectoryClosureIdentity {
@@ -1077,10 +1102,28 @@ function New-PythonWheelhouseLock {
 }
 
 function Get-ProcessNpmEnvironmentNames {
-    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+    $knownNames = @(
+        'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG',
+        'NPM_CONFIG_CACHE', 'NPM_CONFIG_DRY_RUN', 'NPM_CONFIG_OFFLINE',
+        'NPM_CONFIG_PREFER_OFFLINE', 'NPM_CONFIG_AUDIT', 'NPM_CONFIG_FUND',
+        'NPM_CONFIG_UPDATE_NOTIFIER', 'NPM_CONFIG_IGNORE_SCRIPTS',
+        'NPM_CONFIG_PACKAGE_LOCK', 'NPM_CONFIG_OMIT_LOCKFILE_REGISTRY_RESOLVED',
+        'NPM_CONFIG_BIN_LINKS', 'NPM_CONFIG_WORKSPACES', 'NPM_CONFIG_GLOBAL'
+    )
+    $presentNames = @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
         ForEach-Object { [string]$_ } |
         Where-Object { $_ -match '^NPM_CONFIG_' } |
         Sort-Object)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $presentNames = @($presentNames | ForEach-Object {
+            $presentName = [string]$_
+            $canonicalName = @($knownNames | Where-Object {
+                [string]::Equals([string]$_, $presentName, [StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1)
+            if ($canonicalName.Count -eq 1) { [string]$canonicalName[0] } else { $presentName }
+        })
+    }
+    return @(Get-OrdinalUniqueStrings -Values @($presentNames + $knownNames))
 }
 
 function Get-ProcessNodeEnvironmentNames {
@@ -1254,13 +1297,325 @@ function Invoke-WithApprovedNpmEnvironment {
     }
 }
 
+function New-NpmJsonNode {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Object','Array','String','Integer','Number','Boolean','Null')][string] $TokenType,
+        [AllowNull()] $Value,
+        [AllowNull()] $Properties,
+        [AllowNull()] $Items
+    )
+
+    $node = [ordered]@{ TokenType = $TokenType }
+    if ($TokenType -ceq 'Object') { $node['Properties'] = $Properties }
+    elseif ($TokenType -ceq 'Array') { $node['Items'] = @($Items) }
+    else { $node['Value'] = $Value }
+    return [pscustomobject]$node
+}
+
+function Skip-NpmJsonWhitespace {
+    param([Parameter(Mandatory = $true)] $State)
+
+    while ($State.Index -lt $State.Text.Length) {
+        $code = [int][char]$State.Text[$State.Index]
+        if ($code -notin @(0x20, 0x09, 0x0A, 0x0D)) { break }
+        $State.Index++
+    }
+}
+
+function Add-NpmJsonSemanticToken {
+    param([Parameter(Mandatory = $true)] $State)
+
+    $State.TokenCount++
+    if ($State.TokenCount -gt $State.MaxTokens) {
+        throw "npm package-lock JSON exceeds the maximum semantic token count of $($State.MaxTokens)."
+    }
+}
+
+function Read-NpmJsonString {
+    param([Parameter(Mandatory = $true)] $State)
+
+    if ($State.Index -ge $State.Text.Length -or [int][char]$State.Text[$State.Index] -ne 0x22) {
+        throw "npm package-lock JSON expected a string at offset $($State.Index)."
+    }
+    $State.Index++
+    $builder = New-Object System.Text.StringBuilder
+    while ($State.Index -lt $State.Text.Length) {
+        $code = [int][char]$State.Text[$State.Index]
+        $State.Index++
+        if ($code -eq 0x22) {
+            return $builder.ToString()
+        }
+        if ($code -lt 0x20) {
+            throw "npm package-lock JSON string contains an unescaped control character at offset $($State.Index - 1)."
+        }
+        if ($code -ne 0x5C) {
+            if ($code -ge 0xD800 -and $code -le 0xDBFF) {
+                if ($State.Index -ge $State.Text.Length) {
+                    throw 'npm package-lock JSON string contains an unpaired raw high surrogate.'
+                }
+                $lowCode = [int][char]$State.Text[$State.Index]
+                if ($lowCode -lt 0xDC00 -or $lowCode -gt 0xDFFF) {
+                    throw 'npm package-lock JSON string contains an unpaired raw high surrogate.'
+                }
+                [void]$builder.Append([char]$code)
+                [void]$builder.Append([char]$lowCode)
+                $State.Index++
+                continue
+            }
+            if ($code -ge 0xDC00 -and $code -le 0xDFFF) {
+                throw 'npm package-lock JSON string contains an unpaired raw low surrogate.'
+            }
+            [void]$builder.Append([char]$code)
+            continue
+        }
+        if ($State.Index -ge $State.Text.Length) {
+            throw 'npm package-lock JSON string ends with an incomplete escape.'
+        }
+        $escape = [int][char]$State.Text[$State.Index]
+        $State.Index++
+        if ($escape -eq 0x22) { [void]$builder.Append([char]0x22); continue }
+        if ($escape -eq 0x5C) { [void]$builder.Append([char]0x5C); continue }
+        if ($escape -eq 0x2F) { [void]$builder.Append([char]0x2F); continue }
+        if ($escape -eq 0x62) { [void]$builder.Append([char]0x08); continue }
+        if ($escape -eq 0x66) { [void]$builder.Append([char]0x0C); continue }
+        if ($escape -eq 0x6E) { [void]$builder.Append([char]0x0A); continue }
+        if ($escape -eq 0x72) { [void]$builder.Append([char]0x0D); continue }
+        if ($escape -eq 0x74) { [void]$builder.Append([char]0x09); continue }
+        if ($escape -ne 0x75 -or ($State.Index + 4) -gt $State.Text.Length) {
+            throw "npm package-lock JSON string contains an invalid escape at offset $($State.Index - 1)."
+        }
+        $hex = $State.Text.Substring($State.Index, 4)
+        if ($hex -cnotmatch '^[0-9A-Fa-f]{4}$') {
+            throw "npm package-lock JSON string contains an invalid Unicode escape at offset $($State.Index)."
+        }
+        $unit = [Convert]::ToInt32($hex, 16)
+        $State.Index += 4
+        if ($unit -ge 0xD800 -and $unit -le 0xDBFF) {
+            if (($State.Index + 6) -gt $State.Text.Length -or
+                [int][char]$State.Text[$State.Index] -ne 0x5C -or
+                [int][char]$State.Text[$State.Index + 1] -ne 0x75) {
+                throw 'npm package-lock JSON string contains an unpaired high surrogate.'
+            }
+            $lowHex = $State.Text.Substring($State.Index + 2, 4)
+            if ($lowHex -cnotmatch '^[0-9A-Fa-f]{4}$') {
+                throw 'npm package-lock JSON string contains an invalid low-surrogate escape.'
+            }
+            $lowUnit = [Convert]::ToInt32($lowHex, 16)
+            if ($lowUnit -lt 0xDC00 -or $lowUnit -gt 0xDFFF) {
+                throw 'npm package-lock JSON string contains an unpaired high surrogate.'
+            }
+            $State.Index += 6
+            $scalar = 0x10000 + (($unit - 0xD800) * 0x400) + ($lowUnit - 0xDC00)
+            [void]$builder.Append([char]::ConvertFromUtf32($scalar))
+            continue
+        }
+        if ($unit -ge 0xDC00 -and $unit -le 0xDFFF) {
+            throw 'npm package-lock JSON string contains an unpaired low surrogate.'
+        }
+        [void]$builder.Append([char]$unit)
+    }
+    throw 'npm package-lock JSON string is unterminated.'
+}
+
+function Read-NpmJsonNumber {
+    param([Parameter(Mandatory = $true)] $State)
+
+    $start = $State.Index
+    if ([int][char]$State.Text[$State.Index] -eq 0x2D) {
+        $State.Index++
+        if ($State.Index -ge $State.Text.Length) { throw 'npm package-lock JSON number is incomplete.' }
+    }
+    $first = [int][char]$State.Text[$State.Index]
+    if ($first -eq 0x30) {
+        $State.Index++
+        if ($State.Index -lt $State.Text.Length) {
+            $next = [int][char]$State.Text[$State.Index]
+            if ($next -ge 0x30 -and $next -le 0x39) {
+                throw "npm package-lock JSON number has a leading zero at offset $start."
+            }
+        }
+    }
+    elseif ($first -ge 0x31 -and $first -le 0x39) {
+        while ($State.Index -lt $State.Text.Length) {
+            $next = [int][char]$State.Text[$State.Index]
+            if ($next -lt 0x30 -or $next -gt 0x39) { break }
+            $State.Index++
+        }
+    }
+    else {
+        throw "npm package-lock JSON number is invalid at offset $start."
+    }
+
+    $isInteger = $true
+    if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -eq 0x2E) {
+        $isInteger = $false
+        $State.Index++
+        $fractionStart = $State.Index
+        while ($State.Index -lt $State.Text.Length) {
+            $next = [int][char]$State.Text[$State.Index]
+            if ($next -lt 0x30 -or $next -gt 0x39) { break }
+            $State.Index++
+        }
+        if ($State.Index -eq $fractionStart) { throw 'npm package-lock JSON fraction is missing digits.' }
+    }
+    if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -in @(0x45, 0x65)) {
+        $isInteger = $false
+        $State.Index++
+        if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -in @(0x2B, 0x2D)) {
+            $State.Index++
+        }
+        $exponentStart = $State.Index
+        while ($State.Index -lt $State.Text.Length) {
+            $next = [int][char]$State.Text[$State.Index]
+            if ($next -lt 0x30 -or $next -gt 0x39) { break }
+            $State.Index++
+        }
+        if ($State.Index -eq $exponentStart) { throw 'npm package-lock JSON exponent is missing digits.' }
+    }
+    $raw = $State.Text.Substring($start, $State.Index - $start)
+    return New-NpmJsonNode -TokenType $(if ($isInteger) { 'Integer' } else { 'Number' }) -Value $raw
+}
+
+function Read-NpmJsonValue {
+    param(
+        [Parameter(Mandatory = $true)] $State,
+        [Parameter(Mandatory = $true)][int] $Depth
+    )
+
+    if ($Depth -gt 128) { throw 'npm package-lock JSON exceeds the maximum nesting depth.' }
+    Add-NpmJsonSemanticToken -State $State
+    Skip-NpmJsonWhitespace -State $State
+    if ($State.Index -ge $State.Text.Length) { throw 'npm package-lock JSON ends before a value.' }
+    $code = [int][char]$State.Text[$State.Index]
+
+    if ($code -eq 0x7B) {
+        $State.Index++
+        $properties = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        Skip-NpmJsonWhitespace -State $State
+        if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -eq 0x7D) {
+            $State.Index++
+            return New-NpmJsonNode -TokenType Object -Properties $properties
+        }
+        while ($true) {
+            $nameOffset = $State.Index
+            Add-NpmJsonSemanticToken -State $State
+            $name = Read-NpmJsonString -State $State
+            if ($properties.ContainsKey($name)) {
+                throw "npm package-lock JSON contains a duplicate object key at offset $nameOffset."
+            }
+            Skip-NpmJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length -or [int][char]$State.Text[$State.Index] -ne 0x3A) {
+                throw "npm package-lock JSON expected ':' after the object key at offset $nameOffset."
+            }
+            $State.Index++
+            $value = Read-NpmJsonValue -State $State -Depth ($Depth + 1)
+            $properties.Add($name, $value)
+            Skip-NpmJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length) { throw 'npm package-lock JSON object is unterminated.' }
+            $delimiter = [int][char]$State.Text[$State.Index]
+            $State.Index++
+            if ($delimiter -eq 0x7D) { break }
+            if ($delimiter -ne 0x2C) { throw 'npm package-lock JSON object expected a comma or closing brace.' }
+            Skip-NpmJsonWhitespace -State $State
+        }
+        return New-NpmJsonNode -TokenType Object -Properties $properties
+    }
+
+    if ($code -eq 0x5B) {
+        $State.Index++
+        $items = New-Object 'System.Collections.Generic.List[object]'
+        Skip-NpmJsonWhitespace -State $State
+        if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -eq 0x5D) {
+            $State.Index++
+            return New-NpmJsonNode -TokenType Array -Items @()
+        }
+        while ($true) {
+            [void]$items.Add((Read-NpmJsonValue -State $State -Depth ($Depth + 1)))
+            Skip-NpmJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length) { throw 'npm package-lock JSON array is unterminated.' }
+            $delimiter = [int][char]$State.Text[$State.Index]
+            $State.Index++
+            if ($delimiter -eq 0x5D) { break }
+            if ($delimiter -ne 0x2C) { throw 'npm package-lock JSON array expected a comma or closing bracket.' }
+            Skip-NpmJsonWhitespace -State $State
+        }
+        return New-NpmJsonNode -TokenType Array -Items ([object[]]$items.ToArray())
+    }
+
+    if ($code -eq 0x22) {
+        return New-NpmJsonNode -TokenType String -Value (Read-NpmJsonString -State $State)
+    }
+    if ($code -eq 0x74 -and ($State.Index + 4) -le $State.Text.Length -and
+        $State.Text.Substring($State.Index, 4) -ceq 'true') {
+        $State.Index += 4
+        return New-NpmJsonNode -TokenType Boolean -Value $true
+    }
+    if ($code -eq 0x66 -and ($State.Index + 5) -le $State.Text.Length -and
+        $State.Text.Substring($State.Index, 5) -ceq 'false') {
+        $State.Index += 5
+        return New-NpmJsonNode -TokenType Boolean -Value $false
+    }
+    if ($code -eq 0x6E -and ($State.Index + 4) -le $State.Text.Length -and
+        $State.Text.Substring($State.Index, 4) -ceq 'null') {
+        $State.Index += 4
+        return New-NpmJsonNode -TokenType Null -Value $null
+    }
+    if ($code -eq 0x2D -or ($code -ge 0x30 -and $code -le 0x39)) {
+        return Read-NpmJsonNumber -State $State
+    }
+    throw "npm package-lock JSON contains an unexpected token at offset $($State.Index)."
+}
+
+function ConvertFrom-NpmJsonStrict {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,
+        [ValidateRange(1, 50000)][int] $MaxTokens = 50000
+    )
+
+    $state = [pscustomobject]@{ Text = $Text; Index = 0; TokenCount = 0; MaxTokens = $MaxTokens }
+    $value = Read-NpmJsonValue -State $state -Depth 0
+    Skip-NpmJsonWhitespace -State $state
+    if ($state.Index -ne $state.Text.Length) {
+        throw "npm package-lock JSON contains trailing content at offset $($state.Index)."
+    }
+    return $value
+}
+
 function Get-NpmJsonTokenType {
     param($Token)
 
-    if ($null -eq $Token) {
-        return $null
+    if ($null -eq $Token) { return $null }
+    return [string]$Token.TokenType
+}
+
+function Get-NpmJsonObjectProperty {
+    param(
+        [Parameter(Mandatory = $true)] $Token,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Name
+    )
+
+    if ((Get-NpmJsonTokenType -Token $Token) -cne 'Object') { return $null }
+    $value = $null
+    if ($Token.Properties.TryGetValue($Name, [ref]$value)) { return $value }
+    return $null
+}
+
+function Get-NpmJsonObjectProperties {
+    param([Parameter(Mandatory = $true)] $Token)
+
+    if ((Get-NpmJsonTokenType -Token $Token) -cne 'Object') { return @() }
+    return @($Token.Properties.GetEnumerator() | ForEach-Object {
+        [pscustomobject]@{ Name = [string]$_.Key; Value = $_.Value }
+    })
+}
+
+function Get-NpmJsonScalarValue {
+    param([Parameter(Mandatory = $true)] $Token)
+
+    if ((Get-NpmJsonTokenType -Token $Token) -in @('Object','Array')) {
+        throw 'npm package-lock JSON value is not scalar.'
     }
-    return $Token.GetType().GetProperty('Type').GetValue($Token, $null)
+    return $Token.Value
 }
 
 function Get-CanonicalNpmBinTarget {
@@ -1311,66 +1666,112 @@ function Get-NpmLockIdentity {
     )
 
     try {
-        $lock = [Newtonsoft.Json.Linq.JObject]::Parse((Get-Content -Raw -Encoding UTF8 -LiteralPath $LockPath))
+        $lockStream = [System.IO.File]::Open(
+            [System.IO.Path]::GetFullPath($LockPath),
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        try {
+            $lockLength = $lockStream.Length
+            if ($lockLength -gt 32MB) {
+                throw 'npm package-lock exceeds the 32 MiB validation limit.'
+            }
+            $lockBytes = [System.Array]::CreateInstance([byte], [int]$lockLength)
+            $lockOffset = 0
+            while ($lockOffset -lt $lockBytes.Length) {
+                $readCount = $lockStream.Read($lockBytes, $lockOffset, $lockBytes.Length - $lockOffset)
+                if ($readCount -le 0) {
+                    throw 'npm package-lock changed or ended while its validation snapshot was read.'
+                }
+                $lockOffset += $readCount
+            }
+            if ($lockStream.ReadByte() -ne -1 -or $lockStream.Length -ne $lockLength) {
+                throw 'npm package-lock changed while its validation snapshot was read.'
+            }
+        }
+        finally {
+            $lockStream.Dispose()
+        }
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $lockText = $utf8.GetString($lockBytes)
+        $lock = ConvertFrom-NpmJsonStrict -Text $lockText
     }
     catch {
         throw "npm package-lock is not valid JSON: $($_.Exception.Message)"
     }
-    $integerType = [Newtonsoft.Json.Linq.JTokenType]::Integer
-    $objectType = [Newtonsoft.Json.Linq.JTokenType]::Object
-    $stringType = [Newtonsoft.Json.Linq.JTokenType]::String
-    $booleanType = [Newtonsoft.Json.Linq.JTokenType]::Boolean
-    $lockfileVersionToken = $lock['lockfileVersion']
-    $packages = $lock['packages']
+    $integerType = 'Integer'
+    $objectType = 'Object'
+    $stringType = 'String'
+    $booleanType = 'Boolean'
+    $lockfileVersionToken = Get-NpmJsonObjectProperty -Token $lock -Name 'lockfileVersion'
+    $packages = Get-NpmJsonObjectProperty -Token $lock -Name 'packages'
     if ($null -eq $packages -or (Get-NpmJsonTokenType -Token $packages) -ne $objectType) {
         throw 'npm package-lock does not contain an object packages closure.'
     }
     if ($null -eq $lockfileVersionToken -or (Get-NpmJsonTokenType -Token $lockfileVersionToken) -ne $integerType -or
-        [int64]$lockfileVersionToken -notin @(2, 3)) {
-        throw "npm package-lock must use integer lockfileVersion 2 or 3. Actual='$lockfileVersionToken'."
+        [string](Get-NpmJsonScalarValue -Token $lockfileVersionToken) -notin @('2', '3')) {
+        $actualLockfileVersion = if ($null -eq $lockfileVersionToken) { '<missing>' }
+            elseif ((Get-NpmJsonTokenType -Token $lockfileVersionToken) -in @('Object','Array')) {
+                "<$((Get-NpmJsonTokenType -Token $lockfileVersionToken))>"
+            }
+            else { Get-NpmJsonScalarValue -Token $lockfileVersionToken }
+        throw "npm package-lock must use integer lockfileVersion 2 or 3. Actual='$actualLockfileVersion'."
     }
 
-    $rootProject = $packages['']
+    $rootProject = Get-NpmJsonObjectProperty -Token $packages -Name ''
     $rootDependenciesObject = $null
     if ($null -ne $rootProject) {
-        $rootDependenciesObject = $rootProject['dependencies']
+        $rootDependenciesObject = Get-NpmJsonObjectProperty -Token $rootProject -Name 'dependencies'
     }
     if ($null -eq $rootProject -or (Get-NpmJsonTokenType -Token $rootProject) -ne $objectType -or
         $null -eq $rootDependenciesObject -or (Get-NpmJsonTokenType -Token $rootDependenciesObject) -ne $objectType) {
         throw 'npm package-lock is missing its root project dependency entry.'
     }
-    $rootDependencies = @($rootDependenciesObject.Properties())
+    $rootDependencies = @(Get-NpmJsonObjectProperties -Token $rootDependenciesObject)
     if ($rootDependencies.Count -ne 1 -or [string]$rootDependencies[0].Name -cne 'skill-tools' -or
-        (Get-NpmJsonTokenType -Token $rootDependencies[0].Value) -ne $stringType -or [string]$rootDependencies[0].Value -cne $ExpectedVersion) {
+        (Get-NpmJsonTokenType -Token $rootDependencies[0].Value) -ne $stringType -or
+        [string](Get-NpmJsonScalarValue -Token $rootDependencies[0].Value) -cne $ExpectedVersion) {
         throw "npm package-lock root dependencies must bind only skill-tools@$ExpectedVersion."
     }
 
     $approved = Normalize-RegistryUri -Value $ApprovedRegistry
     $entries = @()
-    foreach ($property in @($packages.Properties() | Sort-Object Name)) {
+    foreach ($property in @(Get-NpmJsonObjectProperties -Token $packages | Sort-Object Name)) {
         $packagePath = [string]$property.Name
-        if ([string]::IsNullOrWhiteSpace($packagePath)) {
+        if ($packagePath -ceq '') {
             continue
+        }
+        if ([string]::IsNullOrWhiteSpace($packagePath)) {
+            throw 'npm lock contains a non-root whitespace package path.'
+        }
+        if (@($packagePath.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) {
+            throw 'npm lock contains a package path with control characters.'
         }
         $package = $property.Value
         if ((Get-NpmJsonTokenType -Token $package) -ne $objectType) {
             throw "npm lock entry '$packagePath' must be an object."
         }
-        $versionToken = $package['version']
-        $resolvedToken = $package['resolved']
-        $integrityToken = $package['integrity']
-        $linkToken = $package['link']
-        $inBundleToken = $package['inBundle']
+        $versionToken = Get-NpmJsonObjectProperty -Token $package -Name 'version'
+        $resolvedToken = Get-NpmJsonObjectProperty -Token $package -Name 'resolved'
+        $integrityToken = Get-NpmJsonObjectProperty -Token $package -Name 'integrity'
+        $linkToken = Get-NpmJsonObjectProperty -Token $package -Name 'link'
+        $inBundleToken = Get-NpmJsonObjectProperty -Token $package -Name 'inBundle'
         if ($null -eq $versionToken -or (Get-NpmJsonTokenType -Token $versionToken) -ne $stringType -or
             $null -eq $resolvedToken -or (Get-NpmJsonTokenType -Token $resolvedToken) -ne $stringType -or
             $null -eq $integrityToken -or (Get-NpmJsonTokenType -Token $integrityToken) -ne $stringType -or
-            ($null -ne $linkToken -and ((Get-NpmJsonTokenType -Token $linkToken) -ne $booleanType -or [bool]$linkToken)) -or
-            ($null -ne $inBundleToken -and ((Get-NpmJsonTokenType -Token $inBundleToken) -ne $booleanType -or [bool]$inBundleToken))) {
+            ($null -ne $linkToken -and ((Get-NpmJsonTokenType -Token $linkToken) -ne $booleanType -or [bool](Get-NpmJsonScalarValue -Token $linkToken))) -or
+            ($null -ne $inBundleToken -and ((Get-NpmJsonTokenType -Token $inBundleToken) -ne $booleanType -or [bool](Get-NpmJsonScalarValue -Token $inBundleToken)))) {
             throw "npm lock entry '$packagePath' lacks string version/resolved/integrity or uses a link/bundled package."
         }
-        $version = [string]$versionToken
-        $resolved = [string]$resolvedToken
-        $integrity = [string]$integrityToken
+        $version = [string](Get-NpmJsonScalarValue -Token $versionToken)
+        $resolved = [string](Get-NpmJsonScalarValue -Token $resolvedToken)
+        $integrity = [string](Get-NpmJsonScalarValue -Token $integrityToken)
+        foreach ($identityValue in @($version, $resolved, $integrity)) {
+            if (@($identityValue.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) {
+                throw "npm lock entry '$packagePath' contains control characters in closure identity fields."
+            }
+        }
         if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($resolved) -or
             -not (Test-NpmSha512Integrity -Integrity $integrity)) {
             throw "npm lock entry '$packagePath' lacks version, approved resolved URL, or SHA-512 integrity."
@@ -1403,14 +1804,14 @@ function Get-NpmLockIdentity {
         [string]$root[0].integrity -cne $ExpectedRootIntegrity) {
         throw 'npm package-lock root version or integrity does not match the resolved skill-tools package.'
     }
-    $rootPackage = $packages['node_modules/skill-tools']
+    $rootPackage = Get-NpmJsonObjectProperty -Token $packages -Name 'node_modules/skill-tools'
     $rootBinObject = $null
     if ($null -ne $rootPackage) {
-        $rootBinObject = $rootPackage['bin']
+        $rootBinObject = Get-NpmJsonObjectProperty -Token $rootPackage -Name 'bin'
     }
     $rootBins = @()
     if ($null -ne $rootBinObject -and (Get-NpmJsonTokenType -Token $rootBinObject) -eq $objectType) {
-        $rootBins = @($rootBinObject.Properties())
+        $rootBins = @(Get-NpmJsonObjectProperties -Token $rootBinObject)
     }
     if ($rootBins.Count -ne 1 -or [string]$rootBins[0].Name -cne 'skill-tools' -or
         (Get-NpmJsonTokenType -Token $rootBins[0].Value) -ne $stringType) {
@@ -1418,7 +1819,7 @@ function Get-NpmLockIdentity {
     }
     try {
         $rootBinTarget = Get-CanonicalNpmBinTarget `
-            -Value ([string]$rootBins[0].Value) `
+            -Value ([string](Get-NpmJsonScalarValue -Token $rootBins[0].Value)) `
             -Context 'npm package-lock skill-tools bin target'
     }
     catch {
@@ -1439,7 +1840,7 @@ function Get-NpmLockIdentity {
         $sha.Dispose()
     }
     return [ordered]@{
-        packageLockSha256 = Get-FileSha256 -Path $LockPath
+        packageLockSha256 = Get-BytesSha256 -Bytes $lockBytes
         closureSha256 = $closureSha256
         rootBinTarget = $rootBinTarget
         entries = $entries
@@ -1449,7 +1850,7 @@ function Get-NpmLockIdentity {
 function Test-NpmSha512Integrity {
     param([Parameter(Mandatory = $true)][string] $Integrity)
 
-    if ($Integrity -notmatch '^sha512-(?<value>[A-Za-z0-9+/]+={0,2})$') {
+    if ($Integrity -notmatch '^sha512-(?<value>[A-Za-z0-9+/]+={0,2})\z') {
         return $false
     }
     try {

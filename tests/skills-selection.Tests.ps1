@@ -8,8 +8,23 @@ function Assert-ThrowsMessage {
     $thrown = $false
     $message = $null
     try { & $Action } catch { $thrown = $true; $message = $_.Exception.Message }
-    $thrown | Should -Be $true
-    $message | Should -Match $Pattern
+    $thrown | Should Be $true
+    $message | Should Match $Pattern
+}
+
+function Assert-StringSequence {
+    param([object[]] $Actual, [object[]] $Expected, [string] $Message = 'String sequences differ.')
+
+    $actualValues = @($Actual | ForEach-Object { [string]$_ })
+    $expectedValues = @($Expected | ForEach-Object { [string]$_ })
+    if ($actualValues.Count -ne $expectedValues.Count) {
+        throw "$Message Expected count '$($expectedValues.Count)', got '$($actualValues.Count)'."
+    }
+    for ($index = 0; $index -lt $expectedValues.Count; $index++) {
+        if ($actualValues[$index] -cne $expectedValues[$index]) {
+            throw "$Message Index '$index' expected '$($expectedValues[$index])', got '$($actualValues[$index])'."
+        }
+    }
 }
 
 function New-TestCompatibility {
@@ -79,25 +94,25 @@ function New-SelectionCatalog {
     It 'UnitT10_uses_default_profiles_when_no_profile_is_explicitly_selected' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@(); includeSkills=@(); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
     }
 
     It 'UnitT20_unions_profile_and_personal_includes_then_applies_personal_excludes' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@('skill-a'); excludeSkills=@('skill-b') }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
     }
 
     It 'UnitT30_applies_profile_excludes_inside_the_profile_layer' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@(); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-b')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-b')
     }
 
     It 'UnitT40_allows_personal_includes_to_restore_a_profile_excluded_skill' {
         $catalog = New-SelectionCatalog
         $selection = [pscustomobject]@{ profiles=@('team'); includeSkills=@('skill-c'); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-b','skill-c')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-b','skill-c')
     }
 
     It 'UnitT50_rejects_an_unknown_profile' {
@@ -120,8 +135,10 @@ function New-SelectionCatalog {
                 (New-TestSkill -Id 'new-skill' -Aliases @('old-skill'))
             )
         }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('old-skill'); excludeSkills=@() })) | Should -Be @('new-skill')
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('old-skill') })).Count | Should -Be 0
+        Assert-StringSequence `
+            -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@(); includeSkills=@('old-skill'); excludeSkills=@() })) `
+            -Expected @('new-skill')
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('old-skill') })).Count | Should Be 0
     }
 
     It 'UnitT70_filters_profile_selected_skills_when_required_capability_is_missing' {
@@ -132,7 +149,7 @@ function New-SelectionCatalog {
             )))
         )
         $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should -Be 0
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
     }
 
     It 'UnitT80_fails_closed_when_an_explicitly_included_skill_is_incompatible' {
@@ -155,7 +172,7 @@ function New-SelectionCatalog {
         )
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = '[{"kind":"connector","id":"datadog","state":"configured"}]'
         $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@(); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-optional')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-optional')
     }
 
     # Scenario: A selected Skill has a hard dependency that is either available or explicitly excluded.
@@ -167,7 +184,9 @@ function New-SelectionCatalog {
             (New-TestSkill -Id 'skill-b')
         )
         $catalog.profiles = @([pscustomobject]@{ id='core'; default=$true; includes=@('skill-a'); excludes=@() })
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })) | Should -Be @('skill-a','skill-b')
+        Assert-StringSequence `
+            -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })) `
+            -Expected @('skill-a','skill-b')
         Assert-ThrowsMessage {
             Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@('skill-b') })
         } 'Required dependency.*excluded'
@@ -193,11 +212,11 @@ function New-SelectionCatalog {
         }
         $selection=[pscustomobject]@{ profiles=@('jira'); includeSkills=@(); excludeSkills=@() }
 
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a','skill-b')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a','skill-b')
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"jira-cloud-connector","state":"configured"}]'
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
         $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"jira-cloud-api","state":"configured"}]'
-        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+        Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
     }
 
     # Scenario: Compatibility and conditional fallback refer to the same connector and API identifiers.
@@ -227,18 +246,18 @@ function New-SelectionCatalog {
         $selection=[pscustomobject]@{ profiles=@('product'); includeSkills=@(); excludeSkills=@() }
 
         try {
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a','skill-b')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a','skill-b')
             $explicitSelection=[pscustomobject]@{ profiles=@('product'); includeSkills=@('skill-a'); excludeSkills=@() }
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $explicitSelection) | Should -Be @('skill-a','skill-b')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $explicitSelection) -Expected @('skill-a','skill-b')
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"product-cloud-connector","state":"configured"}]'
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"product-cloud-api","state":"configured"}]'
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a')
 
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"product-cloud-connector","state":"available"}]'
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a','skill-b')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a','skill-b')
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"product-cloud-connector","state":"configured"}]'
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be @('skill-a','skill-b')
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @('skill-a','skill-b')
 
             $conditional.condition.capability = 'undeclared-cloud-api'
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"connector","id":"product-cloud-connector","state":"configured"}]'
@@ -301,10 +320,10 @@ function New-SelectionCatalog {
                 skills=@((New-TestSkill -Id 'skill-a' -Compatibility $compatibility -Dependencies @($conditional)),(New-TestSkill -Id 'skill-b'))
             }
             $selection=[pscustomobject]@{ profiles=@('test'); includeSkills=@(); excludeSkills=@() }
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be $case.WithoutEvidence
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @($case.WithoutEvidence)
 
             $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE='[{"kind":"environment","id":"condition-capability","state":"configured"}]'
-            @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) | Should -Be $case.WithEvidence
+            Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection) -Expected @($case.WithEvidence)
         }
     }
 

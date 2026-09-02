@@ -11,6 +11,21 @@ Describe 'production Skills Catalog' {
         $script:catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
         $script:pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $sourcePinsPath -CatalogPath $catalogPath
         $script:lock = Test-SkillsCatalogLockDocument -LockPath $lockPath -CatalogPath $catalogPath
+
+        function Assert-StringSequence {
+            param([object[]] $Actual, [object[]] $Expected, [string] $Message = 'String sequences differ.')
+
+            $actualValues = @($Actual | ForEach-Object { [string]$_ })
+            $expectedValues = @($Expected | ForEach-Object { [string]$_ })
+            if ($actualValues.Count -ne $expectedValues.Count) {
+                throw "$Message Expected count '$($expectedValues.Count)', got '$($actualValues.Count)'."
+            }
+            for ($index = 0; $index -lt $expectedValues.Count; $index++) {
+                if ($actualValues[$index] -cne $expectedValues[$index]) {
+                    throw "$Message Index '$index' expected '$($expectedValues[$index])', got '$($actualValues[$index])'."
+                }
+            }
+        }
     }
 
     # Scenario: The tracked production catalog defines the repositories available to installed consumers.
@@ -22,9 +37,9 @@ Describe 'production Skills Catalog' {
             'general',
             'knowledge-content'
         )
-        @($script:catalog.sources.id | Sort-Object) | Should -Be $expected
-        @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should -Be 0
-        @($script:catalog.sources | Where-Object { $_.repository -match 'Skill-Darktide-Translate' }).Count | Should -Be 0
+        Assert-StringSequence -Actual @($script:catalog.sources.id | Sort-Object) -Expected $expected
+        @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should Be 0
+        @($script:catalog.sources | Where-Object { $_.repository -match 'Skill-Darktide-Translate' }).Count | Should Be 0
     }
 
     # Scenario: The AI-Instructions repository has completed its cutover to externally owned shared Skills.
@@ -35,10 +50,10 @@ Describe 'production Skills Catalog' {
             @(
                 Get-ChildItem -LiteralPath $builtInSkillRoot -Recurse -Force -File |
                     Where-Object { $_.Name -ne '.gitkeep' }
-            ).Count | Should -Be 0
+            ).Count | Should Be 0
         }
         else {
-            Test-Path -LiteralPath $builtInSkillRoot | Should -Be $false
+            Test-Path -LiteralPath $builtInSkillRoot | Should Be $false
         }
     }
 
@@ -53,8 +68,8 @@ Describe 'production Skills Catalog' {
         foreach ($setup in $setupSkills) {
             $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq [string]$setup.Profile })[0]
             $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq [string]$setup.Id })[0]
-            @($profile.includes | Where-Object { [string]$_ -eq [string]$setup.Id }).Count | Should -Be 0
-            @($skill.profiles).Count | Should -Be 0
+            @($profile.includes | Where-Object { [string]$_ -eq [string]$setup.Id }).Count | Should Be 0
+            @($skill.profiles).Count | Should Be 0
         }
     }
 
@@ -75,7 +90,9 @@ Describe 'production Skills Catalog' {
             Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
             foreach ($case in $cases) {
                 $selection = [pscustomobject]@{ profiles=@([string]$case.Profile); includeSkills=@(); excludeSkills=@() }
-                @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) | Should -Be @($case.Expected)
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @($case.Expected)
             }
         }
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
@@ -85,7 +102,7 @@ Describe 'production Skills Catalog' {
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
     It 'InterT15_maps_twelve_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should -Be 12
+        $activeSkills.Count | Should Be 12
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
@@ -103,23 +120,23 @@ Describe 'production Skills Catalog' {
         }
 
         foreach ($skill in $activeSkills) {
-            $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should -Be $true
-            [string]$skill.source.sourceId | Should -Be $expectedSourceBySkill[[string]$skill.id]
-            [string]$skill.source.path | Should -Be ".agents/skills/$($skill.id)"
+            $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should Be $true
+            [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
+            [string]$skill.source.path | Should Be ".agents/skills/$($skill.id)"
         }
 
         $removedFelo = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'search-with-felo' })
-        $removedFelo.Count | Should -Be 1
-        [string]$removedFelo[0].lifecycle.status | Should -Be 'removed'
-        @($removedFelo[0].lifecycle.aliases).Count | Should -Be 0
-        @($removedFelo[0].lifecycle.PSObject.Properties.Name | Where-Object { $_ -eq 'replacementId' }).Count | Should -Be 0
-        @($removedFelo[0].profiles).Count | Should -Be 0
+        $removedFelo.Count | Should Be 1
+        [string]$removedFelo[0].lifecycle.status | Should Be 'removed'
+        @($removedFelo[0].lifecycle.aliases).Count | Should Be 0
+        @($removedFelo[0].lifecycle.PSObject.Properties.Name | Where-Object { $_ -eq 'replacementId' }).Count | Should Be 0
+        @($removedFelo[0].profiles).Count | Should Be 0
 
         $externalResearch = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'external-research' })
-        $externalResearch.Count | Should -Be 1
-        @($externalResearch[0].includes | Where-Object { $_ -eq 'search-with-felo' }).Count | Should -Be 0
+        $externalResearch.Count | Should Be 1
+        @($externalResearch[0].includes | Where-Object { $_ -eq 'search-with-felo' }).Count | Should Be 0
 
-        @($script:catalog.skills | Where-Object { [string]$_.id -match 'darktide' }).Count | Should -Be 0
+        @($script:catalog.skills | Where-Object { [string]$_.id -match 'darktide' }).Count | Should Be 0
     }
 
     # Scenario: Both Codex and Copilot runtime Instructions publish the official FELO replacement routes.
@@ -139,8 +156,8 @@ Describe 'production Skills Catalog' {
         )
         foreach ($instructionPath in $instructionPaths) {
             $content = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repositoryRoot $instructionPath)
-            $content | Should -Not -Match '\.agents/skills/search-with-felo/SKILL\.md'
-            foreach ($officialPath in $officialPaths) { $content | Should -Match ([regex]::Escape($officialPath)) }
+            $content | Should Not Match '\.agents/skills/search-with-felo/SKILL\.md'
+            foreach ($officialPath in $officialPaths) { $content | Should Match ([regex]::Escape($officialPath)) }
         }
     }
 
@@ -148,36 +165,36 @@ Describe 'production Skills Catalog' {
     # Purpose: Keep API setup conditional and preserve the connector fallback boundary.
     It 'InterT17_routes_Bitbucket_API_failures_to_the_setup_Skill_conditionally' {
         $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'review-bitbucket-pull-request' })[0]
-        @($skill.dependencies).Count | Should -Be 1
-        [string]$skill.dependencies[0].skillId | Should -Be 'configure-bitbucket-api-access'
-        [string]$skill.dependencies[0].type | Should -Be 'conditional'
-        [string]$skill.dependencies[0].condition.capability | Should -Be 'bitbucket-cloud-api'
-        [string]$skill.dependencies[0].condition.operator | Should -Be 'missing-or-invalid'
-        [string]$skill.dependencies[0].fallback.capability | Should -Be 'bitbucket-cloud-connector'
+        @($skill.dependencies).Count | Should Be 1
+        [string]$skill.dependencies[0].skillId | Should Be 'configure-bitbucket-api-access'
+        [string]$skill.dependencies[0].type | Should Be 'conditional'
+        [string]$skill.dependencies[0].condition.capability | Should Be 'bitbucket-cloud-api'
+        [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
+        [string]$skill.dependencies[0].fallback.capability | Should Be 'bitbucket-cloud-connector'
         $connectorRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'connector' })[0]
         $apiRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'environment' })[0]
-        [string]$connectorRequirement.id | Should -Be ([string]$skill.dependencies[0].fallback.capability)
-        [string]$connectorRequirement.state | Should -Be 'configured'
-        [string]$apiRequirement.id | Should -Be ([string]$skill.dependencies[0].condition.capability)
-        [string]$apiRequirement.state | Should -Be 'configured'
+        [string]$connectorRequirement.id | Should Be ([string]$skill.dependencies[0].fallback.capability)
+        [string]$connectorRequirement.state | Should Be 'configured'
+        [string]$apiRequirement.id | Should Be ([string]$skill.dependencies[0].condition.capability)
+        [string]$apiRequirement.state | Should Be 'configured'
     }
 
     # Scenario: Confluence publishing can repair missing or invalid scoped API access without forcing setup when a connector is available.
     # Purpose: Keep API setup conditional and preserve the connector fallback boundary.
     It 'InterT18_routes_Confluence_API_failures_to_the_setup_Skill_conditionally' {
         $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'publish-requirements-to-confluence' })[0]
-        @($skill.dependencies).Count | Should -Be 1
-        [string]$skill.dependencies[0].skillId | Should -Be 'configure-confluence-api-access'
-        [string]$skill.dependencies[0].type | Should -Be 'conditional'
-        [string]$skill.dependencies[0].condition.capability | Should -Be 'confluence-cloud-api'
-        [string]$skill.dependencies[0].condition.operator | Should -Be 'missing-or-invalid'
-        [string]$skill.dependencies[0].fallback.capability | Should -Be 'confluence-cloud-connector'
+        @($skill.dependencies).Count | Should Be 1
+        [string]$skill.dependencies[0].skillId | Should Be 'configure-confluence-api-access'
+        [string]$skill.dependencies[0].type | Should Be 'conditional'
+        [string]$skill.dependencies[0].condition.capability | Should Be 'confluence-cloud-api'
+        [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
+        [string]$skill.dependencies[0].fallback.capability | Should Be 'confluence-cloud-connector'
         $connectorRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'connector' })[0]
         $apiRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'environment' })[0]
-        [string]$connectorRequirement.id | Should -Be ([string]$skill.dependencies[0].fallback.capability)
-        [string]$connectorRequirement.state | Should -Be 'configured'
-        [string]$apiRequirement.id | Should -Be ([string]$skill.dependencies[0].condition.capability)
-        [string]$apiRequirement.state | Should -Be 'configured'
+        [string]$connectorRequirement.id | Should Be ([string]$skill.dependencies[0].fallback.capability)
+        [string]$connectorRequirement.state | Should Be 'configured'
+        [string]$apiRequirement.id | Should Be ([string]$skill.dependencies[0].condition.capability)
+        [string]$apiRequirement.state | Should Be 'configured'
     }
 
     # Scenario: Each workflow is explicitly selected with exact, weaker-state, or wrong-kind capability evidence.
@@ -195,7 +212,9 @@ Describe 'production Skills Catalog' {
             foreach ($case in $positiveCases) {
                 $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = "[{`"kind`":`"$($case.Kind)`",`"id`":`"$($case.Capability)`",`"state`":`"configured`"}]"
                 $selection = [pscustomobject]@{ profiles=@('external-research'); includeSkills=@([string]$case.Skill); excludeSkills=@() }
-                @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) | Should -Be @([string]$case.Skill)
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @([string]$case.Skill)
             }
 
             $negativeCases = @(
@@ -211,8 +230,9 @@ Describe 'production Skills Catalog' {
             foreach ($case in $negativeCases) {
                 $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = [string]$case.Evidence
                 $selection = [pscustomobject]@{ profiles=@('external-research'); includeSkills=@([string]$case.Skill); excludeSkills=@() }
-                @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) |
-                    Should -Be @([string]$case.Setup,[string]$case.Skill)
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @([string]$case.Setup,[string]$case.Skill)
             }
         }
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
@@ -224,56 +244,56 @@ Describe 'production Skills Catalog' {
         $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'ai-memory' })
         $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-notion-ai-memory' })
 
-        $profile.Count | Should -Be 1
-        [bool]$profile[0].default | Should -Be $false
-        @($profile[0].includes) | Should -Be @('manage-notion-ai-memory')
-        $skill.Count | Should -Be 1
-        [string]$skill[0].group | Should -Be 'knowledge-management'
-        @($skill[0].profiles) | Should -Be @('ai-memory')
-        @($skill[0].compatibility.requiredCapabilities).Count | Should -Be 1
-        [string]$skill[0].compatibility.requiredCapabilities[0].kind | Should -Be 'connector'
-        [string]$skill[0].compatibility.requiredCapabilities[0].id | Should -Be 'notion'
-        [string]$skill[0].compatibility.requiredCapabilities[0].state | Should -Be 'configured'
+        $profile.Count | Should Be 1
+        [bool]$profile[0].default | Should Be $false
+        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-notion-ai-memory')
+        $skill.Count | Should Be 1
+        [string]$skill[0].group | Should Be 'knowledge-management'
+        Assert-StringSequence -Actual @($skill[0].profiles) -Expected @('ai-memory')
+        @($skill[0].compatibility.requiredCapabilities).Count | Should Be 1
+        [string]$skill[0].compatibility.requiredCapabilities[0].kind | Should Be 'connector'
+        [string]$skill[0].compatibility.requiredCapabilities[0].id | Should Be 'notion'
+        [string]$skill[0].compatibility.requiredCapabilities[0].state | Should Be 'configured'
     }
 
     # Scenario: The production catalog contains the profiles used by a new installation.
     # Purpose: Keep installation defaults deterministic and limited to the intended core profile.
     It 'InterT20_keeps_core_as_the_only_default_profile' {
-        @($script:catalog.profiles | Where-Object { $_.default -eq $true }).Count | Should -Be 1
-        [string]@($script:catalog.profiles | Where-Object { $_.default -eq $true })[0].id | Should -Be 'core'
+        @($script:catalog.profiles | Where-Object { $_.default -eq $true }).Count | Should Be 1
+        [string]@($script:catalog.profiles | Where-Object { $_.default -eq $true })[0].id | Should Be 'core'
     }
 
     # Scenario: Production source pins are loaded together with the tracked catalog.
     # Purpose: Ensure every source resolves from an immutable commit while preserving its operator-facing branch metadata.
     It 'InterT25_pins_every_production_source_to_a_full_immutable_commit' {
-        $script:pins.schemaVersion | Should -Be 1
-        ([string]$script:pins.catalogId) | Should -Be ([string]$script:catalog.catalogId)
-        @($script:pins.sources).Count | Should -Be @($script:catalog.sources).Count
+        $script:pins.schemaVersion | Should Be 1
+        ([string]$script:pins.catalogId) | Should Be ([string]$script:catalog.catalogId)
+        @($script:pins.sources).Count | Should Be @($script:catalog.sources).Count
 
         foreach ($source in @($script:catalog.sources)) {
             $matches = @($script:pins.sources | Where-Object { [string]$_.id -eq [string]$source.id })
-            $matches.Count | Should -Be 1
-            [string]$matches[0].requestedRef | Should -Be 'main'
-            [string]$matches[0].requestedRefType | Should -Be 'branch'
-            [string]$matches[0].resolvedCommit | Should -Match '^[0-9a-f]{40}$'
-            [string]$matches[0].resolvedVersion | Should -Not -BeNullOrEmpty
+            $matches.Count | Should Be 1
+            [string]$matches[0].requestedRef | Should Be 'main'
+            [string]$matches[0].requestedRefType | Should Be 'branch'
+            [string]$matches[0].resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            [string]$matches[0].resolvedVersion | Should Not BeNullOrEmpty
         }
     }
 
     # Scenario: The production catalog is distributed with its generated immutable lock.
     # Purpose: Make installation reproducible from tracked bytes and give CI a stale-lock gate.
     It 'InterT30_tracks_a_complete_lock_for_every_production_source_and_skill' {
-        Test-Path -LiteralPath $lockPath -PathType Leaf | Should -Be $true
-        ([string]$script:lock.catalogId) | Should -Be ([string]$script:catalog.catalogId)
-        @($script:lock.sources).Count | Should -Be @($script:catalog.sources).Count
-        @($script:lock.skills).Count | Should -Be @($script:catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' }).Count
+        Test-Path -LiteralPath $lockPath -PathType Leaf | Should Be $true
+        ([string]$script:lock.catalogId) | Should Be ([string]$script:catalog.catalogId)
+        @($script:lock.sources).Count | Should Be @($script:catalog.sources).Count
+        @($script:lock.skills).Count | Should Be @($script:catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' }).Count
         foreach ($source in @($script:lock.sources)) {
-            [string]$source.resolvedCommit | Should -Match '^[0-9a-f]{40}$'
-            [string]$source.archiveSha256 | Should -Match '^[0-9a-f]{64}$'
+            [string]$source.resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            [string]$source.archiveSha256 | Should Match '^[0-9a-f]{64}$'
         }
         foreach ($skill in @($script:lock.skills)) {
-            [string]$skill.contentSha256 | Should -Match '^[0-9a-f]{64}$'
+            [string]$skill.contentSha256 | Should Match '^[0-9a-f]{64}$'
         }
-        @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should -Be 0
+        @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should Be 0
     }
 }

@@ -24,6 +24,46 @@ function New-SafeZipFixture {
     finally { $stream.Dispose() }
 }
 
+function Set-SafeZipEntryNameByte {
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $EntryName,
+        [Parameter(Mandatory = $true)][char] $Marker,
+        [Parameter(Mandatory = $true)][byte] $Replacement
+    )
+
+    $markerIndex = $EntryName.IndexOf($Marker)
+    if ($markerIndex -lt 0 -or $EntryName.LastIndexOf($Marker) -ne $markerIndex) {
+        throw 'Safe ZIP test entry must contain exactly one marker.'
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($ArchivePath)
+    $needle = [System.Text.Encoding]::UTF8.GetBytes($EntryName)
+    $markerBytes = [System.Text.Encoding]::UTF8.GetBytes([string]$Marker)
+    if ($markerBytes.Length -ne 1) {
+        throw 'Safe ZIP test marker must encode as exactly one UTF-8 byte.'
+    }
+    $markerByteIndex = [System.Text.Encoding]::UTF8.GetByteCount($EntryName.Substring(0, $markerIndex))
+    $replacementCount = 0
+    for ($offset = 0; $offset -le ($bytes.Length - $needle.Length); $offset++) {
+        $matches = $true
+        for ($index = 0; $index -lt $needle.Length; $index++) {
+            if ($bytes[$offset + $index] -ne $needle[$index]) {
+                $matches = $false
+                break
+            }
+        }
+        if ($matches) {
+            $bytes[$offset + $markerByteIndex] = $Replacement
+            $replacementCount++
+            $offset += $needle.Length - 1
+        }
+    }
+    if ($replacementCount -ne 2) {
+        throw "Safe ZIP test expected two entry-name records; found $replacementCount."
+    }
+    [System.IO.File]::WriteAllBytes($ArchivePath, $bytes)
+}
+
 Describe 'safe ZIP extraction' {
     BeforeEach { Import-Module $script:SafeZipModule -Force }
 
@@ -55,7 +95,9 @@ Describe 'safe ZIP extraction' {
     It 'UnitT11_rejects_control_characters_in_archive_paths' {
         foreach ($control in @([char]9, [char]10, [char]0x7f)) {
             $archivePath = Join-Path $TestDrive ("control-{0}.zip" -f [int]$control)
-            New-SafeZipFixture -ArchivePath $archivePath -EntryName ("candidate-root/scripts/file{0}name.ps1" -f $control)
+            $entryName = 'candidate-root/scripts/file~name.ps1'
+            New-SafeZipFixture -ArchivePath $archivePath -EntryName $entryName
+            Set-SafeZipEntryNameByte -ArchivePath $archivePath -EntryName $entryName -Marker '~' -Replacement ([byte][int]$control)
             $errorMessage = $null
             try {
                 Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot (Join-Path $TestDrive ("expanded-{0}" -f [int]$control)) | Out-Null

@@ -1076,7 +1076,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
         $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'runtime is incomplete.*update-agent-environment\.ps1'
+        ($output -join [Environment]::NewLine) | Should Match '(?s)runtime is incomplete:.*update-agent-environment\.ps1'
     }
 
     # Scenario: The installed runtime directory is replaced by a file while unmanaged cleanup contracts exist beside the stable command.

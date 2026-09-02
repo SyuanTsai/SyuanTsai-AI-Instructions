@@ -234,6 +234,21 @@ Version: this line also belongs to the description body
         Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
         Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
+        Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
+
+        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.exe' } else { 'invalid-native' })
+        [IO.File]::WriteAllBytes($invalidNativePath, [byte[]]@(0, 1, 2, 3))
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+            $chmodCommand = Assert-Command -Name 'chmod'
+            $global:LASTEXITCODE = $null
+            & $chmodCommand '+x' $invalidNativePath
+            if ($global:LASTEXITCODE -ne 0) { throw 'Unable to prepare invalid native launch fixture.' }
+        }
+        $global:LASTEXITCODE = 0
+        $launchError = $null
+        try { Invoke-CheckedCommand -Command $invalidNativePath -Arguments @('--probe') | Out-Null }
+        catch { $launchError = $_.Exception.Message }
+        Assert-True (-not [string]::IsNullOrWhiteSpace($launchError)) 'A native launch failure must not inherit a stale successful exit code.'
 
         $pythonCommand = Assert-Command -Name 'python'
         $commandOutput = @(Invoke-CheckedCommand -Command $pythonCommand -Arguments @(
