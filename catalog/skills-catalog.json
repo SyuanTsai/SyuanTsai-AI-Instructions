@@ -31,6 +31,15 @@
       "excludes": []
     },
     {
+      "id": "ai-memory",
+      "description": "Durable Notion memory and interruption-safe task Handoff workflows.",
+      "default": false,
+      "includes": [
+        "manage-notion-ai-memory"
+      ],
+      "excludes": []
+    },
+    {
       "id": "code-collaboration",
       "description": "Code delegation and pull-request collaboration workflows.",
       "default": false,
@@ -120,6 +129,36 @@
         ],
         "shells": [],
         "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "manage-notion-ai-memory",
+      "group": "knowledge-management",
+      "source": {
+        "sourceId": "general",
+        "path": ".agents/skills/manage-notion-ai-memory"
+      },
+      "profiles": [
+        "ai-memory"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [
+          {
+            "kind": "connector",
+            "id": "notion",
+            "state": "configured"
+          }
+        ],
         "anyOfCapabilities": []
       },
       "dependencies": [],

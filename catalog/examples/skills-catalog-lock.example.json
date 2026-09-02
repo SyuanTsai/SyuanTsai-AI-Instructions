@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "c9f870199a3eeca74f3db6aaa9a4b4f7619003c76a886b0bad79dab43c4face4",
+  "catalogSha256": "92a5bff5d5904d55ea4c9634785769f79cf93bb016d6839ee07763cf19e5a71a",
   "sources": [
     {
       "id": "agent-skills",
@@ -43,6 +43,12 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/investigate-datadog-logs",
       "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "id": "manage-notion-ai-memory",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/manage-notion-ai-memory",
+      "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
     },
     {
       "id": "plan-production-change",
