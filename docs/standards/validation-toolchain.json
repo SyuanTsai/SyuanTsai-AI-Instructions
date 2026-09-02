@@ -20,7 +20,8 @@
     },
     "skill-validator": {
       "source": "github.com/agent-ecosystem/skill-validator/cmd/skill-validator",
-      "channel": "latest-stable"
+      "channel": "latest-stable",
+      "stableVersionRule": "release-semver-only"
     },
     "skill-tools": {
       "source": "npm:skill-tools",
