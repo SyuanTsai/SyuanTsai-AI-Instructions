@@ -33,6 +33,28 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
         }
+
+        function New-TestWheel {
+            param(
+                [Parameter(Mandatory = $true)][string] $Root,
+                [Parameter(Mandatory = $true)][string] $Name,
+                [Parameter(Mandatory = $true)][string] $Version
+            )
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $token = [guid]::NewGuid().ToString('N')
+            $sourceRoot = Join-Path $Root ("wheel-source-$token")
+            [void](New-Item -ItemType Directory -Path $sourceRoot -Force)
+            $distName = ($Name -replace '-', '_')
+            $distInfo = Join-Path $sourceRoot ("$distName-$Version.dist-info")
+            [void](New-Item -ItemType Directory -Path $distInfo -Force)
+            $metadata = "Metadata-Version: 2.4`nName: $Name`nVersion: $Version`n"
+            [IO.File]::WriteAllText((Join-Path $distInfo 'METADATA'), $metadata, (New-Object Text.UTF8Encoding($false)))
+            $wheelPath = Join-Path $Root ("$distName-$Version-py3-none-any.whl")
+            [IO.Compression.ZipFile]::CreateFromDirectory($sourceRoot, $wheelPath)
+            Remove-Item -LiteralPath $sourceRoot -Recurse -Force
+            return $wheelPath
+        }
     }
 
     It 'UnitT10_keeps_the_normative_standard_evidence_toolchain_and_resolver_together' {
@@ -75,6 +97,16 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Equal $toolchain.tools.($entry.Key).source $entry.Value "$($entry.Key) must use its approved source."
             Assert-Equal $toolchain.tools.($entry.Key).channel 'latest-stable' "$($entry.Key) must use latest-stable."
         }
+
+        Assert-Equal $toolchain.tools.skillspector.releaseVersionRule 'v-semver-release-only' 'SkillSpector release tags must use stable v-semver.'
+        Assert-Equal $toolchain.tools.skillspector.pythonPackageIndex 'https://pypi.org/simple' 'SkillSpector dependencies must use the approved PyPI index.'
+        Assert-Equal $toolchain.tools.skillspector.pythonDistribution.configIsolation 'os.devnull' 'pip configuration must be isolated.'
+        Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.onlyBinary) 'SkillSpector dependencies must resolve to wheels only.'
+        Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.disableCache) 'SkillSpector dependency acquisition must disable pip cache.'
+        Assert-Equal $toolchain.tools.skillspector.pythonDistribution.dependencyAcquisition 'verified-wheelhouse' 'SkillSpector dependencies must use a verified wheelhouse.'
+        Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.installNoIndex) 'SkillSpector install must be no-index.'
+        Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.requireHashes) 'SkillSpector install must require hashes.'
+        Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.recordDependencyClosureHashes) 'SkillSpector dependency closure hashes must be recorded.'
 
         Assert-Equal $toolchain.tools.'skill-tools'.registry 'https://registry.npmjs.org/' 'skill-tools must use the approved npm registry.'
         Assert-Equal $toolchain.tools.'skill-validator'.stableVersionRule 'release-semver-only' 'skill-validator must require release SemVer.'
@@ -127,6 +159,94 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $errorMessage 'Untrusted npm registry' 'An npm registry override must fail closed before package resolution.'
     }
 
+    It 'UnitT26a_rejects_untrusted_pip_distribution_overrides_before_dependency_resolution' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $cases = @(
+            @{ Name = 'PIP_INDEX_URL'; Value = 'https://pypi.example.invalid/simple' },
+            @{ Name = 'PIP_EXTRA_INDEX_URL'; Value = 'https://extra.example.invalid/simple' },
+            @{ Name = 'PIP_CONFIG_FILE'; Value = 'custom-pip.conf' },
+            @{ Name = 'PIP_FIND_LINKS'; Value = 'https://files.example.invalid/' },
+            @{ Name = 'PIP_TRUSTED_HOST'; Value = 'example.invalid' },
+            @{ Name = 'PIP_NO_INDEX'; Value = '1' },
+            @{ Name = 'PIP_CERT'; Value = 'custom-ca.pem' },
+            @{ Name = 'PIP_CLIENT_CERT'; Value = 'client.pem' }
+        )
+
+        foreach ($case in $cases) {
+            $previous = [Environment]::GetEnvironmentVariable($case.Name, [EnvironmentVariableTarget]::Process)
+            $errorMessage = $null
+            try {
+                [Environment]::SetEnvironmentVariable($case.Name, $case.Value, [EnvironmentVariableTarget]::Process)
+                Assert-NoConflictingPipEnvironment -ApprovedIndex 'https://pypi.org/simple'
+            }
+            catch {
+                $errorMessage = $_.Exception.Message
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable($case.Name, $previous, [EnvironmentVariableTarget]::Process)
+            }
+
+            Assert-Match $errorMessage ("Untrusted pip environment override.*{0}" -f $case.Name) ("pip override {0} must fail before dependency resolution." -f $case.Name)
+        }
+    }
+
+    It 'UnitT26b_accepts_the_approved_pip_environment_and_executes_the_action' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $names = @('PIP_INDEX_URL', 'PIP_EXTRA_INDEX_URL', 'PIP_CONFIG_FILE', 'PIP_FIND_LINKS', 'PIP_TRUSTED_HOST', 'PIP_NO_INDEX', 'PIP_CERT', 'PIP_CLIENT_CERT')
+        $previous = [ordered]@{}
+        try {
+            foreach ($name in $names) {
+                $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+                [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+            }
+
+            $result = Invoke-WithApprovedPipEnvironment -ApprovedIndex 'https://pypi.org/simple' -Action {
+                $index = [Environment]::GetEnvironmentVariable('PIP_INDEX_URL', [EnvironmentVariableTarget]::Process)
+                $configFile = [Environment]::GetEnvironmentVariable('PIP_CONFIG_FILE', [EnvironmentVariableTarget]::Process)
+                if ($index -notmatch '^https://pypi\.org/simple/?$') { throw 'Approved pip index was not applied.' }
+                if ([string]::IsNullOrWhiteSpace($configFile)) { throw 'pip config isolation was not applied.' }
+                'approved-pip-action-ran'
+            }
+            Assert-Equal $result 'approved-pip-action-ran' 'Approved pip environment must reach the action.'
+        }
+        finally {
+            foreach ($entry in $previous.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+            }
+        }
+    }
+
+    It 'UnitT26c_builds_a_hash_locked_dependency_closure_from_wheels_only' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $wheelhouse = Join-Path $TestDrive 'wheelhouse'
+        [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
+        [void](New-TestWheel -Root $wheelhouse -Name 'skillspector' -Version '2.12.0')
+        [void](New-TestWheel -Root $wheelhouse -Name 'dependency-a' -Version '1.0.0')
+        $lockPath = Join-Path $TestDrive 'dependency-lock.txt'
+
+        $manifest = New-PythonWheelhouseLock -WheelhousePath $wheelhouse -LockPath $lockPath
+        Assert-Equal @($manifest.entries).Count 2 'Dependency closure must include every wheel.'
+        Assert-Match $manifest.closureSha256 '^[0-9a-f]{64}$' 'Dependency closure must have a SHA-256 identity.'
+        $lock = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath
+        Assert-Match $lock 'skillspector==2\.12\.0 --hash=sha256:[0-9a-f]{64}' 'Root wheel must be hash locked.'
+        Assert-Match $lock 'dependency-a==1\.0\.0 --hash=sha256:[0-9a-f]{64}' 'Dependency wheel must be hash locked.'
+    }
+
+    It 'UnitT26d_requires_offline_hash_locked_SkillSpector_installation' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+
+        Assert-Match $resolver "'pip', 'download'" 'SkillSpector dependencies must be acquired before installation.'
+        Assert-Match $resolver '--only-binary=:all:' 'Dependency acquisition must reject source distributions.'
+        Assert-Match $resolver '--no-cache-dir' 'Dependency acquisition must not reuse pip cache.'
+        Assert-Match $resolver 'New-PythonWheelhouseLock' 'Dependency closure must be hash inventoried.'
+        Assert-Match $resolver '--no-index' 'Final SkillSpector installation must not use an index.'
+        Assert-Match $resolver '--require-hashes' 'Final SkillSpector installation must enforce hashes.'
+        Assert-Match $resolver '--no-deps' 'Final installation must not resolve new dependencies outside the locked closure.'
+    }
+
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
 
@@ -141,6 +261,32 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-StableGoModuleVersion -Version 'v1.6.1') 'A normal release version must be stable.'
         Assert-False (Test-StableGoModuleVersion -Version 'v1.7.0-rc1') 'A prerelease version must not be stable.'
         Assert-False (Test-StableGoModuleVersion -Version 'v0.0.0-20260902000000-0123456789ab') 'A pseudo-version must not be stable.'
+    }
+
+    It 'UnitT28a_binds_SkillSpector_release_wheel_metadata_and_installed_version' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        Assert-SkillSpectorWheelIdentity -ReleaseVersion '2.12.0' -WheelFileName 'skillspector-2.12.0-py3-none-any.whl' -MetadataName 'skillspector' -MetadataVersion '2.12.0'
+
+        $cases = @(
+            @{ File = 'skillspector-2.11.0-py3-none-any.whl'; Name = 'skillspector'; Version = '2.12.0'; Pattern = 'release/wheel version mismatch' },
+            @{ File = 'skillspector-2.12.0-py3-none-any.whl'; Name = 'other-package'; Version = '2.12.0'; Pattern = 'METADATA Name mismatch' },
+            @{ File = 'skillspector-2.12.0-py3-none-any.whl'; Name = 'skillspector'; Version = '2.11.0'; Pattern = 'METADATA Version mismatch' }
+        )
+
+        foreach ($case in $cases) {
+            $errorMessage = $null
+            try {
+                Assert-SkillSpectorWheelIdentity -ReleaseVersion '2.12.0' -WheelFileName $case.File -MetadataName $case.Name -MetadataVersion $case.Version
+            }
+            catch {
+                $errorMessage = $_.Exception.Message
+            }
+            Assert-Match $errorMessage $case.Pattern 'SkillSpector release identity mismatch must fail closed.'
+        }
+
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        Assert-Match $resolver "importlib\.metadata.*version\('skillspector'\)" 'Installed SkillSpector version must be verified after installation.'
     }
 
     It 'UnitT29_rejects_untrusted_Go_distribution_overrides_before_module_resolution' {
@@ -239,6 +385,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'authority-level regression' 'Review matrix must record SYP-167 authority regression/CI deliverables.'
         Assert-Match $matrix 'proxy.golang.org' 'Review matrix must record the approved Go module proxy.'
         Assert-Match $matrix 'sum.golang.org' 'Review matrix must record the approved Go checksum database.'
+        Assert-Match $matrix 'pypi.org/simple' 'Review matrix must record the approved Python package index.'
+        Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
     }
 }
