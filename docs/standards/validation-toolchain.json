@@ -16,7 +16,18 @@
   "tools": {
     "skillspector": {
       "source": "NVIDIA/SkillSpector",
-      "channel": "latest-stable"
+      "channel": "latest-stable",
+      "releaseVersionRule": "v-semver-release-only",
+      "pythonPackageIndex": "https://pypi.org/simple",
+      "pythonDistribution": {
+        "configIsolation": "os.devnull",
+        "onlyBinary": true,
+        "disableCache": true,
+        "dependencyAcquisition": "verified-wheelhouse",
+        "installNoIndex": true,
+        "requireHashes": true,
+        "recordDependencyClosureHashes": true
+      }
     },
     "skill-validator": {
       "source": "github.com/agent-ecosystem/skill-validator/cmd/skill-validator",
