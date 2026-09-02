@@ -1,6 +1,11 @@
 {
   "schemaVersion": 1,
   "policy": "latest-stable-per-validation-run",
+  "sourceTrust": {
+    "enforcement": "exact-approved-source",
+    "resolver": "scripts/Resolve-StandardValidationTool.ps1",
+    "failClosedOnMismatch": true
+  },
   "resolution": {
     "resolveAtRunStart": true,
     "freezeForRun": true,
