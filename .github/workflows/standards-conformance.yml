@@ -8,6 +8,7 @@ on:
       - 'docs/standards/**'
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
+      - 'tests/skill-repository-workflows.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
   pull_request:
@@ -17,6 +18,7 @@ on:
       - 'docs/standards/**'
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
+      - 'tests/skill-repository-workflows.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
   workflow_dispatch:
@@ -97,7 +99,11 @@ jobs:
           Import-Module Pester -RequiredVersion $env:PESTER_RESOLVED_VERSION -Force
           Write-Host "Pester frozen for this run: $env:PESTER_RESOLVED_VERSION"
           Write-Host "Pester identity: $env:PESTER_RESOLVED_IDENTITY"
-          $result = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
+          $authorityPaths = @(
+              './tests/skill-repository-standard.Tests.ps1'
+              './tests/skill-repository-workflows.Tests.ps1'
+          )
+          $result = Invoke-Pester -Path $authorityPaths -PassThru
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
           if ($result.FailedCount -gt 0) { exit 1 }
 
