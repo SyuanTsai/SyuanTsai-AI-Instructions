@@ -8,6 +8,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:WorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $script:RequiredPowerShellWorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -64,6 +65,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-Path -LiteralPath $script:ToolchainPath -PathType Leaf) 'Missing validation toolchain policy.'
         Assert-True (Test-Path -LiteralPath $script:ResolverPath -PathType Leaf) 'Missing central validation tool resolver.'
         Assert-True (Test-Path -LiteralPath $script:WorkflowPath -PathType Leaf) 'Missing Standards Conformance workflow.'
+        Assert-True (Test-Path -LiteralPath $script:RequiredPowerShellWorkflowPath -PathType Leaf) 'Missing required PowerShell workflow authority bridge.'
 
         $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
         Assert-Match $index 'skill-repository-standard\.md' 'Standards index must link the normative Standard.'
@@ -101,6 +103,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $toolchain.tools.skillspector.releaseVersionRule 'v-semver-release-only' 'SkillSpector release tags must use stable v-semver.'
         Assert-Equal $toolchain.tools.skillspector.pythonPackageIndex 'https://pypi.org/simple' 'SkillSpector dependencies must use the approved PyPI index.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.configIsolation 'os.devnull' 'pip configuration must be isolated.'
+        Assert-Equal $toolchain.tools.skillspector.pythonDistribution.environmentOverridePolicy 'deny-by-default' 'Inherited pip environment must be denied by default.'
+        $allowedPipEnvironment = @($toolchain.tools.skillspector.pythonDistribution.allowedInheritedEnvironment)
+        Assert-Equal $allowedPipEnvironment.Count 1 'Exactly one inherited pip variable may be conditionally accepted.'
+        Assert-Equal $allowedPipEnvironment[0] 'PIP_INDEX_URL' 'Only the approved PIP_INDEX_URL may be inherited.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.onlyBinary) 'SkillSpector dependencies must resolve to wheels only.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.disableCache) 'SkillSpector dependency acquisition must disable pip cache.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.dependencyAcquisition 'verified-wheelhouse' 'SkillSpector dependencies must use a verified wheelhouse.'
@@ -171,7 +177,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Name = 'PIP_TRUSTED_HOST'; Value = 'example.invalid' },
             @{ Name = 'PIP_NO_INDEX'; Value = '1' },
             @{ Name = 'PIP_CERT'; Value = 'custom-ca.pem' },
-            @{ Name = 'PIP_CLIENT_CERT'; Value = 'client.pem' }
+            @{ Name = 'PIP_CLIENT_CERT'; Value = 'client.pem' },
+            @{ Name = 'PIP_REQUIREMENT'; Value = 'https://files.example.invalid/requirements.txt' },
+            @{ Name = 'PIP_CONSTRAINT'; Value = 'https://files.example.invalid/constraints.txt' },
+            @{ Name = 'PIP_FUTURE_UNTRUSTED_OPTION'; Value = '1' }
         )
 
         foreach ($case in $cases) {
@@ -195,7 +204,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
     It 'UnitT26b_accepts_the_approved_pip_environment_and_executes_the_action' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
-        $names = @('PIP_INDEX_URL', 'PIP_EXTRA_INDEX_URL', 'PIP_CONFIG_FILE', 'PIP_FIND_LINKS', 'PIP_TRUSTED_HOST', 'PIP_NO_INDEX', 'PIP_CERT', 'PIP_CLIENT_CERT')
+        $names = @((Get-ProcessPipEnvironmentNames) + @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') | Sort-Object -Unique)
         $previous = [ordered]@{}
         try {
             foreach ($name in $names) {
@@ -208,6 +217,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $configFile = [Environment]::GetEnvironmentVariable('PIP_CONFIG_FILE', [EnvironmentVariableTarget]::Process)
                 if ($index -notmatch '^https://pypi\.org/simple/?$') { throw 'Approved pip index was not applied.' }
                 if ([string]::IsNullOrWhiteSpace($configFile)) { throw 'pip config isolation was not applied.' }
+                $unexpected = @(Get-ProcessPipEnvironmentNames | Where-Object { $_ -notin @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') })
+                if ($unexpected.Count -gt 0) { throw "Unexpected inherited pip environment: $($unexpected -join ', ')" }
                 'approved-pip-action-ran'
             }
             Assert-Equal $result 'approved-pip-action-ran' 'Approved pip environment must reach the action.'
@@ -253,10 +264,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
+        $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RequiredPowerShellWorkflowPath
 
         Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ValidatePolicyOnly' 'Workflow must validate central tool trust policy.'
         Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Workflow must resolve Pester through the central resolver.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
+
+        Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
+        Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
+        Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ValidatePolicyOnly' 'Required context must validate central tool policy through the resolver.'
+        Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ToolName skillspector.*-Install' 'Required context must live-install SkillSpector through the resolver.'
+        Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Required context must obtain latest Pester through the resolver.'
+        Assert-Match $requiredWorkflow 'skill-repository-standard\.Tests\.ps1' 'Required context must run the authority regression.'
     }
 
     It 'UnitT28_rejects_prerelease_and_pseudo_versions_for_skill_validator' {
