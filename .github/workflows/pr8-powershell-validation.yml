@@ -178,7 +178,11 @@ jobs:
           if ($pester.source -ne 'PowerShellGallery:Pester') { throw 'Unexpected Pester source.' }
           if ([string]::IsNullOrWhiteSpace([string]$pester.resolvedVersion)) { throw 'Pester version was not recorded.' }
           Import-Module Pester -RequiredVersion $pester.resolvedVersion -Force
-          $authority = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
+          $authorityPaths = @(
+              './tests/skill-repository-standard.Tests.ps1'
+              './tests/skill-repository-workflows.Tests.ps1'
+          )
+          $authority = Invoke-Pester -Path $authorityPaths -PassThru
           Write-Host "Authority tests: Total=$($authority.TotalCount) Passed=$($authority.PassedCount) Failed=$($authority.FailedCount)"
           if ($authority.FailedCount -gt 0) { exit 1 }
 
