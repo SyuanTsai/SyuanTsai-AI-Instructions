@@ -253,16 +253,21 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 
 Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source 或 endpoint 偏離 trust anchor，即使 package name 與 channel 不變，整個 canonical validation **MUST** fail closed。
 
+Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials；workflow 的 path trigger 與 merge-blocking bridge **MUST** 覆蓋所有 authority policy、resolver、workflow 與 authority-regression 檔案，且 whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 `main` push 上退化成空 range。
+
 對 `SkillSpector`，resolver **MUST**：
 
 - 只接受 `NVIDIA/SkillSpector` GitHub latest release 中符合 `v<release-semver>` 的非 draft、非 prerelease 版本；
-- 將 release tag、resolved commit、預期 wheel filename、GitHub asset SHA-256、wheel `METADATA` Name/Version 與安裝後 package version 綁定為同一 identity；
-- 使用 Python `-I` isolated mode 執行 venv 建立、pip dependency acquisition、offline install 與 installed-version verification，避免 `PYTHONPATH`、`PYTHONHOME`、user site 或其他 inherited `PYTHON*` interpreter control 介入 canonical resolution；
+- 將 release tag、resolved commit、預期 wheel filename、GitHub asset SHA-256、wheel `METADATA` Name/Version 與安裝後 `dist-info/METADATA` Name/Version 綁定為同一 identity；
+- 使用 Python `-I` isolated mode 執行 venv 建立、pip dependency acquisition 與 offline install，避免 `PYTHONPATH`、`PYTHONHOME`、user site 或其他 inherited `PYTHON*` interpreter control 介入 canonical resolution；
 - 只允許 `https://pypi.org/simple` 作為 Python dependency index，隔離 pip config、停用 cache、只接受 wheels，且 inherited `PIP_*` environment 採 deny-by-default；只有值已等於 approved index 的 `PIP_INDEX_URL` 可被接受；
 - 在任何 dependency network resolution 前拒絕 SkillSpector **root wheel** 的 direct URL / VCS / local-file dependency reference；resolver materialize transitive wheels 後、任何 install 或 SkillSpector execution 前，**MUST** 再檢查完整 wheelhouse，若任一 transitive wheel metadata 含 direct reference 則 fail closed。此 post-materialization check 不得被描述成「已證明 pip 在解析 transitive dependency 時從未接觸 direct-reference URL」；若需要該級 network-egress 保證，**MUST** 另加 transport/sandbox egress control，而不是把 metadata post-check 當成 pre-network enforcement；
-- canonical CI 在執行 validation-tool resolution/tests 時 **MUST NOT** 讓 `actions/checkout` 或等效 checkout 把 repository credential 持久化給後續第三方 package-manager/VCS subprocess；需要 GitHub API token 解析 release 時，token **SHOULD** 只保留到該 API-dependent stage，後續不需要 token 的 module import/tests **SHOULD** 移除；
-- 在 temporary isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，記錄每個 wheel SHA-256 與 deterministic closure identity，再以 `--no-index --require-hashes --no-deps` 從該 wheelhouse 安裝；
-- 在 release、wheel metadata、asset digest、dependency closure 或 installed version 任一 identity 不一致時 fail closed。
+- GitHub API token **MUST** 只用於 authenticated release metadata/tag/asset acquisition；任何 Python、pip 或其他 package-manager subprocess 啟動前 **MUST** 從 process environment 移除 `GITHUB_TOKEN`／`GH_TOKEN`，並在 resolver cleanup 後還原 caller state；
+- 在 temporary isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，以 normalized distribution name 做 ordinal 排序，記錄每個 wheel SHA-256 與 deterministic closure identity，再以 `--no-index --require-hashes --no-deps` 從該 wheelhouse 安裝；
+- resolver 的 `-Install` **MUST** 表示 ephemeral installability verification，而不是留下可供後續執行的 persistent tool；temporary venv 在 receipt 產生前完成驗證，並在 resolver 結束時移除；
+- offline install 後 **MUST** 直接讀取 venv 中唯一匹配的 `*.dist-info/METADATA`，驗證 normalized Name/Version，並拒絕 reparse-backed metadata。Resolver **MUST NOT** 為了查版本再次啟動已安裝的 Python interpreter，因為 interpreter startup 可能處理 package 所寫入的 executable `.pth` line；
+- resolved identity 與 machine-readable receipt **MUST** 明確記錄 `installDisposition=ephemeral-verification`、`credentialIsolation=github-token-cleared-before-python`、`installedMetadataVerification=static-dist-info-metadata` 與 dependency-closure SHA-256；
+- 在 release、wheel metadata、asset digest、dependency closure 或 installed metadata identity 任一不一致時 fail closed。
 
 對 `skill-tools`，resolver **MUST**：
 
@@ -300,7 +305,7 @@ Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUS
 
 Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 自然重新解析當時 latest stable。
 
-**Compatibility lane exception**：為證明 Windows PowerShell 5.1、舊 Pester 或其他明確 legacy compatibility，額外 test lane **MAY** pin 舊版，但必須記錄 explicit purpose，且該 lane **MUST NOT** 成為唯一或 canonical release/security gate。
+**Compatibility lane exception**：為證明 Windows PowerShell 5.1、舊 Pester 或其他明確 legacy compatibility，額外 test lane **MAY** pin 舊版，但必須記錄 explicit purpose，且該 lane **MUST NOT** 成為唯一或 canonical release/security gate。Central resolver **MUST** 驗證這三項 compatibility-lane boundary，而不是只讓 authority test 讀取 JSON metadata。
 
 ## 9. SkillSpector Static Security Gate
 
@@ -409,15 +414,23 @@ Repository Validation **MUST** 驗證至少：
 
 ### 12.2 Tests
 
-本 authority repository **MUST** 維護 `tests/skill-repository-standard.Tests.ps1`，至少保護：
+本 authority repository **MUST** 維護下列 authority regression：
+
+- `tests/skill-repository-standard.Tests.ps1`：normative policy、toolchain trust anchors 與核心 contract；
+- `tests/skill-repository-workflows.Tests.ps1`：immutable action pin、credential isolation、authority path trigger、required bridge 與 event-aware diff range；
+- `tests/standard-validation-resolver-hardening.Tests.ps1`：ephemeral install、static installed metadata、`.pth` startup-code avoidance、GitHub token ordering、ordinal dependency closure 與 compatibility-lane enforcement。
+
+上述 regression 至少保護：
 
 - normative documents / evidence index；
 - validation-tool approved sources 與 approved distribution endpoints；
 - latest-stable channel、resolved identity recording 與 central resolver trust boundary；
-- 負向 source / registry tampering fail-closed behavior；
+- 負向 source / registry / compatibility-policy tampering fail-closed behavior；
 - stable Go release semantics，包含 prerelease / pseudo-version rejection；
 - `agents/openai.yaml` unquoted-key / quoted-string / 25～64 / identity contract；
 - release/install approval boundary；
+- immutable workflow action pin、non-persisted checkout credentials、authority trigger coverage 與正確 commit range；
+- SkillSpector verification-only installation、GitHub token isolation與不啟動 installed interpreter 的 static metadata verification；
 - Standard self-conformance requirement；
 - review matrix 與 SYP-167 authority deliverables 不得過期。
 
@@ -547,15 +560,16 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 4. single validation entry contract；
 5. validation tool approved-source / approved-endpoint enforcement；
 6. latest-stable resolution / stable-release semantics / resolved identity / per-run freeze evidence；
-7. SkillSpector Static Gate + analyzer completeness；
-8. severity/fail-closed semantics；
-9. tests/regression/conformance；
-10. semantic trigger handling；
-11. AI Review / Human Release Approval boundary；
-12. approved-release installation semantics；
-13. suppression/exception contract；
-14. release/install/post-install integrity；
-15. repository-specific deviations 僅存在於 approved adapter/config/exception。
+7. immutable workflow action pin、non-persisted checkout credentials、authority trigger coverage 與 event-aware diff evidence；
+8. SkillSpector Static Gate + analyzer completeness；
+9. severity/fail-closed semantics；
+10. tests/regression/conformance；
+11. semantic trigger handling；
+12. AI Review / Human Release Approval boundary；
+13. approved-release installation semantics；
+14. suppression/exception contract；
+15. release/install/post-install integrity；
+16. repository-specific deviations 僅存在於 approved adapter/config/exception。
 
 Conformance report **MUST** 明確列出 deviations；若沒有，記錄 `None`，不得省略此欄位。
 
@@ -578,11 +592,12 @@ Migration 順序：
 任何修改 MUST / MUST NOT、canonical lifecycle、tool source/version policy、security gate、metadata contract、integrity contract、approval boundary 或 exception policy 的 PR **MUST**：
 
 1. 修改本 normative document；
-2. 同一 PR 更新 `tests/skill-repository-standard.Tests.ps1` 與必要 machine-readable policy；
+2. 同一 PR 更新受影響的 authority regression 與必要 machine-readable policy；
 3. tool source / resolver behavior 變更時，同一 PR 更新 `scripts/Resolve-StandardValidationTool.ps1` trust anchor / adapter 與負向 regression；
-4. 說明對 reference implementation與已 conformant repositories 的影響；
-5. 重新執行 authority-level conformance regression；
-6. 經 Human Release/Policy Review 後才可 merge/fan out。
+4. workflow authority/merge enforcement 變更時，同一 PR 更新 workflow regression、dedicated authority trigger 與 Ruleset-required bridge；
+5. 說明對 reference implementation與已 conformant repositories 的影響；
+6. 重新執行 authority-level conformance regression；
+7. 經 Human Release/Policy Review 後才可 merge/fan out。
 
 這項規則自 Standard v1 首次 merge 前即生效；不延後到 SYP-155。
 
@@ -595,14 +610,18 @@ Migration 順序：
 - local、pre-push、CI 使用不同 pass/block policy；
 - scanner/analyzer 未完整執行仍 pass；
 - 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
+- reusable workflow action 只綁定 mutable major tag，或 checkout 對後續 subprocess 持久化 repository credentials；
+- authority workflow 的 path filter 未涵蓋 required merge-blocking bridge／regression，或 `main` push 的 whitespace gate 使用會退化成空 diff 的 range；
 - `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
 - `SkillSpector` 的 Python invocation 未使用 `-I` isolated mode，dependency acquisition 可繼承 caller-controlled Python/pip import、config、index、link、certificate 或 requirement controls，或 root/direct dependency metadata 可在 preflight 後進入 installation；
 - 把 transitive wheel 的 post-materialization direct-reference metadata check 說成「已證明 resolver 沒有接觸該 direct-reference network location」；若要求該保證卻沒有 transport/sandbox egress control，視為不符合本標準；
-- canonical CI 在第三方 validation-tool/package-manager/VCS subprocess 前保留 `actions/checkout` 或等效 checkout 的 persisted repository credential；
+- `SkillSpector` resolver 在任何 Python/pip subprocess 前仍暴露 `GITHUB_TOKEN`／`GH_TOKEN`，或為了 installed-version verification 啟動已安裝的 interpreter 並處理 package-controlled `.pth` startup line；
+- 將 resolver 的 temporary `-Install` verification 誤稱為留下可供後續 stage 執行的 persistent tool；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
+- compatibility lane 可成為 canonical release/security gate，或 resolver 不驗證 compatibility-lane boundary；
 - 同一 validation run 中途漂移 tool version；
 - provider 可提供 resolved identity / integrity evidence 卻不記錄；
 - 將 repository tree fingerprint 稱為 per-Skill `contentSha256`；
