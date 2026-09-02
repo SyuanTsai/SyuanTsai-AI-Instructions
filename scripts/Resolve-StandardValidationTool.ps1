@@ -1548,11 +1548,18 @@ function Invoke-WithApprovedGoEnvironment {
         return & $Action $goCommand $effectiveBinPath
     }
     finally {
-        foreach ($entry in $previous.GetEnumerator()) {
-            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+        try {
+            if (Test-Path -LiteralPath $workRoot) {
+                if ($null -ne $goCommand) {
+                    [void](Invoke-CheckedCommand -Command $goCommand -Arguments @('clean', '-cache', '-modcache'))
+                }
+                Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction Stop
+            }
         }
-        if (Test-Path -LiteralPath $workRoot) {
-            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction Stop
+        finally {
+            foreach ($entry in $previous.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+            }
         }
     }
 }

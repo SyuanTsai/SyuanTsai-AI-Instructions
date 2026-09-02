@@ -1496,6 +1496,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver '\$identity = "go:.*#moduleCache=\$\(' 'Resolved skill-validator identity must record module-cache isolation.'
             Assert-Match $resolver '#buildCache=\$\(' 'Resolved skill-validator identity must record build-cache isolation.'
             Assert-Match $resolver '#goflags=empty' 'Resolved skill-validator identity must record clean build flags.'
+            Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('clean', '-cache', '-modcache')")) 'Run-owned Go caches must be cleaned through Go before their temporary root is removed.'
             Assert-Match $resolver '\$result\.moduleCacheIsolation = \[string\]\$resolved\.moduleCacheIsolation' 'The receipt must project module-cache isolation from the resolved installation.'
             Assert-Match $resolver '\$result\.buildCacheIsolation = \[string\]\$resolved\.buildCacheIsolation' 'The receipt must project build-cache isolation from the resolved installation.'
             Assert-Match $resolver 'binarySha256=\$executableSha256' 'The immutable skill-validator identity must include the installed binary hash.'

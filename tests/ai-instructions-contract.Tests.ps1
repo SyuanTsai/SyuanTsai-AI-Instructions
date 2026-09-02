@@ -403,11 +403,11 @@ function Assert-AiRuleReferences {
     # Purpose: Keep trigger parity fail-closed instead of accepting a payload that ConvertFrom-Json silently normalizes.
     It 'InterT35_rejects_malformed_or_ambiguous_route_metadata' {
         $invalidRoutes = @(
-            [pscustomobject]@{ name = 'malformed JSON'; text = '- route → `.codex/AI-Rules/Testing.md` <!-- ai-route:{not-json} -->' },
-            [pscustomobject]@{ name = 'unknown field'; text = '- route → `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":["test-change"],"extra":true} -->' },
-            [pscustomobject]@{ name = 'duplicate module field'; text = '- route → `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","module":"database","triggers":["test-change"]} -->' },
-            [pscustomobject]@{ name = 'duplicate trigger'; text = '- route → `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":["test-change","test-change"]} -->' },
-            [pscustomobject]@{ name = 'scalar trigger'; text = '- route → `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":"test-change"} -->' }
+            [pscustomobject]@{ name = 'malformed JSON'; text = '- route -> `.codex/AI-Rules/Testing.md` <!-- ai-route:{not-json} -->' },
+            [pscustomobject]@{ name = 'unknown field'; text = '- route -> `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":["test-change"],"extra":true} -->' },
+            [pscustomobject]@{ name = 'duplicate module field'; text = '- route -> `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","module":"database","triggers":["test-change"]} -->' },
+            [pscustomobject]@{ name = 'duplicate trigger'; text = '- route -> `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":["test-change","test-change"]} -->' },
+            [pscustomobject]@{ name = 'scalar trigger'; text = '- route -> `.codex/AI-Rules/Testing.md` <!-- ai-route:{"module":"testing","triggers":"test-change"} -->' }
         )
         foreach ($invalidRoute in $invalidRoutes) {
             Assert-Throws -Action { Get-AiRoutes -Text ([string]$invalidRoute.text) } -Context ([string]$invalidRoute.name)
