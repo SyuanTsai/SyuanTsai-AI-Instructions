@@ -15,16 +15,17 @@
 | 面向 | Skill-General | Knowledge-Content | Code-Collaboration | Darktide-Translate | Atlassian-Ecosystem | Standard 決策 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Repository structure | `.agents/skills`, catalog, scripts, tests, dual CI | `.agents/skills`, `catalog/source.json`, validator, Pester | `.agents/skills`, full local catalog, `VERSION`, release docs | `.agents/skills`, large domain package, pre-push/release tooling | canonical `skills/`, `catalog/source.json`, install/host adapters | **MUST** separate canonical source layout from consumer projection; v1 canonical source root is `skills/` |
-| Skill package structure | `SKILL.md`, `agents/openai.yaml`, optional refs/scripts | same + references | same | same + assets, extensive scripts/references | same under `skills/` | `SKILL.md` + `agents/openai.yaml` **MUST**; scripts/references/assets **MAY** |
+| Skill package structure | `SKILL.md`, `agents/openai.yaml`, optional refs/scripts | same + references | same | same + assets, extensive scripts/references | same under `skills/` | `SKILL.md` + validated `agents/openai.yaml` **MUST**; scripts/references/assets **MAY** |
 | Catalog / inventory | repository-local full catalog | compact source inventory | repository-local full catalog | repository-local full catalog | compact source inventory + `skillsRoot` | Source repo **MUST** own compact source inventory; cross-source profiles/dependencies/lifecycle remain central policy |
 | Source / pin / provenance | consumer pins external source | emits per-Skill deterministic hash in validator | `Get-SourcePin.ps1` emits repository tree fingerprint | strong commit/package/source binding | explicit source tracking and reviewed revision install | commit identity, archive integrity, per-Skill content integrity **MUST** be distinct concepts and fields |
 | Validation entry point | repo contract + Pester | `scripts/validate.ps1` + Pester | catalog validation + pin script | pre-push orchestration + component diagnostics | repository/API validation + quality gates | Each repo **MUST** expose one canonical validation entry contract used by local/CI; diagnostic subcommands **MAY** exist |
 | Local validation | PowerShell contract + Pester | PowerShell validator + Pester | PowerShell scripts | HEAD-bound pre-push gate | PowerShell tests | Local gate **MUST** execute same policy as CI; no divergent judgment logic |
 | CI workflow | `skill-validator` / `skill-tools` + repository tests | shared quality gate + repo tests | shared quality gate + catalog tests | shared quality gate + strict domain tests | shared quality gate + `gh skill publish --dry-run` + routing tests | Common spec/security/repo/test stages **MUST** be shared contract; host/domain checks are extensions |
+| Validation tool policy | quality tools currently resolve latest while Pester compatibility lanes may pin older versions | mixed repository-local tool resolution | mixed repository-local tool resolution | strong gates but repository-local tool acquisition | latest quality tools plus host-specific checks | Formal validation **MUST** resolve central approved tool sources at latest stable per run, record version/identity and freeze that run; older pins are compatibility-only |
 | Tests / regression | repository and Skill regressions | repository contract | catalog regressions | extensive functional/state/provenance regressions | API safety/routing/host regressions | Conformance + repository regression **MUST**; domain regression **MUST** when domain behavior exists |
 | Release / publish | immutable SHA/tag consumer pin | release/rollback contract | explicit `VERSION`, release/rollback | strong release/pin/rollback evidence | GitHub Skill publishing/install path | Publish **MUST** follow immutable validated candidate; GitHub-hosted Skill repos **SHOULD** dry-run publish compatibility |
 | Security checks | current general quality gates | limited repository safety | limited repository safety | high-risk external-write/state controls | credential/network/MCP/API safety controls | Security policy **MUST** be centralized; legitimate capability is not automatically a vulnerability |
-| AI / Human Review | review Skill exists but not lifecycle authority | no uniform lifecycle boundary | no uniform lifecycle boundary | explicit review/evidence concepts | routing/security acceptance | AI Review **MUST NOT** replace Human Approval for release/security exceptions; boundary defined centrally |
+| AI / Human Review | review Skill exists but not lifecycle authority | no uniform lifecycle boundary | no uniform lifecycle boundary | explicit review/evidence concepts | routing/security acceptance | AI Review **MUST NOT** replace Human Release Approval; approved immutable releases do not require repeated release approval on every install |
 | Special capabilities | Datadog/Notion connectors | private knowledge/material processing | Copilot delegation | executable PowerShell, Git, GitHub, state/reservations | Jira/Confluence/Bitbucket, credentials, MCP/network | Differences **MUST** enter via declared capability/adapter/config/extension points |
 | Extension / exception needs | low | source-inventory hash logic | repository fingerprint naming | clean-HEAD/package binding/stateful gates | host publishing/routing/credential adapters | Extension may strengthen controls, but **MUST NOT** redefine base gate semantics |
 
@@ -48,11 +49,28 @@ All repositories need common Skill/package validation and repository contract va
 
 ### 5. Security must distinguish capability from risk
 
-Jira/MCP/network/environment variables/executable scripts are legitimate capabilities in some repositories. Static or semantic scanners may flag them, but capability presence alone must not equal BLOCK. Standard v1 requires deterministic severity policy, analyzer completeness, explicit suppression/exception evidence, and Human Approval for accepted risk.
+Jira/MCP/network/environment variables/executable scripts are legitimate capabilities in some repositories. Static or semantic scanners may flag them, but capability presence alone must not equal BLOCK. Standard v1 requires deterministic severity policy, analyzer completeness, explicit suppression/exception evidence, and Human Release Approval for accepted risk.
+
+### 6. Validation tool source and version are both supply-chain properties
+
+Existing repositories resolve quality/security/test tools differently. Checking only a tool's version channel is insufficient because a changed package or repository source could still claim `latest-stable`. SYP-167 therefore adds central `validation-toolchain.json`, `scripts/Resolve-StandardValidationTool.ps1`, authority-level regression tests and Standards Conformance CI. Canonical runs validate approved sources first, resolve latest stable from those sources, record resolved version/identity, and freeze the resolved tool for that run.
+
+## SYP-167 authority deliverables
+
+SYP-167 now establishes more than prose policy. The authority repository contains:
+
+- normative Standard v1;
+- cross-repository review evidence;
+- machine-readable validation tool policy;
+- trusted-source validation tool resolver;
+- authority-level regression tests;
+- Standards Conformance CI using the central resolver.
+
+These are authority-level controls only; SYP-167 still does **not** migrate any external Skill repository or repin production Catalog/Lock content.
 
 ## Migration order
 
-1. SYP-167 establishes normative Standard v1 only.
-2. SYP-155 migrates `Skill-General` and creates the reference implementation/conformance tests.
+1. SYP-167 establishes Standard v1 plus the authority-level tool policy, resolver, regression tests and CI.
+2. SYP-155 migrates `Skill-General` and creates the first complete Skill repository reference implementation/conformance validator.
 3. SYP-156～159 migrate the remaining repositories using the Standard as authority and `Skill-General` only as implementation reference.
 4. Production Catalog/Lock pins are updated only after the corresponding source migration is merged and validated.
