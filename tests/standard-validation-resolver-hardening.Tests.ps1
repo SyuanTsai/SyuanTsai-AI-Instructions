@@ -256,7 +256,7 @@ Version: this line also belongs to the description body
         $cases = @(
             "http://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file",
             "https://example.invalid/NVIDIA/SkillSpector/releases/download/$tag/$file",
-            "https://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file?download=1",
+            "https://github.com/NVIDIA/SkillSpector/releases/download/$tag/${file}?download=1",
             "https://github.com/NVIDIA/SkillSpector/releases/download/v2.10.0/$file",
             "https://user@github.com/NVIDIA/SkillSpector/releases/download/$tag/$file",
             "https://github.com:444/NVIDIA/SkillSpector/releases/download/$tag/$file"
