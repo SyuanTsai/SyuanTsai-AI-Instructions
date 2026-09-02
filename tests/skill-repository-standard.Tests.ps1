@@ -7,6 +7,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:MatrixPath = Join-Path $script:StandardsRoot 'skill-repository-review-matrix.md'
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
+        $script:WorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -35,6 +36,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-Path -LiteralPath $script:MatrixPath -PathType Leaf) 'Missing cross-repository review matrix.'
         Assert-True (Test-Path -LiteralPath $script:ToolchainPath -PathType Leaf) 'Missing validation toolchain policy.'
         Assert-True (Test-Path -LiteralPath $script:ResolverPath -PathType Leaf) 'Missing central validation tool resolver.'
+        Assert-True (Test-Path -LiteralPath $script:WorkflowPath -PathType Leaf) 'Missing Standards Conformance workflow.'
 
         $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
         Assert-Match $index 'skill-repository-standard\.md' 'Standards index must link the normative Standard.'
@@ -90,6 +92,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
 
         Assert-Match $errorMessage 'Untrusted validation tool source.*skillspector' 'Unapproved tool source must fail closed.'
+    }
+
+    It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
+
+        Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ValidatePolicyOnly' 'Workflow must validate central tool trust policy.'
+        Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Workflow must resolve Pester through the central resolver.'
+        Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
     }
 
     It 'UnitT30_validates_openai_agent_metadata_against_the_OpenAI_minimum_contract' {
