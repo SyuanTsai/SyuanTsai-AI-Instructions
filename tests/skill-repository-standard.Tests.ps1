@@ -78,6 +78,15 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Equal $toolchain.tools.'skill-tools'.registry 'https://registry.npmjs.org/' 'skill-tools must use the approved npm registry.'
         Assert-Equal $toolchain.tools.'skill-validator'.stableVersionRule 'release-semver-only' 'skill-validator must require release SemVer.'
+        Assert-Equal $toolchain.tools.'skill-validator'.proxy 'https://proxy.golang.org' 'skill-validator must use the approved Go module proxy.'
+        Assert-Equal $toolchain.tools.'skill-validator'.checksumDatabase 'sum.golang.org' 'skill-validator must use the approved Go checksum database.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOENV 'off' 'Go persisted environment configuration must be disabled.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOPROXY 'https://proxy.golang.org' 'Go proxy environment must be fixed.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOSUMDB 'sum.golang.org' 'Go checksum database environment must be fixed.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOPRIVATE '' 'GOPRIVATE must not bypass canonical distribution.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOPROXY 'none' 'GONOPROXY must not bypass the approved proxy.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOSUMDB 'none' 'GONOSUMDB must not bypass checksum verification.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOINSECURE '' 'GOINSECURE must be disabled.'
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
         Assert-True ([bool]$toolchain.compatibilityLane.requiresExplicitPurpose) 'Compatibility pins require an explicit purpose.'
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'
@@ -134,6 +143,35 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-False (Test-StableGoModuleVersion -Version 'v0.0.0-20260902000000-0123456789ab') 'A pseudo-version must not be stable.'
     }
 
+    It 'UnitT29_rejects_untrusted_Go_distribution_overrides_before_module_resolution' {
+        $cases = @(
+            @{ Name = 'GOENV'; Value = 'custom-go-env' },
+            @{ Name = 'GOPROXY'; Value = 'https://proxy.example.invalid' },
+            @{ Name = 'GOSUMDB'; Value = 'off' },
+            @{ Name = 'GOPRIVATE'; Value = 'github.com/agent-ecosystem' },
+            @{ Name = 'GONOPROXY'; Value = 'github.com/agent-ecosystem' },
+            @{ Name = 'GONOSUMDB'; Value = 'github.com/agent-ecosystem' },
+            @{ Name = 'GOINSECURE'; Value = 'github.com/agent-ecosystem' }
+        )
+
+        foreach ($case in $cases) {
+            $previous = [Environment]::GetEnvironmentVariable($case.Name, [EnvironmentVariableTarget]::Process)
+            $errorMessage = $null
+            try {
+                [Environment]::SetEnvironmentVariable($case.Name, $case.Value, [EnvironmentVariableTarget]::Process)
+                & $script:ResolverPath -ToolName skill-validator | Out-Null
+            }
+            catch {
+                $errorMessage = $_.Exception.Message
+            }
+            finally {
+                [Environment]::SetEnvironmentVariable($case.Name, $previous, [EnvironmentVariableTarget]::Process)
+            }
+
+            Assert-Match $errorMessage ("Untrusted Go environment override.*{0}" -f $case.Name) ("Go override {0} must fail closed before module resolution." -f $case.Name)
+        }
+    }
+
     It 'UnitT30_validates_openai_agent_metadata_against_the_OpenAI_minimum_contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
@@ -169,6 +207,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'Validation tool policy' 'Review matrix must record the validation tool policy decision.'
         Assert-Match $matrix 'latest stable' 'Review matrix must record latest-stable validation tooling.'
         Assert-Match $matrix 'authority-level regression' 'Review matrix must record SYP-167 authority regression/CI deliverables.'
+        Assert-Match $matrix 'proxy.golang.org' 'Review matrix must record the approved Go module proxy.'
+        Assert-Match $matrix 'sum.golang.org' 'Review matrix must record the approved Go checksum database.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
     }
 }
