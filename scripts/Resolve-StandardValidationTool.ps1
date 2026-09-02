@@ -25,6 +25,16 @@ $trustedRegistries = [ordered]@{
     'skill-tools' = 'https://registry.npmjs.org/'
 }
 
+$trustedGoEnvironment = [ordered]@{
+    'GOENV' = 'off'
+    'GOPROXY' = 'https://proxy.golang.org'
+    'GOSUMDB' = 'sum.golang.org'
+    'GOPRIVATE' = ''
+    'GONOPROXY' = 'none'
+    'GONOSUMDB' = 'none'
+    'GOINSECURE' = ''
+}
+
 function Normalize-RegistryUri {
     param([Parameter(Mandatory = $true)][string] $Value)
 
@@ -105,6 +115,23 @@ function Get-Policy {
         }
     }
 
+    $skillValidator = $policy.tools.'skill-validator'
+    if ([string]$skillValidator.stableVersionRule -cne 'release-semver-only') {
+        throw "Unexpected skill-validator stableVersionRule '$($skillValidator.stableVersionRule)'."
+    }
+    if ([string]$skillValidator.proxy -cne 'https://proxy.golang.org') {
+        throw "Untrusted Go module proxy '$($skillValidator.proxy)'. Expected 'https://proxy.golang.org'."
+    }
+    if ([string]$skillValidator.checksumDatabase -cne 'sum.golang.org') {
+        throw "Untrusted Go checksum database '$($skillValidator.checksumDatabase)'. Expected 'sum.golang.org'."
+    }
+    foreach ($entry in $trustedGoEnvironment.GetEnumerator()) {
+        $actual = [string]$skillValidator.goEnvironment.($entry.Key)
+        if ($actual -cne [string]$entry.Value) {
+            throw "Untrusted Go environment policy for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
+        }
+    }
+
     return $policy
 }
 
@@ -171,6 +198,54 @@ function Assert-ApprovedNpmRegistry {
     return $expected
 }
 
+function Assert-NoConflictingGoEnvironment {
+    param([Parameter(Mandatory = $true)] $ExpectedEnvironment)
+
+    foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
+        $actual = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
+        if ([string]::IsNullOrEmpty($actual)) {
+            continue
+        }
+        if ([string]$actual -cne [string]$entry.Value) {
+            throw "Untrusted Go environment override for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
+        }
+    }
+}
+
+function Invoke-WithApprovedGoEnvironment {
+    param(
+        [Parameter(Mandatory = $true)] $ExpectedEnvironment,
+        [Parameter(Mandatory = $true)][scriptblock] $Action
+    )
+
+    Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment
+
+    $previous = [ordered]@{}
+    try {
+        foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
+            $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, [EnvironmentVariableTarget]::Process)
+        }
+
+        [void](Assert-Command -Name 'go')
+        $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('env', '-json', 'GOENV', 'GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')) -join "`n"
+        $effective = $effectiveJson | ConvertFrom-Json
+        foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
+            $actual = [string]$effective.($entry.Key)
+            if ($actual -cne [string]$entry.Value) {
+                throw "Go did not apply approved environment for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
+            }
+        }
+
+        return & $Action
+    }
+    finally {
+        foreach ($entry in $previous.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+        }
+    }
+}
+
 function Resolve-Pester {
     param([bool] $ShouldInstall)
 
@@ -231,26 +306,35 @@ function Resolve-SkillTools {
 }
 
 function Resolve-SkillValidator {
-    param([bool] $ShouldInstall)
+    param(
+        [bool] $ShouldInstall,
+        [Parameter(Mandatory = $true)] $ToolPolicy
+    )
 
-    [void](Assert-Command -Name 'go')
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
     $commandPath = 'github.com/agent-ecosystem/skill-validator/cmd/skill-validator'
-    $metadataJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
-    $metadata = $metadataJson | ConvertFrom-Json
-    $version = [string]$metadata.Version
-    if (-not (Test-StableGoModuleVersion -Version $version)) {
-        throw "Go did not resolve a stable release version for skill-validator. Resolved='$version'."
+    $expectedEnvironment = [ordered]@{}
+    foreach ($entry in $trustedGoEnvironment.GetEnumerator()) {
+        $expectedEnvironment[$entry.Key] = [string]$ToolPolicy.goEnvironment.($entry.Key)
     }
 
-    if ($ShouldInstall) {
-        [void](Invoke-CheckedCommand -Command 'go' -Arguments @('install', "$commandPath@$version"))
-    }
+    return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -Action {
+        $metadataJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
+        $metadata = $metadataJson | ConvertFrom-Json
+        $version = [string]$metadata.Version
+        if (-not (Test-StableGoModuleVersion -Version $version)) {
+            throw "Go did not resolve a stable release version for skill-validator. Resolved='$version'."
+        }
 
-    return [ordered]@{
-        resolvedVersion = $version
-        resolvedIdentity = "go:$modulePath@$version"
-        identityKind = 'go-module-version'
+        if ($ShouldInstall) {
+            [void](Invoke-CheckedCommand -Command 'go' -Arguments @('install', "$commandPath@$version"))
+        }
+
+        return [ordered]@{
+            resolvedVersion = $version
+            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)"
+            identityKind = 'go-module-version-with-trusted-distribution'
+        }
     }
 }
 
@@ -330,6 +414,7 @@ if ($ValidatePolicyOnly) {
         }
         trustedSources = $trustedSources
         trustedRegistries = $trustedRegistries
+        trustedGoEnvironment = $trustedGoEnvironment
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
     }
 }
@@ -341,7 +426,7 @@ else {
     $resolved = switch ($ToolName) {
         'pester' { Resolve-Pester -ShouldInstall ([bool]$Install) }
         'skill-tools' { Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) }
-        'skill-validator' { Resolve-SkillValidator -ShouldInstall ([bool]$Install) }
+        'skill-validator' { Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' }
         'skillspector' { Resolve-SkillSpector -ShouldInstall ([bool]$Install) }
     }
 
@@ -358,6 +443,10 @@ else {
     }
     if ($ToolName -eq 'skill-tools') {
         $result.registry = [string]$toolPolicy.registry
+    }
+    if ($ToolName -eq 'skill-validator') {
+        $result.proxy = [string]$toolPolicy.proxy
+        $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
     }
 }
 
