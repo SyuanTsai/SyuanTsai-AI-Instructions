@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "policy": "latest-stable-per-validation-run",
+  "resolution": {
+    "resolveAtRunStart": true,
+    "freezeForRun": true,
+    "recordResolvedVersion": true,
+    "recordResolvedIdentityWhenAvailable": true,
+    "allowPrerelease": false
+  },
+  "tools": {
+    "skillspector": {
+      "source": "NVIDIA/SkillSpector",
+      "channel": "latest-stable"
+    },
+    "skill-validator": {
+      "source": "github.com/agent-ecosystem/skill-validator/cmd/skill-validator",
+      "channel": "latest-stable"
+    },
+    "skill-tools": {
+      "source": "npm:skill-tools",
+      "channel": "latest-stable"
+    },
+    "pester": {
+      "source": "PowerShellGallery:Pester",
+      "channel": "latest-stable"
+    }
+  },
+  "compatibilityLane": {
+    "mayPinOlderVersion": true,
+    "requiresExplicitPurpose": true,
+    "mayBeCanonicalReleaseGate": false
+  }
+}
