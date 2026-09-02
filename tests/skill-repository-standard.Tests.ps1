@@ -14,6 +14,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             if (-not $Condition) { throw $Message }
         }
 
+        function Assert-False {
+            param([bool] $Condition, [string] $Message)
+            if ($Condition) { throw $Message }
+        }
+
         function Assert-Equal {
             param($Actual, $Expected, [string] $Message)
             if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
@@ -71,6 +76,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Equal $toolchain.tools.($entry.Key).channel 'latest-stable' "$($entry.Key) must use latest-stable."
         }
 
+        Assert-Equal $toolchain.tools.'skill-tools'.registry 'https://registry.npmjs.org/' 'skill-tools must use the approved npm registry.'
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
         Assert-True ([bool]$toolchain.compatibilityLane.requiresExplicitPurpose) 'Compatibility pins require an explicit purpose.'
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'
@@ -94,6 +100,23 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $errorMessage 'Untrusted validation tool source.*skillspector' 'Unapproved tool source must fail closed.'
     }
 
+    It 'UnitT26_rejects_an_unapproved_npm_registry_before_skill_tools_resolution' {
+        $previousRegistry = $env:NPM_CONFIG_REGISTRY
+        $errorMessage = $null
+        try {
+            $env:NPM_CONFIG_REGISTRY = 'https://registry.example.invalid/'
+            & $script:ResolverPath -ToolName skill-tools | Out-Null
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+        }
+        finally {
+            $env:NPM_CONFIG_REGISTRY = $previousRegistry
+        }
+
+        Assert-Match $errorMessage 'Untrusted npm registry' 'An npm registry override must fail closed before package resolution.'
+    }
+
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
 
@@ -102,11 +125,20 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
     }
 
+    It 'UnitT28_rejects_prerelease_and_pseudo_versions_for_skill_validator' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        Assert-True (Test-StableGoModuleVersion -Version 'v1.6.1') 'A normal release version must be stable.'
+        Assert-False (Test-StableGoModuleVersion -Version 'v1.7.0-rc1') 'A prerelease version must not be stable.'
+        Assert-False (Test-StableGoModuleVersion -Version 'v0.0.0-20260902000000-0123456789ab') 'A pseudo-version must not be stable.'
+    }
+
     It 'UnitT30_validates_openai_agent_metadata_against_the_OpenAI_minimum_contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
         Assert-Match $standard 'agents/openai\.yaml.*contract' 'Standard must define an openai.yaml content contract.'
         Assert-Match $standard 'syntactically valid YAML' 'Standard must require valid YAML.'
+        Assert-Match $standard 'YAML keys.*MUST.*unquoted' 'Standard must require unquoted YAML keys.'
         Assert-Match $standard 'all string scalar values.*MUST.*quoted' 'Standard must require quoted YAML string values.'
         Assert-Match $standard 'interface\.display_name' 'Standard must require display_name.'
         Assert-Match $standard 'interface\.short_description.*25.*64' 'Standard must require the OpenAI 25-64 character short_description bound.'
@@ -119,14 +151,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $standard 'Release Approval' 'Standard must define release approval.'
         Assert-Match $standard 'Approved Release Installation' 'Standard must define approved release installation.'
-        Assert-Match $standard 'MUST NOT.*再次取得 human approval' 'Installing an approved immutable release must not require repeated release approval.'
+        Assert-Match $standard 'Human Approved.*MUST NOT.*human approval' 'Installing an approved immutable release must not require repeated release approval.'
     }
 
     It 'UnitT50_makes_standard_conformance_tests_effective_in_the_same_policy_change' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
 
-        Assert-Match $standard '本 normative authority 的 conformance regression.*MUST.*同一 PR' 'Standard changes must update authority regression in the same PR.'
+        Assert-Match $standard 'normative authority.*conformance regression.*MUST.*PR' 'Standard changes must update authority regression in the same PR.'
         Assert-Match $index 'tests/skill-repository-standard\.Tests\.ps1' 'Standards index must name the authority regression test.'
     }
 
