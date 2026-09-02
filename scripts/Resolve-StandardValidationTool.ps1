@@ -102,6 +102,11 @@ function Get-Policy {
     if ([bool]$policy.resolution.allowPrerelease) {
         throw 'Prerelease validation tools cannot be the canonical default.'
     }
+    if (-not [bool]$policy.compatibilityLane.mayPinOlderVersion -or
+        -not [bool]$policy.compatibilityLane.requiresExplicitPurpose -or
+        [bool]$policy.compatibilityLane.mayBeCanonicalReleaseGate) {
+        throw 'Validation compatibility-lane policy is incomplete or untrusted.'
+    }
 
     foreach ($entry in $trustedSources.GetEnumerator()) {
         $tool = $policy.tools.($entry.Key)
@@ -231,6 +236,41 @@ function Normalize-PythonPackageName {
     return (($Name.Trim().ToLowerInvariant()) -replace '[-_.]+', '-')
 }
 
+function ConvertFrom-PythonMetadataText {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $unfoldedText = [regex]::Replace($Text, "\r?\n[ `t]+", ' ')
+    $nameMatch = [regex]::Match($unfoldedText, '(?m)^Name:\s*(.+?)\s*$')
+    $versionMatch = [regex]::Match($unfoldedText, '(?m)^Version:\s*(.+?)\s*$')
+    if (-not $nameMatch.Success -or -not $versionMatch.Success) {
+        throw "$Context does not contain Name and Version."
+    }
+
+    $name = $nameMatch.Groups[1].Value.Trim()
+    $version = $versionMatch.Groups[1].Value.Trim()
+    $normalizedName = Normalize-PythonPackageName -Name $name
+    if ($normalizedName -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+        throw "$Context contains an unsafe Python distribution Name '$name'."
+    }
+    if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z._+!-]*$') {
+        throw "$Context contains an unsafe Python distribution Version '$version'."
+    }
+
+    $requiresDist = @([regex]::Matches($unfoldedText, '(?m)^Requires-Dist:\s*(.+?)\s*$') | ForEach-Object {
+        $_.Groups[1].Value.Trim()
+    })
+
+    return [ordered]@{
+        name = $name
+        normalizedName = $normalizedName
+        version = $version
+        requiresDist = $requiresDist
+    }
+}
+
 function Get-PythonWheelMetadata {
     param([Parameter(Mandatory = $true)][string] $WheelPath)
 
@@ -256,25 +296,74 @@ function Get-PythonWheelMetadata {
             $stream.Dispose()
         }
 
-        $unfoldedText = [regex]::Replace($text, "\r?\n[ `t]+", ' ')
-        $nameMatch = [regex]::Match($unfoldedText, '(?m)^Name:\s*(.+?)\s*$')
-        $versionMatch = [regex]::Match($unfoldedText, '(?m)^Version:\s*(.+?)\s*$')
-        if (-not $nameMatch.Success -or -not $versionMatch.Success) {
-            throw "Wheel METADATA in '$WheelPath' does not contain Name and Version."
-        }
-        $requiresDist = @([regex]::Matches($unfoldedText, '(?m)^Requires-Dist:\s*(.+?)\s*$') | ForEach-Object {
-            $_.Groups[1].Value.Trim()
-        })
-
-        return [ordered]@{
-            name = $nameMatch.Groups[1].Value.Trim()
-            version = $versionMatch.Groups[1].Value.Trim()
-            requiresDist = $requiresDist
-        }
+        return ConvertFrom-PythonMetadataText -Text $text -Context "Wheel METADATA in '$WheelPath'"
     }
     finally {
         $archive.Dispose()
     }
+}
+
+function Get-InstalledPythonDistributionMetadata {
+    param(
+        [Parameter(Mandatory = $true)][string] $VirtualEnvironmentPath,
+        [Parameter(Mandatory = $true)][string] $DistributionName
+    )
+
+    $resolvedVenv = [IO.Path]::GetFullPath($VirtualEnvironmentPath)
+    $sitePackages = @()
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $candidate = Join-Path $resolvedVenv 'Lib\site-packages'
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            $sitePackages += $candidate
+        }
+    }
+    else {
+        $libRoot = Join-Path $resolvedVenv 'lib'
+        if (Test-Path -LiteralPath $libRoot -PathType Container) {
+            foreach ($pythonDirectory in @(Get-ChildItem -LiteralPath $libRoot -Directory)) {
+                if ($pythonDirectory.Name -notmatch '^python(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
+                    continue
+                }
+                $candidate = Join-Path $pythonDirectory.FullName 'site-packages'
+                if (Test-Path -LiteralPath $candidate -PathType Container) {
+                    $sitePackages += $candidate
+                }
+            }
+        }
+    }
+    if ($sitePackages.Count -ne 1) {
+        throw "Expected exactly one virtual-environment site-packages directory; found $($sitePackages.Count)."
+    }
+
+    $targetName = Normalize-PythonPackageName -Name $DistributionName
+    $matches = @()
+    foreach ($distInfo in @(Get-ChildItem -LiteralPath $sitePackages[0] -Directory -Filter '*.dist-info')) {
+        if (($distInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installed Python metadata directory is a reparse point: '$($distInfo.FullName)'."
+        }
+        $metadataPath = Join-Path $distInfo.FullName 'METADATA'
+        if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+            continue
+        }
+        $metadataItem = Get-Item -LiteralPath $metadataPath -Force
+        if (($metadataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installed Python METADATA is a reparse point: '$metadataPath'."
+        }
+        $metadataText = Get-Content -Raw -Encoding UTF8 -LiteralPath $metadataPath
+        $metadata = ConvertFrom-PythonMetadataText -Text $metadataText -Context "Installed Python METADATA '$metadataPath'"
+        if ([string]$metadata.normalizedName -ceq $targetName) {
+            $matches += [pscustomobject][ordered]@{
+                name = [string]$metadata.name
+                normalizedName = [string]$metadata.normalizedName
+                version = [string]$metadata.version
+                metadataPath = $metadataPath
+            }
+        }
+    }
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one installed Python distribution '$targetName'; found $($matches.Count)."
+    }
+    return $matches[0]
 }
 
 function Assert-NoPythonDirectReferences {
@@ -373,36 +462,34 @@ function New-PythonWheelhouseLock {
         [Parameter(Mandatory = $true)][string] $LockPath
     )
 
-    $files = @(Get-ChildItem -LiteralPath $WheelhousePath -File | Sort-Object Name)
+    $files = @(Get-ChildItem -LiteralPath $WheelhousePath -File)
     if ($files.Count -eq 0) {
         throw 'Python wheelhouse is empty.'
     }
 
-    $seen = @{}
-    $entries = @()
+    $entryMap = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([StringComparer]::Ordinal)
     foreach ($file in $files) {
         if ($file.Extension -cne '.whl') {
             throw "Non-wheel artifact found in verified wheelhouse: '$($file.Name)'."
         }
         $metadata = Get-PythonWheelMetadata -WheelPath $file.FullName
         Assert-NoPythonDirectReferences -Metadata $metadata -WheelFileName $file.Name
-        $normalizedName = Normalize-PythonPackageName -Name ([string]$metadata.name)
-        if ($seen.ContainsKey($normalizedName)) {
+        $normalizedName = [string]$metadata.normalizedName
+        if ($entryMap.ContainsKey($normalizedName)) {
             throw "Duplicate Python distribution '$normalizedName' in wheelhouse."
         }
-        $seen[$normalizedName] = $true
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-        $entries += [pscustomobject][ordered]@{
+        $entryMap.Add($normalizedName, [pscustomobject][ordered]@{
             name = [string]$metadata.name
             normalizedName = $normalizedName
             version = [string]$metadata.version
             file = $file.Name
             sha256 = $hash
-        }
+        })
     }
 
-    $entries = @($entries | Sort-Object normalizedName)
-    $lockLines = @($entries | ForEach-Object { "$($_.name)==$($_.version) --hash=sha256:$($_.sha256)" })
+    $entries = @($entryMap.Values)
+    $lockLines = @($entries | ForEach-Object { "$($_.normalizedName)==$($_.version) --hash=sha256:$($_.sha256)" })
     [IO.File]::WriteAllText($LockPath, (($lockLines -join [Environment]::NewLine) + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
 
     $canonical = ($entries | ForEach-Object { "$($_.normalizedName)`t$($_.version)`t$($_.file)`t$($_.sha256)`n" }) -join ''
@@ -650,6 +737,8 @@ function Resolve-SkillSpector {
     )
 
     [void](Assert-Command -Name 'python')
+    $previousGitHubToken = [Environment]::GetEnvironmentVariable('GITHUB_TOKEN', [EnvironmentVariableTarget]::Process)
+    $previousGhToken = [Environment]::GetEnvironmentVariable('GH_TOKEN', [EnvironmentVariableTarget]::Process)
     $headers = Get-GitHubHeaders
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Method Get
     if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) {
@@ -697,9 +786,17 @@ function Resolve-SkillSpector {
 
     $closure = $null
     $installEnvironment = $null
+    $installDisposition = $null
+    $installedMetadataVerification = $null
     try {
         $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
         Invoke-WebRequest -Uri ([string]$wheel.browser_download_url) -Headers $headers -OutFile $wheelPath -UseBasicParsing
+
+        # GitHub credentials are needed only for the authenticated release API/download calls above.
+        # No Python or package-manager subprocess may inherit them.
+        [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', $null, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('GH_TOKEN', $null, [EnvironmentVariableTarget]::Process)
+
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
         $expectedHash = $digest.Substring('sha256:'.Length)
         if ($actualHash -cne $expectedHash) {
@@ -723,6 +820,7 @@ function Resolve-SkillSpector {
                 throw "SkillSpector isolated virtual environment Python was not created: $venvPython"
             }
             $installEnvironment = 'isolated-venv'
+            $installDisposition = 'ephemeral-verification'
 
             $closure = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
                 $indexArgument = "--index-url=$approvedIndex"
@@ -753,25 +851,29 @@ function Resolve-SkillSpector {
                     '-r', $lockPath
                 ))
 
-                $installedVersion = ((Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
-                    '-c', "import importlib.metadata as m; print(m.version('skillspector'))"
-                )) -join '').Trim()
-                if ($installedVersion -cne $version) {
-                    throw "Installed SkillSpector version mismatch. Expected '$version', got '$installedVersion'."
-                }
-
                 return $manifest
             }
+
+            # Read dist-info/METADATA directly. Do not verify with
+            # "import importlib.metadata as m; print(m.version('skillspector'))": starting the installed
+            # interpreter here would process site-packages .pth files and could execute newly installed code.
+            $installedMetadata = Get-InstalledPythonDistributionMetadata -VirtualEnvironmentPath $venvPath -DistributionName 'skillspector'
+            if ([string]$installedMetadata.version -cne $version) {
+                throw "Installed SkillSpector version mismatch. Expected '$version', got '$($installedMetadata.version)'."
+            }
+            $installedMetadataVerification = 'static-dist-info-metadata'
         }
     }
     finally {
+        [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', $previousGitHubToken, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('GH_TOKEN', $previousGhToken, [EnvironmentVariableTarget]::Process)
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#directReferences=blocked"
+    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#directReferences=blocked#credentialIsolation=github-token-cleared-before-python"
     $identityKind = 'release-commit-asset-metadata'
     if ($null -ne $closure) {
-        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#interpreterIsolation=$interpreterIsolation#dependencyClosureSha256=$($closure.closureSha256)"
+        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#installDisposition=$installDisposition#interpreterIsolation=$interpreterIsolation#installedMetadataVerification=$installedMetadataVerification#dependencyClosureSha256=$($closure.closureSha256)"
         $identityKind = 'release-commit-asset-metadata-and-dependency-closure'
     }
 
@@ -781,7 +883,10 @@ function Resolve-SkillSpector {
         identityKind = $identityKind
         pythonPackageIndex = $approvedIndex
         installEnvironment = $installEnvironment
+        installDisposition = $installDisposition
         interpreterIsolation = $interpreterIsolation
+        credentialIsolation = 'github-token-cleared-before-python'
+        installedMetadataVerification = $installedMetadataVerification
         directReferencesAllowed = [bool]$ToolPolicy.pythonDistribution.allowDirectReferences
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
@@ -842,7 +947,10 @@ else {
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
         $result.installEnvironment = $resolved.installEnvironment
+        $result.installDisposition = $resolved.installDisposition
         $result.interpreterIsolation = [string]$resolved.interpreterIsolation
+        $result.credentialIsolation = [string]$resolved.credentialIsolation
+        $result.installedMetadataVerification = $resolved.installedMetadataVerification
         $result.directReferencesAllowed = [bool]$resolved.directReferencesAllowed
         $result.dependencyClosureSha256 = $resolved.dependencyClosureSha256
         $result.dependencyClosure = $resolved.dependencyClosure
