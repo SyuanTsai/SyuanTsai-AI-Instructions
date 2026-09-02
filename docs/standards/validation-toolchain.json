@@ -24,6 +24,7 @@
         "onlyBinary": true,
         "disableCache": true,
         "dependencyAcquisition": "verified-wheelhouse",
+        "installEnvironment": "isolated-venv",
         "installNoIndex": true,
         "requireHashes": true,
         "recordDependencyClosureHashes": true
