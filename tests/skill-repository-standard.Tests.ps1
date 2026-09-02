@@ -1,26 +1,28 @@
-$script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
-$script:StandardsRoot = Join-Path $script:RepositoryRoot 'docs\standards'
-$script:IndexPath = Join-Path $script:StandardsRoot 'README.md'
-$script:StandardPath = Join-Path $script:StandardsRoot 'skill-repository-standard.md'
-$script:MatrixPath = Join-Path $script:StandardsRoot 'skill-repository-review-matrix.md'
-$script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
-
-function Assert-True {
-    param([bool] $Condition, [string] $Message)
-    if (-not $Condition) { throw $Message }
-}
-
-function Assert-Equal {
-    param($Actual, $Expected, [string] $Message)
-    if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
-}
-
-function Assert-Match {
-    param([string] $Actual, [string] $Pattern, [string] $Message)
-    if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
-}
-
 Describe 'Agent Skill Repository Standard v1 contract' {
+    BeforeAll {
+        $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:StandardsRoot = Join-Path $script:RepositoryRoot 'docs\standards'
+        $script:IndexPath = Join-Path $script:StandardsRoot 'README.md'
+        $script:StandardPath = Join-Path $script:StandardsRoot 'skill-repository-standard.md'
+        $script:MatrixPath = Join-Path $script:StandardsRoot 'skill-repository-review-matrix.md'
+        $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
+
+        function Assert-True {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+
+        function Assert-Equal {
+            param($Actual, $Expected, [string] $Message)
+            if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
+        }
+
+        function Assert-Match {
+            param([string] $Actual, [string] $Pattern, [string] $Message)
+            if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
+    }
+
     It 'UnitT10_keeps_the_normative_standard_evidence_and_toolchain_documents_together' {
         Assert-True (Test-Path -LiteralPath $script:IndexPath -PathType Leaf) 'Missing standards index.'
         Assert-True (Test-Path -LiteralPath $script:StandardPath -PathType Leaf) 'Missing normative Standard.'
