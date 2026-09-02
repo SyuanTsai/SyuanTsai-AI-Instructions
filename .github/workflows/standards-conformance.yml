@@ -40,8 +40,11 @@ jobs:
           & ./scripts/Resolve-StandardValidationTool.ps1 -ValidatePolicyOnly -OutputPath $receiptPath | Out-Host
           $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
           if ($receipt.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
+          if ($receipt.sourceTrust.enforcement -ne 'exact-approved-source') { throw 'Unexpected source trust enforcement.' }
+          if (-not [bool]$receipt.sourceTrust.failClosedOnMismatch) { throw 'Source trust must fail closed.' }
           if (-not [bool]$receipt.recordResolvedIdentityWhenAvailable) { throw 'Resolved identity recording is not enforced.' }
           Write-Host "Canonical validation policy: $($receipt.policy)"
+          Write-Host "Tool source enforcement: $($receipt.sourceTrust.enforcement)"
 
       - name: Resolve latest stable Pester from central policy
         shell: pwsh
