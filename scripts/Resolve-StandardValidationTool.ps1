@@ -35,6 +35,15 @@ function Get-Policy {
     if ([string]$policy.policy -cne 'latest-stable-per-validation-run') {
         throw "Unsupported validation tool policy '$($policy.policy)'."
     }
+    if ([string]$policy.sourceTrust.enforcement -cne 'exact-approved-source') {
+        throw "Unsupported validation tool source trust enforcement '$($policy.sourceTrust.enforcement)'."
+    }
+    if ([string]$policy.sourceTrust.resolver -cne 'scripts/Resolve-StandardValidationTool.ps1') {
+        throw "Unexpected validation tool resolver '$($policy.sourceTrust.resolver)'."
+    }
+    if (-not [bool]$policy.sourceTrust.failClosedOnMismatch) {
+        throw 'Validation tool source mismatch must fail closed.'
+    }
     if (-not [bool]$policy.resolution.resolveAtRunStart -or -not [bool]$policy.resolution.freezeForRun) {
         throw 'Validation tools must resolve at run start and freeze for the run.'
     }
@@ -104,8 +113,9 @@ function Resolve-Pester {
 
     $repository = Get-PSRepository -Name PSGallery -ErrorAction Stop
     $expectedRepository = 'https://www.powershellgallery.com/api/v2'
-    if ([string]$repository.SourceLocation.TrimEnd('/') -cne $expectedRepository) {
-        throw "Untrusted PSGallery endpoint '$($repository.SourceLocation)'. Expected '$expectedRepository'."
+    $actualRepository = ([string]$repository.SourceLocation).TrimEnd('/')
+    if ($actualRepository -cne $expectedRepository) {
+        throw "Untrusted PSGallery endpoint '$actualRepository'. Expected '$expectedRepository'."
     }
 
     $package = Find-Module -Name Pester -Repository PSGallery -ErrorAction Stop
@@ -245,6 +255,11 @@ if ($ValidatePolicyOnly) {
     $result = [ordered]@{
         schemaVersion = 1
         policy = [string]$policy.policy
+        sourceTrust = [ordered]@{
+            enforcement = [string]$policy.sourceTrust.enforcement
+            resolver = [string]$policy.sourceTrust.resolver
+            failClosedOnMismatch = [bool]$policy.sourceTrust.failClosedOnMismatch
+        }
         trustedSources = $trustedSources
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
     }
