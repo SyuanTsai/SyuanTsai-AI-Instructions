@@ -267,7 +267,7 @@ function Get-Policy {
     Assert-JsonBoolean -Value $skillSpector.pythonDistribution.allowYanked -Expected $false -Context '$.tools.skillspector.pythonDistribution.allowYanked'
     Assert-JsonBoolean -Value $skillSpector.pythonDistribution.disableCache -Expected $true -Context '$.tools.skillspector.pythonDistribution.disableCache'
     Assert-JsonString -Value $skillSpector.pythonDistribution.candidateDiscovery -Expected 'approved-simple-json-lazy' -Context '$.tools.skillspector.pythonDistribution.candidateDiscovery'
-    Assert-JsonString -Value $skillSpector.pythonDistribution.requiresPythonPolicy -Expected 'simple-json-wheel-metadata-exact-current-interpreter' -Context '$.tools.skillspector.pythonDistribution.requiresPythonPolicy'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.requiresPythonPolicy -Expected 'simple-json-wheel-metadata-normalized-specifier-set-current-interpreter' -Context '$.tools.skillspector.pythonDistribution.requiresPythonPolicy'
     Assert-JsonString -Value $skillSpector.pythonDistribution.dependencyAcquisition -Expected 'verified-wheelhouse' -Context '$.tools.skillspector.pythonDistribution.dependencyAcquisition'
     Assert-JsonString -Value $skillSpector.pythonDistribution.dependencyResolver -Expected 'pip-offline-backtracking' -Context '$.tools.skillspector.pythonDistribution.dependencyResolver'
     Assert-JsonString -Value $skillSpector.pythonDistribution.installEnvironment -Expected 'isolated-venv' -Context '$.tools.skillspector.pythonDistribution.installEnvironment'
@@ -2118,7 +2118,7 @@ function Resolve-SkillSpector {
     $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#rootDirectReferences=blocked#credentialIsolation=github-token-cleared-before-python#dependencyClosure=unresolved"
     $identityKind = 'release-commit-asset-metadata'
     if ($null -ne $closure) {
-        $identity = $identity.Replace('#dependencyClosure=unresolved', '#directReferences=blocked#pipOnlineDependencyTraversal=disabled#dependencyDiscovery=approved-simple-json-lazy#requiresPython=simple-json-wheel-metadata-exact-current-interpreter#offlineBacktracking=verified')
+        $identity = $identity.Replace('#dependencyClosure=unresolved', '#directReferences=blocked#pipOnlineDependencyTraversal=disabled#dependencyDiscovery=approved-simple-json-lazy#requiresPython=simple-json-wheel-metadata-normalized-specifier-set-current-interpreter#offlineBacktracking=verified')
         $identity += "#pythonIndex=$approvedIndex#pipVersion=$($backtrackingEvidence.pipVersion)#resolutionRounds=$($backtrackingEvidence.resolutionRounds)#candidateCount=$($backtrackingEvidence.candidateCount)#resolverHelperSha256=$closureHelperSha256#candidateInventorySha256=$($backtrackingEvidence.candidateInventorySha256)#selectionPlanSha256=$($backtrackingEvidence.selectionPlanSha256)#selectedClosureSha256=$($backtrackingEvidence.selectedClosureSha256)#installEnvironment=$installEnvironment#interpreterIsolation=$interpreterIsolation#installedMetadataVerification=$installedMetadataVerification#consoleEntryPoint=$consoleEntryPoint#offlineResolution=verified#dependencyClosureSha256=$($closure.closureSha256)#executableSha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
         $identityKind = 'release-commit-asset-metadata-dependency-closure-and-executable'
     }

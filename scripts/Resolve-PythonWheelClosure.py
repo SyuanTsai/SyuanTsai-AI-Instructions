@@ -328,7 +328,10 @@ def verify_candidate(path: Path, descriptor: Descriptor) -> WheelMetadata:
             descriptor.simple_requires_python,
             f"Simple JSON wheel {descriptor.filename!r}",
         )
-        if simple_requires_python != metadata.requires_python:
+        requires_python_matches = simple_requires_python is None and metadata.requires_python is None
+        if simple_requires_python is not None and metadata.requires_python is not None:
+            requires_python_matches = SpecifierSet(simple_requires_python) == SpecifierSet(metadata.requires_python)
+        if not requires_python_matches:
             raise ClosureError(
                 f"Candidate Requires-Python mismatch for {descriptor.filename!r}: "
                 f"Simple JSON={simple_requires_python!r}, METADATA={metadata.requires_python!r}"
@@ -1256,6 +1259,12 @@ def self_test_command(_: argparse.Namespace) -> None:
         compatible_metadata = verify_candidate(compatible_python, compatible_descriptor)
         if compatible_metadata.requires_python != ">=0":
             raise AssertionError("Compatible wheel Requires-Python was not preserved")
+        whitespace_equivalent_metadata = verify_candidate(
+            compatible_python,
+            replace(compatible_descriptor, simple_requires_python=">= 0"),
+        )
+        if whitespace_equivalent_metadata.requires_python != ">=0":
+            raise AssertionError("Normalized-equivalent Requires-Python specifiers must agree")
         expect_closure_error(
             lambda: verify_candidate(
                 compatible_python,

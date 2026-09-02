@@ -828,7 +828,7 @@ if ($skillSpectorReceipt.pythonPackageIndex -isnot [string] -or
     $skillSpectorReceipt.dependencyDiscovery -isnot [string] -or
     [string]$skillSpectorReceipt.dependencyDiscovery -cne 'approved-simple-json-lazy' -or
     $skillSpectorReceipt.requiresPythonPolicy -isnot [string] -or
-    [string]$skillSpectorReceipt.requiresPythonPolicy -cne 'simple-json-wheel-metadata-exact-current-interpreter' -or
+    [string]$skillSpectorReceipt.requiresPythonPolicy -cne 'simple-json-wheel-metadata-normalized-specifier-set-current-interpreter' -or
     $skillSpectorReceipt.dependencyResolver -isnot [string] -or
     [string]$skillSpectorReceipt.dependencyResolver -cne 'pip-offline-backtracking' -or
     $skillSpectorReceipt.offlineResolutionVerified -isnot [bool] -or
@@ -839,7 +839,7 @@ if ($skillSpectorReceipt.pythonPackageIndex -isnot [string] -or
     [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'directReferences=blocked' -or
     [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'pipOnlineDependencyTraversal=disabled' -or
     [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'dependencyDiscovery=approved-simple-json-lazy' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'requiresPython=simple-json-wheel-metadata-exact-current-interpreter' -or
+    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'requiresPython=simple-json-wheel-metadata-normalized-specifier-set-current-interpreter' -or
     [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'offlineBacktracking=verified' -or
     [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'offlineResolution=verified' -or
     @($skillSpectorReceipt.dependencyClosure).Count -le 1) {

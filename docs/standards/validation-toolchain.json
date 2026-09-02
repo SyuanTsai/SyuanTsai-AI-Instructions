@@ -32,7 +32,7 @@
         "allowYanked": false,
         "disableCache": true,
         "candidateDiscovery": "approved-simple-json-lazy",
-        "requiresPythonPolicy": "simple-json-wheel-metadata-exact-current-interpreter",
+        "requiresPythonPolicy": "simple-json-wheel-metadata-normalized-specifier-set-current-interpreter",
         "dependencyAcquisition": "verified-wheelhouse",
         "dependencyResolver": "pip-offline-backtracking",
         "installEnvironment": "isolated-venv",
