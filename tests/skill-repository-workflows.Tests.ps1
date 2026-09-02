@@ -13,6 +13,11 @@ Describe 'Agent Skill authority workflow contract' {
             'skill-repository-workflows.Tests.ps1'
             'standard-validation-resolver-hardening.Tests.ps1'
         )
+        $script:AuthorityWorkflowDependencies = @(
+            'pr8-powershell-validation.yml'
+            'syp101-production-smoke.yml'
+            'syp86-production-lock.yml'
+        )
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -53,7 +58,10 @@ Describe 'Agent Skill authority workflow contract' {
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
 
-        Assert-Equal ([regex]::Matches($standards, "'\.github/workflows/pr8-powershell-validation\.yml'")).Count 2 'Push and pull-request path filters must both include the required authority bridge.'
+        foreach ($workflowName in $script:AuthorityWorkflowDependencies) {
+            $pattern = "'\.github/workflows/{0}'" -f [regex]::Escape($workflowName)
+            Assert-Equal ([regex]::Matches($standards, $pattern)).Count 2 "Push and pull-request path filters must both include authority workflow '$workflowName'."
+        }
         foreach ($testName in $script:AuthorityTests) {
             Assert-Equal ([regex]::Matches($standards, [regex]::Escape($testName))).Count 3 "Dedicated authority workflow must watch and execute '$testName'."
             Assert-Equal ([regex]::Matches($required, [regex]::Escape($testName))).Count 1 "Required Composition gate must execute '$testName'."
