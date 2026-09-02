@@ -326,6 +326,8 @@ Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA�
 
 對 `skill-validator`，Go `@latest` 解析結果只有純 release SemVer（例如 `v1.6.1`）可視為 latest stable；prerelease（例如 `v1.7.0-rc1`）與 pseudo-version **MUST** fail closed，不得因 Go 能解析就當成 stable release。
 
+Canonical authority workflow **MUST** 在中央 resolver 前，以 full commit SHA 固定受信任的 Go setup action、停用 cross-run cache，並安裝 `validation-toolchain.json` `goRuntimeVersion` 指定的 exact security-patched Go runtime。Resolver **MUST** 在任何 `go list` / `go install` 前以 native `go version` 驗證 exact runtime version，並把它綁入 resolved identity 與 machine-readable receipt；不得以 runner 預裝版本、mutable action tag 或 `GOTOOLCHAIN=auto` 取代這項證據。
+
 `skill-validator` 的 module resolution 與 installation **MUST** 使用該次 resolver invocation 專用、初始為空的暫存 `GOMODCACHE` 與 `GOCACHE`，並在 invocation 結束後移除。Resolver **MUST** 在任何 `go list` / `go install` 前拒絕 inherited `GOMODCACHE`、inherited `GOCACHE`、`GOROOT`、`GOTOOLDIR`、target/build selector 與非空 `GOFLAGS`：shared module cache 可能重用 caller-controlled 的下載/解壓縮內容，shared build cache 可能重用非本次 trusted resolution 產生的 compilation output，`GOROOT` / target selectors 可替換 compiler、stdlib 或產物目標，而 `GOFLAGS` 可注入改變 build behavior 的參數。鎖定 `GOPROXY` / `GOSUMDB` 不能取代這些 build-input 與 cache isolation controls。
 
 Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver 可以使用 provider-specific package manager，但 provider、package/repository identity 與 validation semantics 由中央 resolver 決定。
@@ -711,6 +713,7 @@ Migration 順序：
 - `SkillSpector` resolver 在 helper／Python／pip／其他 tool resolution 前仍暴露 `GITHUB_TOKEN`／`GH_TOKEN`，或為了 installed-version verification 啟動已安裝的 interpreter 並處理 package-controlled `.pth` startup line；
 - 將同一 validation run 的 run-owned validation tool 跨 run 重用，或把 application-level endpoint/direct-reference checks 說成完整 process network-egress sandbox；需要完整 egress guarantee 時 **MUST** 另加 transport/sandbox control；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
+- authority workflow 使用 mutable Go setup action、未安裝 policy 指定的 exact security-patched Go runtime，或 resolver 未在 module resolution 前驗證並記錄 runtime identity；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；

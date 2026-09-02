@@ -272,6 +272,10 @@ function Assert-AuthorityPolicyReceipt {
         -Value (Get-AuthorityRequiredProperty -Object $sourceTrust -Name 'enforcement' -Context 'Validation policy sourceTrust') `
         -Expected 'exact-approved-source' `
         -Context 'Validation policy sourceTrust enforcement'
+    Assert-AuthorityExactString `
+        -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'trustedGoRuntimeVersion' -Context 'Validation policy receipt') `
+        -Expected '1.26.8' `
+        -Context 'Validation policy receipt Go runtime'
     $failClosed = Get-AuthorityRequiredProperty -Object $sourceTrust -Name 'failClosedOnMismatch' -Context 'Validation policy sourceTrust'
     $recordIdentity = Get-AuthorityRequiredProperty -Object $Receipt -Name 'recordResolvedIdentityWhenAvailable' -Context 'Validation policy receipt'
     if ($failClosed -isnot [bool] -or -not [bool]$failClosed -or
@@ -884,6 +888,8 @@ foreach ($binding in @(
 $skillValidatorReceipt = $receipts.'skill-validator'
 if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorReceipt.proxy -cne 'https://proxy.golang.org' -or
     $skillValidatorReceipt.checksumDatabase -isnot [string] -or [string]$skillValidatorReceipt.checksumDatabase -cne 'sum.golang.org' -or
+    $skillValidatorReceipt.goRuntimeVersion -isnot [string] -or [string]$skillValidatorReceipt.goRuntimeVersion -cne '1.26.8' -or
+    [string]$skillValidatorReceipt.resolvedIdentity -cnotlike '*#goRuntime=1.26.8#*' -or
     $skillValidatorReceipt.moduleCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.moduleCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.buildCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.buildCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.temporaryDirectoryIsolation -isnot [string] -or [string]$skillValidatorReceipt.temporaryDirectoryIsolation -cne 'temporary-empty' -or

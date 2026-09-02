@@ -2,6 +2,8 @@ Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:CheckoutSha = '3d3c42e5aac5ba805825da76410c181273ba90b1'
+        $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
+        $script:AuthorityGoVersion = '1.26.8'
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 3
             '.github/workflows/standards-conformance.yml' = 1
@@ -63,6 +65,16 @@ Describe 'Agent Skill authority workflow contract' {
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
+
+        foreach ($workflow in @($standards, $required)) {
+            $setupPattern = "actions/setup-go@$($script:SetupGoSha)\s+# v7\.0\.0"
+            Assert-Equal ([regex]::Matches($workflow, $setupPattern)).Count 1 'Each authority workflow must use the reviewed immutable setup-go v7.0.0 commit exactly once.'
+            Assert-Match $workflow ("go-version:\s*'{0}'" -f [regex]::Escape($script:AuthorityGoVersion)) 'Each authority workflow must provision the exact approved Go runtime.'
+            Assert-Match $workflow 'check-latest:\s*false' 'Authority Go setup must not drift to another patch release.'
+            Assert-Match $workflow 'cache:\s*false' 'Authority Go setup must not restore a cross-run module or build cache.'
+            Assert-NotMatch $workflow 'actions/setup-go@v[0-9]+' 'Authority workflows must not use a mutable setup-go tag.'
+            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The approved Go runtime must be provisioned before the authority gate starts.'
+        }
 
         foreach ($workflowName in $script:AuthorityWorkflowDependencies) {
             $pattern = "'\.github/workflows/{0}'" -f [regex]::Escape($workflowName)

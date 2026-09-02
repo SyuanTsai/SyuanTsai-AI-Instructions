@@ -384,6 +384,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $toolchain.tools.'skill-validator'.stableVersionRule 'release-semver-only' 'skill-validator must require release SemVer.'
         Assert-Equal $toolchain.tools.'skill-validator'.proxy 'https://proxy.golang.org' 'skill-validator must use the approved Go module proxy.'
         Assert-Equal $toolchain.tools.'skill-validator'.checksumDatabase 'sum.golang.org' 'skill-validator must use the approved Go checksum database.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goRuntimeVersion '1.26.8' 'skill-validator must use the approved security-patched Go runtime.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOENV 'off' 'Go persisted environment configuration must be disabled.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOPROXY 'https://proxy.golang.org' 'Go proxy environment must be fixed.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOSUMDB 'sum.golang.org' 'Go checksum database environment must be fixed.'
@@ -923,6 +924,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         foreach ($entry in $expectedGateSources.GetEnumerator()) {
             Assert-Match $gate ("'{0}'\s*=\s*'{1}'" -f [regex]::Escape([string]$entry.Key), [regex]::Escape([string]$entry.Value)) ("Shared gate must freeze {0} from its approved source." -f $entry.Key)
         }
+        Assert-Match $gate "(?s)trustedGoRuntimeVersion'.*?-Expected '1\.26\.8'" 'Shared gate must bind the policy receipt to the approved Go runtime.'
+        Assert-Match $gate "goRuntimeVersion.*'1\.26\.8'" 'Shared gate must bind the skill-validator receipt to the verified Go runtime.'
+        Assert-Match $gate 'resolvedIdentity.*goRuntime=1\.26\.8' 'Shared gate must require the Go runtime in the resolved identity.'
         Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
         Assert-Match $gate '(?m)^\s*& \$resolverPath -ToolName \$entry\.Key -Install -InstallRoot \$installRoot -OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver.'
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
@@ -1249,6 +1253,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $validPolicy = [pscustomobject][ordered]@{
             schemaVersion=1; policy='latest-stable-per-validation-run'
             sourceTrust=[pscustomobject][ordered]@{ enforcement='exact-approved-source'; failClosedOnMismatch=$true }
+            trustedGoRuntimeVersion='1.26.8'
             recordResolvedIdentityWhenAvailable=$true
         }
         Assert-AuthorityPolicyReceipt -Receipt $validPolicy
@@ -1256,6 +1261,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Path='schemaVersion'; Value='1'; Pattern='unsupported schemaVersion' },
             @{ Path='policy'; Value=@('latest-stable-per-validation-run'); Pattern='must be the exact string' },
             @{ Path='sourceTrust.enforcement'; Value=1; Pattern='must be the exact string' },
+            @{ Path='trustedGoRuntimeVersion'; Value=@('1.26.8'); Pattern='must be the exact string' },
             @{ Path='sourceTrust.failClosedOnMismatch'; Value='true'; Pattern='incomplete or untrusted' },
             @{ Path='recordResolvedIdentityWhenAvailable'; Value='true'; Pattern='incomplete or untrusted' }
         )) {
@@ -1496,7 +1502,26 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver '\$identity = "go:.*#moduleCache=\$\(' 'Resolved skill-validator identity must record module-cache isolation.'
             Assert-Match $resolver '#buildCache=\$\(' 'Resolved skill-validator identity must record build-cache isolation.'
             Assert-Match $resolver '#goflags=empty' 'Resolved skill-validator identity must record clean build flags.'
+            Assert-Match $resolver '#goRuntime=\$goRuntimeVersion' 'Resolved skill-validator identity must bind the exact Go runtime version.'
+            Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")) 'The resolver must verify the native Go runtime before module resolution.'
             Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('clean', '-cache', '-modcache')")) 'Run-owned Go caches must be cleaned through Go before their temporary root is removed.'
+            Assert-Match $resolver '\$result\.goRuntimeVersion = \[string\]\$resolved\.goRuntimeVersion' 'The receipt must project the verified Go runtime version.'
+            $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
+            $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
+            Assert-True ($versionProbeIndex -ge 0 -and $moduleLookupIndex -gt $versionProbeIndex) 'Go runtime verification must fail closed before module resolution can start.'
+
+            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @('go version go1.26.8 linux/amd64') -ExpectedVersion '1.26.8') '1.26.8' 'The exact approved Go runtime evidence must be accepted.'
+            foreach ($case in @(
+                @{ Output=@(); Pattern='ambiguous runtime-version evidence' },
+                @{ Output=@('go version go1.26.8 linux/amd64', 'unexpected second line'); Pattern='ambiguous runtime-version evidence' },
+                @{ Output=@('go version devel go1.26.8 linux/amd64'); Pattern='Unapproved Go runtime' },
+                @{ Output=@('go version go1.26.7 linux/amd64'); Pattern='Unapproved Go runtime' }
+            )) {
+                $runtimeError = $null
+                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersion '1.26.8' | Out-Null }
+                catch { $runtimeError = $_.Exception.Message }
+                Assert-Match $runtimeError ([string]$case.Pattern) 'Untrusted Go runtime evidence must fail closed.'
+            }
             Assert-Match $resolver '\$result\.moduleCacheIsolation = \[string\]\$resolved\.moduleCacheIsolation' 'The receipt must project module-cache isolation from the resolved installation.'
             Assert-Match $resolver '\$result\.buildCacheIsolation = \[string\]\$resolved\.buildCacheIsolation' 'The receipt must project build-cache isolation from the resolved installation.'
             Assert-Match $resolver 'binarySha256=\$executableSha256' 'The immutable skill-validator identity must include the installed binary hash.'

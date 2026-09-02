@@ -29,6 +29,7 @@ $trustedRegistries = [ordered]@{
 
 $trustedPythonIndex = 'https://pypi.org/simple'
 $trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
+$trustedGoRuntimeVersion = '1.26.8'
 
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
@@ -281,9 +282,10 @@ function Get-Policy {
 
     $skillValidator = $policy.tools.'skill-validator'
     Assert-ExactPropertySet -Value $skillValidator -Expected @(
-        'source', 'channel', 'stableVersionRule', 'proxy', 'checksumDatabase', 'goEnvironment', 'goDistribution'
+        'source', 'channel', 'stableVersionRule', 'proxy', 'checksumDatabase', 'goRuntimeVersion', 'goEnvironment', 'goDistribution'
     ) -Context '$.tools.skill-validator'
     Assert-JsonString -Value $skillValidator.stableVersionRule -Expected 'release-semver-only' -Context '$.tools.skill-validator.stableVersionRule'
+    Assert-JsonString -Value $skillValidator.goRuntimeVersion -Expected $trustedGoRuntimeVersion -Context '$.tools.skill-validator.goRuntimeVersion'
     if ($skillValidator.proxy -isnot [string] -or $skillValidator.checksumDatabase -isnot [string]) {
         throw 'skill-validator proxy and checksumDatabase must be strings.'
     }
@@ -1564,6 +1566,28 @@ function Invoke-WithApprovedGoEnvironment {
     }
 }
 
+function Get-ApprovedGoRuntimeVersion {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersion
+    )
+
+    $lines = @($VersionOutput | ForEach-Object { [string]$_ })
+    if ($lines.Count -ne 1) {
+        throw "Go returned ambiguous runtime-version evidence: '$($lines -join ' ')'."
+    }
+    $versionMatch = [regex]::Match(
+        [string]$lines[0],
+        '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$'
+    )
+    $runtimeVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['version'].Value } else { $null }
+    if ([string]$runtimeVersion -cne $ExpectedVersion) {
+        throw "Unapproved Go runtime '$($lines[0])'. Expected exact version '$ExpectedVersion'."
+    }
+
+    return $runtimeVersion
+}
+
 function Resolve-Pester {
     param(
         [bool] $ShouldInstall,
@@ -1840,6 +1864,10 @@ function Resolve-SkillValidator {
         return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
             param($goCommand, $effectiveBinPath)
 
+            $goRuntimeVersion = Get-ApprovedGoRuntimeVersion `
+                -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
+                -ExpectedVersion ([string]$ToolPolicy.goRuntimeVersion)
+
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
             $version = [string]$metadata.Version
@@ -1875,7 +1903,7 @@ function Resolve-SkillValidator {
                 Add-ProcessPathValue -Name 'PATH' -Value $effectiveBinPath
             }
 
-            $identity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
+            $identity = "go:$modulePath@$version#goRuntime=$goRuntimeVersion#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
             if ($null -ne $installedClosure) {
                 $identity += "#binarySha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
             }
@@ -1888,6 +1916,7 @@ function Resolve-SkillValidator {
                 executableSha256 = $executableSha256
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 dependencyClosure = if ($null -eq $installedClosure) { @() } else { @($installedClosure.entries) }
+                goRuntimeVersion = $goRuntimeVersion
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
                 temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
@@ -2190,6 +2219,7 @@ if ($ValidatePolicyOnly) {
         trustedRegistries = $trustedRegistries
         trustedPythonIndex = $trustedPythonIndex
         trustedPowerShellRepository = $trustedPowerShellRepository
+        trustedGoRuntimeVersion = $trustedGoRuntimeVersion
         trustedGoEnvironment = $trustedGoEnvironment
         trustedGoDistribution = $trustedGoDistribution
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
@@ -2247,6 +2277,7 @@ else {
     if ($ToolName -eq 'skill-validator') {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
+        $result.goRuntimeVersion = [string]$resolved.goRuntimeVersion
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
         $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation

@@ -51,6 +51,7 @@
       "stableVersionRule": "release-semver-only",
       "proxy": "https://proxy.golang.org",
       "checksumDatabase": "sum.golang.org",
+      "goRuntimeVersion": "1.26.8",
       "goEnvironment": {
         "GOENV": "off",
         "GOPROXY": "https://proxy.golang.org",
