@@ -845,7 +845,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     version = '0.4.1'
                     resolved = 'https://registry.npmjs.org/skill-tools/-/skill-tools-0.4.1.tgz'
                     integrity = $integrity
-                    bin = [ordered]@{ 'skill-tools' = 'dist/cli.js' }
+                    bin = [ordered]@{ 'skill-tools' = './dist/cli.js' }
                 }
                 'node_modules/@skill-tools/dependency' = [ordered]@{
                     version = '1.2.3'
@@ -861,7 +861,54 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $identity.packageLockSha256 '^[0-9a-f]{64}$' 'The raw package-lock must be hashed.'
         Assert-Match $identity.closureSha256 '^[0-9a-f]{64}$' 'The canonical dependency closure must be hashed separately.'
         Assert-Equal @($identity.entries).Count 2 'Every locked npm package must be represented in closure evidence.'
-        Assert-Equal $identity.rootBinTarget 'dist/cli.js' 'The lock must bind the expected skill-tools bin target.'
+        Assert-Equal $identity.rootBinTarget 'dist/cli.js' 'The lock must bind the canonical skill-tools bin target.'
+        foreach ($acceptedBin in @(
+            @{ Value='dist/cli.js'; Expected='dist/cli.js' },
+            @{ Value='./dist/cli.js'; Expected='dist/cli.js' },
+            @{ Value='.\dist\.\cli.js'; Expected='dist/cli.js' },
+            @{ Value='dist/./cli.js'; Expected='dist/cli.js' },
+            @{ Value='.hidden/cli.js'; Expected='.hidden/cli.js' },
+            @{ Value='dist/.../cli.js'; Expected='dist/.../cli.js' },
+            @{ Value='dist/..hidden/cli.js'; Expected='dist/..hidden/cli.js' }
+        )) {
+            Assert-Equal `
+                (Get-CanonicalNpmBinTarget -Value $acceptedBin.Value -Context 'test bin') `
+                $acceptedBin.Expected `
+                "Safe npm bin target '$($acceptedBin.Value)' must canonicalize deterministically."
+        }
+        Assert-Equal `
+            (Get-CanonicalNpmBinTarget -Value './dist/cli.js' -Context 'installed test bin') `
+            (Get-CanonicalNpmBinTarget -Value 'dist/cli.js' -Context 'lock test bin') `
+            'Installed and lockfile spellings of the same npm bin target must compare identically.'
+        Assert-False `
+            ((Get-CanonicalNpmBinTarget -Value 'dist/other.js' -Context 'test bin') -ceq $identity.rootBinTarget) `
+            'Canonicalization must not make different npm bin targets compare equal.'
+        foreach ($unsafeBin in @(
+            $null, 7, '', '   ', '/dist/cli.js', '\\server\share\cli.js', 'C:\dist\cli.js', 'C:dist\cli.js',
+            'https://example.invalid/cli.js', '../dist/cli.js', 'dist/../cli.js', 'dist//cli.js', 'dist\\cli.js',
+            'dist/', '.', './.', 'dist:cli.js', ("dist/{0}cli.js" -f [char]0x0000),
+            ("dist/{0}cli.js" -f [char]0x007f), ("dist/{0}cli.js" -f [char]0x0085),
+            ("dist/{0}cli.js" -f [char]0x009f)
+        )) {
+            $binError = $null
+            try { Get-CanonicalNpmBinTarget -Value $unsafeBin -Context 'test bin' | Out-Null }
+            catch { $binError = $_.Exception.Message }
+            Assert-Match $binError 'safe relative package path' "Unsafe npm bin target '$unsafeBin' must fail closed."
+        }
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        Assert-Match $resolver '\$installedBinTarget = Get-CanonicalNpmBinTarget' 'Installed and lockfile bin targets must share the same canonicalization rule.'
+
+        $lock.packages.'node_modules/skill-tools'.bin['skill-tools'] = '../dist/cli.js'
+        [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $unsafeLockError = $null
+        try {
+            Get-NpmLockIdentity -LockPath $lockPath -ApprovedRegistry 'https://registry.npmjs.org/' -ExpectedRootIntegrity $integrity -ExpectedVersion '0.4.1' | Out-Null
+        }
+        catch {
+            $unsafeLockError = $_.Exception.Message
+        }
+        Assert-Match $unsafeLockError 'unsafe or missing skill-tools bin target' 'Unsafe npm bin targets must also fail closed through lockfile verification.'
+        $lock.packages.'node_modules/skill-tools'.bin['skill-tools'] = './dist/cli.js'
 
         $lock.packages.'node_modules/@skill-tools/dependency'.resolved = 'https://registry.example.invalid/dependency.tgz'
         [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))

@@ -1263,6 +1263,45 @@ function Get-NpmJsonTokenType {
     return $Token.GetType().GetProperty('Type').GetValue($Token, $null)
 }
 
+function Get-CanonicalNpmBinTarget {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        throw "$Context is not a safe relative package path: expected a non-empty string."
+    }
+    foreach ($character in ([string]$Value).ToCharArray()) {
+        if ([char]::IsControl($character)) {
+            throw "$Context is not a safe relative package path: control characters are forbidden."
+        }
+    }
+    if (([string]$Value).Contains(':')) {
+        throw "$Context is not a safe relative package path: colons are forbidden."
+    }
+
+    $normalized = ([string]$Value).Replace([char]'\', [char]'/')
+    if ($normalized.StartsWith('/')) {
+        throw "$Context is not a safe relative package path: absolute paths are forbidden."
+    }
+
+    $segments = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($segment in @($normalized.Split([char[]]@([char]'/'), [System.StringSplitOptions]::None))) {
+        if ($segment -ceq '.') {
+            continue
+        }
+        if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '..') {
+            throw "$Context is not a safe relative package path: empty and parent segments are forbidden."
+        }
+        [void]$segments.Add($segment)
+    }
+    if ($segments.Count -eq 0) {
+        throw "$Context is not a safe relative package path: no package file is identified."
+    }
+    return [string]::Join('/', [string[]]$segments.ToArray())
+}
+
 function Get-NpmLockIdentity {
     param(
         [Parameter(Mandatory = $true)][string] $LockPath,
@@ -1374,9 +1413,16 @@ function Get-NpmLockIdentity {
         $rootBins = @($rootBinObject.Properties())
     }
     if ($rootBins.Count -ne 1 -or [string]$rootBins[0].Name -cne 'skill-tools' -or
-        (Get-NpmJsonTokenType -Token $rootBins[0].Value) -ne $stringType -or [string]::IsNullOrWhiteSpace([string]$rootBins[0].Value) -or
-        [IO.Path]::IsPathRooted([string]$rootBins[0].Value) -or [string]$rootBins[0].Value -match '(^|[\\/])\.\.([\\/]|$)') {
+        (Get-NpmJsonTokenType -Token $rootBins[0].Value) -ne $stringType) {
         throw 'npm package-lock contains an unsafe or missing skill-tools bin target.'
+    }
+    try {
+        $rootBinTarget = Get-CanonicalNpmBinTarget `
+            -Value ([string]$rootBins[0].Value) `
+            -Context 'npm package-lock skill-tools bin target'
+    }
+    catch {
+        throw "npm package-lock contains an unsafe or missing skill-tools bin target. $($_.Exception.Message)"
     }
 
     $canonicalLines = New-Object 'System.Collections.Generic.List[string]'
@@ -1395,7 +1441,7 @@ function Get-NpmLockIdentity {
     return [ordered]@{
         packageLockSha256 = Get-FileSha256 -Path $LockPath
         closureSha256 = $closureSha256
-        rootBinTarget = [string]$rootBins[0].Value
+        rootBinTarget = $rootBinTarget
         entries = $entries
     }
 }
@@ -1777,12 +1823,23 @@ function Resolve-SkillTools {
                 }
                 $installedBins = @($installedManifest.bin.PSObject.Properties)
                 if ($installedBins.Count -ne 1 -or [string]$installedBins[0].Name -cne 'skill-tools' -or
-                    $installedBins[0].Value -isnot [string] -or [string]$installedBins[0].Value -cne [string]$lockIdentity.rootBinTarget) {
+                    $installedBins[0].Value -isnot [string]) {
+                    throw 'Installed skill-tools bin metadata does not match package-lock.'
+                }
+                try {
+                    $installedBinTarget = Get-CanonicalNpmBinTarget `
+                        -Value ([string]$installedBins[0].Value) `
+                        -Context 'Installed skill-tools bin target'
+                }
+                catch {
+                    throw "Installed skill-tools bin metadata does not match package-lock. $($_.Exception.Message)"
+                }
+                if ([string]$installedBinTarget -cne [string]$lockIdentity.rootBinTarget) {
                     throw 'Installed skill-tools bin metadata does not match package-lock.'
                 }
 
                 $packageRoot = [IO.Path]::GetFullPath((Join-Path $toolInstallPath 'node_modules/skill-tools')).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-                $entryPointPath = [IO.Path]::GetFullPath((Join-Path $packageRoot ([string]$installedBins[0].Value)))
+                $entryPointPath = [IO.Path]::GetFullPath((Join-Path $packageRoot $installedBinTarget))
                 $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                     [StringComparison]::OrdinalIgnoreCase
                 }
