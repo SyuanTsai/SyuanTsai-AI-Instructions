@@ -159,8 +159,14 @@ jobs:
           $skillSpector = Get-Content -Raw -Encoding UTF8 -LiteralPath $skillSpectorReceipt | ConvertFrom-Json
           if ($skillSpector.source -ne 'NVIDIA/SkillSpector') { throw 'Unexpected SkillSpector source.' }
           if ($skillSpector.installEnvironment -ne 'isolated-venv') { throw 'SkillSpector was not installed in the approved isolated environment.' }
+          if ($skillSpector.installDisposition -ne 'ephemeral-verification') { throw 'SkillSpector resolver install must remain verification-only.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'installDisposition=ephemeral-verification') { throw 'SkillSpector identity does not record verification-only installation.' }
           if ($skillSpector.interpreterIsolation -ne 'python-isolated-mode') { throw 'SkillSpector Python subprocesses were not isolated.' }
           if ($skillSpector.resolvedIdentity -notmatch 'interpreterIsolation=python-isolated-mode') { throw 'SkillSpector identity does not record Python interpreter isolation.' }
+          if ($skillSpector.credentialIsolation -ne 'github-token-cleared-before-python') { throw 'SkillSpector Python subprocesses inherited GitHub credentials.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'credentialIsolation=github-token-cleared-before-python') { throw 'SkillSpector identity does not record credential isolation.' }
+          if ($skillSpector.installedMetadataVerification -ne 'static-dist-info-metadata') { throw 'SkillSpector installed version was not verified through static metadata.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'installedMetadataVerification=static-dist-info-metadata') { throw 'SkillSpector identity does not record static installed metadata verification.' }
           if ([bool]$skillSpector.directReferencesAllowed) { throw 'SkillSpector direct dependency references were not blocked.' }
           if ($skillSpector.resolvedIdentity -notmatch 'directReferences=blocked') { throw 'SkillSpector identity does not record direct-reference blocking.' }
           if ([string]$skillSpector.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure identity is missing.' }
@@ -181,6 +187,7 @@ jobs:
           $authorityPaths = @(
               './tests/skill-repository-standard.Tests.ps1'
               './tests/skill-repository-workflows.Tests.ps1'
+              './tests/standard-validation-resolver-hardening.Tests.ps1'
           )
           $authority = Invoke-Pester -Path $authorityPaths -PassThru
           Write-Host "Authority tests: Total=$($authority.TotalCount) Passed=$($authority.PassedCount) Failed=$($authority.FailedCount)"
