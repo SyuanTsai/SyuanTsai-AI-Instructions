@@ -6,15 +6,15 @@ Tracking: Jira `SYP-167`
 
 ## 1. Purpose
 
-本標準定義 Agent Skill source repository 從 acquisition、package、validation、security review 到 publish/install 的共同 contract。Repository-specific 能力可透過 extension / adapter / config 接入，但不得另建第二套 lifecycle、Security Gate、severity policy 或 review policy。
+本標準定義 Agent Skill source repository 從 package、validation、security review、release 到 consumer installation 的共同 contract。Repository-specific 能力可透過 extension / adapter / config 接入，但不得另建第二套 lifecycle、Security Gate、severity policy、review policy 或 tool-version policy。
 
 ## 2. Normative terms
 
 - **MUST / MUST NOT**：Standard v1 conformance 必要條件。
-- **SHOULD / SHOULD NOT**：預設要求；偏離必須記錄原因與 evidence。
+- **SHOULD / SHOULD NOT**：預設要求；偏離必須記錄理由與 evidence。
 - **MAY**：合法 extension。
 
-## 3. Ownership boundaries
+## 3. Authority, effective scope and reference implementation
 
 ### 3.1 Normative authority
 
@@ -23,14 +23,21 @@ Tracking: Jira `SYP-167`
 Source repository **MUST NOT** 私自重新定義：
 
 - canonical lifecycle；
+- validation tool-version policy；
 - security severity / block semantics；
 - suppression / exception policy；
 - AI Review / Human Approval boundary；
 - cross-repository profile / dependency / lifecycle semantics。
 
-### 3.2 Reference implementation
+### 3.2 Effective scope
 
-`Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference，但若 reference implementation 與本標準衝突，**MUST** 修正 reference implementation 或先修改本標準並 review；不得以 implementation 現況覆蓋 normative policy。
+本 normative authority 的 conformance regression **MUST** 與 Standard v1 的 normative change 在同一 PR 建立或更新；Standard 本身不得依賴未來 migration task 才獲得最基本的 regression protection。
+
+Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標準要求的 repository-level conformance tests。SYP-155 負責第一個完整 reference implementation；SYP-156～159 依序 migration。Migration window 允許尚未遷移的 repository 維持 legacy layout，但不得宣稱已 conformant。
+
+### 3.3 Reference implementation
+
+`Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference。若 reference implementation 與本標準衝突，**MUST** 修正 implementation，或先修改本標準並完成 review/tests；不得以 implementation 現況覆蓋 normative policy。
 
 ## 4. Repository and Skill package contract
 
@@ -56,7 +63,7 @@ tests/
 
 `skillsRoot` **MUST** 由 source metadata 宣告，Standard v1 canonical value 為 `skills`。
 
-Historical `.agents/skills/<skill-id>` source repositories可在 SYP-155～159 migration 完成前繼續存在，但屬 **legacy source layout**，不是 Standard v1 reference layout。
+Historical `.agents/skills/<skill-id>` source repositories 可在 SYP-155～159 migration 完成前繼續存在，但屬 **legacy source layout**，不是 Standard v1 reference layout。
 
 ### 4.2 Consumer projection
 
@@ -92,6 +99,21 @@ Rename **MUST** 使用新 stable ID 並由 central Catalog lifecycle 處理 tomb
 
 Skill-specific `scripts/`、`references/`、`assets/` **MAY** 存在。Repository root script **SHOULD** 僅處理 repository-level validation、release、pin/provenance、orchestration 或 adapters；Skill 自己的 domain implementation **SHOULD** 保持在 Skill package 內。
 
+### 4.5 `agents/openai.yaml` contract
+
+`agents/openai.yaml` **MUST** 不只存在，還必須通過內容驗證：
+
+- 檔案 **MUST** 是 syntactically valid YAML；
+- root **MUST** 是 mapping/object；
+- `interface` **MUST** 存在且為 mapping/object；
+- `interface.display_name` **MUST** 是 non-empty string；
+- `interface.short_description` **MUST** 是 non-empty string；
+- `interface.default_prompt` **MUST** 是 non-empty string；
+- `interface.default_prompt` **MUST** reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；
+- malformed YAML、缺欄位、空白欄位或錯誤 Skill identity **MUST** fail closed。
+
+Repository **MAY** 驗證額外 host metadata，但不得降低上述最低 contract。
+
 ## 5. Source inventory and central Catalog ownership
 
 ### 5.1 Source-owned inventory
@@ -114,19 +136,20 @@ Inventory **MUST** 與實際 package directories 完全一致；未宣告 packag
 
 ### 5.2 Central policy
 
-下列 cross-source policy **MUST** 由 central Catalog 擁有，而非在 source repositories 重複成第二份 authority：
+下列 cross-source policy **MUST** 由 central Catalog / Standard 擁有，而非在 source repositories 重複成第二份 authority：
 
 - profiles / selection；
 - compatibility；
 - cross-Skill dependencies；
 - lifecycle / rename / removal；
-- consumer routing policy。
+- consumer routing policy；
+- canonical validation tool selection policy。
 
-Source repository **MAY** 維護 derived/read-only display metadata，但 **MUST NOT** 讓 derived metadata 成為與 central Catalog 競爭的 authority。
+Source repository **MAY** 維護 derived/read-only display metadata，但 **MUST NOT** 讓 derived metadata 成為競爭 authority。
 
 ## 6. Pin, provenance and integrity contract
 
-以下 security properties **MUST** 分開命名與驗證：
+以下 properties **MUST** 分開命名與驗證：
 
 - `resolvedCommit`：immutable full Git commit identity；
 - `archiveSha256`：controlled acquisition 取得的 source archive raw bytes hash；
@@ -161,26 +184,45 @@ Consumer/publisher **MUST NOT** 直接以 mutable `main`、branch 或 moving tag
 
 ## 7. Canonical lifecycle
 
-Standard v1 canonical flow 為：
+Standard v1 將「release candidate 核准」與「安裝已核准 release」明確分開。
+
+### 7.1 Development / release flow
 
 ```text
-Controlled Acquisition
+Controlled Candidate Acquisition
 → Integrity Verification
 → SkillSpector Static Security Scan
 → Repository Validation
 → Tests / Regression / Conformance
 → Conditional SkillSpector Semantic Scan
 → AI Review
-→ Human Approval
-→ Publish / Install
+→ Human Release Approval
+→ Publish Approved Immutable Release
+```
+
+Human approval 在這條 flow 核准的是**特定 immutable release candidate**，不是核准某一台電腦的每次安裝。
+
+### 7.2 Approved release installation flow
+
+```text
+Select Human-Approved Immutable Release
+→ Controlled Acquisition
+→ Integrity Verification
+→ Install / Project to Consumer Location
 → Post-install Integrity Verification
 ```
 
-Repository **MUST** 維持此 stage ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate 或另建不同 policy pipeline。
+使用者安裝已經 Human Approved 且綁定 immutable revision 的 released artifact **MUST NOT** 因 Standard v1 本身被要求再次取得 human approval。
 
-## 8. Single validation entry contract
+Host、企業政策或實際操作若涉及新的外部寫入、credential grant、elevated permission 或其他使用者授權，仍 **MAY / MUST** 依該操作自己的 authorization boundary 取得同意；這與 release approval 是不同概念。
 
-每個 repository **MUST** 提供一個 canonical validation entry point，例如 repository root script `scripts/Validate.ps1`（實際名稱可由 adapter/config 決定）。
+Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate或另建不同 policy pipeline。
+
+## 8. Canonical validation entry and validation tool policy
+
+### 8.1 Single validation entry
+
+每個 conformant repository **MUST** 提供一個 canonical validation entry point，例如 repository root script `scripts/Validate.ps1`（實際名稱可由 adapter/config 決定）。
 
 Canonical entry **MUST**：
 
@@ -192,6 +234,24 @@ Canonical entry **MUST**：
 - 只允許 execution adapter 差異，例如 path、credential source、artifact destination、TTY availability。
 
 Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 canonical entry 的 release path。
+
+### 8.2 Latest-stable tool policy
+
+中央 machine-readable policy 位於 `docs/standards/validation-toolchain.json`。
+
+正式 validation / conformance / security gate **MUST** 預設使用每個工具在 validation run 開始時可解析到的 **latest stable** version，而不是 repository 各自長期 pin 不同版本。
+
+每次 canonical validation run **MUST**：
+
+1. 在 run 開始時解析中央 policy 指定工具的 latest stable version；
+2. 記錄 resolved version，若 provider 可提供 immutable identity / package digest 也 **MUST** 記錄；
+3. 將 resolved toolset freeze 到該次 run 結束，避免同一 candidate 的不同 stage 在 run 中途漂移；
+4. 顯示足以 audit 的 tool version evidence；
+5. 若 latest stable 無法解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version。
+
+Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 自然重新解析當時 latest stable。
+
+**Compatibility lane exception**：為證明 Windows PowerShell 5.1、舊 Pester 或其他明確 legacy compatibility，額外 test lane **MAY** pin 舊版，但必須記錄 explicit purpose，且該 lane **MUST NOT** 成為唯一或 canonical release/security gate。
 
 ## 9. SkillSpector Static Security Gate
 
@@ -216,9 +276,9 @@ Static gate 在下列任一情況 **MUST BLOCK**：
 
 ### 9.3 Analyzer completeness
 
-Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不是只看 exit code。若 scanner 版本改變 analyzer inventory，CI **MUST** 顯示 resolved scanner version 與 analyzer completeness evidence。
+Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不是只看 exit code。每次 run **MUST** 顯示 resolved SkillSpector version 與 analyzer completeness evidence。
 
-Tool version **MUST** 可重現：release/conformance gate **MUST NOT** 永久依賴無版本約束的 `latest`。允許 scheduled update job 評估新版工具，但 production gate 使用的版本 **MUST** 經 review/pin。
+因 Standard v1 預設使用 latest stable，analyzer inventory 可能隨 release 變更；adapter **MUST** 針對實際 resolved version 驗證其完整性，不能拿舊版 analyzer allowlist 假裝新版完整。
 
 ### 9.4 Severity handling
 
@@ -226,7 +286,7 @@ Repository **MUST** 使用 central severity semantics：
 
 - **Critical / High**：預設 BLOCK；只有正式 approved exception 才可放行。
 - **Medium**：需要 triage。若屬 exploit/security boundary violation 或 analyzer 明確定義為 blocking 類型，BLOCK；其餘需有 resolution/suppression evidence 才可 release。
-- **Low / Informational**：可不阻擋，但 SHOULD 保留 evidence 供 trend/review；不得藉由降級 severity 隱藏實質 High/Critical risk。
+- **Low / Informational**：可不阻擋，但 **SHOULD** 保留 evidence 供 trend/review；不得藉由降級 severity 隱藏實質 High/Critical risk。
 
 實際 scanner severity 名稱若不同，adapter **MUST** 做 deterministic mapping，mapping 必須受版本控制與 tests 保護。
 
@@ -244,7 +304,7 @@ Repository **MUST** 使用 central severity semantics：
 
 Gate **MUST** 評估 capability 的 declared purpose、scope、permission、data flow、secret handling 與 observed behavior。
 
-例如下列風險則可能 BLOCK：
+例如下列風險可能 BLOCK：
 
 - Prompt Injection enabling unsafe instruction override；
 - MCP Tool Poisoning / description-behaviour mismatch；
@@ -292,6 +352,7 @@ Repository Validation **MUST** 驗證至少：
 - package inventory exact match；
 - required files；
 - `SKILL.md` name identity；
+- `agents/openai.yaml` YAML syntax、required fields 與 Skill identity binding；
 - safe relative paths；
 - source/inventory integrity contract；
 - repository-specific declared adapters/config；
@@ -299,7 +360,9 @@ Repository Validation **MUST** 驗證至少：
 
 ### 12.2 Tests
 
-Repository **MUST** 有：
+本 authority repository **MUST** 維護 `tests/skill-repository-standard.Tests.ps1`，至少保護 normative documents、tool-version policy、metadata contract、release/install approval boundary 與本節的 self-conformance requirement。
+
+每個 conformant Skill repository **MUST** 有：
 
 - Standard v1 conformance regression；
 - repository contract regression；
@@ -308,7 +371,7 @@ Repository **MUST** 有：
 
 Tests **MUST NOT** 因 migration 而弱化既有 integrity/security/regression guarantees。
 
-## 13. AI Review and Human Approval
+## 13. AI Review and Human Release Approval
 
 ### 13.1 AI Review
 
@@ -319,13 +382,13 @@ AI Review **SHOULD** 聚焦：
 - static/semantic findings triage；
 - test gap / regression risk；
 - release evidence completeness；
-- suppression/exception 是否真的符合 policy。
+- suppression/exception 是否符合 policy。
 
-AI Review **MUST NOT** 自行批准 High/Critical accepted-risk exception 或繞過 Human Approval。
+AI Review **MUST NOT** 自行批准 High/Critical accepted-risk exception 或繞過 Human Release Approval。
 
-### 13.2 Human Approval
+### 13.2 Release Approval
 
-Human Approval **MUST** 是下列事項的最終邊界：
+Human Release Approval **MUST** 是下列事項的最終邊界：
 
 - publish/release candidate；
 - new/changed security exception；
@@ -333,7 +396,15 @@ Human Approval **MUST** 是下列事項的最終邊界：
 - intentional analyzer suppression that affects release outcome；
 - normative policy change。
 
-自動化 **MAY** 在沒有 blocking finding 且 policy 未要求人工 security exception review 時準備 candidate，但不得將「AI 認為合理」等同 human approval。
+Approval **MUST** 綁定被 review 的 immutable candidate identity；candidate bytes / commit 改變後，舊 approval 不得沿用。
+
+自動化 **MAY** 在沒有 blocking finding且 policy 未要求人工 security exception review 時準備 candidate，但不得將「AI 認為合理」等同 human approval。
+
+### 13.3 Approved Release Installation
+
+安裝流程的 authority 是**已 Human Approved 的 immutable released artifact**與其 integrity/provenance evidence。
+
+Standard v1 **MUST NOT** 要求同一 approved release 每次在不同 consumer 安裝時重新做人工作品核准。安裝時仍必須做 acquisition/integrity/post-install verification，並遵守 host 對實際權限、credential 或 external-write operation 的獨立 authorization policy。
 
 ## 14. Suppression and exception policy
 
@@ -361,7 +432,7 @@ Exception **MUST** 是顯式、可追蹤、Human Approved 的 repository-specifi
 - owner；
 - review/expiry condition。
 
-Exception **MUST NOT** 建立替代 lifecycle 或把 repository 永久排除於 Security Gate。
+Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或把「使用舊 validation tool」變成無期限預設。若 compatibility lane 需要舊版工具，必須使用 8.2 的 compatibility-lane boundary。
 
 ## 15. Repository-specific extension points
 
@@ -379,42 +450,52 @@ Repository **MAY** 增加 extension stage/check，例如：
 Extension **MUST**：
 
 - 由 config/adapter/declared stage 表達；
-- 使用 canonical severity/fail semantics；
+- 使用 canonical latest-stable tool policy、severity/fail semantics；
 - 不得跳過 Static Security、Repository Validation、Tests 或 required Semantic Scan；
 - local/CI/pre-push 使用同一判斷；
 - 不得把 temporary evidence 寫成 uncontrolled tracked state。
 
 ## 16. Release, publish and install
 
-Release candidate **MUST** 綁定單一 immutable candidate revision，且所有 canonical stages **MUST** 對同一 candidate 執行。
+### 16.1 Publish approved immutable release
 
-在 validation 完成後 candidate bytes 改變，**MUST** 重新執行受影響 stages；不得將舊 scan/test evidence 套用到新 commit。
+Release candidate **MUST** 綁定單一 immutable candidate revision，且所有 canonical validation stages與 Human Release Approval **MUST** 對同一 candidate identity 生效。
 
-GitHub-hosted dedicated Skill repositories **SHOULD** 執行 host publishing compatibility dry run（例如 GitHub Skill publishing dry-run）作 extension acceptance。
+在 validation/approval 完成後 candidate bytes 改變，**MUST** 重新執行受影響 stages並重新取得 release approval；不得將舊 scan/test/approval evidence 套用到新 commit。
 
-Publish/install **MUST**：
+GitHub-hosted dedicated Skill repositories **SHOULD** 執行 host publishing compatibility dry run 作 extension acceptance。
 
-- 使用 validated immutable commit / package；
+### 16.2 Install approved immutable release
+
+Install **MUST**：
+
+- 只選擇已核准且可追溯到 immutable candidate 的 release/package；
+- controlled acquisition validated immutable commit/package；
 - 保存必要 provenance；
 - 不把 secret 寫入 package/manifest；
 - 安裝後重新驗證 expected package identity / per-file integrity；
 - integrity mismatch 時 fail closed / rollback，不得 silent repair 成未知內容。
+
+只要安裝的是相同 approved immutable release，Standard v1 本身不要求重複 Human Release Approval。
 
 ## 17. Conformance levels
 
 Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 
 1. source/package/inventory contract；
-2. canonical lifecycle stage ordering；
-3. single validation entry contract；
-4. SkillSpector Static Gate + analyzer completeness；
-5. severity/fail-closed semantics；
-6. tests/regression/conformance；
-7. semantic trigger handling；
-8. AI/Human review boundary；
-9. suppression/exception contract；
-10. release/install/post-install integrity；
-11. repository-specific deviations 僅存在於 approved adapter/config/exception。
+2. `SKILL.md` 與 `agents/openai.yaml` metadata contract；
+3. canonical lifecycle stage ordering；
+4. single validation entry contract；
+5. latest-stable validation tool resolution/freeze/evidence contract；
+6. SkillSpector Static Gate + analyzer completeness；
+7. severity/fail-closed semantics；
+8. tests/regression/conformance；
+9. semantic trigger handling；
+10. AI Review / Human Release Approval boundary；
+11. approved-release installation semantics；
+12. suppression/exception contract；
+13. release/install/post-install integrity；
+14. repository-specific deviations 僅存在於 approved adapter/config/exception。
 
 Conformance report **MUST** 明確列出 deviations；若沒有，記錄 `None`，不得省略此欄位。
 
@@ -424,15 +505,27 @@ SYP-167 **MUST NOT** 直接改寫五個 source repositories 或 production Catal
 
 Migration 順序：
 
-1. SYP-167：建立 Standard v1 與 cross-repository review；
-2. SYP-155：`Skill-General` 建立 reference implementation + conformance tests；
+1. SYP-167：建立 Standard v1、cross-repository review、authority-level regression tests與 machine-readable validation-tool policy；
+2. SYP-155：`Skill-General` 建立第一個完整 canonical validator、SkillSpector integration 與 repository conformance tests；
 3. SYP-156～159：其餘 repositories fan-out migration；
 4. 每個 source migration 合併並驗證後，才更新 central Catalog/Lock source path / immutable pins；
 5. production consumer migration 必須維持 transactional/fail-closed integrity guarantees。
 
 因此現行 central Catalog/Lock 仍可在 migration window pin legacy `.agents/skills/...` source path。Standard v1 定義的是 migration target，不要求 SYP-167 在尚未遷移 source repositories 時破壞 production runtime。
 
-## 19. Prohibited patterns
+## 19. Standard change contract
+
+任何修改 MUST / MUST NOT、canonical lifecycle、tool-version policy、security gate、metadata contract、integrity contract、approval boundary 或 exception policy 的 PR **MUST**：
+
+1. 修改本 normative document；
+2. 同一 PR 更新 `tests/skill-repository-standard.Tests.ps1` 與必要 machine-readable policy；
+3. 說明對 reference implementation與已 conformant repositories 的影響；
+4. 重新執行 authority-level conformance regression；
+5. 經 Human Release/Policy Review 後才可 merge/fan out。
+
+這項規則自 Standard v1 首次 merge 前即生效；不延後到 SYP-155。
+
+## 20. Prohibited patterns
 
 下列做法 **MUST NOT**：
 
@@ -440,9 +533,12 @@ Migration 順序：
 - hard-code CI Skill list 造成新增 Skill 可繞過 security gate；
 - local、pre-push、CI 使用不同 pass/block policy；
 - scanner/analyzer 未完整執行仍 pass；
-- release gate 永久依賴 unpinned latest tool；
+- canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
+- 同一 validation run 中途漂移 tool version；
 - 將 repository tree fingerprint 稱為 per-Skill `contentSha256`；
 - 使用 broad scanner suppression 隱藏 findings；
 - 將 legitimate network/MCP/script capability 一律視為 vulnerability；
-- 將 AI Review 當作 Human Approval；
-- 在 source repository 私自建立與本標準競爭的 lifecycle/security policy。
+- 將 AI Review 當作 Human Release Approval；
+- 將每次 approved release installation 誤當成新的 release approval；
+- 只檢查 `agents/openai.yaml` 存在而不驗證 YAML/required fields/identity；
+- 在 source repository 私自建立與本標準競爭的 lifecycle/security/tool-version policy。
