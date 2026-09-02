@@ -6,7 +6,7 @@ Tracking: Jira `SYP-167`
 
 ## 1. Purpose
 
-本標準定義 Agent Skill source repository 從 package、validation、security review、release 到 consumer installation 的共同 contract。Repository-specific 能力可透過 extension / adapter / config 接入，但不得另建第二套 lifecycle、Security Gate、severity policy、review policy 或 tool-version policy。
+本標準定義 Agent Skill source repository 從 package、validation、security review、release 到 consumer installation 的共同 contract。Repository-specific 能力可透過 extension / adapter / config 接入，但不得另建第二套 lifecycle、Security Gate、severity policy、review policy 或 validation-tool policy。
 
 ## 2. Normative terms
 
@@ -23,7 +23,7 @@ Tracking: Jira `SYP-167`
 Source repository **MUST NOT** 私自重新定義：
 
 - canonical lifecycle；
-- validation tool-version policy；
+- validation tool source / version policy；
 - security severity / block semantics；
 - suppression / exception policy；
 - AI Review / Human Approval boundary；
@@ -101,18 +101,21 @@ Skill-specific `scripts/`、`references/`、`assets/` **MAY** 存在。Repositor
 
 ### 4.5 `agents/openai.yaml` contract
 
+本 Standard 將 OpenAI upstream `openai/skills` / `openai/codex` 的 `agents/openai.yaml` interface constraints 視為最低相容性基線；內部規範可以更嚴格，但不得比上游最低 contract 更寬鬆。
+
 `agents/openai.yaml` **MUST** 不只存在，還必須通過內容驗證：
 
 - 檔案 **MUST** 是 syntactically valid YAML；
 - root **MUST** 是 mapping/object；
+- YAML keys **SHOULD** 保持 unquoted；all string scalar values **MUST** be quoted；
 - `interface` **MUST** 存在且為 mapping/object；
-- `interface.display_name` **MUST** 是 non-empty string；
-- `interface.short_description` **MUST** 是 non-empty string；
-- `interface.default_prompt` **MUST** 是 non-empty string；
-- `interface.default_prompt` **MUST** reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；
-- malformed YAML、缺欄位、空白欄位或錯誤 Skill identity **MUST** fail closed。
+- `interface.display_name` **MUST** 是 non-empty quoted string；
+- `interface.short_description` **MUST** 是 25～64 characters inclusive 的 quoted string；
+- `interface.default_prompt` **MUST** 是 non-empty quoted string；
+- `interface.default_prompt` **MUST** 明確 reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；
+- malformed YAML、unquoted string value、缺欄位、空白欄位、`short_description` 長度超界或錯誤 Skill identity **MUST** fail closed。
 
-Repository **MAY** 驗證額外 host metadata，但不得降低上述最低 contract。
+Optional `interface` / dependency string fields若存在，也 **MUST** 遵守上游 quoted-string rule。Repository **MAY** 驗證額外 host metadata，但不得降低上述最低 contract。
 
 ## 5. Source inventory and central Catalog ownership
 
@@ -143,7 +146,7 @@ Inventory **MUST** 與實際 package directories 完全一致；未宣告 packag
 - cross-Skill dependencies；
 - lifecycle / rename / removal；
 - consumer routing policy；
-- canonical validation tool selection policy。
+- canonical validation tool source / version policy。
 
 Source repository **MAY** 維護 derived/read-only display metadata，但 **MUST NOT** 讓 derived metadata 成為競爭 authority。
 
@@ -216,7 +219,7 @@ Select Human-Approved Immutable Release
 
 Host、企業政策或實際操作若涉及新的外部寫入、credential grant、elevated permission 或其他使用者授權，仍 **MAY / MUST** 依該操作自己的 authorization boundary 取得同意；這與 release approval 是不同概念。
 
-Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate或另建不同 policy pipeline。
+Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate 或另建不同 policy pipeline。
 
 ## 8. Canonical validation entry and validation tool policy
 
@@ -235,19 +238,43 @@ Canonical entry **MUST**：
 
 Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 canonical entry 的 release path。
 
-### 8.2 Latest-stable tool policy
+### 8.2 Latest-stable tool and trusted-source policy
 
-中央 machine-readable policy 位於 `docs/standards/validation-toolchain.json`。
+中央 machine-readable policy 位於 `docs/standards/validation-toolchain.json`；中央 resolver / trust anchor 位於 `scripts/Resolve-StandardValidationTool.ps1`。
 
-正式 validation / conformance / security gate **MUST** 預設使用每個工具在 validation run 開始時可解析到的 **latest stable** version，而不是 repository 各自長期 pin 不同版本。
+正式 validation / conformance / security gate **MUST** 預設使用每個工具在 validation run 開始時從**核准來源**可解析到的 **latest stable** version，而不是 repository 各自長期 pin 不同版本。
+
+`source` **MUST** 視為供應鏈安全屬性，不是描述性 metadata。Standard v1 的核准 source trust anchors 為：
+
+- SkillSpector → `NVIDIA/SkillSpector`；
+- skill-validator → `github.com/agent-ecosystem/skill-validator/cmd/skill-validator`；
+- skill-tools → `npm:skill-tools`；
+- Pester → `PowerShellGallery:Pester`。
+
+Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。任一 source 偏離 trust anchor，即使 channel 仍為 `latest-stable`，整個 canonical validation **MUST** fail closed。
+
+Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver可以使用 provider-specific package manager，但 provider、package/repository identity與 validation semantics由中央 resolver決定。
+
+`validation-toolchain.json` 的 `recordResolvedIdentityWhenAvailable` **MUST** 為 `true`，並由 authority regression 保護。
 
 每次 canonical validation run **MUST**：
 
-1. 在 run 開始時解析中央 policy 指定工具的 latest stable version；
-2. 記錄 resolved version，若 provider 可提供 immutable identity / package digest 也 **MUST** 記錄；
-3. 將 resolved toolset freeze 到該次 run 結束，避免同一 candidate 的不同 stage 在 run 中途漂移；
-4. 顯示足以 audit 的 tool version evidence；
-5. 若 latest stable 無法解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version。
+1. 在 run 開始時驗證所有 tool source trust anchors；
+2. 依中央 policy 從 approved source 解析該 run 所需工具的 latest stable version；
+3. 記錄 resolved version；
+4. provider 可提供 immutable identity、module/package coordinate、package integrity、release commit 或 asset digest 時 **MUST** 記錄 resolved identity；
+5. 將 resolved toolset freeze 到該次 run 結束，避免同一 candidate 的不同 stage 在 run 中途漂移；
+6. 顯示足以 audit 的 source、version 與 identity evidence；
+7. 若 approved source、latest stable、identity/integrity evidence無法依 provider contract 解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version或另一個 source。
+
+合法 validation tool source 變更是**trust-root change**。此類 PR **MUST** 同時修改：
+
+- `validation-toolchain.json`；
+- `Resolve-StandardValidationTool.ps1` trust anchor / resolver adapter；
+- authority regression；
+- 變更理由與供應鏈 review evidence。
+
+只修改 JSON `source` 而沒有同步更新 resolver/test **MUST** 被 conformance gate 阻擋。
 
 Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 自然重新解析當時 latest stable。
 
@@ -276,7 +303,7 @@ Static gate 在下列任一情況 **MUST BLOCK**：
 
 ### 9.3 Analyzer completeness
 
-Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不是只看 exit code。每次 run **MUST** 顯示 resolved SkillSpector version 與 analyzer completeness evidence。
+Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不是只看 exit code。每次 run **MUST** 顯示 resolved SkillSpector source、version、identity 與 analyzer completeness evidence。
 
 因 Standard v1 預設使用 latest stable，analyzer inventory 可能隨 release 變更；adapter **MUST** 針對實際 resolved version 驗證其完整性，不能拿舊版 analyzer allowlist 假裝新版完整。
 
@@ -352,7 +379,7 @@ Repository Validation **MUST** 驗證至少：
 - package inventory exact match；
 - required files；
 - `SKILL.md` name identity；
-- `agents/openai.yaml` YAML syntax、required fields 與 Skill identity binding；
+- `agents/openai.yaml` YAML syntax、quoted string values、required fields、`short_description` 25～64 character bound 與 `$<skill-id>` identity binding；
 - safe relative paths；
 - source/inventory integrity contract；
 - repository-specific declared adapters/config；
@@ -360,7 +387,16 @@ Repository Validation **MUST** 驗證至少：
 
 ### 12.2 Tests
 
-本 authority repository **MUST** 維護 `tests/skill-repository-standard.Tests.ps1`，至少保護 normative documents、tool-version policy、metadata contract、release/install approval boundary 與本節的 self-conformance requirement。
+本 authority repository **MUST** 維護 `tests/skill-repository-standard.Tests.ps1`，至少保護：
+
+- normative documents / evidence index；
+- validation-tool approved sources；
+- latest-stable channel、resolved identity recording與 central resolver trust boundary；
+- 負向 source-tampering fail-closed behavior；
+- `agents/openai.yaml` quoted-string / 25～64 / identity contract；
+- release/install approval boundary；
+- Standard self-conformance requirement；
+- review matrix 與 SYP-167 authority deliverables 不得過期。
 
 每個 conformant Skill repository **MUST** 有：
 
@@ -394,7 +430,7 @@ Human Release Approval **MUST** 是下列事項的最終邊界：
 - new/changed security exception；
 - accepted High/Critical risk；
 - intentional analyzer suppression that affects release outcome；
-- normative policy change。
+- normative policy / validation source trust-root change。
 
 Approval **MUST** 綁定被 review 的 immutable candidate identity；candidate bytes / commit 改變後，舊 approval 不得沿用。
 
@@ -432,7 +468,7 @@ Exception **MUST** 是顯式、可追蹤、Human Approved 的 repository-specifi
 - owner；
 - review/expiry condition。
 
-Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或把「使用舊 validation tool」變成無期限預設。若 compatibility lane 需要舊版工具，必須使用 8.2 的 compatibility-lane boundary。
+Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或把「使用舊 validation tool / 未核准 tool source」變成無期限預設。若 compatibility lane 需要舊版工具，必須使用 8.2 的 compatibility-lane boundary；未核准 source 不屬於 compatibility exception。
 
 ## 15. Repository-specific extension points
 
@@ -450,7 +486,7 @@ Repository **MAY** 增加 extension stage/check，例如：
 Extension **MUST**：
 
 - 由 config/adapter/declared stage 表達；
-- 使用 canonical latest-stable tool policy、severity/fail semantics；
+- 使用 canonical trusted-source + latest-stable tool policy、severity/fail semantics；
 - 不得跳過 Static Security、Repository Validation、Tests 或 required Semantic Scan；
 - local/CI/pre-push 使用同一判斷；
 - 不得把 temporary evidence 寫成 uncontrolled tracked state。
@@ -459,7 +495,7 @@ Extension **MUST**：
 
 ### 16.1 Publish approved immutable release
 
-Release candidate **MUST** 綁定單一 immutable candidate revision，且所有 canonical validation stages與 Human Release Approval **MUST** 對同一 candidate identity 生效。
+Release candidate **MUST** 綁定單一 immutable candidate revision，且所有 canonical validation stages 與 Human Release Approval **MUST** 對同一 candidate identity 生效。
 
 在 validation/approval 完成後 candidate bytes 改變，**MUST** 重新執行受影響 stages並重新取得 release approval；不得將舊 scan/test/approval evidence 套用到新 commit。
 
@@ -486,16 +522,17 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 2. `SKILL.md` 與 `agents/openai.yaml` metadata contract；
 3. canonical lifecycle stage ordering；
 4. single validation entry contract；
-5. latest-stable validation tool resolution/freeze/evidence contract；
-6. SkillSpector Static Gate + analyzer completeness；
-7. severity/fail-closed semantics；
-8. tests/regression/conformance；
-9. semantic trigger handling；
-10. AI Review / Human Release Approval boundary；
-11. approved-release installation semantics；
-12. suppression/exception contract；
-13. release/install/post-install integrity；
-14. repository-specific deviations 僅存在於 approved adapter/config/exception。
+5. validation tool approved-source enforcement；
+6. latest-stable resolution / resolved identity / per-run freeze evidence；
+7. SkillSpector Static Gate + analyzer completeness；
+8. severity/fail-closed semantics；
+9. tests/regression/conformance；
+10. semantic trigger handling；
+11. AI Review / Human Release Approval boundary；
+12. approved-release installation semantics；
+13. suppression/exception contract；
+14. release/install/post-install integrity；
+15. repository-specific deviations 僅存在於 approved adapter/config/exception。
 
 Conformance report **MUST** 明確列出 deviations；若沒有，記錄 `None`，不得省略此欄位。
 
@@ -505,7 +542,7 @@ SYP-167 **MUST NOT** 直接改寫五個 source repositories 或 production Catal
 
 Migration 順序：
 
-1. SYP-167：建立 Standard v1、cross-repository review、authority-level regression tests與 machine-readable validation-tool policy；
+1. SYP-167：建立 Standard v1、cross-repository review、machine-readable validation-tool policy、trusted-source resolver、authority-level regression tests 與 Standards Conformance CI；
 2. SYP-155：`Skill-General` 建立第一個完整 canonical validator、SkillSpector integration 與 repository conformance tests；
 3. SYP-156～159：其餘 repositories fan-out migration；
 4. 每個 source migration 合併並驗證後，才更新 central Catalog/Lock source path / immutable pins；
@@ -515,13 +552,14 @@ Migration 順序：
 
 ## 19. Standard change contract
 
-任何修改 MUST / MUST NOT、canonical lifecycle、tool-version policy、security gate、metadata contract、integrity contract、approval boundary 或 exception policy 的 PR **MUST**：
+任何修改 MUST / MUST NOT、canonical lifecycle、tool source/version policy、security gate、metadata contract、integrity contract、approval boundary 或 exception policy 的 PR **MUST**：
 
 1. 修改本 normative document；
 2. 同一 PR 更新 `tests/skill-repository-standard.Tests.ps1` 與必要 machine-readable policy；
-3. 說明對 reference implementation與已 conformant repositories 的影響；
-4. 重新執行 authority-level conformance regression；
-5. 經 Human Release/Policy Review 後才可 merge/fan out。
+3. tool source / resolver behavior 變更時，同一 PR 更新 `scripts/Resolve-StandardValidationTool.ps1` trust anchor / adapter 與負向 regression；
+4. 說明對 reference implementation與已 conformant repositories 的影響；
+5. 重新執行 authority-level conformance regression；
+6. 經 Human Release/Policy Review 後才可 merge/fan out。
 
 這項規則自 Standard v1 首次 merge 前即生效；不延後到 SYP-155。
 
@@ -533,12 +571,15 @@ Migration 順序：
 - hard-code CI Skill list 造成新增 Skill 可繞過 security gate；
 - local、pre-push、CI 使用不同 pass/block policy；
 - scanner/analyzer 未完整執行仍 pass；
+- 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source`；
+- workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
 - 同一 validation run 中途漂移 tool version；
+- provider 可提供 resolved identity / integrity evidence 卻不記錄；
 - 將 repository tree fingerprint 稱為 per-Skill `contentSha256`；
 - 使用 broad scanner suppression 隱藏 findings；
 - 將 legitimate network/MCP/script capability 一律視為 vulnerability；
 - 將 AI Review 當作 Human Release Approval；
 - 將每次 approved release installation 誤當成新的 release approval；
-- 只檢查 `agents/openai.yaml` 存在而不驗證 YAML/required fields/identity；
-- 在 source repository 私自建立與本標準競爭的 lifecycle/security/tool-version policy。
+- 只檢查 `agents/openai.yaml` 存在而不驗證 YAML、quoted strings、25～64 `short_description`、required fields 與 Skill identity；
+- 在 source repository 私自建立與本標準競爭的 lifecycle/security/tool policy。
