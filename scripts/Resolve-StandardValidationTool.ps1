@@ -1506,8 +1506,18 @@ function Invoke-WithApprovedGoEnvironment {
             }
         }
         foreach ($name in $ExpectedEnvironment.Keys) {
-            $actual = [string]$effective.$name
+            $property = $effective.PSObject.Properties[[string]$name]
+            if ($null -eq $property) {
+                throw "Go environment evidence omitted approved setting '$name'."
+            }
+            $actual = [string]$property.Value
             $expected = [string]$ExpectedEnvironment[$name]
+            if ([string]$name -ceq 'GOENV' -and $expected -ceq 'off') {
+                if ($actual -cne '' -and $actual -cne 'off') {
+                    throw "Go did not confirm disabled environment configuration for 'GOENV': '$actual'. Expected an empty effective configuration path or 'off'."
+                }
+                continue
+            }
             if ($actual -cne $expected) {
                 throw "Go did not apply approved environment for '$name': '$actual'. Expected '$expected'."
             }

@@ -1457,7 +1457,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 param($names)
                 $snapshot = [ordered]@{}
                 foreach ($name in $names) {
-                    $snapshot[[string]$name] = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+                    $snapshot[[string]$name] = if ([string]$name -ceq 'GOENV') {
+                        ''
+                    }
+                    else {
+                        [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+                    }
                 }
                 return [pscustomobject]$snapshot
             } -Action {
