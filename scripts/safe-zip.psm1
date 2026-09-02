@@ -19,6 +19,7 @@ function Assert-SafeZipEntry {
 
     $name = [string] $Entry.FullName
     if ([string]::IsNullOrWhiteSpace($name) -or
+        @($name.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0 -or
         $name.Contains('\') -or
         $name.StartsWith('/', [System.StringComparison]::Ordinal) -or
         $name.Contains(':')) {
@@ -86,6 +87,10 @@ function Assert-SafeZipEntry {
     $unixFileType = ($externalAttributes -shr 16) -band 0xF000L
     if ($unixFileType -eq 0xA000L) {
         throw "ZIP archive contains a symbolic link entry: $name"
+    }
+    $expectedUnixFileType = if ($isDirectory) { 0x4000L } else { 0x8000L }
+    if ($unixFileType -ne 0 -and $unixFileType -ne $expectedUnixFileType) {
+        throw "ZIP archive contains a special file entry: $name"
     }
     if (($externalAttributes -band 0x400L) -ne 0) {
         throw "ZIP archive contains a reparse-point entry: $name"

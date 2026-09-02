@@ -110,7 +110,8 @@ function Test-IsSafeRepositoryPath {
     param([object] $Value)
     if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $false }
     $path = [string]$Value
-    if ($path.StartsWith('/') -or $path.EndsWith('/') -or $path.Contains('\') -or $path.Contains('//') -or $path.Contains(':')) { return $false }
+    if ($path.StartsWith('/') -or $path.EndsWith('/') -or $path.Contains('\') -or $path.Contains('//') -or $path.Contains(':') -or
+        $path -match '[\x00-\x1F\x7F-\x9F]') { return $false }
     foreach ($segment in $path.Split('/')) { if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq '.' -or $segment -eq '..') { return $false } }
     return $true
 }
@@ -213,6 +214,8 @@ function Assert-SkillsCatalog {
         $anyOfCapabilities = Get-RequiredProperty -Object $compatibility -Name 'anyOfCapabilities' -Context "Skills Catalog Skill '$skillId' compatibility"
         Assert-Array -Value $anyOfCapabilities -Context "Skills Catalog Skill '$skillId' compatibility anyOfCapabilities" -AllowEmpty
         foreach ($alternativeSet in @($anyOfCapabilities)) { Assert-Array -Value $alternativeSet -Context "Skills Catalog Skill '$skillId' compatibility alternative set"; foreach ($requirement in @($alternativeSet)) { Assert-Capability -Capability $requirement -Context "Skills Catalog Skill '$skillId' compatibility alternative" } }
+        $capabilityRequirements = @($requiredCapabilities)
+        foreach ($alternativeSet in @($anyOfCapabilities)) { $capabilityRequirements += @($alternativeSet) }
 
         $dependencies = Get-RequiredProperty -Object $skill -Name 'dependencies' -Context "Skills Catalog Skill '$skillId'"
         Assert-Array -Value $dependencies -Context "Skills Catalog Skill '$skillId' dependencies" -AllowEmpty
@@ -227,14 +230,38 @@ function Assert-SkillsCatalog {
             if ([string]$dependencyType -eq 'conditional') {
                 $condition = Get-RequiredProperty -Object $dependency -Name 'condition' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
                 Assert-OnlyProperties -Object $condition -Allowed @('capability','operator') -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
-                Assert-StableId -Value (Get-RequiredProperty -Object $condition -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition capability"
+                $conditionCapability = Get-RequiredProperty -Object $condition -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
+                Assert-StableId -Value $conditionCapability -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition capability"
                 $operator = Get-RequiredProperty -Object $condition -Name 'operator' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition"
                 Assert-NonEmptyString -Value $operator -Context "Conditional dependency '$skillId' -> '$dependencySkillId' condition operator"
                 if (@('available','missing','missing-or-invalid','unavailable') -cnotcontains [string]$operator) { throw "Unsupported conditional dependency operator '$operator' for Skill '$skillId'." }
                 $fallback = Get-RequiredProperty -Object $dependency -Name 'fallback' -Context "Conditional dependency '$skillId' -> '$dependencySkillId'"
                 Assert-OnlyProperties -Object $fallback -Allowed @('capability','description') -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback"
-                Assert-StableId -Value (Get-RequiredProperty -Object $fallback -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback capability"
+                $fallbackCapability = Get-RequiredProperty -Object $fallback -Name 'capability' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback"
+                Assert-StableId -Value $fallbackCapability -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback capability"
                 Assert-NonEmptyString -Value (Get-RequiredProperty -Object $fallback -Name 'description' -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback") -Context "Conditional dependency '$skillId' -> '$dependencySkillId' fallback description"
+
+                if ([string]$conditionCapability -ceq [string]$fallbackCapability) {
+                    throw "Conditional dependency '$skillId' -> '$dependencySkillId' condition and fallback capabilities must be distinct."
+                }
+                foreach ($capabilityId in @([string]$conditionCapability,[string]$fallbackCapability)) {
+                    $declarations = @($capabilityRequirements | Where-Object { [string]$_.id -ceq $capabilityId })
+                    if ($declarations.Count -ne 1) {
+                        throw "Conditional dependency '$skillId' -> '$dependencySkillId' capability '$capabilityId' must declare exactly one compatibility requirement with its required kind and state."
+                    }
+                }
+
+                $pairedAlternativeSetCount = 0
+                foreach ($alternativeSet in @($anyOfCapabilities)) {
+                    $alternativeIds = @($alternativeSet | ForEach-Object { [string]$_.id })
+                    if ($alternativeIds -ccontains [string]$conditionCapability -and
+                        $alternativeIds -ccontains [string]$fallbackCapability) {
+                        $pairedAlternativeSetCount++
+                    }
+                }
+                if ($pairedAlternativeSetCount -ne 1) {
+                    throw "Conditional dependency '$skillId' -> '$dependencySkillId' condition and fallback capabilities must be declared together in exactly one compatibility anyOfCapabilities set."
+                }
             }
             elseif ((Test-HasProperty -Object $dependency -Name 'condition') -or (Test-HasProperty -Object $dependency -Name 'fallback')) {
                 throw "Non-conditional dependency '$skillId' -> '$dependencySkillId' must not declare condition or fallback."
@@ -366,7 +393,7 @@ function Assert-SkillsCatalogLock {
         if ($lockedSkills.ContainsKey([string]$skillId)) { throw "Duplicate Skills Catalog lock Skill ID: $skillId" }
         if (-not $catalogSkills.ContainsKey([string]$skillId)) { throw "Skills Catalog lock references unknown or removed Skill '$skillId'." }
         $lockedSkills[[string]$skillId]=$skill
-        $sourceId=Get-RequiredProperty -Object $skill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'"; $sourcePath=Get-RequiredProperty -Object $skill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'"
+        $sourceId=Get-RequiredProperty -Object $skill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'"; Assert-StableId -Value $sourceId -Context "Skills Catalog lock Skill '$skillId' sourceId"; $sourcePath=Get-RequiredProperty -Object $skill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'"
         if (-not (Test-IsSafeRepositoryPath -Value $sourcePath)) { throw "Unsafe Skills Catalog lock sourcePath for Skill '$skillId': $sourcePath" }
         if ([string]$sourceId -cne [string]$catalogSkills[[string]$skillId].source.sourceId -or [string]$sourcePath -cne [string]$catalogSkills[[string]$skillId].source.path) { throw "Skills Catalog lock source does not match catalog Skill '$skillId'." }
         Assert-Sha256 -Value (Get-RequiredProperty -Object $skill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'") -Context "Skills Catalog lock Skill '$skillId' contentSha256"

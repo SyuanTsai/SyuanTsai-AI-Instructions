@@ -14,12 +14,13 @@ You are the Codex agent responsible for development, testing, and code review in
 
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
-- Planning or modifying production code, or adding or modifying tests or test strategy → `.codex/AI-Rules/Testing.en.md`
-- EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md`
-- Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md`
-- Current, multi-source, or multilingual public external research, or use of an external search provider → `.codex/AI-Rules/ExternalResearch.en.md`
+- Planning or modifying production code or executable build, CI, deployment, or configuration behavior, or adding or modifying tests or test strategy → `.codex/AI-Rules/Testing.en.md` <!-- ai-route:{"module":"testing","triggers":["production-plan-or-change","executable-build-ci-deploy-configuration-change","test-or-test-strategy-change"]} -->
+- EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md` <!-- ai-route:{"module":"database","triggers":["entity-framework","sql","database-query","data-access-performance"]} -->
+- Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md` <!-- ai-route:{"module":"code-review","triggers":["code-review","pull-request-review"]} -->
+- Git commit message generation → `.codex/AI-Rules/GitCommit.en.md` <!-- ai-route:{"module":"git-commit","triggers":["git-commit-message-generation"]} -->
+- Current, multi-source, or multilingual public external research, or use of an external search provider → `.codex/AI-Rules/ExternalResearch.en.md` <!-- ai-route:{"module":"external-research","triggers":["public-current-research","public-multi-source-research","public-multilingual-research","external-search-provider"]} -->
 
-If an applicable module is missing, identify the missing file and do not invent its contents.
+If an applicable module is missing, identify the missing file and do not invent its contents. <!-- ai-invariant:base.missing-module-no-invention -->
 
 ## Shared Skills
 
@@ -32,12 +33,12 @@ If an applicable module is missing, identify the missing file and do not invent 
 - Query or aggregate Datadog logs, analyze APM traces, handle Logs Explorer, trace, or investigation widget URLs, or investigate an incident with Datadog telemetry → `.agents/skills/investigate-datadog-logs/SKILL.md`
 - Use official Felo search, slides, X search, or landing-page workflows → `~/.agents/skills/felo-search/SKILL.md`, `~/.agents/skills/felo-slides/SKILL.md`, `~/.agents/skills/felo-x-search/SKILL.md`, `~/.agents/skills/felo-landingpage/SKILL.md`
 
-The non-`core` Skills above may be absent because of the selected profile or runtime capabilities. A missing optional Skill is not by itself a task failure: build a GitHub Copilot implementation prompt directly from current repository evidence and Instructions; use Jira or Datadog directly only when an approved connector or API capability is already available; and use the `ExternalResearch` fallback through an approved connector or platform web search when the official Felo Skill is unavailable. If no safe fallback capability exists, report that the capability is not installed or configured and do not invent the missing Skill workflow.
+The non-`core` Skills above may be absent because of the selected profile or runtime capabilities. A missing optional Skill is not by itself a task failure: build a GitHub Copilot implementation prompt directly from current repository evidence and Instructions; use Jira or Datadog directly only when an approved connector or API capability is already available; and use the `ExternalResearch` fallback through an approved connector or platform web search when the official Felo Skill is unavailable. If no safe fallback capability exists, report that the capability is not installed or configured and do not invent the missing Skill workflow. <!-- ai-invariant:base.optional-capability-no-invention -->
 
-Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it.
+Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. <!-- ai-invariant:base.jira-credential-nondisclosure --> <!-- ai-invariant:base.jira-mutation-explicit-request -->
 
 ## Agents
 
 When multiple agents are needed and supported, keep each role focused: Planner plans, Implementer implements, Test Agent tests, Reviewer reviews, and Translator translates. Activate only the roles required by the task; do not add handoffs to simple work merely because agents are available.
 
-Stop the affected change and ask the user when missing information would materially change the result, additional authority is required, or rules conflict.
+Stop the affected change and ask the user when missing information would materially change the result, additional authority is required, or rules conflict. <!-- ai-invariant:base.stop-on-missing-authority-or-conflict -->

@@ -1,7 +1,11 @@
 $script:SafeZipModule = Join-Path $PSScriptRoot '..\scripts\safe-zip.psm1'
 
 function New-SafeZipFixture {
-    param([Parameter(Mandatory = $true)][string] $ArchivePath)
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [string] $EntryName = 'candidate-root/scripts/bootstrap.ps1',
+        [int] $ExternalAttributes
+    )
 
     Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
@@ -9,10 +13,11 @@ function New-SafeZipFixture {
     try {
         $archive = New-Object System.IO.Compression.ZipArchive($stream,[System.IO.Compression.ZipArchiveMode]::Create,$false)
         try {
-            $entry = $archive.CreateEntry('candidate-root/scripts/bootstrap.ps1')
+            $entry = $archive.CreateEntry($EntryName)
             $writer = New-Object System.IO.StreamWriter($entry.Open(),(New-Object System.Text.UTF8Encoding($false)))
             try { $writer.Write("Write-Output 'verified'`n") }
             finally { $writer.Dispose() }
+            if ($PSBoundParameters.ContainsKey('ExternalAttributes')) { $entry.ExternalAttributes = $ExternalAttributes }
         }
         finally { $archive.Dispose() }
     }
@@ -43,5 +48,33 @@ Describe 'safe ZIP extraction' {
             $stream.CanRead | Should Be $true
         }
         finally { $stream.Dispose() }
+    }
+
+    # Scenario: An archive member uses a control byte inside an otherwise normal-looking path.
+    # Purpose: Keep archive extraction paths compatible with the unambiguous content-inventory grammar.
+    It 'UnitT11_rejects_control_characters_in_archive_paths' {
+        foreach ($control in @([char]9, [char]10, [char]0x7f)) {
+            $archivePath = Join-Path $TestDrive ("control-{0}.zip" -f [int]$control)
+            New-SafeZipFixture -ArchivePath $archivePath -EntryName ("candidate-root/scripts/file{0}name.ps1" -f $control)
+            $errorMessage = $null
+            try {
+                Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot (Join-Path $TestDrive ("expanded-{0}" -f [int]$control)) | Out-Null
+            }
+            catch { $errorMessage = $_.Exception.Message }
+            $errorMessage | Should Match 'Unsafe ZIP entry path'
+        }
+    }
+
+    # Scenario: ZIP metadata marks a non-directory member as a Unix FIFO.
+    # Purpose: Only regular files and directories may enter a verified source inventory.
+    It 'UnitT12_rejects_special_file_archive_entries' {
+        $archivePath = Join-Path $TestDrive 'special-file.zip'
+        New-SafeZipFixture -ArchivePath $archivePath -ExternalAttributes ([int](0x1000 -shl 16))
+        $errorMessage = $null
+        try {
+            Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot (Join-Path $TestDrive 'special-expanded') | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        $errorMessage | Should Match 'special file entry'
     }
 }

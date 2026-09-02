@@ -10,6 +10,7 @@
 - `.github/copilot-instructions.md`：GitHub Copilot 繁體中文 Instructions。
 - `.github/copilot-instructions.en.md`：GitHub Copilot 英文 Instructions。
 - `.github/AI-Rules/<rule>.md` 與 `.github/AI-Rules/<rule>.en.md`：GitHub Copilot 繁體中文與英文條件式規則模組。
+- `ai-instructions-contract.json` 與 `tests/ai-instructions-contract.Tests.ps1`：Base／Rule inventory、locale pair、兩平台 route／trigger 與 safety invariant 的 machine-readable 維護契約與 regression；不會 fan out。
 - `docs/standards/`：所有 Agent Skill source repository 共用 policy 的唯一 normative authority；reference implementation 或個別 source repository 不得另建競爭 policy。
 - `catalog/skills-catalog.json`、`catalog/skills-catalog.sources.json` 與 `catalog/skills-catalog-lock.json`：共用 Agent Skills 的外部來源、選擇 metadata 與 immutable production pin；Skill 內容只在各自的 external Catalog Repository 維護。
 - `catalog/schemas/*.schema.json`、`catalog/examples/*.json` 與 `scripts/skills-catalog-contract.psm1`：獨立 Agent Skills Catalog、版本 lock、managed manifest 與個人選擇設定的跨 Repository 契約；schema、去識別化 example、parser 與 tests 必須同步。
@@ -25,7 +26,7 @@ Skills Catalog 的 group 與 profile 只存在 metadata。Standard v1 將 canoni
 
 維護 fan-out Instructions 時，必須遵守：
 
-- Base Agent 約 300～800 tokens，只保留長期不變的角色與責任、工作流程、必要限制、輸出格式、停止與詢問條件，以及外部規則載入方式。
+- Base Agent（含 machine-readable route／invariant markers）約 300～1,200 tokens，只保留長期不變的角色與責任、工作流程、必要限制、輸出格式、停止與詢問條件，以及外部規則載入方式；超出時必須先合併重複語意或移入條件式模組。
 - 不得將 C#、測試、Git、架構、Database、Service Bus、翻譯等所有細節放進同一個 Base Agent。
 - 規則必須明確、可執行，且不依賴其他 Repository、未提供的對話內容或特定本機環境。
 - Base Agent 應要求先搜尋相關 symbol、檔名、interface 與直接 reference，不得預設讀取整個 Repository。
@@ -45,25 +46,24 @@ Skills Catalog 的 group 與 profile 只存在 metadata。Standard v1 將 canoni
 
 ## 條件式規則模組
 
-專門規則應拆成獨立 Markdown，例如：
+目前共通的專門規則拆成下列獨立 Markdown；未來新增平台專屬或共通模組時，必須先在 machine-readable contract 宣告適用平台：
 
 ```text
 AI-Rules/
-├─ Base.md
-├─ Testing.md
 ├─ CodeReview.md
 ├─ Database.md
-├─ ServiceBus.md
-└─ Translation.md
+├─ ExternalResearch.md
+├─ GitCommit.md
+└─ Testing.md
 ```
 
 Base Agent 只描述載入條件：
 
-- 測試新增或修改 → 載入 `AI-Rules/Testing.md`
+- Production code、可執行 build／CI／deploy／configuration 行為或測試新增／修改 → 載入 `AI-Rules/Testing.md`
 - Code Review → 載入 `AI-Rules/CodeReview.md`
-- Database schema 或 query 修改 → 載入 `AI-Rules/Database.md`
-- Service Bus 相關程式碼 → 載入 `AI-Rules/ServiceBus.md`
-- 翻譯檔案 → 載入 `AI-Rules/Translation.md`
+- EF、SQL、database query 或資料存取效能 → 載入 `AI-Rules/Database.md`
+- Git Commit Message 產生 → 載入 `AI-Rules/GitCommit.md`
+- 公開外部資料研究或外部搜尋 provider → 載入 `AI-Rules/ExternalResearch.md`
 
 只載入當前任務需要的模組；不存在的模組不得臆測。新增領域規則時，優先建立條件式模組，不得直接膨脹 Base Agent。
 
@@ -101,13 +101,14 @@ bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標
 ## 修改流程
 
 1. 判斷內容屬於共通 Base、條件式模組、Agent Skill Standard、共用 Agent Skill 或平台專屬內容。
-2. 若涉及 Agent Skill repository lifecycle/security/conformance policy，先修改 `docs/standards/` normative authority，再同步 reference implementation / source repositories；不得反向從單一 implementation 私自建立 policy。
+2. 若涉及 Agent Skill repository lifecycle/security/conformance policy，先修改 `docs/standards/` normative authority，並在同一 PR 更新 `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 中受影響的 regression，以及相關 machine-readable policy／resolver；authority regression 與 human review 通過後，才同步 reference implementation / source repositories。不得反向從單一 implementation 私自建立 policy。
 3. 依「正向規則設計原則」確認規則以期望結果、判斷依據與可採用行為為核心。
 4. 先修改繁體中文來源，再同步適用的平台與英文版本。
-5. 確認各版本的規則、例外與載入條件一致。
+5. 確認各版本的規則、例外與載入條件一致；同步更新 `ai-instructions-contract.json` 與同一行的 `ai-route`／`ai-invariant` marker，並執行 `tests/ai-instructions-contract.Tests.ps1`。
 6. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
 7. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
-8. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
-9. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
+8. 修改 Standard normative authority、validation tool policy／resolver 或 authority workflow 時，執行 `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1`，並確認 `.github/workflows/standards-conformance.yml` 與 Ruleset-required Composition context 都呼叫同一個 authority gate。
+9. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
+10. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
 
-純 Markdown Instructions / Standard 文件修改不需要額外建立產品單元測試；若修改 executable Catalog/runtime contract，仍必須執行對應 contract tests。若新舊要求衝突，以 `docs/standards/` 已核准的較新 normative Standard 為共用 Skill policy authority；若 fan-out/runtime migration 範圍不明且會影響 production，停止 mutation 並先保留現行 immutable pins。
+純 Markdown Instructions 修改不需要額外建立產品單元測試，但不得略過本 Repository 的 AI Instructions contract regression。Standard 文件即使只有 Markdown 變更，只要改變 normative contract，仍必須在同一 PR 更新並執行 authority regression；修改 executable Catalog/runtime contract 亦必須執行對應 contract tests。若新舊要求衝突，以 `docs/standards/` 已核准的較新 normative Standard 為共用 Skill policy authority；若 fan-out/runtime migration 範圍不明且會影響 production，停止 mutation 並先保留現行 immutable pins。

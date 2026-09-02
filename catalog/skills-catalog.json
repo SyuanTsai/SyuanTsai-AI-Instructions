@@ -44,7 +44,6 @@
       "description": "Code delegation and pull-request collaboration workflows.",
       "default": false,
       "includes": [
-        "configure-bitbucket-api-access",
         "review-bitbucket-pull-request",
         "write-copilot-implementation-prompt"
       ],
@@ -55,8 +54,6 @@
       "description": "Jira and Confluence work-management workflows.",
       "default": false,
       "includes": [
-        "configure-confluence-api-access",
-        "configure-jira-api-access",
         "publish-requirements-to-confluence",
         "work-with-jira"
       ],
@@ -198,9 +195,7 @@
         "sourceId": "atlassian-ecosystem",
         "path": ".agents/skills/configure-bitbucket-api-access"
       },
-      "profiles": [
-        "code-collaboration"
-      ],
+      "profiles": [],
       "compatibility": {
         "platforms": [
           "any"
@@ -241,7 +236,7 @@
           [
             {
               "kind": "connector",
-              "id": "bitbucket-cloud",
+              "id": "bitbucket-cloud-connector",
               "state": "configured"
             },
             {
@@ -278,9 +273,7 @@
         "sourceId": "atlassian-ecosystem",
         "path": ".agents/skills/configure-jira-api-access"
       },
-      "profiles": [
-        "atlassian"
-      ],
+      "profiles": [],
       "compatibility": {
         "platforms": [
           "any"
@@ -311,7 +304,20 @@
         ],
         "shells": [],
         "requiredCapabilities": [],
-        "anyOfCapabilities": []
+        "anyOfCapabilities": [
+          [
+            {
+              "kind": "connector",
+              "id": "jira-cloud-connector",
+              "state": "configured"
+            },
+            {
+              "kind": "environment",
+              "id": "jira-cloud-api",
+              "state": "configured"
+            }
+          ]
+        ]
       },
       "dependencies": [
         {
@@ -339,9 +345,7 @@
         "sourceId": "atlassian-ecosystem",
         "path": ".agents/skills/configure-confluence-api-access"
       },
-      "profiles": [
-        "atlassian"
-      ],
+      "profiles": [],
       "compatibility": {
         "platforms": [
           "any"
@@ -376,7 +380,7 @@
           [
             {
               "kind": "connector",
-              "id": "confluence-cloud",
+              "id": "confluence-cloud-connector",
               "state": "configured"
             },
             {

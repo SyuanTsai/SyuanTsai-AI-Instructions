@@ -1,8 +1,8 @@
 Describe 'Standard validation resolver hardening' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
-        $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
-        $script:ToolchainPath = Join-Path $script:RepositoryRoot 'docs\standards\validation-toolchain.json'
+        $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1'
+        $script:ToolchainPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -60,6 +60,8 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: An installed wheel places executable startup code in a .pth file next to valid dist-info metadata.
+    # Purpose: Verify installed identity and entry-point metadata without starting that interpreter or processing .pth code.
     It 'UnitT10_reads_installed_dist_info_without_processing_pth_startup_code' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -79,6 +81,11 @@ Describe 'Standard validation resolver hardening' {
             "Metadata-Version: 2.4`nName: SkillSpector`nVersion: 2.11.0`n",
             (New-Object Text.UTF8Encoding($false))
         )
+        [IO.File]::WriteAllText(
+            (Join-Path $distInfo 'entry_points.txt'),
+            "[console_scripts]`nskillspector = skillspector.cli:main`n",
+            (New-Object Text.UTF8Encoding($false))
+        )
 
         $marker = Join-Path $TestDrive 'pth-startup-code-ran.txt'
         [IO.File]::WriteAllText(
@@ -90,6 +97,7 @@ Describe 'Standard validation resolver hardening' {
         $metadata = Get-InstalledPythonDistributionMetadata -VirtualEnvironmentPath $venv -DistributionName 'skillspector'
         Assert-Equal $metadata.normalizedName 'skillspector' 'Installed metadata must bind the normalized distribution name.'
         Assert-Equal $metadata.version '2.11.0' 'Installed metadata must bind the expected version.'
+        Assert-Equal $metadata.consoleEntryPoint 'skillspector.cli:main' 'Installed metadata must bind the exact console entry-point target.'
         Assert-False (Test-Path -LiteralPath $marker) 'Static metadata verification must not process executable .pth startup lines.'
 
         $resolverLines = Get-Content -Encoding UTF8 -LiteralPath $script:ResolverPath
@@ -98,6 +106,8 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $codeOnly 'Get-InstalledPythonDistributionMetadata' 'Resolver must use static dist-info metadata verification.'
     }
 
+    # Scenario: The release API needs a GitHub token before resolver-managed Python and offline pip execute.
+    # Purpose: Ensure credentials are removed before the first Python subprocess and are not restored by the resolver.
     It 'UnitT20_clears_GitHub_credentials_before_any_Python_or_pip_subprocess' {
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         $resolveStart = $resolver.IndexOf('function Resolve-SkillSpector')
@@ -105,20 +115,23 @@ Describe 'Standard validation resolver hardening' {
         Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillSpector body was not found.'
         $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
 
-        $clearIndex = $body.IndexOf('[Environment]::SetEnvironmentVariable(''GITHUB_TOKEN'', $null')
-        $venvIndex = $body.IndexOf("'-m', 'venv'")
-        $pipIndex = $body.IndexOf("'pip', 'download'")
-        $restoreIndex = $body.IndexOf('[Environment]::SetEnvironmentVariable(''GITHUB_TOKEN'', $previousGitHubToken')
+        $clearIndex = $body.IndexOf("Remove-Item -LiteralPath 'Env:GITHUB_TOKEN'")
+        $venvIndex = $body.IndexOf("'-S', '-m', 'venv'")
+        $helperIndex = $body.IndexOf('Resolve-PythonWheelClosureFromApprovedIndex')
+        $restoreIndex = $body.IndexOf("SetEnvironmentVariable('GITHUB_TOKEN'")
         Assert-True ($clearIndex -ge 0) 'GitHub token clearing was not found.'
         Assert-True ($venvIndex -gt $clearIndex) 'System Python must not start before GitHub token clearing.'
-        Assert-True ($pipIndex -gt $clearIndex) 'pip must not start before GitHub token clearing.'
-        Assert-True ($restoreIndex -gt $pipIndex) 'GitHub token restoration must occur only during final cleanup.'
+        Assert-True ($helperIndex -gt $clearIndex) 'Approved-index candidate resolution must not start before GitHub token clearing.'
+        Assert-True ($restoreIndex -lt 0) 'The resolver must not restore GitHub credentials after third-party code becomes reachable.'
         Assert-Match $body 'credentialIsolation=github-token-cleared-before-python' 'Resolved identity must record credential isolation.'
+        Assert-Match $body 'resolutionRounds=\$\(\$backtrackingEvidence\.resolutionRounds\)' 'Resolved identity must bind offline resolution rounds.'
+        Assert-Match $body 'consoleEntryPoint=\$consoleEntryPoint' 'Resolved identity must bind the statically verified console entry point.'
         Assert-Match $body "credentialIsolation = 'github-token-cleared-before-python'" 'Machine-readable receipt must expose credential isolation.'
-        Assert-Match $body "installDisposition = 'ephemeral-verification'" 'Machine-readable receipt must identify the temporary install as verification-only.'
         Assert-Match $body "installedMetadataVerification = 'static-dist-info-metadata'" 'Machine-readable receipt must identify static metadata verification.'
     }
 
+    # Scenario: Compatibility-only Pester lanes are changed so they can become the canonical release gate.
+    # Purpose: Keep older pinned lanes explicitly non-canonical under the strict typed policy contract.
     It 'UnitT30_rejects_a_compatibility_lane_that_can_become_the_canonical_gate' {
         $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ToolchainPath | ConvertFrom-Json
         $toolchain.compatibilityLane.mayBeCanonicalReleaseGate = $true
@@ -136,9 +149,11 @@ Describe 'Standard validation resolver hardening' {
         catch {
             $errorMessage = $_.Exception.Message
         }
-        Assert-Match $errorMessage 'compatibility-lane policy is incomplete or untrusted' 'Compatibility lanes must never become the canonical release gate.'
+        Assert-Match $errorMessage 'mayBeCanonicalReleaseGate.*False' 'Compatibility lanes must never become the canonical release gate.'
     }
 
+    # Scenario: Dependency names arrive in mixed case and non-ordinal discovery order.
+    # Purpose: Keep closure identity deterministic across hosts and cultures.
     It 'UnitT40_orders_dependency_closure_identity_with_ordinal_normalized_names' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -155,6 +170,8 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $manifest.closureSha256 '^[0-9a-f]{64}$' 'Dependency closure must retain a deterministic SHA-256 identity.'
     }
 
+    # Scenario: Wheel metadata contains unsafe identity text, duplicate headers or body text that resembles headers.
+    # Purpose: Reject unsafe or ambiguous header identity without parsing description-body content as metadata.
     It 'UnitT50_rejects_unsafe_or_ambiguous_metadata_identity_text_before_lock_generation' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -189,6 +206,8 @@ Version: this line also belongs to the description body
         Assert-Equal $bodyMetadata.version '1.0.0' 'Description-body Version text must not be treated as a second metadata header.'
     }
 
+    # Scenario: A function or alias shadows a native prerequisite name in PowerShell command resolution.
+    # Purpose: Resolve and execute only an absolute native application path.
     It 'UnitT60_resolves_only_native_applications_and_ignores_command_shadowing' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -214,9 +233,11 @@ Version: this line also belongs to the description body
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
         Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
-        Assert-NotMatch $resolver '(?m)\$output = & \$Command(?:[ \t]|$)' 'Native execution must not re-resolve the caller-supplied command name.'
+        Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
     }
 
+    # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
+    # Purpose: Bind asset acquisition to the exact approved GitHub release path before digest verification.
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 

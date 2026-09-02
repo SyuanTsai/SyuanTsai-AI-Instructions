@@ -9,6 +9,8 @@ param(
 
     [switch] $ValidatePolicyOnly,
 
+    [string] $InstallRoot,
+
     [string] $OutputPath
 )
 
@@ -26,6 +28,7 @@ $trustedRegistries = [ordered]@{
 }
 
 $trustedPythonIndex = 'https://pypi.org/simple'
+$trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
 
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
@@ -36,13 +39,122 @@ $trustedGoEnvironment = [ordered]@{
     'GONOSUMDB' = 'none'
     'GOINSECURE' = ''
     'GOFLAGS' = ''
+    'GOTOOLCHAIN' = 'local'
+    'GOWORK' = 'off'
+    'CGO_ENABLED' = '0'
 }
 
 $trustedGoDistribution = [ordered]@{
     'moduleCacheIsolation' = 'temporary-empty'
-    'rejectInheritedModuleCache' = $true
     'buildCacheIsolation' = 'temporary-empty'
+    'temporaryDirectoryIsolation' = 'temporary-empty'
+    'binaryInstallIsolation' = 'run-owned'
+    'rejectInheritedModuleCache' = $true
     'rejectInheritedBuildCache' = $true
+    'rejectDangerousEnvironment' = $true
+    'recordBinaryHash' = $true
+}
+
+$deniedGoEnvironmentNames = @(
+    'GOROOT', 'GOTOOLDIR', 'GOPATH', 'GO111MODULE',
+    'GOOS', 'GOARCH', 'GOAMD64', 'GO386', 'GOARM', 'GOARM64',
+    'GOMIPS', 'GOMIPS64', 'GOPPC64', 'GORISCV64', 'GOWASM',
+    'GOCACHEPROG', 'GOAUTH', 'GOVCS', 'GOEXPERIMENT', 'GODEBUG',
+    'GO_EXTLINK_ENABLED', 'GCCGO',
+    'CC', 'CXX', 'FC', 'AR', 'PKG_CONFIG',
+    'CGO_CFLAGS', 'CGO_CPPFLAGS', 'CGO_CXXFLAGS', 'CGO_FFLAGS', 'CGO_LDFLAGS',
+    'CGO_CFLAGS_ALLOW', 'CGO_CFLAGS_DISALLOW',
+    'CGO_CPPFLAGS_ALLOW', 'CGO_CPPFLAGS_DISALLOW',
+    'CGO_CXXFLAGS_ALLOW', 'CGO_CXXFLAGS_DISALLOW',
+    'CGO_FFLAGS_ALLOW', 'CGO_FFLAGS_DISALLOW',
+    'CGO_LDFLAGS_ALLOW', 'CGO_LDFLAGS_DISALLOW'
+)
+
+# Python isolated mode ignores PYTHON* startup configuration, but rejecting the
+# variables that can redirect imports or execute startup code makes the trust
+# boundary explicit. Do not match every case-insensitive "python*" name here:
+# setup-python intentionally publishes benign runner metadata such as
+# pythonLocation, Python_ROOT_DIR, and Python3_ROOT_DIR.
+$dangerousPythonEnvironmentNames = @(
+    'PYTHONPATH', 'PYTHONHOME', 'PYTHONUSERBASE', 'PYTHONEXECUTABLE',
+    'PYTHONSTARTUP', 'PYTHONINSPECT', 'PYTHONBREAKPOINT',
+    'PYTHONNOUSERSITE', 'PYTHONSAFEPATH', 'PYTHONPLATLIBDIR',
+    '_PYTHON_SYSCONFIGDATA_NAME', '__PYVENV_LAUNCHER__',
+    'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE', 'SSL_CERT_DIR'
+)
+
+function Assert-ExactPropertySet {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($null -eq $Value -or $null -eq $Value.PSObject) {
+        throw "JSON object '$Context' is missing."
+    }
+
+    $actual = @($Value.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    $missing = @($Expected | Where-Object { $actual -cnotcontains $_ })
+    $unexpected = @($actual | Where-Object { $Expected -cnotcontains $_ })
+    if ($missing.Count -gt 0 -or $unexpected.Count -gt 0 -or $actual.Count -ne $Expected.Count) {
+        throw "JSON object '$Context' has an invalid property set. Missing='$($missing -join ',')' Unexpected='$($unexpected -join ',')'."
+    }
+}
+
+function Assert-JsonBoolean {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][bool] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [bool] -or $Value -ne $Expected) {
+        throw "JSON property '$Context' must be the boolean '$($Expected.ToString().ToLowerInvariant())'."
+    }
+}
+
+function Assert-JsonString {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [string] -or [string]$Value -cne $Expected) {
+        throw "JSON property '$Context' must be the exact string '$Expected'."
+    }
+}
+
+function Assert-JsonIntegerOne {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $isInteger = $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]
+    if (-not $isInteger -or [Convert]::ToInt64($Value) -ne 1) {
+        throw "JSON property '$Context' must be the integer 1."
+    }
+}
+
+function Assert-JsonSingleStringArray {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [array]) {
+        throw "JSON property '$Context' must be an array."
+    }
+    $items = @($Value)
+    if ($items.Count -ne 1 -or $items[0] -isnot [string] -or [string]$items[0] -cne $Expected) {
+        throw "JSON property '$Context' must contain only '$Expected'."
+    }
 }
 
 function Normalize-RegistryUri {
@@ -75,54 +187,48 @@ function Get-Policy {
     }
 
     $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
-    if ($null -eq $policy -or $policy.schemaVersion -ne 1) {
-        throw 'Unsupported validation toolchain schemaVersion.'
-    }
-    if ([string]$policy.policy -cne 'latest-stable-per-validation-run') {
-        throw "Unsupported validation tool policy '$($policy.policy)'."
-    }
-    if ([string]$policy.sourceTrust.enforcement -cne 'exact-approved-source') {
-        throw "Unsupported validation tool source trust enforcement '$($policy.sourceTrust.enforcement)'."
-    }
-    if ([string]$policy.sourceTrust.resolver -cne 'scripts/Resolve-StandardValidationTool.ps1') {
-        throw "Unexpected validation tool resolver '$($policy.sourceTrust.resolver)'."
-    }
-    if (-not [bool]$policy.sourceTrust.failClosedOnMismatch) {
-        throw 'Validation tool source mismatch must fail closed.'
-    }
-    if (-not [bool]$policy.resolution.resolveAtRunStart -or -not [bool]$policy.resolution.freezeForRun) {
-        throw 'Validation tools must resolve at run start and freeze for the run.'
-    }
-    if (-not [bool]$policy.resolution.recordResolvedVersion) {
-        throw 'Validation tool policy must record resolved versions.'
-    }
-    if (-not [bool]$policy.resolution.recordResolvedIdentityWhenAvailable) {
-        throw 'Validation tool policy must record resolved immutable/package identity when available.'
-    }
-    if ([bool]$policy.resolution.allowPrerelease) {
-        throw 'Prerelease validation tools cannot be the canonical default.'
-    }
-    if (-not [bool]$policy.compatibilityLane.mayPinOlderVersion -or
-        -not [bool]$policy.compatibilityLane.requiresExplicitPurpose -or
-        [bool]$policy.compatibilityLane.mayBeCanonicalReleaseGate) {
-        throw 'Validation compatibility-lane policy is incomplete or untrusted.'
-    }
+    Assert-ExactPropertySet -Value $policy -Expected @(
+        'schemaVersion', 'policy', 'sourceTrust', 'resolution', 'tools', 'compatibilityLane'
+    ) -Context '$'
+    Assert-JsonIntegerOne -Value $policy.schemaVersion -Context '$.schemaVersion'
+    Assert-JsonString -Value $policy.policy -Expected 'latest-stable-per-validation-run' -Context '$.policy'
+
+    Assert-ExactPropertySet -Value $policy.sourceTrust -Expected @(
+        'enforcement', 'resolver', 'failClosedOnMismatch'
+    ) -Context '$.sourceTrust'
+    Assert-JsonString -Value $policy.sourceTrust.enforcement -Expected 'exact-approved-source' -Context '$.sourceTrust.enforcement'
+    Assert-JsonString -Value $policy.sourceTrust.resolver -Expected 'scripts/Resolve-StandardValidationTool.ps1' -Context '$.sourceTrust.resolver'
+    Assert-JsonBoolean -Value $policy.sourceTrust.failClosedOnMismatch -Expected $true -Context '$.sourceTrust.failClosedOnMismatch'
+
+    Assert-ExactPropertySet -Value $policy.resolution -Expected @(
+        'resolveAtRunStart', 'freezeForRun', 'recordResolvedVersion',
+        'recordResolvedIdentityWhenAvailable', 'allowPrerelease'
+    ) -Context '$.resolution'
+    Assert-JsonBoolean -Value $policy.resolution.resolveAtRunStart -Expected $true -Context '$.resolution.resolveAtRunStart'
+    Assert-JsonBoolean -Value $policy.resolution.freezeForRun -Expected $true -Context '$.resolution.freezeForRun'
+    Assert-JsonBoolean -Value $policy.resolution.recordResolvedVersion -Expected $true -Context '$.resolution.recordResolvedVersion'
+    Assert-JsonBoolean -Value $policy.resolution.recordResolvedIdentityWhenAvailable -Expected $true -Context '$.resolution.recordResolvedIdentityWhenAvailable'
+    Assert-JsonBoolean -Value $policy.resolution.allowPrerelease -Expected $false -Context '$.resolution.allowPrerelease'
+
+    Assert-ExactPropertySet -Value $policy.tools -Expected @(
+        'skillspector', 'skill-validator', 'skill-tools', 'pester'
+    ) -Context '$.tools'
 
     foreach ($entry in $trustedSources.GetEnumerator()) {
         $tool = $policy.tools.($entry.Key)
-        if ($null -eq $tool) {
-            throw "Missing validation tool policy for '$($entry.Key)'."
-        }
-        if ([string]$tool.source -cne [string]$entry.Value) {
+        if ($tool.source -isnot [string] -or [string]$tool.source -cne [string]$entry.Value) {
             throw "Untrusted validation tool source for '$($entry.Key)': '$($tool.source)'. Expected '$($entry.Value)'."
         }
-        if ([string]$tool.channel -cne 'latest-stable') {
-            throw "Validation tool '$($entry.Key)' must use channel 'latest-stable'."
+        if ($tool.channel -isnot [string] -or [string]$tool.channel -cne 'latest-stable') {
+            throw "Validation tool '$($entry.Key)' must use string channel 'latest-stable'."
         }
     }
 
     foreach ($entry in $trustedRegistries.GetEnumerator()) {
         $tool = $policy.tools.($entry.Key)
+        if ($tool.registry -isnot [string]) {
+            throw "Validation tool registry for '$($entry.Key)' must be a string."
+        }
         $configuredRegistry = Normalize-RegistryUri -Value ([string]$tool.registry)
         $expectedRegistry = Normalize-RegistryUri -Value ([string]$entry.Value)
         if ($configuredRegistry -cne $expectedRegistry) {
@@ -131,32 +237,55 @@ function Get-Policy {
     }
 
     $skillSpector = $policy.tools.skillspector
-    if ([string]$skillSpector.releaseVersionRule -cne 'v-semver-release-only') {
-        throw "Unexpected SkillSpector releaseVersionRule '$($skillSpector.releaseVersionRule)'."
+    Assert-ExactPropertySet -Value $skillSpector -Expected @(
+        'source', 'channel', 'releaseVersionRule', 'pythonPackageIndex', 'pythonDistribution'
+    ) -Context '$.tools.skillspector'
+    Assert-JsonString -Value $skillSpector.releaseVersionRule -Expected 'v-semver-release-only' -Context '$.tools.skillspector.releaseVersionRule'
+    if ($skillSpector.pythonPackageIndex -isnot [string]) {
+        throw 'SkillSpector pythonPackageIndex must be a string.'
     }
     if ((Normalize-RegistryUri -Value ([string]$skillSpector.pythonPackageIndex)) -cne (Normalize-RegistryUri -Value $trustedPythonIndex)) {
         throw "Untrusted SkillSpector Python package index '$($skillSpector.pythonPackageIndex)'. Expected '$trustedPythonIndex'."
     }
-    $allowedInherited = @($skillSpector.pythonDistribution.allowedInheritedEnvironment)
-    if ([string]$skillSpector.pythonDistribution.configIsolation -cne 'os.devnull' -or
-        [string]$skillSpector.pythonDistribution.environmentOverridePolicy -cne 'deny-by-default' -or
-        $allowedInherited.Count -ne 1 -or [string]$allowedInherited[0] -cne 'PIP_INDEX_URL' -or
-        -not [bool]$skillSpector.pythonDistribution.onlyBinary -or
-        $null -eq $skillSpector.pythonDistribution.PSObject.Properties['allowDirectReferences'] -or
-        [bool]$skillSpector.pythonDistribution.allowDirectReferences -or
-        -not [bool]$skillSpector.pythonDistribution.disableCache -or
-        [string]$skillSpector.pythonDistribution.dependencyAcquisition -cne 'verified-wheelhouse' -or
-        [string]$skillSpector.pythonDistribution.installEnvironment -cne 'isolated-venv' -or
-        [string]$skillSpector.pythonDistribution.interpreterIsolation -cne 'python-isolated-mode' -or
-        -not [bool]$skillSpector.pythonDistribution.installNoIndex -or
-        -not [bool]$skillSpector.pythonDistribution.requireHashes -or
-        -not [bool]$skillSpector.pythonDistribution.recordDependencyClosureHashes) {
-        throw 'SkillSpector Python dependency distribution policy is incomplete or untrusted.'
-    }
+    Assert-ExactPropertySet -Value $skillSpector.pythonDistribution -Expected @(
+        'configIsolation', 'environmentOverridePolicy', 'allowedInheritedEnvironment',
+        'rejectInheritedPythonEnvironment', 'onlyBinary', 'allowDirectReferences',
+        'allowPipOnlineDependencyTraversal', 'allowYanked', 'disableCache',
+        'candidateDiscovery', 'requiresPythonPolicy', 'dependencyAcquisition', 'dependencyResolver',
+        'installEnvironment', 'interpreterIsolation', 'credentialIsolation',
+        'installedMetadataVerification', 'verifyOfflineResolution',
+        'installNoIndex', 'requireHashes',
+        'recordDependencyClosureHashes'
+    ) -Context '$.tools.skillspector.pythonDistribution'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.configIsolation -Expected 'os.devnull' -Context '$.tools.skillspector.pythonDistribution.configIsolation'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.environmentOverridePolicy -Expected 'deny-by-default' -Context '$.tools.skillspector.pythonDistribution.environmentOverridePolicy'
+    Assert-JsonSingleStringArray -Value $skillSpector.pythonDistribution.allowedInheritedEnvironment -Expected 'PIP_INDEX_URL' -Context '$.tools.skillspector.pythonDistribution.allowedInheritedEnvironment'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.rejectInheritedPythonEnvironment -Expected $true -Context '$.tools.skillspector.pythonDistribution.rejectInheritedPythonEnvironment'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.onlyBinary -Expected $true -Context '$.tools.skillspector.pythonDistribution.onlyBinary'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.allowDirectReferences -Expected $false -Context '$.tools.skillspector.pythonDistribution.allowDirectReferences'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.allowPipOnlineDependencyTraversal -Expected $false -Context '$.tools.skillspector.pythonDistribution.allowPipOnlineDependencyTraversal'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.allowYanked -Expected $false -Context '$.tools.skillspector.pythonDistribution.allowYanked'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.disableCache -Expected $true -Context '$.tools.skillspector.pythonDistribution.disableCache'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.candidateDiscovery -Expected 'approved-simple-json-lazy' -Context '$.tools.skillspector.pythonDistribution.candidateDiscovery'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.requiresPythonPolicy -Expected 'simple-json-wheel-metadata-exact-current-interpreter' -Context '$.tools.skillspector.pythonDistribution.requiresPythonPolicy'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.dependencyAcquisition -Expected 'verified-wheelhouse' -Context '$.tools.skillspector.pythonDistribution.dependencyAcquisition'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.dependencyResolver -Expected 'pip-offline-backtracking' -Context '$.tools.skillspector.pythonDistribution.dependencyResolver'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.installEnvironment -Expected 'isolated-venv' -Context '$.tools.skillspector.pythonDistribution.installEnvironment'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.interpreterIsolation -Expected 'python-isolated-mode' -Context '$.tools.skillspector.pythonDistribution.interpreterIsolation'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.credentialIsolation -Expected 'github-token-cleared-before-python' -Context '$.tools.skillspector.pythonDistribution.credentialIsolation'
+    Assert-JsonString -Value $skillSpector.pythonDistribution.installedMetadataVerification -Expected 'static-dist-info-metadata' -Context '$.tools.skillspector.pythonDistribution.installedMetadataVerification'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.verifyOfflineResolution -Expected $true -Context '$.tools.skillspector.pythonDistribution.verifyOfflineResolution'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.installNoIndex -Expected $true -Context '$.tools.skillspector.pythonDistribution.installNoIndex'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.requireHashes -Expected $true -Context '$.tools.skillspector.pythonDistribution.requireHashes'
+    Assert-JsonBoolean -Value $skillSpector.pythonDistribution.recordDependencyClosureHashes -Expected $true -Context '$.tools.skillspector.pythonDistribution.recordDependencyClosureHashes'
 
     $skillValidator = $policy.tools.'skill-validator'
-    if ([string]$skillValidator.stableVersionRule -cne 'release-semver-only') {
-        throw "Unexpected skill-validator stableVersionRule '$($skillValidator.stableVersionRule)'."
+    Assert-ExactPropertySet -Value $skillValidator -Expected @(
+        'source', 'channel', 'stableVersionRule', 'proxy', 'checksumDatabase', 'goEnvironment', 'goDistribution'
+    ) -Context '$.tools.skill-validator'
+    Assert-JsonString -Value $skillValidator.stableVersionRule -Expected 'release-semver-only' -Context '$.tools.skill-validator.stableVersionRule'
+    if ($skillValidator.proxy -isnot [string] -or $skillValidator.checksumDatabase -isnot [string]) {
+        throw 'skill-validator proxy and checksumDatabase must be strings.'
     }
     if ([string]$skillValidator.proxy -cne 'https://proxy.golang.org') {
         throw "Untrusted Go module proxy '$($skillValidator.proxy)'. Expected 'https://proxy.golang.org'."
@@ -165,17 +294,53 @@ function Get-Policy {
         throw "Untrusted Go checksum database '$($skillValidator.checksumDatabase)'. Expected 'sum.golang.org'."
     }
     foreach ($entry in $trustedGoEnvironment.GetEnumerator()) {
-        $actual = [string]$skillValidator.goEnvironment.($entry.Key)
+        $raw = $skillValidator.goEnvironment.($entry.Key)
+        if ($raw -isnot [string]) {
+            throw "Go environment policy '$($entry.Key)' must be a string."
+        }
+        $actual = [string]$raw
         if ($actual -cne [string]$entry.Value) {
             throw "Untrusted Go environment policy for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
         }
     }
-    if ([string]$skillValidator.goDistribution.moduleCacheIsolation -cne [string]$trustedGoDistribution.moduleCacheIsolation -or
-        [bool]$skillValidator.goDistribution.rejectInheritedModuleCache -ne [bool]$trustedGoDistribution.rejectInheritedModuleCache -or
-        [string]$skillValidator.goDistribution.buildCacheIsolation -cne [string]$trustedGoDistribution.buildCacheIsolation -or
-        [bool]$skillValidator.goDistribution.rejectInheritedBuildCache -ne [bool]$trustedGoDistribution.rejectInheritedBuildCache) {
-        throw 'Go cache distribution policy is incomplete or untrusted.'
+    Assert-ExactPropertySet -Value $skillValidator.goEnvironment -Expected @($trustedGoEnvironment.Keys) -Context '$.tools.skill-validator.goEnvironment'
+    Assert-ExactPropertySet -Value $skillValidator.goDistribution -Expected @($trustedGoDistribution.Keys) -Context '$.tools.skill-validator.goDistribution'
+    foreach ($entry in $trustedGoDistribution.GetEnumerator()) {
+        if ($entry.Value -is [bool]) {
+            Assert-JsonBoolean -Value $skillValidator.goDistribution.($entry.Key) -Expected ([bool]$entry.Value) -Context "$.tools.skill-validator.goDistribution.$($entry.Key)"
+        }
+        else {
+            Assert-JsonString -Value $skillValidator.goDistribution.($entry.Key) -Expected ([string]$entry.Value) -Context "$.tools.skill-validator.goDistribution.$($entry.Key)"
+        }
     }
+
+    $skillTools = $policy.tools.'skill-tools'
+    Assert-ExactPropertySet -Value $skillTools -Expected @(
+        'source', 'registry', 'channel', 'npmDistribution'
+    ) -Context '$.tools.skill-tools'
+    Assert-ExactPropertySet -Value $skillTools.npmDistribution -Expected @(
+        'configIsolation', 'environmentOverridePolicy', 'allowedInheritedEnvironment',
+        'dependencyAcquisition', 'installEnvironment', 'ignoreScripts',
+        'recordDependencyClosureIntegrity'
+    ) -Context '$.tools.skill-tools.npmDistribution'
+    Assert-JsonString -Value $skillTools.npmDistribution.configIsolation -Expected 'empty-config-and-workdir' -Context '$.tools.skill-tools.npmDistribution.configIsolation'
+    Assert-JsonString -Value $skillTools.npmDistribution.environmentOverridePolicy -Expected 'deny-by-default' -Context '$.tools.skill-tools.npmDistribution.environmentOverridePolicy'
+    Assert-JsonSingleStringArray -Value $skillTools.npmDistribution.allowedInheritedEnvironment -Expected 'NPM_CONFIG_REGISTRY' -Context '$.tools.skill-tools.npmDistribution.allowedInheritedEnvironment'
+    Assert-JsonString -Value $skillTools.npmDistribution.dependencyAcquisition -Expected 'package-lock' -Context '$.tools.skill-tools.npmDistribution.dependencyAcquisition'
+    Assert-JsonString -Value $skillTools.npmDistribution.installEnvironment -Expected 'isolated-prefix' -Context '$.tools.skill-tools.npmDistribution.installEnvironment'
+    Assert-JsonBoolean -Value $skillTools.npmDistribution.ignoreScripts -Expected $true -Context '$.tools.skill-tools.npmDistribution.ignoreScripts'
+    Assert-JsonBoolean -Value $skillTools.npmDistribution.recordDependencyClosureIntegrity -Expected $true -Context '$.tools.skill-tools.npmDistribution.recordDependencyClosureIntegrity'
+
+    $pester = $policy.tools.pester
+    Assert-ExactPropertySet -Value $pester -Expected @('source', 'channel', 'repository') -Context '$.tools.pester'
+    Assert-JsonString -Value $pester.repository -Expected $trustedPowerShellRepository -Context '$.tools.pester.repository'
+
+    Assert-ExactPropertySet -Value $policy.compatibilityLane -Expected @(
+        'mayPinOlderVersion', 'requiresExplicitPurpose', 'mayBeCanonicalReleaseGate'
+    ) -Context '$.compatibilityLane'
+    Assert-JsonBoolean -Value $policy.compatibilityLane.mayPinOlderVersion -Expected $true -Context '$.compatibilityLane.mayPinOlderVersion'
+    Assert-JsonBoolean -Value $policy.compatibilityLane.requiresExplicitPurpose -Expected $true -Context '$.compatibilityLane.requiresExplicitPurpose'
+    Assert-JsonBoolean -Value $policy.compatibilityLane.mayBeCanonicalReleaseGate -Expected $false -Context '$.compatibilityLane.mayBeCanonicalReleaseGate'
 
     return $policy
 }
@@ -198,6 +363,11 @@ function Assert-Command {
     return $resolvedPath
 }
 
+function Assert-NpmCommand {
+    $name = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'npm.cmd' } else { 'npm' }
+    return Assert-Command -Name $name
+}
+
 function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -215,11 +385,118 @@ function Invoke-CheckedCommand {
         Assert-Command -Name $Command
     }
 
-    $output = & $commandPath @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$commandPath $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
+    $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("standard-command-stderr-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    try {
+        $output = & $commandPath @Arguments 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ })
+        }
+        else {
+            @()
+        }
+        if ($exitCode -ne 0) {
+            throw "$commandPath $($Arguments -join ' ') failed: $($stderr -join [Environment]::NewLine)"
+        }
+        if ($stderr.Count -gt 0) {
+            Write-Verbose ($stderr -join [Environment]::NewLine)
+        }
+        return @($output | ForEach-Object { [string]$_ })
     }
-    return @($output | ForEach-Object { [string]$_ })
+    finally {
+        if (Test-Path -LiteralPath $stderrPath) {
+            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function New-RunOwnedInstallDirectory {
+    param(
+        [string] $Root,
+        [Parameter(Mandatory = $true)][string] $ToolName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        $base = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            $env:RUNNER_TEMP
+        }
+        else {
+            [IO.Path]::GetTempPath()
+        }
+        $Root = Join-Path $base 'standard-validation-tools'
+    }
+    $fullRoot = [IO.Path]::GetFullPath($Root)
+    [void](New-Item -ItemType Directory -Path $fullRoot -Force)
+    $toolRoot = Join-Path $fullRoot ("{0}-{1}" -f $ToolName, [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $toolRoot)
+    return [IO.Path]::GetFullPath($toolRoot)
+}
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "File not found for hashing: $Path"
+    }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-DirectoryClosureIdentity {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $root = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $entries = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)) {
+        $relative = $file.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/')
+        $entries += [pscustomobject][ordered]@{
+            path = $relative
+            sha256 = Get-FileSha256 -Path $file.FullName
+        }
+    }
+    if ($entries.Count -eq 0) {
+        throw "Installed tool directory is empty: $root"
+    }
+    $canonical = ($entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $closureHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return [ordered]@{
+        sha256 = $closureHash
+        entries = $entries
+    }
+}
+
+function Get-OrdinalUniqueStrings {
+    param([object[]] $Values)
+
+    $result = @()
+    foreach ($value in @($Values)) {
+        $item = [string]$value
+        if ($result -cnotcontains $item) {
+            $result += $item
+        }
+    }
+    return $result
+}
+
+function Add-ProcessPathValue {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Value
+    )
+
+    $separator = [IO.Path]::PathSeparator
+    $current = [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
+    $updated = if ([string]::IsNullOrWhiteSpace($current)) { $Value } else { "$Value$separator$current" }
+    [Environment]::SetEnvironmentVariable($Name, $updated, [EnvironmentVariableTarget]::Process)
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) {
+        [IO.File]::AppendAllText($env:GITHUB_ENV, "$Name=$updated$([Environment]::NewLine)", (New-Object Text.UTF8Encoding($false)))
+    }
 }
 
 function Invoke-IsolatedPythonCommand {
@@ -276,6 +553,12 @@ function Test-StableGoModuleVersion {
     return $Version -match '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'
 }
 
+function Test-StableNpmPackageVersion {
+    param([Parameter(Mandatory = $true)][string] $Version)
+
+    return $Version -cmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\+[0-9A-Za-z.-]+)?$'
+}
+
 function Normalize-PythonPackageName {
     param([Parameter(Mandatory = $true)][string] $Name)
 
@@ -288,11 +571,12 @@ function ConvertFrom-PythonMetadataText {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    $headerBoundary = [regex]::Match($Text, '\r?\n\r?\n')
-    $headerText = if ($headerBoundary.Success) { $Text.Substring(0, $headerBoundary.Index) } else { $Text }
-    $unfoldedHeaders = [regex]::Replace($headerText, "\r?\n[ `t]+", ' ')
-    $nameMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Name:[ \t]*([^\r\n]+?)[ \t]*\r?$'))
-    $versionMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Version:[ \t]*([^\r\n]+?)[ \t]*\r?$'))
+    $normalizedText = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $headerBoundary = $normalizedText.IndexOf("`n`n", [StringComparison]::Ordinal)
+    $headerText = if ($headerBoundary -ge 0) { $normalizedText.Substring(0, $headerBoundary) } else { $normalizedText }
+    $unfoldedHeaders = [regex]::Replace($headerText, "\n[ `t]+", ' ')
+    $nameMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Name:[ \t]*([^\n]+?)[ \t]*$'))
+    $versionMatches = @([regex]::Matches($unfoldedHeaders, '(?im)^Version:[ \t]*([^\n]+?)[ \t]*$'))
     if ($nameMatches.Count -ne 1 -or $versionMatches.Count -ne 1) {
         throw "$Context must contain exactly one Name field and one Version field in its metadata header section. Found Name=$($nameMatches.Count), Version=$($versionMatches.Count)."
     }
@@ -351,6 +635,53 @@ function Get-PythonWheelMetadata {
     }
 }
 
+function Get-PythonConsoleEntryPoint {
+    param(
+        [Parameter(Mandatory = $true)][string] $EntryPointsPath,
+        [Parameter(Mandatory = $true)][string] $CommandName
+    )
+
+    if (-not (Test-Path -LiteralPath $EntryPointsPath -PathType Leaf)) {
+        throw "Installed Python entry_points.txt is missing: '$EntryPointsPath'."
+    }
+    $item = Get-Item -LiteralPath $EntryPointsPath -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed Python entry_points.txt is a reparse point: '$EntryPointsPath'."
+    }
+
+    $section = ''
+    $entryPointMatches = @()
+    $text = ([IO.File]::ReadAllText($item.FullName)).Replace("`r`n", "`n").Replace("`r", "`n")
+    foreach ($rawLine in @($text.Split("`n"))) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#') -or $line.StartsWith(';')) {
+            continue
+        }
+        if ($line -match '^\[(?<section>[A-Za-z0-9_.-]+)\]$') {
+            $section = [string]$Matches.section
+            continue
+        }
+        if ($section -cne 'console_scripts') {
+            continue
+        }
+        if ($line -notmatch '^(?<name>[A-Za-z0-9_.-]+)\s*=\s*(?<value>\S(?:.*\S)?)$') {
+            throw "Installed Python console_scripts contains a malformed entry: '$line'."
+        }
+        if ([string]$Matches.name -ceq $CommandName) {
+            $entryPointMatches += [string]$Matches.value
+        }
+    }
+    if ($entryPointMatches.Count -ne 1) {
+        throw "Expected exactly one installed Python console entry point '$CommandName'; found $($entryPointMatches.Count)."
+    }
+    $value = [string]$entryPointMatches[0]
+    if ($value.Length -gt 512 -or
+        $value -cnotmatch '^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*$') {
+        throw "Installed Python console entry point '$CommandName' has an unsafe target."
+    }
+    return $value
+}
+
 function Get-InstalledPythonDistributionMetadata {
     param(
         [Parameter(Mandatory = $true)][string] $VirtualEnvironmentPath,
@@ -382,6 +713,10 @@ function Get-InstalledPythonDistributionMetadata {
     if ($sitePackages.Count -ne 1) {
         throw "Expected exactly one virtual-environment site-packages directory; found $($sitePackages.Count)."
     }
+    $sitePackagesItem = Get-Item -LiteralPath $sitePackages[0] -Force
+    if (($sitePackagesItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Virtual-environment site-packages is a reparse point: '$($sitePackagesItem.FullName)'."
+    }
 
     $targetName = Normalize-PythonPackageName -Name $DistributionName
     $matches = @()
@@ -400,11 +735,15 @@ function Get-InstalledPythonDistributionMetadata {
         $metadataText = Get-Content -Raw -Encoding UTF8 -LiteralPath $metadataPath
         $metadata = ConvertFrom-PythonMetadataText -Text $metadataText -Context "Installed Python METADATA '$metadataPath'"
         if ([string]$metadata.normalizedName -ceq $targetName) {
+            $entryPointsPath = Join-Path $distInfo.FullName 'entry_points.txt'
+            $consoleEntryPoint = Get-PythonConsoleEntryPoint -EntryPointsPath $entryPointsPath -CommandName $targetName
             $matches += [pscustomobject][ordered]@{
                 name = [string]$metadata.name
                 normalizedName = [string]$metadata.normalizedName
                 version = [string]$metadata.version
                 metadataPath = $metadataPath
+                entryPointsPath = $entryPointsPath
+                consoleEntryPoint = $consoleEntryPoint
             }
         }
     }
@@ -424,6 +763,156 @@ function Assert-NoPythonDirectReferences {
         if ([string]$requirement -match '@|(?:https?|file|git\+https?|git\+ssh|ssh)\s*:') {
             throw "Python direct dependency reference is not allowed in '$WheelFileName': '$requirement'."
         }
+    }
+}
+
+function Resolve-PythonWheelClosureFromApprovedIndex {
+    param(
+        [Parameter(Mandatory = $true)][string] $PythonCommand,
+        [Parameter(Mandatory = $true)][string] $HelperPath,
+        [Parameter(Mandatory = $true)][string] $ApprovedIndex,
+        [Parameter(Mandatory = $true)][string] $RootWheelPath,
+        [Parameter(Mandatory = $true)][string] $RootWheelSha256,
+        [Parameter(Mandatory = $true)][string] $CandidatePath,
+        [Parameter(Mandatory = $true)][string] $WheelhousePath,
+        [Parameter(Mandatory = $true)][string] $WorkPath
+    )
+
+    if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf)) {
+        throw "Python wheel closure helper not found: $HelperPath"
+    }
+    [void](New-Item -ItemType Directory -Path $WorkPath -Force)
+    $planPath = Join-Path $WorkPath 'offline-backtracking-plan.json'
+    $inventoryPath = Join-Path $WorkPath 'candidate-inventory.json'
+    $resultPath = Join-Path $WorkPath 'closure-result.json'
+
+    [void](Invoke-IsolatedPythonCommand -PythonCommand $PythonCommand -Arguments @(
+        $HelperPath, 'resolve',
+        '--index-url', $ApprovedIndex,
+        '--root-wheel', $RootWheelPath,
+        '--root-sha256', $RootWheelSha256,
+        '--candidate-dir', $CandidatePath,
+        '--selected-dir', $WheelhousePath,
+        '--plan', $planPath,
+        '--inventory', $inventoryPath,
+        '--result', $resultPath
+    ))
+    foreach ($path in @($planPath, $inventoryPath, $resultPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Python wheel closure helper did not produce required evidence: $path"
+        }
+    }
+
+    try {
+        $result = Get-Content -Raw -Encoding UTF8 -LiteralPath $resultPath | ConvertFrom-Json
+        $inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $inventoryPath | ConvertFrom-Json
+        $plan = Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath | ConvertFrom-Json
+    }
+    catch {
+        throw "Python wheel closure helper result is invalid JSON: $($_.Exception.Message)"
+    }
+    try {
+        $verificationOutput = @(Invoke-IsolatedPythonCommand -PythonCommand $PythonCommand -Arguments @(
+            $HelperPath, 'verify',
+            '--candidate-dir', $CandidatePath,
+            '--selected-dir', $WheelhousePath,
+            '--plan', $planPath,
+            '--inventory', $inventoryPath,
+            '--result', $resultPath
+        ))
+        $verification = ($verificationOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    }
+    catch {
+        throw "Python wheel closure cross-file evidence verification failed: $($_.Exception.Message)"
+    }
+    if (($result.schemaVersion -isnot [int] -and $result.schemaVersion -isnot [long]) -or
+        [int64]$result.schemaVersion -ne 1) {
+        throw 'Python wheel closure helper returned an unsupported schemaVersion.'
+    }
+    foreach ($name in @('candidateInventorySha256', 'selectionPlanSha256', 'rawSelectionPlanSha256', 'selectedClosureSha256')) {
+        $value = $result.$name
+        if ($value -isnot [string] -or [string]$value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Python wheel closure helper returned an invalid $name."
+        }
+        if ($verification.$name -isnot [string] -or [string]$verification.$name -cne [string]$value) {
+            throw "Python wheel closure helper cross-file verification disagrees on $name."
+        }
+    }
+    if (($verification.schemaVersion -isnot [int] -and $verification.schemaVersion -isnot [long]) -or
+        [int64]$verification.schemaVersion -ne 1 -or
+        $verification.verified -isnot [bool] -or
+        -not [bool]$verification.verified) {
+        throw 'Python wheel closure helper did not verify its cross-file evidence.'
+    }
+    foreach ($name in @('resolutionRounds', 'candidateCount')) {
+        $value = $result.$name
+        if (($value -isnot [int] -and $value -isnot [long]) -or [int64]$value -le 0) {
+            throw "Python wheel closure helper returned an invalid $name."
+        }
+    }
+    if ($result.pipVersion -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$result.pipVersion) -or
+        [string]$result.pipVersion -cnotmatch '^[0-9A-Za-z][0-9A-Za-z._+!-]{0,63}$') {
+        throw 'Python wheel closure helper did not record a safe pip resolver version.'
+    }
+    $selectedEntries = @($result.selectedEntries)
+    if ($result.selectedEntries -isnot [array] -or $selectedEntries.Count -le 0) {
+        throw 'Python wheel closure helper returned no selected wheel entries.'
+    }
+    if (($inventory.schemaVersion -isnot [int] -and $inventory.schemaVersion -isnot [long]) -or
+        [int64]$inventory.schemaVersion -ne 1 -or
+        $inventory.index -isnot [string] -or
+        [string]$inventory.index -cne $ApprovedIndex.TrimEnd('/') -or
+        $inventory.pipVersion -isnot [string] -or
+        [string]$inventory.pipVersion -cne [string]$result.pipVersion -or
+        $inventory.yankedAllowed -isnot [bool] -or
+        [bool]$inventory.yankedAllowed -or
+        $inventory.inventorySha256 -isnot [string] -or
+        [string]$inventory.inventorySha256 -cne [string]$result.candidateInventorySha256 -or
+        $inventory.entries -isnot [array] -or
+        @($inventory.entries).Count -ne [int64]$result.candidateCount) {
+        throw 'Python wheel closure candidate inventory is inconsistent with the helper result.'
+    }
+    $candidateRoot = [IO.Path]::GetFullPath($CandidatePath).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else { [StringComparison]::Ordinal }
+    foreach ($entry in @($inventory.entries)) {
+        if ($entry.file -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$entry.file) -or
+            [IO.Path]::GetFileName([string]$entry.file) -cne [string]$entry.file -or
+            $entry.sha256 -isnot [string] -or [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Python wheel closure candidate inventory contains an invalid file identity.'
+        }
+        $candidateFile = [IO.Path]::GetFullPath((Join-Path $CandidatePath ([string]$entry.file)))
+        if (-not $candidateFile.StartsWith($candidateRoot, $pathComparison) -or
+            -not (Test-Path -LiteralPath $candidateFile -PathType Leaf) -or
+            (Get-FileSha256 -Path $candidateFile) -cne [string]$entry.sha256) {
+            throw "Python wheel closure candidate evidence changed or escaped its pool: $candidateFile"
+        }
+    }
+    $rawPlanHash = Get-FileSha256 -Path $planPath
+    if ($rawPlanHash -cne [string]$result.rawSelectionPlanSha256 -or
+        $plan.install -isnot [array] -or
+        @($plan.install).Count -ne $selectedEntries.Count) {
+        throw 'Python wheel closure selection plan is inconsistent with the helper result.'
+    }
+
+    return [ordered]@{
+        planPath = $planPath
+        inventoryPath = $inventoryPath
+        resultPath = $resultPath
+        pipVersion = [string]$result.pipVersion
+        resolutionRounds = [int64]$result.resolutionRounds
+        candidateCount = [int64]$result.candidateCount
+        candidateInventorySha256 = [string]$result.candidateInventorySha256
+        selectionPlanSha256 = [string]$result.selectionPlanSha256
+        rawSelectionPlanSha256 = [string]$result.rawSelectionPlanSha256
+        selectedClosureSha256 = [string]$result.selectedClosureSha256
+        selectedEntries = $selectedEntries
     }
 }
 
@@ -451,7 +940,23 @@ function Get-ProcessPipEnvironmentNames {
     return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
         ForEach-Object { [string]$_ } |
         Where-Object { $_ -match '^PIP_' } |
-        Sort-Object -Unique)
+        Sort-Object)
+}
+
+function Get-ProcessPythonEnvironmentNames {
+    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $dangerousPythonEnvironmentNames -icontains $_ } |
+        Sort-Object)
+}
+
+function Assert-NoConflictingPythonEnvironment {
+    foreach ($name in Get-ProcessPythonEnvironmentNames) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Python environment override for '$name': '$actual'."
+        }
+    }
 }
 
 function Assert-NoConflictingPipEnvironment {
@@ -460,7 +965,7 @@ function Assert-NoConflictingPipEnvironment {
     $expectedIndex = Normalize-RegistryUri -Value $ApprovedIndex
     foreach ($name in Get-ProcessPipEnvironmentNames) {
         $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
-        if ([string]::IsNullOrWhiteSpace($actual)) {
+        if ([string]::IsNullOrEmpty($actual)) {
             continue
         }
         if ($name -ceq 'PIP_INDEX_URL') {
@@ -481,8 +986,13 @@ function Invoke-WithApprovedPipEnvironment {
     )
 
     Assert-NoConflictingPipEnvironment -ApprovedIndex $ApprovedIndex
+    Assert-NoConflictingPythonEnvironment
 
-    $names = @((Get-ProcessPipEnvironmentNames) + @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') | Sort-Object -Unique)
+    $names = @(Get-OrdinalUniqueStrings -Values @(
+        (Get-ProcessPipEnvironmentNames) +
+        (Get-ProcessPythonEnvironmentNames) +
+        @('PIP_INDEX_URL', 'PIP_CONFIG_FILE')
+    ))
     $previous = [ordered]@{}
     $nullDevice = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'NUL' } else { '/dev/null' }
     $normalizedIndex = Normalize-RegistryUri -Value $ApprovedIndex
@@ -556,30 +1066,349 @@ function New-PythonWheelhouseLock {
     }
 }
 
-function Assert-ApprovedNpmRegistry {
+function Get-ProcessNpmEnvironmentNames {
+    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+        ForEach-Object { [string]$_ } |
+        Where-Object { $_ -match '^NPM_CONFIG_' } |
+        Sort-Object)
+}
+
+function Get-ProcessNodeEnvironmentNames {
+    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+        ForEach-Object { [string]$_ } |
+        Where-Object {
+            $_ -match '^NODE_' -or
+            $_ -ieq 'SSL_CERT_FILE' -or
+            $_ -ieq 'SSL_CERT_DIR'
+        } |
+        Sort-Object)
+}
+
+function Assert-NoConflictingNpmEnvironment {
     param([Parameter(Mandatory = $true)][string] $ExpectedRegistry)
 
     $expected = Normalize-RegistryUri -Value $ExpectedRegistry
-
-    if (-not [string]::IsNullOrWhiteSpace($env:NPM_CONFIG_REGISTRY)) {
-        $environmentRegistry = Normalize-RegistryUri -Value $env:NPM_CONFIG_REGISTRY
-        if ($environmentRegistry -cne $expected) {
-            throw "Untrusted npm registry from NPM_CONFIG_REGISTRY: '$environmentRegistry'. Expected '$expected'."
+    foreach ($name in Get-ProcessNpmEnvironmentNames) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if ([string]::IsNullOrEmpty($actual)) {
+            continue
         }
+        if ($name -ieq 'NPM_CONFIG_REGISTRY') {
+            $actualRegistry = Normalize-RegistryUri -Value $actual
+            if ($actualRegistry -cne $expected) {
+                throw "Untrusted npm registry from '$name': '$actualRegistry'. Expected '$expected'."
+            }
+            continue
+        }
+        throw "Untrusted npm environment override for '$name': '$actual'."
     }
 
-    [void](Assert-Command -Name 'npm')
-    $configuredRegistry = (Invoke-CheckedCommand -Command 'npm' -Arguments @('config', 'get', 'registry')) -join ''
+    foreach ($name in @(Get-OrdinalUniqueStrings -Values @((Get-ProcessNodeEnvironmentNames) + @(
+        'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
+        'SSL_CERT_FILE', 'SSL_CERT_DIR'
+    )))) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Node environment override for '$name': '$actual'."
+        }
+    }
+}
+
+function Assert-ApprovedNpmRegistry {
+    param(
+        [Parameter(Mandatory = $true)][string] $NpmCommand,
+        [Parameter(Mandatory = $true)][string] $ExpectedRegistry
+    )
+
+    $expected = Normalize-RegistryUri -Value $ExpectedRegistry
+    $configuredRegistry = (Invoke-CheckedCommand -Command $NpmCommand -Arguments @('config', 'get', 'registry')) -join ''
     $configured = Normalize-RegistryUri -Value $configuredRegistry
     if ($configured -cne $expected) {
         throw "Untrusted npm registry from npm configuration: '$configured'. Expected '$expected'."
     }
 
+    $configJson = (Invoke-CheckedCommand -Command $NpmCommand -Arguments @('config', 'list', '--json')) -join "`n"
+    $config = $configJson | ConvertFrom-Json
+    Assert-ApprovedNpmConfigurationObject -Configuration $config -ExpectedRegistry $ExpectedRegistry
     return $expected
 }
 
+function Assert-ApprovedNpmConfigurationObject {
+    param(
+        [Parameter(Mandatory = $true)] $Configuration,
+        [Parameter(Mandatory = $true)][string] $ExpectedRegistry
+    )
+
+    $registryProperty = $Configuration.PSObject.Properties['registry']
+    if ($null -eq $registryProperty -or $registryProperty.Value -isnot [string]) {
+        throw 'npm configuration did not expose a string default registry.'
+    }
+    $expected = Normalize-RegistryUri -Value $ExpectedRegistry
+    $configured = Normalize-RegistryUri -Value ([string]$registryProperty.Value)
+    if ($configured -cne $expected) {
+        throw "Untrusted npm registry from npm configuration object: '$configured'. Expected '$expected'."
+    }
+    $scopedRegistries = @($Configuration.PSObject.Properties | Where-Object { [string]$_.Name -match ':registry$' })
+    if ($scopedRegistries.Count -gt 0) {
+        throw "Untrusted scoped npm registry configuration remains active: '$($scopedRegistries.Name -join ',')'."
+    }
+}
+
+function Invoke-WithApprovedNpmEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][string] $NpmCommand,
+        [Parameter(Mandatory = $true)][string] $ApprovedRegistry,
+        [Parameter(Mandatory = $true)][string] $WorkPath,
+        [Parameter(Mandatory = $true)][scriptblock] $Action
+    )
+
+    Assert-NoConflictingNpmEnvironment -ExpectedRegistry $ApprovedRegistry
+    [void](New-Item -ItemType Directory -Path $WorkPath -Force)
+    $cachePath = Join-Path $WorkPath 'npm-cache'
+    [void](New-Item -ItemType Directory -Path $cachePath -Force)
+    $normalizedRegistry = Normalize-RegistryUri -Value $ApprovedRegistry
+    $userConfig = Join-Path $WorkPath 'user.npmrc'
+    $globalConfig = Join-Path $WorkPath 'global.npmrc'
+    $projectConfig = Join-Path $WorkPath '.npmrc'
+    [IO.File]::WriteAllText($userConfig, '', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($globalConfig, '', (New-Object Text.UTF8Encoding($false)))
+    $controlledNpmrc = @(
+        "registry=$normalizedRegistry",
+        'dry-run=false',
+        'ignore-scripts=true',
+        'package-lock=true',
+        'omit-lockfile-registry-resolved=false',
+        'audit=false',
+        'fund=false'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($projectConfig, $controlledNpmrc + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    $workManifest = [ordered]@{
+        name = 'standard-validation-npm-work'
+        version = '1.0.0'
+        private = $true
+    } | ConvertTo-Json
+    [IO.File]::WriteAllText((Join-Path $WorkPath 'package.json'), $workManifest + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+
+    $names = @(Get-OrdinalUniqueStrings -Values @((Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + @(
+        'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG',
+        'NPM_CONFIG_CACHE', 'NPM_CONFIG_DRY_RUN', 'NPM_CONFIG_OFFLINE',
+        'NPM_CONFIG_PREFER_OFFLINE', 'NPM_CONFIG_AUDIT', 'NPM_CONFIG_FUND',
+        'NPM_CONFIG_UPDATE_NOTIFIER', 'NPM_CONFIG_IGNORE_SCRIPTS',
+        'NPM_CONFIG_PACKAGE_LOCK', 'NPM_CONFIG_OMIT_LOCKFILE_REGISTRY_RESOLVED',
+        'NPM_CONFIG_BIN_LINKS', 'NPM_CONFIG_WORKSPACES', 'NPM_CONFIG_GLOBAL',
+        'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
+        'SSL_CERT_FILE', 'SSL_CERT_DIR'
+    )))
+    $previous = @()
+    $previousLocation = Get-Location
+    try {
+        foreach ($name in $names) {
+            $previous += [pscustomobject]@{
+                name = $name
+                value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            }
+            [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        }
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_REGISTRY', $normalizedRegistry, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $userConfig, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $globalConfig, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_CACHE', $cachePath, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_DRY_RUN', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_OFFLINE', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFER_OFFLINE', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_AUDIT', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_FUND', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_UPDATE_NOTIFIER', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_IGNORE_SCRIPTS', 'true', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PACKAGE_LOCK', 'true', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_OMIT_LOCKFILE_REGISTRY_RESOLVED', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_BIN_LINKS', 'true', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_WORKSPACES', 'false', [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBAL', 'false', [EnvironmentVariableTarget]::Process)
+        Set-Location -LiteralPath $WorkPath
+
+        $approved = Assert-ApprovedNpmRegistry -NpmCommand $NpmCommand -ExpectedRegistry $ApprovedRegistry
+        return & $Action $approved
+    }
+    finally {
+        Set-Location -LiteralPath $previousLocation.Path
+        $currentNames = @(Get-OrdinalUniqueStrings -Values @(
+            (Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + $names
+        ))
+        foreach ($name in $currentNames) {
+            [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        }
+        foreach ($entry in $previous) {
+            [Environment]::SetEnvironmentVariable([string]$entry.name, $entry.value, [EnvironmentVariableTarget]::Process)
+        }
+    }
+}
+
+function Get-NpmJsonTokenType {
+    param($Token)
+
+    if ($null -eq $Token) {
+        return $null
+    }
+    return $Token.GetType().GetProperty('Type').GetValue($Token, $null)
+}
+
+function Get-NpmLockIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string] $LockPath,
+        [Parameter(Mandatory = $true)][string] $ApprovedRegistry,
+        [Parameter(Mandatory = $true)][string] $ExpectedRootIntegrity,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersion
+    )
+
+    try {
+        $lock = [Newtonsoft.Json.Linq.JObject]::Parse((Get-Content -Raw -Encoding UTF8 -LiteralPath $LockPath))
+    }
+    catch {
+        throw "npm package-lock is not valid JSON: $($_.Exception.Message)"
+    }
+    $integerType = [Newtonsoft.Json.Linq.JTokenType]::Integer
+    $objectType = [Newtonsoft.Json.Linq.JTokenType]::Object
+    $stringType = [Newtonsoft.Json.Linq.JTokenType]::String
+    $booleanType = [Newtonsoft.Json.Linq.JTokenType]::Boolean
+    $lockfileVersionToken = $lock['lockfileVersion']
+    $packages = $lock['packages']
+    if ($null -eq $packages -or (Get-NpmJsonTokenType -Token $packages) -ne $objectType) {
+        throw 'npm package-lock does not contain an object packages closure.'
+    }
+    if ($null -eq $lockfileVersionToken -or (Get-NpmJsonTokenType -Token $lockfileVersionToken) -ne $integerType -or
+        [int64]$lockfileVersionToken -notin @(2, 3)) {
+        throw "npm package-lock must use integer lockfileVersion 2 or 3. Actual='$lockfileVersionToken'."
+    }
+
+    $rootProject = $packages['']
+    $rootDependenciesObject = $null
+    if ($null -ne $rootProject) {
+        $rootDependenciesObject = $rootProject['dependencies']
+    }
+    if ($null -eq $rootProject -or (Get-NpmJsonTokenType -Token $rootProject) -ne $objectType -or
+        $null -eq $rootDependenciesObject -or (Get-NpmJsonTokenType -Token $rootDependenciesObject) -ne $objectType) {
+        throw 'npm package-lock is missing its root project dependency entry.'
+    }
+    $rootDependencies = @($rootDependenciesObject.Properties())
+    if ($rootDependencies.Count -ne 1 -or [string]$rootDependencies[0].Name -cne 'skill-tools' -or
+        (Get-NpmJsonTokenType -Token $rootDependencies[0].Value) -ne $stringType -or [string]$rootDependencies[0].Value -cne $ExpectedVersion) {
+        throw "npm package-lock root dependencies must bind only skill-tools@$ExpectedVersion."
+    }
+
+    $approved = Normalize-RegistryUri -Value $ApprovedRegistry
+    $entries = @()
+    foreach ($property in @($packages.Properties() | Sort-Object Name)) {
+        $packagePath = [string]$property.Name
+        if ([string]::IsNullOrWhiteSpace($packagePath)) {
+            continue
+        }
+        $package = $property.Value
+        if ((Get-NpmJsonTokenType -Token $package) -ne $objectType) {
+            throw "npm lock entry '$packagePath' must be an object."
+        }
+        $versionToken = $package['version']
+        $resolvedToken = $package['resolved']
+        $integrityToken = $package['integrity']
+        $linkToken = $package['link']
+        $inBundleToken = $package['inBundle']
+        if ($null -eq $versionToken -or (Get-NpmJsonTokenType -Token $versionToken) -ne $stringType -or
+            $null -eq $resolvedToken -or (Get-NpmJsonTokenType -Token $resolvedToken) -ne $stringType -or
+            $null -eq $integrityToken -or (Get-NpmJsonTokenType -Token $integrityToken) -ne $stringType -or
+            ($null -ne $linkToken -and ((Get-NpmJsonTokenType -Token $linkToken) -ne $booleanType -or [bool]$linkToken)) -or
+            ($null -ne $inBundleToken -and ((Get-NpmJsonTokenType -Token $inBundleToken) -ne $booleanType -or [bool]$inBundleToken))) {
+            throw "npm lock entry '$packagePath' lacks string version/resolved/integrity or uses a link/bundled package."
+        }
+        $version = [string]$versionToken
+        $resolved = [string]$resolvedToken
+        $integrity = [string]$integrityToken
+        if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($resolved) -or
+            -not (Test-NpmSha512Integrity -Integrity $integrity)) {
+            throw "npm lock entry '$packagePath' lacks version, approved resolved URL, or SHA-512 integrity."
+        }
+        try {
+            $resolvedUri = [Uri]$resolved
+        }
+        catch {
+            throw "npm lock entry '$packagePath' has invalid resolved URL '$resolved'."
+        }
+        if (-not $resolvedUri.IsAbsoluteUri -or $resolvedUri.Scheme -cne 'https' -or
+            -not [string]::IsNullOrEmpty($resolvedUri.UserInfo) -or
+            -not [string]::IsNullOrEmpty($resolvedUri.Query) -or
+            -not [string]::IsNullOrEmpty($resolvedUri.Fragment) -or
+            -not $resolvedUri.AbsoluteUri.StartsWith($approved, [StringComparison]::Ordinal)) {
+            throw "npm lock entry '$packagePath' resolved from untrusted endpoint '$resolved'."
+        }
+        $entries += [pscustomobject][ordered]@{
+            path = $packagePath
+            version = $version
+            resolved = $resolved
+            integrity = $integrity
+        }
+    }
+    if ($entries.Count -eq 0) {
+        throw 'npm package-lock dependency closure is empty.'
+    }
+    $root = @($entries | Where-Object { $_.path -ceq 'node_modules/skill-tools' })
+    if ($root.Count -ne 1 -or [string]$root[0].version -cne $ExpectedVersion -or
+        [string]$root[0].integrity -cne $ExpectedRootIntegrity) {
+        throw 'npm package-lock root version or integrity does not match the resolved skill-tools package.'
+    }
+    $rootPackage = $packages['node_modules/skill-tools']
+    $rootBinObject = $null
+    if ($null -ne $rootPackage) {
+        $rootBinObject = $rootPackage['bin']
+    }
+    $rootBins = @()
+    if ($null -ne $rootBinObject -and (Get-NpmJsonTokenType -Token $rootBinObject) -eq $objectType) {
+        $rootBins = @($rootBinObject.Properties())
+    }
+    if ($rootBins.Count -ne 1 -or [string]$rootBins[0].Name -cne 'skill-tools' -or
+        (Get-NpmJsonTokenType -Token $rootBins[0].Value) -ne $stringType -or [string]::IsNullOrWhiteSpace([string]$rootBins[0].Value) -or
+        [IO.Path]::IsPathRooted([string]$rootBins[0].Value) -or [string]$rootBins[0].Value -match '(^|[\\/])\.\.([\\/]|$)') {
+        throw 'npm package-lock contains an unsafe or missing skill-tools bin target.'
+    }
+
+    $canonicalLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($entry in $entries) {
+        [void]$canonicalLines.Add("$($entry.path)`t$($entry.version)`t$($entry.resolved)`t$($entry.integrity)")
+    }
+    $canonicalLines.Sort([StringComparer]::Ordinal)
+    $canonical = [string]::Join("`n", $canonicalLines) + "`n"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $closureSha256 = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return [ordered]@{
+        packageLockSha256 = Get-FileSha256 -Path $LockPath
+        closureSha256 = $closureSha256
+        rootBinTarget = [string]$rootBins[0].Value
+        entries = $entries
+    }
+}
+
+function Test-NpmSha512Integrity {
+    param([Parameter(Mandatory = $true)][string] $Integrity)
+
+    if ($Integrity -notmatch '^sha512-(?<value>[A-Za-z0-9+/]+={0,2})$') {
+        return $false
+    }
+    try {
+        return ([Convert]::FromBase64String($Matches.value).Length -eq 64)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Assert-NoConflictingGoEnvironment {
-    param([Parameter(Mandatory = $true)] $ExpectedEnvironment)
+    param(
+        [Parameter(Mandatory = $true)] $ExpectedEnvironment,
+        [string[]] $DeniedEnvironmentNames = @()
+    )
 
     foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
         $actual = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
@@ -590,56 +1419,94 @@ function Assert-NoConflictingGoEnvironment {
             throw "Untrusted Go environment override for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
         }
     }
+    foreach ($name in $DeniedEnvironmentNames) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Go environment override for '$name': '$actual'. Expected an unset value."
+        }
+    }
 }
 
 function Invoke-WithApprovedGoEnvironment {
     param(
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
         [Parameter(Mandatory = $true)] $DistributionPolicy,
+        [string] $InstallBinPath,
+        [scriptblock] $EnvironmentProbe,
         [Parameter(Mandatory = $true)][scriptblock] $Action
     )
 
-    Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment
-    $inheritedModuleCache = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
-    if ([bool]$DistributionPolicy.rejectInheritedModuleCache -and -not [string]::IsNullOrEmpty($inheritedModuleCache)) {
-        throw "Untrusted Go environment override for 'GOMODCACHE': '$inheritedModuleCache'. Expected an unset value."
+    Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment -DeniedEnvironmentNames $deniedGoEnvironmentNames
+    $dynamicNames = @('GOMODCACHE', 'GOCACHE', 'GOTMPDIR', 'GOBIN')
+    foreach ($name in $dynamicNames) {
+        $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Go environment override for '$name': '$actual'. Expected an unset value."
+        }
     }
-    $inheritedBuildCache = [Environment]::GetEnvironmentVariable('GOCACHE', [EnvironmentVariableTarget]::Process)
-    if ([bool]$DistributionPolicy.rejectInheritedBuildCache -and -not [string]::IsNullOrEmpty($inheritedBuildCache)) {
-        throw "Untrusted Go environment override for 'GOCACHE': '$inheritedBuildCache'. Expected an unset value."
-    }
-    if ([string]$DistributionPolicy.moduleCacheIsolation -cne 'temporary-empty') {
-        throw "Unsupported Go module cache isolation '$($DistributionPolicy.moduleCacheIsolation)."
-    }
-    if ([string]$DistributionPolicy.buildCacheIsolation -cne 'temporary-empty') {
-        throw "Unsupported Go build cache isolation '$($DistributionPolicy.buildCacheIsolation)."
+    foreach ($entry in $trustedGoDistribution.GetEnumerator()) {
+        $actual = $DistributionPolicy.($entry.Key)
+        if ($entry.Value -is [bool]) {
+            if ($actual -isnot [bool] -or [bool]$actual -ne [bool]$entry.Value) {
+                throw "Unsupported Go distribution control '$($entry.Key)'."
+            }
+        }
+        elseif ($actual -isnot [string] -or [string]$actual -cne [string]$entry.Value) {
+            throw "Unsupported Go distribution control '$($entry.Key)'."
+        }
     }
 
     $previous = [ordered]@{}
-    $moduleCachePath = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-module-cache-{0}" -f [guid]::NewGuid().ToString('N'))
-    $buildCachePath = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-build-cache-{0}" -f [guid]::NewGuid().ToString('N'))
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-work-{0}" -f [guid]::NewGuid().ToString('N'))
+    $moduleCachePath = Join-Path $workRoot 'module-cache'
+    $buildCachePath = Join-Path $workRoot 'build-cache'
+    $temporaryPath = Join-Path $workRoot 'tmp'
+    $effectiveBinPath = if ([string]::IsNullOrWhiteSpace($InstallBinPath)) {
+        Join-Path $workRoot 'bin'
+    }
+    else {
+        [IO.Path]::GetFullPath($InstallBinPath)
+    }
     try {
+        $allNames = @(Get-OrdinalUniqueStrings -Values @(
+            @($ExpectedEnvironment.Keys) + $deniedGoEnvironmentNames + $dynamicNames
+        ))
+        foreach ($name in $allNames) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable([string]$name, $null, [EnvironmentVariableTarget]::Process)
+        }
         foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
-            $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, [EnvironmentVariableTarget]::Process)
         }
-        $previous.GOMODCACHE = $inheritedModuleCache
-        $previous.GOCACHE = $inheritedBuildCache
-        [void](New-Item -ItemType Directory -Path $moduleCachePath)
-        [void](New-Item -ItemType Directory -Path $buildCachePath)
+        foreach ($path in @($moduleCachePath, $buildCachePath, $temporaryPath, $effectiveBinPath)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
         [Environment]::SetEnvironmentVariable('GOMODCACHE', $moduleCachePath, [EnvironmentVariableTarget]::Process)
         [Environment]::SetEnvironmentVariable('GOCACHE', $buildCachePath, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('GOTMPDIR', $temporaryPath, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('GOBIN', $effectiveBinPath, [EnvironmentVariableTarget]::Process)
 
         $processGoEnv = [Environment]::GetEnvironmentVariable('GOENV', [EnvironmentVariableTarget]::Process)
         if ([string]$processGoEnv -cne 'off') {
             throw "Canonical Go process environment requires GOENV=off. Actual='$processGoEnv'."
         }
 
-        [void](Assert-Command -Name 'go')
-        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOFLAGS', 'GOMODCACHE', 'GOCACHE')
-        $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
-        $effective = $effectiveJson | ConvertFrom-Json
-        foreach ($name in @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOFLAGS')) {
+        $effectiveNames = @(Get-OrdinalUniqueStrings -Values @(
+            @($ExpectedEnvironment.Keys) + $dynamicNames
+        ))
+        $goCommand = $null
+        if ($null -eq $EnvironmentProbe) {
+            $goCommand = Assert-Command -Name 'go'
+            $effectiveJson = (Invoke-CheckedCommand -Command $goCommand -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
+            $effective = $effectiveJson | ConvertFrom-Json
+        }
+        else {
+            $effective = & $EnvironmentProbe $effectiveNames
+            if ($null -eq $effective) {
+                throw 'The injected Go environment probe returned no evidence.'
+            }
+        }
+        foreach ($name in $ExpectedEnvironment.Keys) {
             $actual = [string]$effective.$name
             $expected = [string]$ExpectedEnvironment[$name]
             if ($actual -cne $expected) {
@@ -652,43 +1519,44 @@ function Invoke-WithApprovedGoEnvironment {
         else {
             [StringComparison]::Ordinal
         }
-        $effectiveModuleCache = [IO.Path]::GetFullPath([string]$effective.GOMODCACHE)
-        $expectedModuleCache = [IO.Path]::GetFullPath($moduleCachePath)
-        if (-not [string]::Equals($effectiveModuleCache, $expectedModuleCache, $pathComparison)) {
-            throw "Go did not apply the isolated module cache '$expectedModuleCache'. Actual='$effectiveModuleCache'."
+        $expectedPaths = [ordered]@{
+            GOMODCACHE = $moduleCachePath
+            GOCACHE = $buildCachePath
+            GOTMPDIR = $temporaryPath
+            GOBIN = $effectiveBinPath
         }
-        $effectiveBuildCache = [IO.Path]::GetFullPath([string]$effective.GOCACHE)
-        $expectedBuildCache = [IO.Path]::GetFullPath($buildCachePath)
-        if (-not [string]::Equals($effectiveBuildCache, $expectedBuildCache, $pathComparison)) {
-            throw "Go did not apply the isolated build cache '$expectedBuildCache'. Actual='$effectiveBuildCache'."
-        }
-        if (@(Get-ChildItem -LiteralPath $moduleCachePath -Force).Count -ne 0) {
-            throw "The isolated Go module cache was not empty before module resolution: '$moduleCachePath'."
-        }
-        if (@(Get-ChildItem -LiteralPath $buildCachePath -Force).Count -ne 0) {
-            throw "The isolated Go build cache was not empty before installation: '$buildCachePath'."
+        foreach ($entry in $expectedPaths.GetEnumerator()) {
+            $effectivePath = [IO.Path]::GetFullPath([string]$effective.($entry.Key))
+            $expectedPath = [IO.Path]::GetFullPath([string]$entry.Value)
+            if (-not [string]::Equals($effectivePath, $expectedPath, $pathComparison)) {
+                throw "Go did not apply isolated path '$($entry.Key)=$expectedPath'. Actual='$effectivePath'."
+            }
+            if (@(Get-ChildItem -LiteralPath $expectedPath -Force).Count -ne 0) {
+                throw "The isolated Go path '$($entry.Key)' was not empty before resolution: '$expectedPath'."
+            }
         }
 
-        return & $Action
+        return & $Action $goCommand $effectiveBinPath
     }
     finally {
         foreach ($entry in $previous.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
         }
-        if (Test-Path -LiteralPath $moduleCachePath) {
-            Remove-Item -LiteralPath $moduleCachePath -Recurse -Force -ErrorAction Stop
-        }
-        if (Test-Path -LiteralPath $buildCachePath) {
-            Remove-Item -LiteralPath $buildCachePath -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $workRoot) {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction Stop
         }
     }
 }
 
 function Resolve-Pester {
-    param([bool] $ShouldInstall)
+    param(
+        [bool] $ShouldInstall,
+        [Parameter(Mandatory = $true)][string] $RepositoryEndpoint,
+        [string] $RequestedInstallRoot
+    )
 
     $repository = Get-PSRepository -Name PSGallery -ErrorAction Stop
-    $expectedRepository = 'https://www.powershellgallery.com/api/v2'
+    $expectedRepository = $RepositoryEndpoint.TrimEnd('/')
     $actualRepository = ([string]$repository.SourceLocation).TrimEnd('/')
     if ($actualRepository -cne $expectedRepository) {
         throw "Untrusted PSGallery endpoint '$actualRepository'. Expected '$expectedRepository'."
@@ -700,53 +1568,241 @@ function Resolve-Pester {
         throw "Could not resolve a stable Pester version. Resolved='$version'."
     }
 
+    $toolInstallPath = $null
+    $modulePath = $null
+    $moduleClosure = $null
     if ($ShouldInstall) {
-        Install-Module Pester -Repository PSGallery -RequiredVersion $version -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+        $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'pester'
+        try {
+            Save-Module Pester -Repository PSGallery -RequiredVersion $version -Path $toolInstallPath -Force -ErrorAction Stop
+            $modulePath = Join-Path (Join-Path (Join-Path $toolInstallPath 'Pester') $version) 'Pester.psd1'
+            if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+                throw "Saved Pester module manifest was not found: $modulePath"
+            }
+            $manifest = Test-ModuleManifest -Path $modulePath -ErrorAction Stop
+            if ([string]$manifest.Version -cne $version) {
+                throw "Saved Pester version mismatch. Expected '$version', got '$($manifest.Version)'."
+            }
+            [void](Import-Module -Name $modulePath -Force -PassThru -ErrorAction Stop)
+            $invokePester = Get-Command Invoke-Pester -CommandType Function, Cmdlet -ErrorAction Stop | Select-Object -First 1
+            if ($null -eq $invokePester -or [string]$invokePester.Module.Version -cne $version) {
+                throw "Saved Pester module did not expose Invoke-Pester@$version."
+            }
+            $moduleClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
+            Add-ProcessPathValue -Name 'PSModulePath' -Value $toolInstallPath
+        }
+        catch {
+            if (Test-Path -LiteralPath $toolInstallPath) {
+                Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
     }
 
+    $identity = "PowerShellGallery:Pester@$version#repository=$expectedRepository"
+    if ($null -ne $moduleClosure) {
+        $identity += "#moduleClosureSha256=$($moduleClosure.sha256)"
+    }
     return [ordered]@{
         resolvedVersion = $version
-        resolvedIdentity = "PowerShellGallery:Pester@$version"
-        identityKind = 'package-coordinate'
+        resolvedIdentity = $identity
+        identityKind = 'package-coordinate-and-installed-closure'
+        installRoot = $toolInstallPath
+        modulePath = $modulePath
+        executablePath = $modulePath
+        executableSha256 = if ($null -eq $modulePath) { $null } else { Get-FileSha256 -Path $modulePath }
+        dependencyClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
+        dependencyClosure = if ($null -eq $moduleClosure) { @() } else { @($moduleClosure.entries) }
     }
 }
 
 function Resolve-SkillTools {
     param(
         [bool] $ShouldInstall,
-        [Parameter(Mandatory = $true)][string] $Registry
+        [Parameter(Mandatory = $true)][string] $Registry,
+        [Parameter(Mandatory = $true)] $DistributionPolicy,
+        [string] $RequestedInstallRoot
     )
 
-    $approvedRegistry = Assert-ApprovedNpmRegistry -ExpectedRegistry $Registry
-    $registryArgument = "--registry=$approvedRegistry"
-
-    $versionJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', 'skill-tools', 'version', '--json', $registryArgument)) -join "`n"
-    $version = [string]($versionJson | ConvertFrom-Json)
-    if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('-')) {
-        throw "Could not resolve a stable skill-tools version. Resolved='$version'."
+    if ([string]$DistributionPolicy.configIsolation -cne 'empty-config-and-workdir' -or
+        [string]$DistributionPolicy.environmentOverridePolicy -cne 'deny-by-default' -or
+        [string]$DistributionPolicy.dependencyAcquisition -cne 'package-lock' -or
+        [string]$DistributionPolicy.installEnvironment -cne 'isolated-prefix' -or
+        -not [bool]$DistributionPolicy.ignoreScripts -or
+        -not [bool]$DistributionPolicy.recordDependencyClosureIntegrity) {
+        throw 'npm distribution policy is incomplete or untrusted.'
     }
 
-    $integrityJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', "skill-tools@$version", 'dist.integrity', '--json', $registryArgument)) -join "`n"
-    $integrity = [string]($integrityJson | ConvertFrom-Json)
-    if ([string]::IsNullOrWhiteSpace($integrity)) {
-        throw 'npm did not return package integrity for skill-tools.'
+    $npmCommand = Assert-NpmCommand
+    $nodeCommand = Assert-Command -Name 'node'
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ("standard-npm-work-{0}" -f [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $workRoot)
+    $toolInstallPath = if ($ShouldInstall) {
+        New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skill-tools'
     }
-
-    if ($ShouldInstall) {
-        [void](Invoke-CheckedCommand -Command 'npm' -Arguments @('install', '--global', '--no-audit', '--no-fund', $registryArgument, "skill-tools@$version"))
+    else {
+        $null
     }
+    try {
+        return Invoke-WithApprovedNpmEnvironment -NpmCommand $npmCommand -ApprovedRegistry $Registry -WorkPath $workRoot -Action {
+            param($approvedRegistry)
 
-    return [ordered]@{
-        resolvedVersion = $version
-        resolvedIdentity = "npm:skill-tools@$version#$integrity#registry=$approvedRegistry"
-        identityKind = 'registry-integrity'
+            $registryArgument = "--registry=$approvedRegistry"
+            $versionJson = (Invoke-CheckedCommand -Command $npmCommand -Arguments @('view', 'skill-tools', 'version', '--json', $registryArgument)) -join "`n"
+            $parsedVersion = $versionJson | ConvertFrom-Json
+            if ($parsedVersion -isnot [string]) {
+                throw 'npm returned a non-string skill-tools version.'
+            }
+            $version = [string]$parsedVersion
+            if (-not (Test-StableNpmPackageVersion -Version $version)) {
+                throw "Could not resolve a stable SemVer skill-tools version. Resolved='$version'."
+            }
+
+            $integrityJson = (Invoke-CheckedCommand -Command $npmCommand -Arguments @('view', "skill-tools@$version", 'dist.integrity', '--json', $registryArgument)) -join "`n"
+            $parsedIntegrity = $integrityJson | ConvertFrom-Json
+            if ($parsedIntegrity -isnot [string] -or -not (Test-NpmSha512Integrity -Integrity ([string]$parsedIntegrity))) {
+                throw 'npm did not return a SHA-512 package integrity for skill-tools.'
+            }
+            $integrity = [string]$parsedIntegrity
+
+            $lockIdentity = $null
+            $executablePath = $null
+            $executableSha256 = $null
+            $entryPointPath = $null
+            $entryPointSha256 = $null
+            $nodeSha256 = $null
+            $installedClosureSha256 = $null
+            $executableVerified = $false
+            if ($ShouldInstall) {
+                $controlledProjectConfig = @(
+                    "registry=$approvedRegistry",
+                    'dry-run=false',
+                    'ignore-scripts=true',
+                    'package-lock=true',
+                    'omit-lockfile-registry-resolved=false',
+                    'audit=false',
+                    'fund=false'
+                ) -join [Environment]::NewLine
+                [IO.File]::WriteAllText((Join-Path $toolInstallPath '.npmrc'), $controlledProjectConfig + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+                $packageJsonPath = Join-Path $toolInstallPath 'package.json'
+                $packageJson = [ordered]@{
+                    name = 'standard-validation-skill-tools'
+                    private = $true
+                    version = '1.0.0'
+                    dependencies = [ordered]@{ 'skill-tools' = $version }
+                } | ConvertTo-Json -Depth 5
+                [IO.File]::WriteAllText($packageJsonPath, $packageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+
+                [void](Invoke-CheckedCommand -Command $npmCommand -Arguments @(
+                    'install', '--package-lock-only', '--ignore-scripts=true', '--dry-run=false',
+                    '--package-lock=true', '--omit-lockfile-registry-resolved=false',
+                    '--workspaces=false', '--global=false', '--replace-registry-host=never', '--no-audit', '--no-fund',
+                    "--prefix=$toolInstallPath", $registryArgument
+                ))
+                $lockPath = Join-Path $toolInstallPath 'package-lock.json'
+                if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+                    throw 'npm did not create the required package-lock.json.'
+                }
+                $lockIdentity = Get-NpmLockIdentity -LockPath $lockPath -ApprovedRegistry $approvedRegistry -ExpectedRootIntegrity $integrity -ExpectedVersion $version
+                $lockBeforeInstall = [string]$lockIdentity.packageLockSha256
+
+                [void](Invoke-CheckedCommand -Command $npmCommand -Arguments @(
+                    'ci', '--ignore-scripts=true', '--dry-run=false', '--workspaces=false', '--global=false',
+                    '--replace-registry-host=never', '--no-audit', '--no-fund',
+                    "--prefix=$toolInstallPath", $registryArgument
+                ))
+                if ((Get-FileSha256 -Path $lockPath) -cne $lockBeforeInstall) {
+                    throw 'npm ci modified the verified package-lock.json.'
+                }
+                [void](Invoke-CheckedCommand -Command $npmCommand -Arguments @(
+                    'ls', '--all', '--loglevel=error', "--prefix=$toolInstallPath"
+                ))
+                $installedManifestPath = Join-Path $toolInstallPath 'node_modules/skill-tools/package.json'
+                if (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) {
+                    throw "Installed skill-tools manifest was not found: $installedManifestPath"
+                }
+                $installedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $installedManifestPath | ConvertFrom-Json
+                if ($installedManifest.name -isnot [string] -or [string]$installedManifest.name -cne 'skill-tools' -or
+                    $installedManifest.version -isnot [string] -or [string]$installedManifest.version -cne $version) {
+                    throw "Installed skill-tools package identity mismatch. Expected 'skill-tools@$version'."
+                }
+                $installedBins = @($installedManifest.bin.PSObject.Properties)
+                if ($installedBins.Count -ne 1 -or [string]$installedBins[0].Name -cne 'skill-tools' -or
+                    $installedBins[0].Value -isnot [string] -or [string]$installedBins[0].Value -cne [string]$lockIdentity.rootBinTarget) {
+                    throw 'Installed skill-tools bin metadata does not match package-lock.'
+                }
+
+                $packageRoot = [IO.Path]::GetFullPath((Join-Path $toolInstallPath 'node_modules/skill-tools')).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+                $entryPointPath = [IO.Path]::GetFullPath((Join-Path $packageRoot ([string]$installedBins[0].Value)))
+                $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    [StringComparison]::OrdinalIgnoreCase
+                }
+                else {
+                    [StringComparison]::Ordinal
+                }
+                if (-not $entryPointPath.StartsWith($packageRoot, $pathComparison) -or
+                    -not (Test-Path -LiteralPath $entryPointPath -PathType Leaf)) {
+                    throw 'Installed skill-tools entry point escapes or is absent from its package root.'
+                }
+                $executablePath = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    Join-Path $toolInstallPath 'node_modules\.bin\skill-tools.cmd'
+                }
+                else {
+                    Join-Path $toolInstallPath 'node_modules/.bin/skill-tools'
+                }
+                if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+                    throw "Installed skill-tools executable was not found: $executablePath"
+                }
+                [void](Invoke-CheckedCommand -Command $nodeCommand -Arguments @($entryPointPath, '--help'))
+                $executableVerified = $true
+                $executableSha256 = Get-FileSha256 -Path $executablePath
+                $entryPointSha256 = Get-FileSha256 -Path $entryPointPath
+                $nodeSha256 = Get-FileSha256 -Path $nodeCommand
+                $installedClosureSha256 = [string](Get-DirectoryClosureIdentity -Path $toolInstallPath).sha256
+                Add-ProcessPathValue -Name 'PATH' -Value (Split-Path -Parent $executablePath)
+            }
+
+            $identity = "npm:skill-tools@$version#$integrity#registry=$approvedRegistry"
+            if ($null -ne $lockIdentity) {
+                $identity += "#packageLockSha256=$($lockIdentity.packageLockSha256)#dependencyClosureSha256=$($lockIdentity.closureSha256)#executableSha256=$executableSha256#installedClosureSha256=$installedClosureSha256"
+            }
+            return [ordered]@{
+                resolvedVersion = $version
+                resolvedIdentity = $identity
+                identityKind = 'registry-integrity-and-locked-dependency-closure'
+                installRoot = $toolInstallPath
+                executablePath = $executablePath
+                executableSha256 = $executableSha256
+                packageLockSha256 = if ($null -eq $lockIdentity) { $null } else { [string]$lockIdentity.packageLockSha256 }
+                dependencyClosureSha256 = if ($null -eq $lockIdentity) { $null } else { [string]$lockIdentity.closureSha256 }
+                dependencyClosure = if ($null -eq $lockIdentity) { @() } else { @($lockIdentity.entries) }
+                installedClosureSha256 = $installedClosureSha256
+                entryPointPath = $entryPointPath
+                entryPointSha256 = $entryPointSha256
+                nodePath = $nodeCommand
+                nodeSha256 = $nodeSha256
+                executableVerified = $executableVerified
+            }
+        }
+    }
+    catch {
+        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
+            Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    finally {
+        if (Test-Path -LiteralPath $workRoot) {
+            Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
 function Resolve-SkillValidator {
     param(
         [bool] $ShouldInstall,
-        [Parameter(Mandatory = $true)] $ToolPolicy
+        [Parameter(Mandatory = $true)] $ToolPolicy,
+        [string] $RequestedInstallRoot
     )
 
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
@@ -756,37 +1812,97 @@ function Resolve-SkillValidator {
         $expectedEnvironment[$entry.Key] = [string]$ToolPolicy.goEnvironment.($entry.Key)
     }
 
-    return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -Action {
-        $metadataJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
-        $metadata = $metadataJson | ConvertFrom-Json
-        $version = [string]$metadata.Version
-        if (-not (Test-StableGoModuleVersion -Version $version)) {
-            throw "Go did not resolve a stable release version for skill-validator. Resolved='$version'."
-        }
+    $toolInstallPath = if ($ShouldInstall) {
+        New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skill-validator'
+    }
+    else {
+        $null
+    }
+    $installBinPath = if ($ShouldInstall) { Join-Path $toolInstallPath 'bin' } else { $null }
 
-        if ($ShouldInstall) {
-            [void](Invoke-CheckedCommand -Command 'go' -Arguments @('install', "$commandPath@$version"))
-        }
+    try {
+        return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
+            param($goCommand, $effectiveBinPath)
 
-        return [ordered]@{
-            resolvedVersion = $version
-            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty"
-            identityKind = 'go-module-version-with-trusted-distribution'
-            moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
-            buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
+            $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
+            $metadata = $metadataJson | ConvertFrom-Json
+            $version = [string]$metadata.Version
+            if ([string]$metadata.Path -cne $modulePath -or -not (Test-StableGoModuleVersion -Version $version)) {
+                throw "Go did not resolve the expected stable release for skill-validator. Path='$($metadata.Path)' Version='$version'."
+            }
+
+            $executablePath = $null
+            $executableSha256 = $null
+            $installedClosure = $null
+            if ($ShouldInstall) {
+                [void](Invoke-CheckedCommand -Command $goCommand -Arguments @('install', "$commandPath@$version"))
+                $executableName = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    'skill-validator.exe'
+                }
+                else {
+                    'skill-validator'
+                }
+                $executablePath = [IO.Path]::GetFullPath((Join-Path $effectiveBinPath $executableName))
+                if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+                    throw "Installed skill-validator executable was not found: $executablePath"
+                }
+
+                $buildInfo = @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version', '-m', $executablePath))
+                $modulePattern = '^\s*mod\s+{0}\s+{1}\s+h1:[A-Za-z0-9+/=]+\s*$' -f
+                    [regex]::Escape($modulePath), [regex]::Escape($version)
+                if (@($buildInfo | Where-Object { $_ -match $modulePattern }).Count -ne 1) {
+                    throw "Installed skill-validator build identity did not bind '$modulePath@$version'."
+                }
+                [void](Invoke-CheckedCommand -Command $executablePath -Arguments @('--help'))
+                $executableSha256 = Get-FileSha256 -Path $executablePath
+                $installedClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
+                Add-ProcessPathValue -Name 'PATH' -Value $effectiveBinPath
+            }
+
+            $identity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
+            if ($null -ne $installedClosure) {
+                $identity += "#binarySha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
+            }
+            return [ordered]@{
+                resolvedVersion = $version
+                resolvedIdentity = $identity
+                identityKind = 'go-module-version-build-info-and-binary-hash'
+                installRoot = $toolInstallPath
+                executablePath = $executablePath
+                executableSha256 = $executableSha256
+                dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
+                dependencyClosure = if ($null -eq $installedClosure) { @() } else { @($installedClosure.entries) }
+                moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
+                buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
+                temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
+                binaryInstallIsolation = [string]$ToolPolicy.goDistribution.binaryInstallIsolation
+            }
         }
+    }
+    catch {
+        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
+            Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
 }
 
 function Resolve-SkillSpector {
     param(
         [bool] $ShouldInstall,
-        [Parameter(Mandatory = $true)] $ToolPolicy
+        [Parameter(Mandatory = $true)] $ToolPolicy,
+        [string] $RequestedInstallRoot
     )
 
-    [void](Assert-Command -Name 'python')
-    $previousGitHubToken = [Environment]::GetEnvironmentVariable('GITHUB_TOKEN', [EnvironmentVariableTarget]::Process)
-    $previousGhToken = [Environment]::GetEnvironmentVariable('GH_TOKEN', [EnvironmentVariableTarget]::Process)
+    $pythonCommand = Assert-Command -Name 'python'
+    $closureHelperPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.py'))
+    if (-not (Test-Path -LiteralPath $closureHelperPath -PathType Leaf)) {
+        throw "Python wheel closure helper not found: $closureHelperPath"
+    }
+    $closureHelperSha256 = Get-FileSha256 -Path $closureHelperPath
+    $approvedIndex = Normalize-RegistryUri -Value ([string]$ToolPolicy.pythonPackageIndex)
+    Assert-NoConflictingPipEnvironment -ApprovedIndex $approvedIndex
+    Assert-NoConflictingPythonEnvironment
     $headers = Get-GitHubHeaders
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Method Get
     if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) {
@@ -827,7 +1943,6 @@ function Resolve-SkillSpector {
         throw 'SkillSpector release wheel does not expose a SHA-256 digest.'
     }
 
-    $approvedIndex = Normalize-RegistryUri -Value ([string]$ToolPolicy.pythonPackageIndex)
     $interpreterIsolation = [string]$ToolPolicy.pythonDistribution.interpreterIsolation
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("skillspector-{0}-{1}" -f $version, [guid]::NewGuid().ToString('N'))
     $wheelhouse = Join-Path $tempRoot 'wheelhouse'
@@ -835,16 +1950,16 @@ function Resolve-SkillSpector {
 
     $closure = $null
     $installEnvironment = $null
-    $installDisposition = $null
+    $toolInstallPath = $null
+    $executablePath = $null
+    $executableSha256 = $null
+    $installedClosure = $null
+    $backtrackingEvidence = $null
+    $consoleEntryPoint = $null
     $installedMetadataVerification = $null
     try {
         $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
         Invoke-WebRequest -Uri $assetUri -Headers $headers -OutFile $wheelPath -UseBasicParsing
-
-        # GitHub credentials are needed only for the authenticated release API/download calls above.
-        # No Python or package-manager subprocess may inherit them.
-        [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', $null, [EnvironmentVariableTarget]::Process)
-        [Environment]::SetEnvironmentVariable('GH_TOKEN', $null, [EnvironmentVariableTarget]::Process)
 
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
         $expectedHash = $digest.Substring('sha256:'.Length)
@@ -856,27 +1971,38 @@ function Resolve-SkillSpector {
         Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
         Assert-NoPythonDirectReferences -Metadata $wheelMetadata -WheelFileName ([string]$wheel.name)
 
-        if ($ShouldInstall) {
-            $venvPath = Join-Path $tempRoot 'venv'
-            [void](Invoke-IsolatedPythonCommand -PythonCommand 'python' -Arguments @('-m', 'venv', $venvPath))
-            $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                Join-Path $venvPath 'Scripts\python.exe'
-            }
-            else {
-                Join-Path $venvPath 'bin/python'
-            }
-            if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-                throw "SkillSpector isolated virtual environment Python was not created: $venvPython"
-            }
-            $installEnvironment = 'isolated-venv'
-            $installDisposition = 'ephemeral-verification'
+        # GitHub credentials are needed only for the authenticated release API/download calls above.
+        # No resolver-managed Python or package-manager subprocess may inherit them.
+        if ($headers.ContainsKey('Authorization')) { [void]$headers.Remove('Authorization') }
+        Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'Env:GH_TOKEN' -Force -ErrorAction SilentlyContinue
 
-            $closure = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
-                $indexArgument = "--index-url=$approvedIndex"
-                [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
-                    '-m', 'pip', 'download', '--disable-pip-version-check', '--no-cache-dir',
-                    '--only-binary=:all:', '--dest', $wheelhouse, $indexArgument, $wheelPath
-                ))
+        if ($ShouldInstall) {
+            $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
+            $venvPath = Join-Path $toolInstallPath 'venv'
+            $installation = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', $venvPath))
+                $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    Join-Path $venvPath 'Scripts\python.exe'
+                }
+                else {
+                    Join-Path $venvPath 'bin/python'
+                }
+                if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+                    throw "SkillSpector isolated virtual environment Python was not created: $venvPython"
+                }
+
+                $dependencyResolutionPath = Join-Path $tempRoot 'dependency-resolution'
+                $candidatePath = Join-Path $tempRoot 'verified-candidates'
+                $resolutionEvidence = Resolve-PythonWheelClosureFromApprovedIndex `
+                    -PythonCommand $venvPython `
+                    -HelperPath $closureHelperPath `
+                    -ApprovedIndex $approvedIndex `
+                    -RootWheelPath $wheelPath `
+                    -RootWheelSha256 $expectedHash `
+                    -CandidatePath $candidatePath `
+                    -WheelhousePath $wheelhouse `
+                    -WorkPath $dependencyResolutionPath
 
                 $wheelhouseRoot = Join-Path $wheelhouse ([string]$wheel.name)
                 if (-not (Test-Path -LiteralPath $wheelhouseRoot -PathType Leaf)) {
@@ -893,6 +2019,45 @@ function Resolve-SkillSpector {
                 if ($rootEntry.Count -ne 1 -or [string]$rootEntry[0].version -cne $version -or [string]$rootEntry[0].sha256 -cne $expectedHash) {
                     throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
                 }
+                $selectedEntries = @($resolutionEvidence.selectedEntries)
+                if ($selectedEntries.Count -ne @($manifest.entries).Count) {
+                    throw "Offline backtracking selection count mismatch. Expected '$(@($manifest.entries).Count)', got '$($selectedEntries.Count)'."
+                }
+                foreach ($entry in @($manifest.entries)) {
+                    $selectedMatches = @($selectedEntries | Where-Object {
+                        [string]$_.normalizedName -ceq [string]$entry.normalizedName -and
+                        [string]$_.version -ceq [string]$entry.version -and
+                        [string]$_.file -ceq [string]$entry.file -and
+                        [string]$_.sha256 -ceq [string]$entry.sha256
+                    })
+                    if ($selectedMatches.Count -ne 1) {
+                        throw "Offline backtracking evidence did not bind '$($entry.file)'."
+                    }
+                }
+
+                $planPath = Join-Path $tempRoot 'skillspector-offline-install-plan.json'
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
+                    '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
+                    '--dry-run', '--ignore-installed', '--no-index', "--find-links=$wheelhouse",
+                    '--only-binary=:all:', '--require-hashes', '--report', $planPath, '-r', $lockPath
+                ))
+                if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
+                    throw 'Offline SkillSpector dependency resolution did not produce an install plan.'
+                }
+                $plan = Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath | ConvertFrom-Json
+                $planned = @($plan.install)
+                if ($planned.Count -ne @($manifest.entries).Count) {
+                    throw "Offline SkillSpector dependency plan count mismatch. Expected '$(@($manifest.entries).Count)', got '$($planned.Count)'."
+                }
+                foreach ($entry in @($manifest.entries)) {
+                    $plannedMatches = @($planned | Where-Object {
+                        (Normalize-PythonPackageName -Name ([string]$_.metadata.name)) -ceq [string]$entry.normalizedName -and
+                        [string]$_.metadata.version -ceq [string]$entry.version
+                    })
+                    if ($plannedMatches.Count -ne 1) {
+                        throw "Offline SkillSpector dependency plan did not bind '$($entry.name)==$($entry.version)'."
+                    }
+                }
 
                 [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
                     '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
@@ -900,45 +2065,97 @@ function Resolve-SkillSpector {
                     '-r', $lockPath
                 ))
 
-                return $manifest
-            }
+                # Read the installed dist-info files directly. Starting the installed interpreter here
+                # would process site-packages .pth startup lines before the resolver has verified metadata.
+                $installedMetadata = Get-InstalledPythonDistributionMetadata `
+                    -VirtualEnvironmentPath $venvPath `
+                    -DistributionName 'skillspector'
+                if ([string]$installedMetadata.version -cne $version) {
+                    throw "Installed SkillSpector version mismatch. Expected '$version', got '$($installedMetadata.version)'."
+                }
 
-            # Read dist-info/METADATA directly. Do not verify with
-            # "import importlib.metadata as m; print(m.version('skillspector'))": starting the installed
-            # interpreter here would process site-packages .pth files and could execute newly installed code.
-            $installedMetadata = Get-InstalledPythonDistributionMetadata -VirtualEnvironmentPath $venvPath -DistributionName 'skillspector'
-            if ([string]$installedMetadata.version -cne $version) {
-                throw "Installed SkillSpector version mismatch. Expected '$version', got '$($installedMetadata.version)'."
+                $installedExecutablePath = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    Join-Path $venvPath 'Scripts\skillspector.exe'
+                }
+                else {
+                    Join-Path $venvPath 'bin/skillspector'
+                }
+                $installedExecutablePath = [IO.Path]::GetFullPath($installedExecutablePath)
+                if (-not (Test-Path -LiteralPath $installedExecutablePath -PathType Leaf)) {
+                    throw "Installed SkillSpector executable was not found: $installedExecutablePath"
+                }
+
+                return [ordered]@{
+                    manifest = $manifest
+                    executablePath = $installedExecutablePath
+                    consoleEntryPoint = [string]$installedMetadata.consoleEntryPoint
+                    installedMetadataVerification = 'static-dist-info-metadata'
+                    resolutionEvidence = $resolutionEvidence
+                }
             }
-            $installedMetadataVerification = 'static-dist-info-metadata'
+            $closure = $installation.manifest
+            $backtrackingEvidence = $installation.resolutionEvidence
+            $executablePath = [string]$installation.executablePath
+            $consoleEntryPoint = [string]$installation.consoleEntryPoint
+            $installedMetadataVerification = [string]$installation.installedMetadataVerification
+            $installEnvironment = 'isolated-venv'
+            $executableSha256 = Get-FileSha256 -Path $executablePath
+            $installedClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
+            Add-ProcessPathValue -Name 'PATH' -Value (Split-Path -Parent $executablePath)
         }
     }
+    catch {
+        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
+            Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
     finally {
-        [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', $previousGitHubToken, [EnvironmentVariableTarget]::Process)
-        [Environment]::SetEnvironmentVariable('GH_TOKEN', $previousGhToken, [EnvironmentVariableTarget]::Process)
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#directReferences=blocked#credentialIsolation=github-token-cleared-before-python"
+    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#rootDirectReferences=blocked#credentialIsolation=github-token-cleared-before-python#dependencyClosure=unresolved"
     $identityKind = 'release-commit-asset-metadata'
     if ($null -ne $closure) {
-        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#installDisposition=$installDisposition#interpreterIsolation=$interpreterIsolation#installedMetadataVerification=$installedMetadataVerification#dependencyClosureSha256=$($closure.closureSha256)"
-        $identityKind = 'release-commit-asset-metadata-and-dependency-closure'
+        $identity = $identity.Replace('#dependencyClosure=unresolved', '#directReferences=blocked#pipOnlineDependencyTraversal=disabled#dependencyDiscovery=approved-simple-json-lazy#requiresPython=simple-json-wheel-metadata-exact-current-interpreter#offlineBacktracking=verified')
+        $identity += "#pythonIndex=$approvedIndex#pipVersion=$($backtrackingEvidence.pipVersion)#resolutionRounds=$($backtrackingEvidence.resolutionRounds)#candidateCount=$($backtrackingEvidence.candidateCount)#resolverHelperSha256=$closureHelperSha256#candidateInventorySha256=$($backtrackingEvidence.candidateInventorySha256)#selectionPlanSha256=$($backtrackingEvidence.selectionPlanSha256)#selectedClosureSha256=$($backtrackingEvidence.selectedClosureSha256)#installEnvironment=$installEnvironment#interpreterIsolation=$interpreterIsolation#installedMetadataVerification=$installedMetadataVerification#consoleEntryPoint=$consoleEntryPoint#offlineResolution=verified#dependencyClosureSha256=$($closure.closureSha256)#executableSha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
+        $identityKind = 'release-commit-asset-metadata-dependency-closure-and-executable'
     }
 
     return [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity
         identityKind = $identityKind
+        installRoot = $toolInstallPath
+        executablePath = $executablePath
+        executableSha256 = $executableSha256
         pythonPackageIndex = $approvedIndex
         installEnvironment = $installEnvironment
-        installDisposition = $installDisposition
         interpreterIsolation = $interpreterIsolation
         credentialIsolation = 'github-token-cleared-before-python'
         installedMetadataVerification = $installedMetadataVerification
         directReferencesAllowed = [bool]$ToolPolicy.pythonDistribution.allowDirectReferences
+        pipOnlineDependencyTraversalAllowed = [bool]$ToolPolicy.pythonDistribution.allowPipOnlineDependencyTraversal
+        dependencyDiscovery = [string]$ToolPolicy.pythonDistribution.candidateDiscovery
+        requiresPythonPolicy = [string]$ToolPolicy.pythonDistribution.requiresPythonPolicy
+        dependencyResolver = [string]$ToolPolicy.pythonDistribution.dependencyResolver
+        yankedAllowed = [bool]$ToolPolicy.pythonDistribution.allowYanked
+        resolverHelperPath = $closureHelperPath
+        resolverHelperSha256 = $closureHelperSha256
+        consoleEntryPoint = $consoleEntryPoint
+        pipVersion = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.pipVersion }
+        resolutionRounds = if ($null -eq $backtrackingEvidence) { $null } else { [int64]$backtrackingEvidence.resolutionRounds }
+        candidateCount = if ($null -eq $backtrackingEvidence) { $null } else { [int64]$backtrackingEvidence.candidateCount }
+        candidateInventorySha256 = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.candidateInventorySha256 }
+        selectionPlanSha256 = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.selectionPlanSha256 }
+        rawSelectionPlanSha256 = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.rawSelectionPlanSha256 }
+        selectedClosureSha256 = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.selectedClosureSha256 }
+        offlineResolutionVerified = if ($null -eq $closure) { $false } else { $true }
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
+        installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
     }
 }
 
@@ -956,6 +2173,7 @@ if ($ValidatePolicyOnly) {
         trustedSources = $trustedSources
         trustedRegistries = $trustedRegistries
         trustedPythonIndex = $trustedPythonIndex
+        trustedPowerShellRepository = $trustedPowerShellRepository
         trustedGoEnvironment = $trustedGoEnvironment
         trustedGoDistribution = $trustedGoDistribution
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
@@ -967,10 +2185,18 @@ else {
     }
 
     $resolved = switch ($ToolName) {
-        'pester' { Resolve-Pester -ShouldInstall ([bool]$Install) }
-        'skill-tools' { Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) }
-        'skill-validator' { Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' }
-        'skillspector' { Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector }
+        'pester' {
+            Resolve-Pester -ShouldInstall ([bool]$Install) -RepositoryEndpoint ([string]$policy.tools.pester.repository) -RequestedInstallRoot $InstallRoot
+        }
+        'skill-tools' {
+            Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) -DistributionPolicy $policy.tools.'skill-tools'.npmDistribution -RequestedInstallRoot $InstallRoot
+        }
+        'skill-validator' {
+            Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' -RequestedInstallRoot $InstallRoot
+        }
+        'skillspector' {
+            Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot
+        }
     }
 
     $toolPolicy = $policy.tools.$ToolName
@@ -983,26 +2209,59 @@ else {
         resolvedIdentity = [string]$resolved.resolvedIdentity
         identityKind = [string]$resolved.identityKind
         frozenForRun = [bool]$policy.resolution.freezeForRun
+        installRoot = $resolved.installRoot
+        executablePath = $resolved.executablePath
+        executableSha256 = $resolved.executableSha256
+        dependencyClosureSha256 = $resolved.dependencyClosureSha256
+        dependencyClosure = $resolved.dependencyClosure
+    }
+    if ($ToolName -eq 'pester') {
+        $result.modulePath = $resolved.modulePath
     }
     if ($ToolName -eq 'skill-tools') {
         $result.registry = [string]$toolPolicy.registry
+        $result.packageLockSha256 = $resolved.packageLockSha256
+        $result.entryPointPath = $resolved.entryPointPath
+        $result.entryPointSha256 = $resolved.entryPointSha256
+        $result.nodePath = $resolved.nodePath
+        $result.nodeSha256 = $resolved.nodeSha256
+        $result.executableVerified = $resolved.executableVerified
+        $result.installedClosureSha256 = $resolved.installedClosureSha256
     }
     if ($ToolName -eq 'skill-validator') {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
+        $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation
+        $result.binaryInstallIsolation = [string]$resolved.binaryInstallIsolation
     }
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
         $result.installEnvironment = $resolved.installEnvironment
-        $result.installDisposition = $resolved.installDisposition
         $result.interpreterIsolation = [string]$resolved.interpreterIsolation
         $result.credentialIsolation = [string]$resolved.credentialIsolation
         $result.installedMetadataVerification = $resolved.installedMetadataVerification
         $result.directReferencesAllowed = [bool]$resolved.directReferencesAllowed
+        $result.pipOnlineDependencyTraversalAllowed = [bool]$resolved.pipOnlineDependencyTraversalAllowed
+        $result.dependencyDiscovery = [string]$resolved.dependencyDiscovery
+        $result.requiresPythonPolicy = [string]$resolved.requiresPythonPolicy
+        $result.dependencyResolver = [string]$resolved.dependencyResolver
+        $result.yankedAllowed = [bool]$resolved.yankedAllowed
+        $result.resolverHelperPath = [string]$resolved.resolverHelperPath
+        $result.resolverHelperSha256 = [string]$resolved.resolverHelperSha256
+        $result.consoleEntryPoint = $resolved.consoleEntryPoint
+        $result.pipVersion = $resolved.pipVersion
+        $result.resolutionRounds = $resolved.resolutionRounds
+        $result.candidateCount = $resolved.candidateCount
+        $result.candidateInventorySha256 = $resolved.candidateInventorySha256
+        $result.selectionPlanSha256 = $resolved.selectionPlanSha256
+        $result.rawSelectionPlanSha256 = $resolved.rawSelectionPlanSha256
+        $result.selectedClosureSha256 = $resolved.selectedClosureSha256
+        $result.offlineResolutionVerified = [bool]$resolved.offlineResolutionVerified
         $result.dependencyClosureSha256 = $resolved.dependencyClosureSha256
         $result.dependencyClosure = $resolved.dependencyClosure
+        $result.installedClosureSha256 = $resolved.installedClosureSha256
     }
 }
 

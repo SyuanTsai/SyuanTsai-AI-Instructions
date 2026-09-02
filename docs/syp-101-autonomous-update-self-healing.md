@@ -16,7 +16,7 @@
 2. `runtime-bundle.json` schema v2：同一 Repository/commit、acquisition、archive hash、exact file inventory 與 inventory hash。
 3. Checked-in Catalog/Lock：external Skills 的 immutable commits、archive hashes 與 content inventories。
 
-Stable launcher 先以自身內建、未載入 runtime code 的 preflight 驗證 config strict schema、canonical identity、config/bundle pin、完整 non-reparse runtime inventory，以及自身 bytes 與 inventory 內的 reference copy；manual updater 與 cleanup 也必須先通過這個 preflight，之後才能載入 installed contract modules。Runtime 接著驗證 Catalog/Lock，installer 則驗證實際 codeload archive hash。任何一項不成立都不得執行下載、fan-out、cleanup 或更新。
+Stable launcher 先以自身內建、未載入 runtime code 的 preflight 驗證 config strict schema、canonical identity、config/bundle pin、完整 non-reparse runtime inventory，以及自身 bytes 與 inventory 內的 reference copy；manual updater、Agent environment updater 與 cleanup 也必須先通過這個 preflight，之後才能載入 installed contract modules。Runtime 接著驗證 Catalog/Lock，installer 則驗證實際 codeload archive hash。任何一項不成立都不得執行下載、fan-out、cleanup 或更新。
 
 ### Target Repository
 
@@ -81,14 +81,14 @@ Updater 不根據 mutable ref 直接安裝內容。它先解析完整 commit，�
 Installer 在 Codex Home 建立同磁碟 staging/backup：
 
 1. Stable installer 先以內建 verifier 驗證 canonical identity；codeload 由同一個 exclusive file handle 完成 archive hash 與安全解壓，git-checkout 則由完整 commit SHA 的 Git objects 產生 installer-owned snapshot，不讀取 mutable worktree bytes。通過後才 import candidate contract，接著取得 per-Codex-Home install lock。Updater 安裝另在鎖內確認 installed commit 與 mode/channel/ref 仍等於 candidate selection 時的狀態，核准撤銷或 policy drift 時在 mutation 前停止。
-2. 組合 launcher、updater、cleanup、完整 runtime 與 config。
+2. 組合 launcher、updater、Agent environment updater、cleanup、完整 runtime 與 config。
 3. 產生 runtime bundle v2。
 4. Parse 所有 PowerShell，驗證 bundle/config inventory 與 Catalog/Lock。
 5. 驗證所有 stable file/runtime mutation paths 的類型、reparse-point boundary 與 stable-file single-link ownership，並持有本次 staging／backup roots 的 non-delete-sharing directory handles，再備份現有 stable commands、runtime、config、個人 `AGENTS.md` 與 `hooks.json`。
 6. 全程持有 Codex Home／`hooks` 的可阻擋 rename directory handles，以 handle-bound create/write 替換 stable commands；每個 stable file 都在同一 mutation handle 內比較 backup snapshot 的 original bytes，再記錄 transaction-applied bytes，之後才 swap runtime、寫入 config 並更新個人文件/hooks。
 7. 任一步失敗即恢復所有備份；stable-file rollback 只在 current bytes 仍等於 transaction-applied bytes 時還原或刪除，並會繼續恢復其他未 drift 檔案。Transaction runtime 先原子移入 recovery backup，再以 staged configuration 與 candidate identity 重驗 exact bundle/inventory；只有驗證成功才可遞迴刪除，外部新增、替換或 hash drift 一律保留。外部並行修改會升級為 rollback failure，recovery backup 也會保留；包含 staging validation failure 在內，rollback 成功後都刪除 transaction directories。
 
-若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行；驗證完成後，launcher／updater snapshot／cleanup 會持有 shared runtime read lock 到 runtime 使用結束，installer 的 exclusive lock 因此不能在執行中 swap bundle。Updater 另從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤持有 install-state lock，只在把 immutable candidate 交給 installer transaction 前釋放；若安裝失敗，必須重新取得鎖並確認 active identity 未變，才可寫入 failure receipt。
+若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行；驗證完成後，launcher／updater snapshot／Agent environment updater／cleanup 會持有 shared runtime read lock 到 runtime 使用結束，installer 的 exclusive lock 因此不能在執行中 swap bundle。Agent environment `-Apply` 僅在執行 runtime updater 時釋放 read lock，之後重新取得鎖才能 import 與 reconcile。Updater 另從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤持有 install-state lock，只在把 immutable candidate 交給 installer transaction 前釋放；若安裝失敗，必須重新取得鎖並確認 active identity 未變，才可寫入 failure receipt。
 
 既有受管檔案的 write/delete handle 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 final path，並拒絕 reparse file 與 `NumberOfLinks != 1` 的 hard-link alias，使 path precheck 與 native open 間的 alias／parent-junction swap 不能把 mutation 導向 root 外。新檔建立從 target root 起逐層建立或開啟 parent directory，並持有帶讀取存取權且不分享 delete 的 handles 到 file handle 驗證完成；Windows 因此會阻擋途中 rename。移除會以同一個 deny-write/delete handle 讀取與驗證 bytes，再設定 delete disposition，直到關閉 handle 才完成刪除，避免最後一次驗證與 `Remove-Item` 間的 TOCTOU。Exact-hash read-only 檔案會在 handle-bound transaction 暫時清除 attribute；guard handle 保持開啟，重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復再回報。
 
@@ -130,7 +130,7 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Candidate behind/diverged | 寫 stale receipt，不下載、不降級、不安裝。 |
 | GitHub candidate drift | 寫 drift receipt，刪除暫存下載，不安裝。 |
 | Verified bundle/config pin mismatch | Launcher fail closed；同一 stable updater 以 `-RecoverInterruptedInstall` 驗證兩份 strict identity、exact runtime inventory 與 stable entry-point references，然後只將 config pin 對齊 active verified runtime commit 並立即返回，不會接續 network check 或 install workflow。 |
-| Runtime inventory drift | Stable launcher／manual updater／cleanup 在載入 runtime code 前 fail closed，重新執行可信 installer。 |
+| Runtime inventory drift | Stable launcher／manual updater／Agent environment updater／cleanup 在載入 runtime code 前 fail closed，重新執行可信 installer。 |
 | Candidate parse/Catalog/Lock failure | 不進入 active swap。 |
 | Installer mutation failure | Transactional rollback；若 rollback 也失敗則保留 backup。 |
 | Malformed update receipt | Quarantine 損壞檔案，從已驗證 runtime 繼續並原子寫入新 receipt。 |

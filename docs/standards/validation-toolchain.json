@@ -25,12 +25,21 @@
         "allowedInheritedEnvironment": [
           "PIP_INDEX_URL"
         ],
+        "rejectInheritedPythonEnvironment": true,
         "onlyBinary": true,
         "allowDirectReferences": false,
+        "allowPipOnlineDependencyTraversal": false,
+        "allowYanked": false,
         "disableCache": true,
+        "candidateDiscovery": "approved-simple-json-lazy",
+        "requiresPythonPolicy": "simple-json-wheel-metadata-exact-current-interpreter",
         "dependencyAcquisition": "verified-wheelhouse",
+        "dependencyResolver": "pip-offline-backtracking",
         "installEnvironment": "isolated-venv",
         "interpreterIsolation": "python-isolated-mode",
+        "credentialIsolation": "github-token-cleared-before-python",
+        "installedMetadataVerification": "static-dist-info-metadata",
+        "verifyOfflineResolution": true,
         "installNoIndex": true,
         "requireHashes": true,
         "recordDependencyClosureHashes": true
@@ -50,23 +59,42 @@
         "GONOPROXY": "none",
         "GONOSUMDB": "none",
         "GOINSECURE": "",
-        "GOFLAGS": ""
+        "GOFLAGS": "",
+        "GOTOOLCHAIN": "local",
+        "GOWORK": "off",
+        "CGO_ENABLED": "0"
       },
       "goDistribution": {
         "moduleCacheIsolation": "temporary-empty",
-        "rejectInheritedModuleCache": true,
         "buildCacheIsolation": "temporary-empty",
-        "rejectInheritedBuildCache": true
+        "temporaryDirectoryIsolation": "temporary-empty",
+        "binaryInstallIsolation": "run-owned",
+        "rejectInheritedModuleCache": true,
+        "rejectInheritedBuildCache": true,
+        "rejectDangerousEnvironment": true,
+        "recordBinaryHash": true
       }
     },
     "skill-tools": {
       "source": "npm:skill-tools",
       "registry": "https://registry.npmjs.org/",
-      "channel": "latest-stable"
+      "channel": "latest-stable",
+      "npmDistribution": {
+        "configIsolation": "empty-config-and-workdir",
+        "environmentOverridePolicy": "deny-by-default",
+        "allowedInheritedEnvironment": [
+          "NPM_CONFIG_REGISTRY"
+        ],
+        "dependencyAcquisition": "package-lock",
+        "installEnvironment": "isolated-prefix",
+        "ignoreScripts": true,
+        "recordDependencyClosureIntegrity": true
+      }
     },
     "pester": {
       "source": "PowerShellGallery:Pester",
-      "channel": "latest-stable"
+      "channel": "latest-stable",
+      "repository": "https://www.powershellgallery.com/api/v2"
     }
   },
   "compatibilityLane": {

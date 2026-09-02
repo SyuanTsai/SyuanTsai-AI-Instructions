@@ -1,6 +1,6 @@
 ﻿$script:InstallScript = Join-Path $PSScriptRoot '..\scripts\install-ai-instructions-bootstrap.ps1'
 $script:InstalledBootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions-installed.ps1'
-$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
+$script:TestPowerShellExecutable = (Get-Process -Id $PID).Path
 
 function New-InstallerSourceArchive {
     param(
@@ -762,6 +762,112 @@ else {
         }
     }
 
+    # Scenario: Apply must let the runtime updater own the install lock, then consume the resulting runtime as one stable snapshot.
+    # Purpose: Release the read lease only for update and reacquire it before importing or calling the reconciler.
+    It 'InterT54a_agent_environment_apply_releases_then_reacquires_the_runtime_read_lock' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
+        $updaterMarker = Join-Path $TestDrive 'environment-updater-lock.marker'
+        $reconcilerMarker = Join-Path $TestDrive 'environment-reconciler-lock.marker'
+        $escapedInstallLockPath = $installLockPath.Replace("'","''")
+        $escapedUpdaterMarker = $updaterMarker.Replace("'","''")
+        $escapedReconcilerMarker = $reconcilerMarker.Replace("'","''")
+
+        $updaterFixture = @"
+param([string]`$CodexHome,[switch]`$ForceCheck,[switch]`$InstallApproved)
+`$exclusive = [System.IO.File]::Open(
+    '$escapedInstallLockPath',
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+)
+try { [System.IO.File]::WriteAllText('$escapedUpdaterMarker','exclusive-acquired') }
+finally { `$exclusive.Dispose() }
+"@
+        Set-TestText -Path (Join-Path $codexHome 'hooks\update-ai-instructions.ps1') -Value $updaterFixture
+        Set-TestText -Path (Join-Path $runtimeRoot 'update-ai-instructions.ps1') -Value $updaterFixture
+
+        $reconcilerFixture = @"
+Set-StrictMode -Version 2.0
+function Get-UserSkillsDesiredState {
+    param(
+        [string]`$RuntimeRoot,
+        [object]`$Configuration,
+        [string]`$CatalogRepository,
+        [string]`$CatalogCommit,
+        [string]`$WorkingRoot
+    )
+    `$exclusive = `$null
+    `$lockOutcome = 'exclusive-acquired'
+    try {
+        `$exclusive = [System.IO.File]::Open(
+            '$escapedInstallLockPath',
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch [System.IO.IOException] { `$lockOutcome = 'blocked-by-read-lock' }
+    finally { if (`$null -ne `$exclusive) { `$exclusive.Dispose() } }
+    [System.IO.File]::WriteAllText('$escapedReconcilerMarker',`$lockOutcome)
+    return [pscustomobject]@{
+        RuntimeRoot = `$RuntimeRoot
+        Catalog = [pscustomobject]@{ skills = @() }
+        Files = @()
+        Manifest = [pscustomobject]@{
+            catalogRepository = `$CatalogRepository
+            catalogCommit = `$CatalogCommit
+            lockSha256 = ('a' * 64)
+        }
+    }
+}
+function Invoke-UserSkillsReconciliation {
+    param(
+        [object]`$DesiredState,
+        [string]`$UserHome,
+        [string]`$Mode,
+        [switch]`$ForceReinstallManagedSkills,
+        [switch]`$MigrateLegacyCatalogSkills
+    )
+    return [pscustomobject]@{
+        schemaVersion=1; outcome='current'; exitCode=0
+        catalogCommit=[string]`$DesiredState.Manifest.catalogCommit
+        catalogLockSha256=[string]`$DesiredState.Manifest.lockSha256
+        installed=@(); updated=@(); removed=@(); preserved=@(); failed=@()
+        rollbackState='not-started'; backupPath=`$null
+    }
+}
+function Invoke-UserSkillsRecovery { param([string]`$UserHome); throw 'Recovery is not expected in this fixture.' }
+Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery
+"@
+        Set-TestText -Path (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Value $reconcilerFixture
+
+        $runtimeContractPath = Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
+        Import-Module $runtimeContractPath -Force
+        $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $updatedBundle = New-AiInstructionsRuntimeBundleV2 `
+            -RuntimeRoot $runtimeRoot `
+            -Repository ([string]$bundle.repository) `
+            -Commit ([string]$bundle.commit) `
+            -Acquisition ([string]$bundle.acquisition) `
+            -ArchiveSha256 ([string]$bundle.archiveSha256)
+        Set-TestJson -Path $bundlePath -Document $updatedBundle
+
+        $environmentUpdater = Join-Path $codexHome 'hooks\update-agent-environment.ps1'
+        $userHome = Join-Path $TestDrive 'locked-environment-user'
+        New-Item -ItemType Directory -Path $userHome | Out-Null
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $environmentUpdater `
+            -CodexHome $codexHome -UserHome $userHome -Apply -OutputFormat Json 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Be 0
+        ($output -join [Environment]::NewLine) | Should Match '"outcome":"current"'
+        [System.IO.File]::ReadAllText($updaterMarker) | Should Be 'exclusive-acquired'
+        [System.IO.File]::ReadAllText($reconcilerMarker) | Should Be 'blocked-by-read-lock'
+    }
+
     # Scenario: The installed configuration pin is changed without replacing the runtime bundle.
     # Purpose: Make the stable launcher reject mixed configuration/runtime identity before bootstrap.
     It 'InterT55_installed_launcher_rejects_a_runtime_bundle_pin_mismatch' {
@@ -941,6 +1047,36 @@ else {
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stable launcher does not match'
+    }
+
+    # Scenario: The stable Agent environment updater drifts from its immutable runtime reference copy.
+    # Purpose: Stop an already-installed but tampered user-scoped entry point during its trusted launcher preflight.
+    It 'InterT63a_agent_environment_updater_rejects_stable_entry_point_version_drift' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $environmentUpdater = Join-Path $codexHome 'hooks\update-agent-environment.ps1'
+        [System.IO.File]::AppendAllText($environmentUpdater,"`n# stable Agent environment updater drift`n")
+        $userHome = Join-Path $TestDrive 'environment-updater-user'
+        New-Item -ItemType Directory -Path $userHome | Out-Null
+
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $environmentUpdater `
+            -CodexHome $codexHome -UserHome $userHome -VerifyOnly -OutputFormat Json 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'stable Agent environment updater does not match'
+    }
+
+    # Scenario: The stable Agent environment updater is missing from an otherwise installed runtime.
+    # Purpose: Treat the stable entry point as required runtime inventory instead of silently accepting a partial install.
+    It 'InterT63b_installed_launcher_rejects_a_missing_stable_agent_environment_updater' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $environmentUpdater = Join-Path $codexHome 'hooks\update-agent-environment.ps1'
+        Remove-Item -LiteralPath $environmentUpdater -Force
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath -SkipUpdateCheck 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'runtime is incomplete.*update-agent-environment\.ps1'
     }
 
     # Scenario: The installed runtime directory is replaced by a file while unmanaged cleanup contracts exist beside the stable command.

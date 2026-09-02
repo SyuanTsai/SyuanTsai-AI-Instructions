@@ -69,8 +69,16 @@ jobs:
           if ($null -eq $invokePester) { throw 'Invoke-Pester 3.4.0 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
           $result = & $invokePester -Script ./tests -PassThru
+          if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ([int]$result.TotalCount -ne 416) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 416." }
           if ($result.FailedCount -gt 0) { exit 1 }
+          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
+          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
+          if ([int]$result.SkippedCount -ne 6) { throw "Windows PowerShell 5.1 expected exactly 6 platform/version skips; got $($result.SkippedCount)." }
+          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
+            throw 'Pester result counts are incomplete.'
+          }
           exit 0
 
   powershell-7:
@@ -125,8 +133,16 @@ jobs:
           if ($null -eq $invokePester) { throw 'Invoke-Pester 4.10.1 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
           $result = & $invokePester -Script ./tests -PassThru
+          if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ([int]$result.TotalCount -ne 416) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 416." }
           if ($result.FailedCount -gt 0) { exit 1 }
+          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
+          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
+          if ([int]$result.SkippedCount -ne 5) { throw "PowerShell 7 on Windows expected exactly 5 platform skips; got $($result.SkippedCount)." }
+          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
+            throw 'Pester result counts are incomplete.'
+          }
           exit 0
 
   powershell-7-unix-composition:
@@ -147,68 +163,24 @@ jobs:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $policyReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-policy.json'
-          & ./scripts/Resolve-StandardValidationTool.ps1 -ValidatePolicyOnly -OutputPath $policyReceipt | Out-Host
-          $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $policyReceipt | ConvertFrom-Json
-          if ($policy.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
-          if ($policy.sourceTrust.enforcement -ne 'exact-approved-source') { throw 'Unexpected source trust enforcement.' }
-          if (-not [bool]$policy.sourceTrust.failClosedOnMismatch) { throw 'Source trust must fail closed.' }
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP
 
-          $skillSpectorReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-skillspector.json'
-          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName skillspector -Install -OutputPath $skillSpectorReceipt | Out-Host
-          $skillSpector = Get-Content -Raw -Encoding UTF8 -LiteralPath $skillSpectorReceipt | ConvertFrom-Json
-          if ($skillSpector.source -ne 'NVIDIA/SkillSpector') { throw 'Unexpected SkillSpector source.' }
-          if ($skillSpector.installEnvironment -ne 'isolated-venv') { throw 'SkillSpector was not installed in the approved isolated environment.' }
-          if ($skillSpector.installDisposition -ne 'ephemeral-verification') { throw 'SkillSpector resolver install must remain verification-only.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'installDisposition=ephemeral-verification') { throw 'SkillSpector identity does not record verification-only installation.' }
-          if ($skillSpector.interpreterIsolation -ne 'python-isolated-mode') { throw 'SkillSpector Python subprocesses were not isolated.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'interpreterIsolation=python-isolated-mode') { throw 'SkillSpector identity does not record Python interpreter isolation.' }
-          if ($skillSpector.credentialIsolation -ne 'github-token-cleared-before-python') { throw 'SkillSpector Python subprocesses inherited GitHub credentials.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'credentialIsolation=github-token-cleared-before-python') { throw 'SkillSpector identity does not record credential isolation.' }
-          if ($skillSpector.installedMetadataVerification -ne 'static-dist-info-metadata') { throw 'SkillSpector installed version was not verified through static metadata.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'installedMetadataVerification=static-dist-info-metadata') { throw 'SkillSpector identity does not record static installed metadata verification.' }
-          if ([bool]$skillSpector.directReferencesAllowed) { throw 'SkillSpector direct dependency references were not blocked.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'directReferences=blocked') { throw 'SkillSpector identity does not record direct-reference blocking.' }
-          if ([string]$skillSpector.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure identity is missing.' }
-          if (@($skillSpector.dependencyClosure).Count -le 1) { throw 'SkillSpector runtime dependency closure is incomplete.' }
-          if ($skillSpector.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector identity does not bind the dependency closure.' }
-
-          # The GitHub API token is needed only while resolving the SkillSpector release.
-          # Do not leave it available while importing third-party modules or running repository tests.
-          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
-          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
-
-          $pesterReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-pester.json'
-          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName pester -Install -OutputPath $pesterReceipt | Out-Host
-          $pester = Get-Content -Raw -Encoding UTF8 -LiteralPath $pesterReceipt | ConvertFrom-Json
-          if ($pester.source -ne 'PowerShellGallery:Pester') { throw 'Unexpected Pester source.' }
-          if ([string]::IsNullOrWhiteSpace([string]$pester.resolvedVersion)) { throw 'Pester version was not recorded.' }
-          Import-Module Pester -RequiredVersion $pester.resolvedVersion -Force
-          $authorityPaths = @(
-              './tests/skill-repository-standard.Tests.ps1'
-              './tests/skill-repository-workflows.Tests.ps1'
-              './tests/standard-validation-resolver-hardening.Tests.ps1'
-          )
-          $authority = Invoke-Pester -Path $authorityPaths -PassThru
-          Write-Host "Authority tests: Total=$($authority.TotalCount) Passed=$($authority.PassedCount) Failed=$($authority.FailedCount)"
-          if ($authority.FailedCount -gt 0) { exit 1 }
-
-          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-              & git diff --check "$($env:PULL_REQUEST_BASE_SHA)...HEAD"
-          }
-          elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:PUSH_BEFORE_SHA -notmatch '^0+$') {
-              & git diff --check "$($env:PUSH_BEFORE_SHA)..HEAD"
-          }
-          else {
-              & git rev-parse HEAD^ 2>$null | Out-Null
-              if ($LASTEXITCODE -eq 0) {
-                  & git diff --check 'HEAD^..HEAD'
-              }
-              else {
-                  & git diff-tree --check --root -r HEAD
-              }
-          }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check whitespace
+        shell: bash
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PULL_REQUEST_BASE_SHA...HEAD"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff --check "$PUSH_BEFORE_SHA..HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff-tree --check --root -r HEAD
+          fi
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -220,13 +192,31 @@ jobs:
           }
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
 
-      - name: Run cross-platform composition tests
+      - name: Run cross-platform composition and acquisition tests
         shell: pwsh
         run: |
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
           Import-Module $pester.Path -Force
-          $result = Invoke-Pester -Script ./tests/skills-source-composition.Tests.ps1 -PassThru
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ($result.FailedCount -gt 0) { exit 1 }
+          $testPaths = @(
+            './tests/skills-source-composition.Tests.ps1',
+            './tests/skills-source-acquisition.Tests.ps1'
+          )
+          $expectedTestCounts = @{
+            './tests/skills-source-composition.Tests.ps1' = 6
+            './tests/skills-source-acquisition.Tests.ps1' = 45
+          }
+          foreach ($testPath in $testPaths) {
+            $result = Invoke-Pester -Script $testPath -PassThru
+            if ($null -eq $result) { throw "Pester did not return a result object for $testPath." }
+            Write-Host "$testPath - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+            if ($result.TotalCount -isnot [int] -and $result.TotalCount -isnot [long]) { throw "Pester returned a non-integer TotalCount for $testPath." }
+            if ([int64]$result.TotalCount -ne [int64]$expectedTestCounts[$testPath]) { throw "Pester discovered $($result.TotalCount) tests in $testPath; expected exactly $($expectedTestCounts[$testPath])." }
+            if ([int]$result.FailedCount -ne 0) { throw "Pester reported $($result.FailedCount) failed tests in $testPath." }
+            if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests in $testPath." }
+            if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests in $testPath." }
+            if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
+            if ([int]$result.PassedCount -ne [int]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
+          }
+          exit 0

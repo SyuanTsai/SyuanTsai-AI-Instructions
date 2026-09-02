@@ -153,6 +153,7 @@ function Test-CapabilityRequirement {
 function Test-CapabilityIdAvailable {
     param(
         [Parameter(Mandatory = $true)][string] $CapabilityId,
+        [Parameter(Mandatory = $true)][object] $Skill,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
     )
 
@@ -160,12 +161,23 @@ function Test-CapabilityIdAvailable {
         throw "Invalid dependency capability ID '$CapabilityId'."
     }
 
-    foreach ($item in $Evidence) {
-        if ([string]$item.id -ceq $CapabilityId) {
-            return $true
+    $compatibility = Get-OptionalPropertyValue -Object $Skill -Name 'compatibility'
+    $requirements = @()
+    if ($null -ne $compatibility) {
+        $requirements += @(Get-OptionalPropertyValue -Object $compatibility -Name 'requiredCapabilities' -DefaultValue @())
+        foreach ($alternativeSet in @(Get-OptionalPropertyValue -Object $compatibility -Name 'anyOfCapabilities' -DefaultValue @())) {
+            $requirements += @($alternativeSet)
         }
     }
-    return $false
+
+    $matches = @($requirements | Where-Object {
+        [string](Get-OptionalPropertyValue -Object $_ -Name 'id' -DefaultValue '') -ceq $CapabilityId
+    })
+    if ($matches.Count -ne 1) {
+        throw "Conditional capability '$CapabilityId' for Skill '$([string]$Skill.id)' must declare exactly one compatibility requirement with its required kind and state."
+    }
+
+    return [bool](Test-CapabilityRequirement -Requirement $matches[0] -Evidence $Evidence)
 }
 
 function Test-SkillCompatibility {
@@ -213,6 +225,117 @@ function Test-SkillCompatibility {
     }
 
     return $true
+}
+
+function Get-ConditionalDependencyState {
+    param(
+        [Parameter(Mandatory = $true)][object] $Dependency,
+        [Parameter(Mandatory = $true)][object] $Skill,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $DependencyId
+    )
+
+    $condition = Get-OptionalPropertyValue -Object $Dependency -Name 'condition'
+    $fallback = Get-OptionalPropertyValue -Object $Dependency -Name 'fallback'
+    if ($null -eq $condition -or $null -eq $fallback) {
+        throw "Conditional dependency '$SkillId' -> '$DependencyId' is missing condition or fallback metadata."
+    }
+
+    $operator = [string](Get-OptionalPropertyValue -Object $condition -Name 'operator' -DefaultValue '')
+    $conditionCapability = [string](Get-OptionalPropertyValue -Object $condition -Name 'capability' -DefaultValue '')
+    $fallbackCapability = [string](Get-OptionalPropertyValue -Object $fallback -Name 'capability' -DefaultValue '')
+    $conditionAvailable = Test-CapabilityIdAvailable -CapabilityId $conditionCapability -Skill $Skill -Evidence $Evidence
+    $fallbackAvailable = Test-CapabilityIdAvailable -CapabilityId $fallbackCapability -Skill $Skill -Evidence $Evidence
+
+    switch ($operator) {
+        'available' { $required = $conditionAvailable -and -not $fallbackAvailable }
+        'missing' { $required = -not $conditionAvailable -and -not $fallbackAvailable }
+        'unavailable' { $required = -not $conditionAvailable -and -not $fallbackAvailable }
+        'missing-or-invalid' {
+            # Invalid evidence is rejected when loaded, so an invalid capability is treated
+            # as unavailable evidence at this layer.
+            $required = -not $conditionAvailable -and -not $fallbackAvailable
+        }
+        default { throw "Unsupported conditional dependency operator '$operator' for '$SkillId'." }
+    }
+
+    return [pscustomobject]@{
+        Required = [bool]$required
+        ConditionCapability = $conditionCapability
+        FallbackCapability = $fallbackCapability
+    }
+}
+
+function Test-SkillCompatibilityRepairableByConditionalDependency {
+    param(
+        [Parameter(Mandatory = $true)][object] $Skill,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence,
+        [Parameter(Mandatory = $true)][hashtable] $SkillsById
+    )
+
+    $compatibility = Get-OptionalPropertyValue -Object $Skill -Name 'compatibility'
+    if ($null -eq $compatibility) { return $false }
+
+    # Platform, shell, and mandatory capability failures cannot be repaired by installing
+    # an API-configuration dependency. Only an unsatisfied alternative capability set can.
+    $baseCompatibility = [pscustomobject]@{
+        platforms = @(Get-OptionalPropertyValue -Object $compatibility -Name 'platforms' -DefaultValue @('any'))
+        shells = @(Get-OptionalPropertyValue -Object $compatibility -Name 'shells' -DefaultValue @())
+        requiredCapabilities = @(Get-OptionalPropertyValue -Object $compatibility -Name 'requiredCapabilities' -DefaultValue @())
+        anyOfCapabilities = @()
+    }
+    if (-not (Test-SkillCompatibility -Skill ([pscustomobject]@{ compatibility = $baseCompatibility }) -Evidence $Evidence)) {
+        return $false
+    }
+
+    $hasRepairableGap = $false
+    foreach ($alternativeSet in @(Get-OptionalPropertyValue -Object $compatibility -Name 'anyOfCapabilities' -DefaultValue @())) {
+        $setSatisfied = $false
+        foreach ($requirement in @($alternativeSet)) {
+            if (Test-CapabilityRequirement -Requirement $requirement -Evidence $Evidence) {
+                $setSatisfied = $true
+                break
+            }
+        }
+        if ($setSatisfied) { continue }
+
+        $alternativeIds = @($alternativeSet | ForEach-Object {
+            [string](Get-OptionalPropertyValue -Object $_ -Name 'id' -DefaultValue '')
+        })
+        $setRepairable = $false
+        foreach ($dependency in @(Get-OptionalPropertyValue -Object $Skill -Name 'dependencies' -DefaultValue @())) {
+            $dependencyId = [string](Get-OptionalPropertyValue -Object $dependency -Name 'skillId' -DefaultValue '')
+            if ([string](Get-OptionalPropertyValue -Object $dependency -Name 'type' -DefaultValue '') -cne 'conditional' -or
+                -not $SkillsById.ContainsKey($dependencyId)) {
+                continue
+            }
+
+            $condition = Get-OptionalPropertyValue -Object $dependency -Name 'condition'
+            $fallback = Get-OptionalPropertyValue -Object $dependency -Name 'fallback'
+            $conditionCapability = [string](Get-OptionalPropertyValue -Object $condition -Name 'capability' -DefaultValue '')
+            $fallbackCapability = [string](Get-OptionalPropertyValue -Object $fallback -Name 'capability' -DefaultValue '')
+            if ($alternativeIds -cnotcontains $conditionCapability -or
+                $alternativeIds -cnotcontains $fallbackCapability) {
+                continue
+            }
+
+            $state = Get-ConditionalDependencyState -Dependency $dependency -Skill $Skill -Evidence $Evidence -SkillId ([string]$Skill.id) -DependencyId $dependencyId
+            if (-not $state.Required) { continue }
+
+            $dependencySkill = $SkillsById[$dependencyId]
+            if ([string]$dependencySkill.lifecycle.status -eq 'removed' -or
+                -not (Test-SkillCompatibility -Skill $dependencySkill -Evidence $Evidence)) {
+                continue
+            }
+            $setRepairable = $true
+            break
+        }
+        if (-not $setRepairable) { return $false }
+        $hasRepairableGap = $true
+    }
+
+    return $hasRepairableGap
 }
 
 function Resolve-ConfiguredSkillId {
@@ -337,7 +460,8 @@ function Resolve-SkillsSelection {
         if ([string]$skill.lifecycle.status -eq 'removed') {
             throw "Selected Skill '$skillId' is removed."
         }
-        if (-not (Test-SkillCompatibility -Skill $skill -Evidence $evidence)) {
+        if (-not (Test-SkillCompatibility -Skill $skill -Evidence $evidence) -and
+            -not (Test-SkillCompatibilityRepairableByConditionalDependency -Skill $skill -Evidence $evidence -SkillsById $skillsById)) {
             if ($explicitIncludes.ContainsKey($skillId)) {
                 throw "Explicitly included Skill '$skillId' is incompatible with the current platform, shell, or capability evidence."
             }
@@ -364,36 +488,7 @@ function Resolve-SkillsSelection {
                         $required = $true
                     }
                     'conditional' {
-                        $condition = Get-OptionalPropertyValue -Object $dependency -Name 'condition'
-                        $fallback = Get-OptionalPropertyValue -Object $dependency -Name 'fallback'
-                        if ($null -eq $condition -or $null -eq $fallback) {
-                            throw "Conditional dependency '$skillId' -> '$dependencyId' is missing condition or fallback metadata."
-                        }
-                        $operator = [string](Get-OptionalPropertyValue -Object $condition -Name 'operator' -DefaultValue '')
-                        $conditionCapability = [string](Get-OptionalPropertyValue -Object $condition -Name 'capability' -DefaultValue '')
-                        $fallbackCapability = [string](Get-OptionalPropertyValue -Object $fallback -Name 'capability' -DefaultValue '')
-                        $conditionAvailable = Test-CapabilityIdAvailable -CapabilityId $conditionCapability -Evidence $evidence
-                        $fallbackAvailable = Test-CapabilityIdAvailable -CapabilityId $fallbackCapability -Evidence $evidence
-
-                        switch ($operator) {
-                            'available' {
-                                $required = $conditionAvailable -and -not $fallbackAvailable
-                            }
-                            'missing' {
-                                $required = -not $conditionAvailable -and -not $fallbackAvailable
-                            }
-                            'unavailable' {
-                                $required = -not $conditionAvailable -and -not $fallbackAvailable
-                            }
-                            'missing-or-invalid' {
-                                # Invalid evidence is rejected when loaded, so an invalid capability is treated
-                                # as unavailable evidence at this layer.
-                                $required = -not $conditionAvailable -and -not $fallbackAvailable
-                            }
-                            default {
-                                throw "Unsupported conditional dependency operator '$operator' for '$skillId'."
-                            }
-                        }
+                        $required = (Get-ConditionalDependencyState -Dependency $dependency -Skill $skill -Evidence $evidence -SkillId $skillId -DependencyId $dependencyId).Required
                     }
                     'recommended' {
                         continue

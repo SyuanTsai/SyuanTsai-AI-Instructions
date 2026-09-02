@@ -46,6 +46,8 @@ Test-SkillsCatalogContract `
 - `.github/AI-Rules/*.en.md` → `.github/AI-Rules/*.en.md`
 - external `.agents/skills/<skill-id>/**` → `.agents/skills/<skill-id>/**`
 
+`ai-instructions-contract.json` 只用於維護來源的 inventory、locale／platform parity、route、trigger 與 safety invariant regression，不會 fan out。GitHub Copilot 的 `.github/AI-Rules/**` 是由 Base Instructions 依任務明確要求讀取的條件式模組，不是 `.github/instructions/**/*.instructions.md` 的 path-specific 自動載入檔；不得以 `applyTo: "**"` 將所有模組無條件注入。不同 Copilot surface 對 Base 指示讀取其他 Repository 檔案的能力可能不同，導入新 surface 時應依 [GitHub Copilot custom instructions](https://docs.github.com/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot) 驗證 References／instructions inventory，且跨 surface 必須生效的最小安全邊界應保留在 Base。
+
 未被 Git 追蹤、且沒有 manifest ownership 的 project-owned 或 customized 檔案不覆寫。若 manifest 缺失，但本機未追蹤檔案的 bytes 精確等於 immutable source，bootstrap 可安全重建 manifest。Reserved Agent path 一旦已 tracked，則依上一節流程先完整備份並遷移，不再要求逐 Repository 人工清理。
 
 ## 官方 Felo replacement
@@ -118,7 +120,7 @@ $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODE
 
 預設只掃描 ready 的本機 fixed drives，跳過系統目錄、AppData、package caches、Codex／Agent system roots、temp／test fixtures、`node_modules`、`bin`、`obj`、reparse points 與兩個 authority repositories。Repository 以 Git common directory、worktree root 與 branch identity 去重；單一 Repository 失敗不會中止後續處理。每次 bootstrap 後會驗證 custom FELO、舊 route／manifest、tracked reserved path、非 Agent Git drift 與 official Felo inventory，並輸出可供 Jira 記錄的 JSON 統計；rollout 不執行任何 push。
 
-舊 bootstrap `SessionStart` hook 只有在 command 指向目前 Codex Home 的 installed bootstrap path 時才會從 entry 內精確移除；不同路徑下即使檔名相同也視為個人 hook 保留，同一 entry 的其他 hooks 與個人規則也不變。Installer 在 active transaction 全程持有 Codex Home、`hooks` 與本次 staging／backup roots 的 non-reparse directory handles；stable file 透過 handle-bound create/write/delete 更新，且任何多重 hard-link alias 都在 mutation 前 fail closed。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`；失敗後的 transaction runtime 會先移入 recovery backup，只有 exact bundle/inventory 仍等於已驗證 candidate 時才刪除，否則保留並回報 drift。
+舊 bootstrap `SessionStart` hook 只有在 command 指向目前 Codex Home 的 installed bootstrap path 時才會從 entry 內精確移除；不同路徑下即使檔名相同也視為個人 hook 保留，同一 entry 的其他 hooks 與個人規則也不變。Installer 在 active transaction 全程持有 Codex Home、`hooks` 與本次 staging／backup roots 的 non-reparse directory handles；stable file 透過 handle-bound create/write/delete 更新，且任何多重 hard-link alias 都在 mutation 前 fail closed。所有 stable file/runtime/exclude mutation paths 在寫入前都必須是預期類型且不是 reparse point。安裝中任何正常例外都會 restore 原 launcher、updater、Agent environment updater、cleanup、runtime、config、`AGENTS.md` 與 `hooks.json`；失敗後的 transaction runtime 會先移入 recovery backup，只有 exact bundle/inventory 仍等於已驗證 candidate 時才刪除，否則保留並回報 drift。
 
 安裝時可追加 exclusions：
 
@@ -213,13 +215,13 @@ Recovery 只會將個人 config 的 bundle pin 對齊目前完整驗證的 activ
 - 解析 immutable candidate commit，並以 GitHub compare 驗證它是目前 installed commit 的 descendant；behind／diverged candidate 一律標為 stale 且不安裝；
 - 下載 codeload ZIP，從同一個 exclusive file handle 計算 archive SHA-256 並安全解壓；git-checkout 安裝則從完整 commit SHA 的 Git objects 建立 installer-owned snapshot，不執行 mutable worktree bytes；之後 parse 全部 PowerShell 並驗證 Catalog/Lock；
 - 安裝前再次解析 candidate，遇到 TOCTOU drift 即停止；
-- 透過 installer transaction swap；stable launcher、updater、cleanup、config、個人 `AGENTS.md` 與 `hooks.json` 都在 handle 內以 backup original bytes 做 CAS，失敗時只 rollback 仍等於 transaction-applied bytes 的檔案並保留並行外部修改；
-- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；updater 從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤都持有 install-state lock，只在交給 candidate installer 前釋放。Verified launcher／updater snapshot／cleanup 在使用 runtime 時持有 shared read lock，installer 只有取得 exclusive lock 才能 swap。Installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit 與 mode/channel/ref，核准已撤銷或 policy 已變更時在任何 mutation 前停止；
+- 透過 installer transaction swap；stable launcher、updater、Agent environment updater、cleanup、config、個人 `AGENTS.md` 與 `hooks.json` 都在 handle 內以 backup original bytes 做 CAS，失敗時只 rollback 仍等於 transaction-applied bytes 的檔案並保留並行外部修改；
+- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；updater 從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤都持有 install-state lock，只在交給 candidate installer 前釋放。Verified launcher／updater snapshot／Agent environment updater／cleanup 在使用 runtime 時持有 shared read lock，installer 只有取得 exclusive lock 才能 swap；Agent environment `-Apply` 僅在交棒給 runtime updater 時釋放 read lock，更新後必須重新取得鎖才能 import 與 reconcile。Installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit 與 mode/channel/ref，核准已撤銷或 policy 已變更時在任何 mutation 前停止；
 - 以原子替換的 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed；`current` 以 `currentCommit` 表示已解析版本且 `candidateCommit` 為 `null`，避免重複身分無法由 JSON Schema 驗證。若舊 receipt 損壞，先 quarantine 再從已驗證 runtime 繼續檢查。
 
 最小檢查間隔尚未經過時，updater 回傳不落盤的 `rate-limit` workflow 結果並保留上一份有效 receipt；鎖已被其他 updater／installer 持有時則回傳不落盤的 `concurrent` 並讓 manual command／launcher fail closed。兩者都不屬於 update receipt schema 的 persisted outcomes。
 
-網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
+網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／Agent environment updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
 
 ## 使用者層級 Agent 環境升級
 
