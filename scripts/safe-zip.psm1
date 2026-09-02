@@ -10,16 +10,21 @@ function Test-ZipDirectoryEntry {
 
 function Assert-SafeZipEntry {
     param(
-        [Parameter(Mandatory = $true)][object] $Entry,
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Entry,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.Dictionary[string,string]] $PathCasings,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitEntries,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitFiles,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $Roots
     )
 
+    if ($null -eq $Entry) {
+        throw 'Unsafe ZIP entry path: unreadable archive entry metadata.'
+    }
     $name = [string] $Entry.FullName
+    if (@($name.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) {
+        throw 'Unsafe ZIP entry path: control characters are forbidden.'
+    }
     if ([string]::IsNullOrWhiteSpace($name) -or
-        @($name.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0 -or
         $name.Contains('\') -or
         $name.StartsWith('/', [System.StringComparison]::Ordinal) -or
         $name.Contains(':')) {
@@ -138,7 +143,12 @@ function Expand-SafeZipRepository {
             (-not $ownsStream)
         )
         try {
-            $entries = @($archive.Entries)
+            try {
+                $entries = @($archive.Entries)
+            }
+            catch {
+                throw 'Unsafe ZIP entry path: unreadable archive entry metadata.'
+            }
             if ($entries.Count -eq 0) {
                 throw 'ZIP archive is empty.'
             }

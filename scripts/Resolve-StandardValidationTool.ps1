@@ -1127,7 +1127,11 @@ function Get-ProcessNpmEnvironmentNames {
 }
 
 function Get-ProcessNodeEnvironmentNames {
-    return @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
+    $knownNames = @(
+        'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
+        'SSL_CERT_FILE', 'SSL_CERT_DIR'
+    )
+    $presentNames = @([Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).Keys |
         ForEach-Object { [string]$_ } |
         Where-Object {
             $_ -match '^NODE_' -or
@@ -1135,6 +1139,16 @@ function Get-ProcessNodeEnvironmentNames {
             $_ -ieq 'SSL_CERT_DIR'
         } |
         Sort-Object)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $presentNames = @($presentNames | ForEach-Object {
+            $presentName = [string]$_
+            $canonicalName = @($knownNames | Where-Object {
+                [string]::Equals([string]$_, $presentName, [StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1)
+            if ($canonicalName.Count -eq 1) { [string]$canonicalName[0] } else { $presentName }
+        })
+    }
+    return @(Get-OrdinalUniqueStrings -Values @($presentNames + $knownNames))
 }
 
 function Assert-NoConflictingNpmEnvironment {
@@ -1156,10 +1170,7 @@ function Assert-NoConflictingNpmEnvironment {
         throw "Untrusted npm environment override for '$name': '$actual'."
     }
 
-    foreach ($name in @(Get-OrdinalUniqueStrings -Values @((Get-ProcessNodeEnvironmentNames) + @(
-        'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
-        'SSL_CERT_FILE', 'SSL_CERT_DIR'
-    )))) {
+    foreach ($name in Get-ProcessNodeEnvironmentNames) {
         $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         if (-not [string]::IsNullOrEmpty($actual)) {
             throw "Untrusted Node environment override for '$name': '$actual'."
@@ -1242,7 +1253,7 @@ function Invoke-WithApprovedNpmEnvironment {
     } | ConvertTo-Json
     [IO.File]::WriteAllText((Join-Path $WorkPath 'package.json'), $workManifest + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 
-    $names = @(Get-OrdinalUniqueStrings -Values @((Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + @(
+    $names = @(Get-OrdinalUniqueStrings -Values @(@(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames) + @(
         'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG',
         'NPM_CONFIG_CACHE', 'NPM_CONFIG_DRY_RUN', 'NPM_CONFIG_OFFLINE',
         'NPM_CONFIG_PREFER_OFFLINE', 'NPM_CONFIG_AUDIT', 'NPM_CONFIG_FUND',
@@ -1286,7 +1297,7 @@ function Invoke-WithApprovedNpmEnvironment {
     finally {
         Set-Location -LiteralPath $previousLocation.Path
         $currentNames = @(Get-OrdinalUniqueStrings -Values @(
-            (Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + $names
+            @(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames) + $names
         ))
         foreach ($name in $currentNames) {
             [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)

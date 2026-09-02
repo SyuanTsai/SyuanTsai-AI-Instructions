@@ -30,8 +30,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
 
         function Assert-Match {
-            param([string] $Actual, [string] $Pattern, [string] $Message)
-            if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
+            param([AllowNull()] $Actual, [string] $Pattern, [string] $Message)
+            if ([string]$Actual -notmatch $Pattern) {
+                $actualDisplay = if ($null -eq $Actual) { '<null>' } else { $Actual }
+                throw "$Message Actual='$actualDisplay' Pattern='$Pattern'."
+            }
         }
 
         function Assert-NotMatch {
@@ -465,7 +468,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
     It 'UnitT26_rejects_an_unapproved_npm_registry_before_skill_tools_resolution' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
-        $previous = @((Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) | ForEach-Object {
+        $previous = @(@(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames) | ForEach-Object {
             [pscustomobject]@{
                 name = [string]$_
                 value = [Environment]::GetEnvironmentVariable([string]$_, [EnvironmentVariableTarget]::Process)
@@ -483,7 +486,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $errorMessage = $_.Exception.Message
         }
         finally {
-            foreach ($name in @((Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames))) {
+            foreach ($name in @(@(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames))) {
                 [Environment]::SetEnvironmentVariable([string]$name, $null, [EnvironmentVariableTarget]::Process)
             }
             foreach ($entry in $previous) {
@@ -774,7 +777,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Name = 'SSL_CERT_FILE'; Value = '/tmp/untrusted-openssl-ca.pem'; Pattern = 'Untrusted Node environment override' }
         )
         $ambientNames = @(Get-OrdinalUniqueStrings -Values @(
-            (Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + @($cases.Name)
+            @(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames) + @($cases.Name)
         ))
         $previous = @($ambientNames | ForEach-Object {
             [pscustomobject]@{
@@ -784,22 +787,34 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         })
         try {
             foreach ($case in $cases) {
+                $caseName = [string]$case.Name
+                $caseValue = [string]$case.Value
+                $casePattern = [string]$case.Pattern
                 foreach ($name in $ambientNames) {
                     [Environment]::SetEnvironmentVariable([string]$name, $null, [EnvironmentVariableTarget]::Process)
                 }
-                [Environment]::SetEnvironmentVariable([string]$case.Name, [string]$case.Value, [EnvironmentVariableTarget]::Process)
-                $errorMessage = $null
                 try {
-                    Assert-NoConflictingNpmEnvironment -ExpectedRegistry 'https://registry.npmjs.org/'
+                    [Environment]::SetEnvironmentVariable($caseName, $caseValue, [EnvironmentVariableTarget]::Process)
+                    Assert-Equal `
+                        ([Environment]::GetEnvironmentVariable($caseName, [EnvironmentVariableTarget]::Process)) `
+                        $caseValue `
+                        "Test process environment did not retain '$caseName'."
+                    $errorMessage = $null
+                    try {
+                        Assert-NoConflictingNpmEnvironment -ExpectedRegistry 'https://registry.npmjs.org/'
+                    }
+                    catch {
+                        $errorMessage = $_.Exception.Message
+                    }
+                    Assert-Match $errorMessage ("{0}.*{1}" -f $casePattern, $caseName) ("{0} must fail before npm invocation." -f $caseName)
                 }
-                catch {
-                    $errorMessage = $_.Exception.Message
+                finally {
+                    [Environment]::SetEnvironmentVariable($caseName, $null, [EnvironmentVariableTarget]::Process)
                 }
-                Assert-Match $errorMessage ("{0}.*{1}" -f $case.Pattern, $case.Name) ("{0} must fail before npm invocation." -f $case.Name)
             }
         }
         finally {
-            foreach ($name in @(Get-OrdinalUniqueStrings -Values @((Get-ProcessNpmEnvironmentNames) + (Get-ProcessNodeEnvironmentNames) + $ambientNames))) {
+            foreach ($name in @(Get-OrdinalUniqueStrings -Values @(@(Get-ProcessNpmEnvironmentNames) + @(Get-ProcessNodeEnvironmentNames) + $ambientNames))) {
                 [Environment]::SetEnvironmentVariable([string]$name, $null, [EnvironmentVariableTarget]::Process)
             }
             foreach ($entry in $previous) {
