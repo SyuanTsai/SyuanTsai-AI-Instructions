@@ -262,6 +262,8 @@ Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable p
 
 對 `skill-validator`，Go `@latest` 解析結果只有純 release SemVer（例如 `v1.6.1`）可視為 latest stable；prerelease（例如 `v1.7.0-rc1`）與 pseudo-version **MUST** fail closed，不得因 Go 能解析就當成 stable release。
 
+`skill-validator` 的 module resolution 與 installation **MUST** 使用該次 resolver invocation 專用、初始為空的暫存 `GOMODCACHE`，並在 invocation 結束後移除。Resolver **MUST** 在任何 `go list` / `go install` 前拒絕 inherited `GOMODCACHE`，不得信任使用者或 runner 的 shared module cache；鎖定 `GOPROXY` / `GOSUMDB` 不能取代 cache isolation，因為 Go 會重用 module cache 中已下載及解壓縮的內容。
+
 Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver 可以使用 provider-specific package manager，但 provider、package/repository identity 與 validation semantics 由中央 resolver 決定。
 
 `validation-toolchain.json` 的 `recordResolvedIdentityWhenAvailable` **MUST** 為 `true`，並由 authority regression 保護。
@@ -584,6 +586,7 @@ Migration 順序：
 - 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
 - `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
+- 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`，而未使用該次 invocation 專用的空白暫存 cache；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
 - 同一 validation run 中途漂移 tool version；

@@ -37,6 +37,11 @@ $trustedGoEnvironment = [ordered]@{
     'GOINSECURE' = ''
 }
 
+$trustedGoDistribution = [ordered]@{
+    'moduleCacheIsolation' = 'temporary-empty'
+    'rejectInheritedModuleCache' = $true
+}
+
 function Normalize-RegistryUri {
     param([Parameter(Mandatory = $true)][string] $Value)
 
@@ -153,6 +158,10 @@ function Get-Policy {
         if ($actual -cne [string]$entry.Value) {
             throw "Untrusted Go environment policy for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
         }
+    }
+    if ([string]$skillValidator.goDistribution.moduleCacheIsolation -cne [string]$trustedGoDistribution.moduleCacheIsolation -or
+        [bool]$skillValidator.goDistribution.rejectInheritedModuleCache -ne [bool]$trustedGoDistribution.rejectInheritedModuleCache) {
+        throw 'Go module cache distribution policy is incomplete or untrusted.'
     }
 
     return $policy
@@ -415,17 +424,29 @@ function Assert-NoConflictingGoEnvironment {
 function Invoke-WithApprovedGoEnvironment {
     param(
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
+        [Parameter(Mandatory = $true)] $DistributionPolicy,
         [Parameter(Mandatory = $true)][scriptblock] $Action
     )
 
     Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment
+    $inheritedModuleCache = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
+    if ([bool]$DistributionPolicy.rejectInheritedModuleCache -and -not [string]::IsNullOrEmpty($inheritedModuleCache)) {
+        throw "Untrusted Go environment override for 'GOMODCACHE': '$inheritedModuleCache'. Expected an unset value."
+    }
+    if ([string]$DistributionPolicy.moduleCacheIsolation -cne 'temporary-empty') {
+        throw "Unsupported Go module cache isolation '$($DistributionPolicy.moduleCacheIsolation)'."
+    }
 
     $previous = [ordered]@{}
+    $moduleCachePath = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-module-cache-{0}" -f [guid]::NewGuid().ToString('N'))
     try {
         foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
             $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, [EnvironmentVariableTarget]::Process)
         }
+        $previous.GOMODCACHE = $inheritedModuleCache
+        [void](New-Item -ItemType Directory -Path $moduleCachePath)
+        [Environment]::SetEnvironmentVariable('GOMODCACHE', $moduleCachePath, [EnvironmentVariableTarget]::Process)
 
         $processGoEnv = [Environment]::GetEnvironmentVariable('GOENV', [EnvironmentVariableTarget]::Process)
         if ([string]$processGoEnv -cne 'off') {
@@ -433,15 +454,29 @@ function Invoke-WithApprovedGoEnvironment {
         }
 
         [void](Assert-Command -Name 'go')
-        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')
+        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOMODCACHE')
         $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
         $effective = $effectiveJson | ConvertFrom-Json
-        foreach ($name in $effectiveNames) {
+        foreach ($name in @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')) {
             $actual = [string]$effective.$name
             $expected = [string]$ExpectedEnvironment[$name]
             if ($actual -cne $expected) {
                 throw "Go did not apply approved environment for '$name': '$actual'. Expected '$expected'."
             }
+        }
+        $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else {
+            [StringComparison]::Ordinal
+        }
+        $effectiveModuleCache = [IO.Path]::GetFullPath([string]$effective.GOMODCACHE)
+        $expectedModuleCache = [IO.Path]::GetFullPath($moduleCachePath)
+        if (-not [string]::Equals($effectiveModuleCache, $expectedModuleCache, $pathComparison)) {
+            throw "Go did not apply the isolated module cache '$expectedModuleCache'. Actual='$effectiveModuleCache'."
+        }
+        if (@(Get-ChildItem -LiteralPath $moduleCachePath -Force).Count -ne 0) {
+            throw "The isolated Go module cache was not empty before module resolution: '$moduleCachePath'."
         }
 
         return & $Action
@@ -449,6 +484,9 @@ function Invoke-WithApprovedGoEnvironment {
     finally {
         foreach ($entry in $previous.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+        }
+        if (Test-Path -LiteralPath $moduleCachePath) {
+            Remove-Item -LiteralPath $moduleCachePath -Recurse -Force -ErrorAction Stop
         }
     }
 }
@@ -525,7 +563,7 @@ function Resolve-SkillValidator {
         $expectedEnvironment[$entry.Key] = [string]$ToolPolicy.goEnvironment.($entry.Key)
     }
 
-    return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -Action {
+    return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -Action {
         $metadataJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
         $metadata = $metadataJson | ConvertFrom-Json
         $version = [string]$metadata.Version
@@ -539,8 +577,9 @@ function Resolve-SkillValidator {
 
         return [ordered]@{
             resolvedVersion = $version
-            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)"
+            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)"
             identityKind = 'go-module-version-with-trusted-distribution'
+            moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
         }
     }
 }
@@ -699,6 +738,7 @@ if ($ValidatePolicyOnly) {
         trustedRegistries = $trustedRegistries
         trustedPythonIndex = $trustedPythonIndex
         trustedGoEnvironment = $trustedGoEnvironment
+        trustedGoDistribution = $trustedGoDistribution
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
     }
 }
@@ -731,6 +771,7 @@ else {
     if ($ToolName -eq 'skill-validator') {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
+        $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
     }
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex

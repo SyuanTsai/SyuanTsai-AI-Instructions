@@ -82,6 +82,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $index 'Resolve-StandardValidationTool\.ps1' 'Standards index must name the central validation tool resolver.'
     }
 
+    # Scenario: The authority policy is loaded with every supported validation provider and distribution control.
+    # Purpose: Protect the complete latest-stable source, endpoint, and cache-isolation trust contract.
     It 'UnitT20_requires_latest_stable_tools_trusted_sources_and_resolved_identity_evidence' {
         $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ToolchainPath | ConvertFrom-Json
 
@@ -134,6 +136,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOPROXY 'none' 'GONOPROXY must not bypass the approved proxy.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOSUMDB 'none' 'GONOSUMDB must not bypass checksum verification.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOINSECURE '' 'GOINSECURE must be disabled.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goDistribution.moduleCacheIsolation 'temporary-empty' 'Go module resolution must use a fresh temporary module cache.'
+        Assert-True ([bool]$toolchain.tools.'skill-validator'.goDistribution.rejectInheritedModuleCache) 'An inherited Go module cache override must fail closed.'
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
         Assert-True ([bool]$toolchain.compatibilityLane.requiresExplicitPurpose) 'Compatibility pins require an explicit purpose.'
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'
@@ -241,6 +245,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
     }
 
+    # Scenario: Cross-platform test wheels expose standards-compliant METADATA entries using ZIP forward slashes.
+    # Purpose: Verify dependency closure hashing without allowing host-specific archive separators to invalidate the fixture.
     It 'UnitT26c_builds_a_hash_locked_dependency_closure_from_wheels_only' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -323,6 +329,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver "importlib\.metadata.*version\('skillspector'\)" 'Installed SkillSpector version must be verified after installation.'
     }
 
+    # Scenario: A caller supplies one conflicting Go distribution variable before skill-validator resolution.
+    # Purpose: Ensure proxy, checksum, bypass, and module-cache overrides all fail before network or cache use.
     It 'UnitT29_rejects_untrusted_Go_distribution_overrides_before_module_resolution' {
         $cases = @(
             @{ Name = 'GOENV'; Value = 'custom-go-env' },
@@ -331,7 +339,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Name = 'GOPRIVATE'; Value = 'github.com/agent-ecosystem' },
             @{ Name = 'GONOPROXY'; Value = 'github.com/agent-ecosystem' },
             @{ Name = 'GONOSUMDB'; Value = 'github.com/agent-ecosystem' },
-            @{ Name = 'GOINSECURE'; Value = 'github.com/agent-ecosystem' }
+            @{ Name = 'GOINSECURE'; Value = 'github.com/agent-ecosystem' },
+            @{ Name = 'GOMODCACHE'; Value = (Join-Path $TestDrive 'untrusted-go-module-cache') }
         )
 
         foreach ($case in $cases) {
@@ -352,6 +361,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
     }
 
+    # Scenario: No conflicting Go variables exist and the approved environment is applied to a resolver action.
+    # Purpose: Protect the valid GOENV=off path plus fresh temporary module-cache setup and cleanup.
     It 'UnitT29a_accepts_the_approved_Go_environment_and_executes_the_action' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -371,9 +382,30 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
                 [Environment]::SetEnvironmentVariable([string]$entry.Key, $null, [EnvironmentVariableTarget]::Process)
             }
+            $previous.GOMODCACHE = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('GOMODCACHE', $null, [EnvironmentVariableTarget]::Process)
 
-            $result = Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -Action { 'approved-action-ran' }
-            Assert-Equal $result 'approved-action-ran' 'Approved Go environment must reach the action.'
+            $distributionPolicy = [ordered]@{
+                moduleCacheIsolation = 'temporary-empty'
+                rejectInheritedModuleCache = $true
+            }
+            $result = Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $distributionPolicy -Action {
+                $moduleCache = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
+                [ordered]@{
+                    action = 'approved-action-ran'
+                    moduleCache = $moduleCache
+                    moduleCacheExists = Test-Path -LiteralPath $moduleCache -PathType Container
+                    moduleCacheEntryCount = @(Get-ChildItem -LiteralPath $moduleCache -Force).Count
+                }
+            }
+            Assert-Equal $result.action 'approved-action-ran' 'Approved Go environment must reach the action.'
+            Assert-True ([bool]$result.moduleCacheExists) 'Approved Go resolution must provide an isolated module cache.'
+            Assert-Equal $result.moduleCacheEntryCount 0 'The isolated Go module cache must be empty before resolution.'
+            Assert-False (Test-Path -LiteralPath $result.moduleCache) 'The isolated Go module cache must be removed after resolution.'
+
+            $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+            Assert-Match $resolver 'resolvedIdentity = "go:.*#moduleCache=\$\(' 'Resolved skill-validator identity must record module-cache isolation.'
+            Assert-Match $resolver '\$result\.moduleCacheIsolation = ' 'The machine-readable receipt must expose module-cache isolation.'
         }
         finally {
             foreach ($entry in $previous.GetEnumerator()) {

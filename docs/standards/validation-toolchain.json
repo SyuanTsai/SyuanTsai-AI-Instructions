@@ -48,6 +48,10 @@
         "GONOPROXY": "none",
         "GONOSUMDB": "none",
         "GOINSECURE": ""
+      },
+      "goDistribution": {
+        "moduleCacheIsolation": "temporary-empty",
+        "rejectInheritedModuleCache": true
       }
     },
     "skill-tools": {
