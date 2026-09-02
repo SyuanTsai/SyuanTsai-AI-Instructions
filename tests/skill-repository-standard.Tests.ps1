@@ -217,8 +217,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $configFile = [Environment]::GetEnvironmentVariable('PIP_CONFIG_FILE', [EnvironmentVariableTarget]::Process)
                 if ($index -notmatch '^https://pypi\.org/simple/?$') { throw 'Approved pip index was not applied.' }
                 if ([string]::IsNullOrWhiteSpace($configFile)) { throw 'pip config isolation was not applied.' }
-                $unexpected = @(Get-ProcessPipEnvironmentNames | Where-Object { $_ -notin @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') })
-                if ($unexpected.Count -gt 0) { throw "Unexpected inherited pip environment: $($unexpected -join ', ')" }
+                $unexpected = @(Get-ProcessPipEnvironmentNames | Where-Object {
+                    $_ -notin @('PIP_INDEX_URL', 'PIP_CONFIG_FILE') -and
+                    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_, [EnvironmentVariableTarget]::Process))
+                })
+                if ($unexpected.Count -gt 0) { throw "Unexpected effective pip environment override: $($unexpected -join ', ')" }
                 'approved-pip-action-ran'
             }
             Assert-Equal $result 'approved-pip-action-ran' 'Approved pip environment must reach the action.'
