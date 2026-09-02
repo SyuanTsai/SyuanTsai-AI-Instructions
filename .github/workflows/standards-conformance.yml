@@ -46,22 +46,27 @@ jobs:
           Write-Host "Canonical validation policy: $($receipt.policy)"
           Write-Host "Tool source enforcement: $($receipt.sourceTrust.enforcement)"
 
-      - name: Validate latest stable SkillSpector release identity
+      - name: Resolve and install latest stable SkillSpector from locked dependency closure
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $receiptPath = Join-Path $env:RUNNER_TEMP 'standard-validation-skillspector.json'
-          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName skillspector -OutputPath $receiptPath | Out-Host
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName skillspector -Install -OutputPath $receiptPath | Out-Host
           $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
           if ($receipt.source -ne 'NVIDIA/SkillSpector') { throw "Unexpected SkillSpector source '$($receipt.source)'." }
           if ($receipt.pythonPackageIndex -notmatch '^https://pypi\.org/simple/?$') { throw "Unexpected Python package index '$($receipt.pythonPackageIndex)'." }
           if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion)) { throw 'SkillSpector version was not recorded.' }
           if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'SkillSpector identity was not recorded.' }
           if ($receipt.resolvedIdentity -notmatch 'metadata=skillspector@') { throw 'SkillSpector wheel METADATA identity was not recorded.' }
+          if ([string]$receipt.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure SHA-256 was not recorded.' }
+          if (@($receipt.dependencyClosure).Count -le 1) { throw 'SkillSpector dependency closure did not include runtime dependencies.' }
+          if ($receipt.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector resolved identity does not bind the dependency closure.' }
           Write-Host "Resolved SkillSpector version: $($receipt.resolvedVersion)"
           Write-Host "Resolved SkillSpector identity: $($receipt.resolvedIdentity)"
+          Write-Host "Dependency closure entries: $(@($receipt.dependencyClosure).Count)"
+          Write-Host "Dependency closure SHA-256: $($receipt.dependencyClosureSha256)"
 
       - name: Resolve latest stable Pester from central policy
         shell: pwsh
