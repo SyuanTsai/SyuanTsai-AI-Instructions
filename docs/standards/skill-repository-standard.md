@@ -259,7 +259,8 @@ Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable p
 - 將 release tag、resolved commit、預期 wheel filename、GitHub asset SHA-256、wheel `METADATA` Name/Version 與安裝後 package version 綁定為同一 identity；
 - 使用 Python `-I` isolated mode 執行 venv 建立、pip dependency acquisition、offline install 與 installed-version verification，避免 `PYTHONPATH`、`PYTHONHOME`、user site 或其他 inherited `PYTHON*` interpreter control 介入 canonical resolution；
 - 只允許 `https://pypi.org/simple` 作為 Python dependency index，隔離 pip config、停用 cache、只接受 wheels，且 inherited `PIP_*` environment 採 deny-by-default；只有值已等於 approved index 的 `PIP_INDEX_URL` 可被接受；
-- 在任何 dependency network resolution 前拒絕 SkillSpector root wheel 的 direct URL / VCS / local-file dependency reference，並在建立 closure 時再次拒絕任何 wheel metadata 中的 direct reference；不得讓 `Requires-Dist` 繞過 approved index；
+- 在任何 dependency network resolution 前拒絕 SkillSpector **root wheel** 的 direct URL / VCS / local-file dependency reference；resolver materialize transitive wheels 後、任何 install 或 SkillSpector execution 前，**MUST** 再檢查完整 wheelhouse，若任一 transitive wheel metadata 含 direct reference 則 fail closed。此 post-materialization check 不得被描述成「已證明 pip 在解析 transitive dependency 時從未接觸 direct-reference URL」；若需要該級 network-egress 保證，**MUST** 另加 transport/sandbox egress control，而不是把 metadata post-check 當成 pre-network enforcement；
+- canonical CI 在執行 validation-tool resolution/tests 時 **MUST NOT** 讓 `actions/checkout` 或等效 checkout 把 repository credential 持久化給後續第三方 package-manager/VCS subprocess；需要 GitHub API token 解析 release 時，token **SHOULD** 只保留到該 API-dependent stage，後續不需要 token 的 module import/tests **SHOULD** 移除；
 - 在 temporary isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，記錄每個 wheel SHA-256 與 deterministic closure identity，再以 `--no-index --require-hashes --no-deps` 從該 wheelhouse 安裝；
 - 在 release、wheel metadata、asset digest、dependency closure 或 installed version 任一 identity 不一致時 fail closed。
 
@@ -595,7 +596,9 @@ Migration 順序：
 - scanner/analyzer 未完整執行仍 pass；
 - 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
 - `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
-- `SkillSpector` 的 Python invocation 未使用 `-I` isolated mode，dependency acquisition 可繼承 caller-controlled Python/pip import、config、index、link、certificate 或 requirement controls，或 wheel metadata 可用 direct reference 繞過 approved index；
+- `SkillSpector` 的 Python invocation 未使用 `-I` isolated mode，dependency acquisition 可繼承 caller-controlled Python/pip import、config、index、link、certificate 或 requirement controls，或 root/direct dependency metadata 可在 preflight 後進入 installation；
+- 把 transitive wheel 的 post-materialization direct-reference metadata check 說成「已證明 resolver 沒有接觸該 direct-reference network location」；若要求該保證卻沒有 transport/sandbox egress control，視為不符合本標準；
+- canonical CI 在第三方 validation-tool/package-manager/VCS subprocess 前保留 `actions/checkout` 或等效 checkout 的 persisted repository credential；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
