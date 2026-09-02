@@ -104,6 +104,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.onlyBinary) 'SkillSpector dependencies must resolve to wheels only.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.disableCache) 'SkillSpector dependency acquisition must disable pip cache.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.dependencyAcquisition 'verified-wheelhouse' 'SkillSpector dependencies must use a verified wheelhouse.'
+        Assert-Equal $toolchain.tools.skillspector.pythonDistribution.installEnvironment 'isolated-venv' 'SkillSpector must install in an isolated virtual environment.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.installNoIndex) 'SkillSpector install must be no-index.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.requireHashes) 'SkillSpector install must require hashes.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.recordDependencyClosureHashes) 'SkillSpector dependency closure hashes must be recorded.'
@@ -238,6 +239,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
     It 'UnitT26d_requires_offline_hash_locked_SkillSpector_installation' {
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
 
+        Assert-Match $resolver "'-m', 'venv'" 'SkillSpector must use an isolated Python virtual environment.'
+        Assert-Match $resolver '\$venvPython' 'SkillSpector dependency acquisition and install must use the virtual-environment Python.'
+        Assert-NotMatch $resolver '--break-system-packages' 'Canonical install must not bypass PEP 668 protections.'
         Assert-Match $resolver "'pip', 'download'" 'SkillSpector dependencies must be acquired before installation.'
         Assert-Match $resolver '--only-binary=:all:' 'Dependency acquisition must reject source distributions.'
         Assert-Match $resolver '--no-cache-dir' 'Dependency acquisition must not reuse pip cache.'
