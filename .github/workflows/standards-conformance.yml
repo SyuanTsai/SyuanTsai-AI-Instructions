@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'docs/standards/**'
+      - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
   pull_request:
@@ -13,6 +14,7 @@ on:
       - main
     paths:
       - 'docs/standards/**'
+      - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
   workflow_dispatch:
@@ -30,34 +32,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve latest stable Pester
+      - name: Validate central tool sources and policy
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
-          $pester = Get-Module Pester -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Latest stable Pester could not be resolved.' }
-          Import-Module $pester.Path -Force
-          Write-Host "Resolved Pester version: $($pester.Version)"
-          "PESTER_RESOLVED_VERSION=$($pester.Version)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'standard-validation-policy.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ValidatePolicyOnly -OutputPath $receiptPath | Out-Host
+          $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
+          if ($receipt.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
+          if (-not [bool]$receipt.recordResolvedIdentityWhenAvailable) { throw 'Resolved identity recording is not enforced.' }
+          Write-Host "Canonical validation policy: $($receipt.policy)"
 
-      - name: Validate toolchain latest-stable policy
+      - name: Resolve latest stable Pester from central policy
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          $policy = Get-Content -Raw -Encoding UTF8 ./docs/standards/validation-toolchain.json | ConvertFrom-Json
-          if ($policy.policy -ne 'latest-stable-per-validation-run') { throw 'Unexpected validation tool policy.' }
-          foreach ($property in $policy.tools.PSObject.Properties) {
-            if ($property.Value.channel -ne 'latest-stable') {
-              throw "Tool '$($property.Name)' is not configured for latest-stable."
-            }
-          }
-          Write-Host "Canonical validation policy: $($policy.policy)"
-          Write-Host "Pester frozen for this run: $env:PESTER_RESOLVED_VERSION"
+          $ErrorActionPreference = 'Stop'
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'standard-validation-pester.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName pester -Install -OutputPath $receiptPath | Out-Host
+          $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
+          if ($receipt.source -ne 'PowerShellGallery:Pester') { throw "Unexpected Pester source '$($receipt.source)'." }
+          if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion)) { throw 'Pester version was not recorded.' }
+          if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'Pester identity was not recorded.' }
+          "PESTER_RESOLVED_VERSION=$($receipt.resolvedVersion)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PESTER_RESOLVED_IDENTITY=$($receipt.resolvedIdentity)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Resolved Pester version: $($receipt.resolvedVersion)"
+          Write-Host "Resolved Pester identity: $($receipt.resolvedIdentity)"
 
       - name: Run Standard v1 authority regression
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion $env:PESTER_RESOLVED_VERSION -Force
+          Write-Host "Pester frozen for this run: $env:PESTER_RESOLVED_VERSION"
+          Write-Host "Pester identity: $env:PESTER_RESOLVED_IDENTITY"
           $result = Invoke-Pester -Path ./tests/skill-repository-standard.Tests.ps1 -PassThru
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
           if ($result.FailedCount -gt 0) { exit 1 }
