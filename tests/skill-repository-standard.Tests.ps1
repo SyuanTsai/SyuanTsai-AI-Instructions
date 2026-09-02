@@ -39,13 +39,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [Parameter(Mandatory = $true)][string] $Name,
-                [Parameter(Mandatory = $true)][string] $Version
+                [Parameter(Mandatory = $true)][string] $Version,
+                [string[]] $RequiresDist = @()
             )
 
             Add-Type -AssemblyName System.IO.Compression
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $distName = ($Name -replace '-', '_')
             $metadata = "Metadata-Version: 2.4`nName: $Name`nVersion: $Version`n"
+            foreach ($requirement in $RequiresDist) {
+                $metadata += "Requires-Dist: $requirement`n"
+            }
             $wheelPath = Join-Path $Root ("$distName-$Version-py3-none-any.whl")
             $archive = [IO.Compression.ZipFile]::Open($wheelPath, [IO.Compression.ZipArchiveMode]::Create)
             try {
@@ -118,9 +122,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $allowedPipEnvironment.Count 1 'Exactly one inherited pip variable may be conditionally accepted.'
         Assert-Equal $allowedPipEnvironment[0] 'PIP_INDEX_URL' 'Only the approved PIP_INDEX_URL may be inherited.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.onlyBinary) 'SkillSpector dependencies must resolve to wheels only.'
+        Assert-True ($null -ne $toolchain.tools.skillspector.pythonDistribution.PSObject.Properties['allowDirectReferences']) 'SkillSpector direct-reference policy must be explicit.'
+        Assert-False ([bool]$toolchain.tools.skillspector.pythonDistribution.allowDirectReferences) 'SkillSpector dependencies must not bypass PyPI with direct references.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.disableCache) 'SkillSpector dependency acquisition must disable pip cache.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.dependencyAcquisition 'verified-wheelhouse' 'SkillSpector dependencies must use a verified wheelhouse.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.installEnvironment 'isolated-venv' 'SkillSpector must install in an isolated virtual environment.'
+        Assert-Equal $toolchain.tools.skillspector.pythonDistribution.interpreterIsolation 'python-isolated-mode' 'Every SkillSpector Python subprocess must ignore inherited interpreter controls.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.installNoIndex) 'SkillSpector install must be no-index.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.requireHashes) 'SkillSpector install must require hashes.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.recordDependencyClosureHashes) 'SkillSpector dependency closure hashes must be recorded.'
@@ -269,7 +276,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
     It 'UnitT26d_requires_offline_hash_locked_SkillSpector_installation' {
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
+        Assert-Match $resolver 'function Invoke-IsolatedPythonCommand' 'Python isolation must be centralized in one command wrapper.'
+        Assert-Match $resolver 'return Invoke-CheckedCommand.*@\(''-I''\) \+ \$Arguments' 'Every wrapped Python subprocess must prepend isolated mode.'
+        Assert-NotMatch $resolver "Invoke-CheckedCommand -Command 'python'" 'System Python must not bypass isolated mode.'
+        Assert-NotMatch $resolver 'Invoke-CheckedCommand -Command \$venvPython' 'Virtual-environment Python must not bypass isolated mode.'
         Assert-Match $resolver "'-m', 'venv'" 'SkillSpector must use an isolated Python virtual environment.'
         Assert-Match $resolver '\$venvPython' 'SkillSpector dependency acquisition and install must use the virtual-environment Python.'
         Assert-NotMatch $resolver '--break-system-packages' 'Canonical install must not bypass PEP 668 protections.'
@@ -280,6 +292,62 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver '--no-index' 'Final SkillSpector installation must not use an index.'
         Assert-Match $resolver '--require-hashes' 'Final SkillSpector installation must enforce hashes.'
         Assert-Match $resolver '--no-deps' 'Final installation must not resolve new dependencies outside the locked closure.'
+        Assert-Match $resolver 'interpreterIsolation=\$interpreterIsolation' 'Resolved SkillSpector identity must record Python interpreter isolation.'
+        Assert-Match $resolver '\$result\.interpreterIsolation = ' 'The machine-readable receipt must expose Python interpreter isolation.'
+        Assert-Match $resolver 'directReferences=blocked' 'Resolved SkillSpector identity must record direct-reference blocking.'
+        Assert-Match $resolver '\$result\.directReferencesAllowed = ' 'The machine-readable receipt must expose direct-reference policy.'
+        Assert-Match $standard '對 `SkillSpector`，resolver \*\*MUST\*\*' 'Normative authority must define SkillSpector resolver controls.'
+        Assert-Match $standard 'Python `-I` isolated mode' 'Normative authority must require inherited Python interpreter isolation.'
+        Assert-Match $standard '--no-index --require-hashes --no-deps' 'Normative authority must require offline hash-locked installation.'
+    }
+
+    It 'UnitT26e_ignores_inherited_PYTHONPATH_for_every_Python_subprocess' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        [void](Assert-Command -Name 'python')
+        $probeRoot = Join-Path $TestDrive 'untrusted-python-path'
+        [void](New-Item -ItemType Directory -Path $probeRoot -Force)
+        $siteCustomizePath = Join-Path $probeRoot 'sitecustomize.py'
+        [IO.File]::WriteAllText($siteCustomizePath, "raise SystemExit('untrusted PYTHONPATH executed')`n", (New-Object Text.UTF8Encoding($false)))
+
+        $previousPythonPath = [Environment]::GetEnvironmentVariable('PYTHONPATH', [EnvironmentVariableTarget]::Process)
+        try {
+            [Environment]::SetEnvironmentVariable('PYTHONPATH', $probeRoot, [EnvironmentVariableTarget]::Process)
+            $output = Invoke-IsolatedPythonCommand -PythonCommand 'python' -Arguments @('-c', "print('isolated-python-ran')")
+            Assert-Equal (($output -join '').Trim()) 'isolated-python-ran' 'Isolated Python must ignore caller-controlled PYTHONPATH imports.'
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('PYTHONPATH', $previousPythonPath, [EnvironmentVariableTarget]::Process)
+        }
+    }
+
+    It 'UnitT26f_rejects_direct_Python_dependency_references_before_network_resolution' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $wheelhouse = Join-Path $TestDrive 'direct-reference-wheelhouse'
+        [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
+        $safeWheel = New-TestWheel -Root $wheelhouse -Name 'safe-package' -Version '1.0.0' -RequiresDist @('dependency-a>=1.0')
+        $unsafeWheel = New-TestWheel -Root $wheelhouse -Name 'unsafe-package' -Version '1.0.0' -RequiresDist @("dependency-b @`n https://packages.example.invalid/dependency-b.whl")
+
+        $safeMetadata = Get-PythonWheelMetadata -WheelPath $safeWheel
+        Assert-NoPythonDirectReferences -Metadata $safeMetadata -WheelFileName ([IO.Path]::GetFileName($safeWheel))
+
+        $errorMessage = $null
+        try {
+            $unsafeMetadata = Get-PythonWheelMetadata -WheelPath $unsafeWheel
+            Assert-NoPythonDirectReferences -Metadata $unsafeMetadata -WheelFileName ([IO.Path]::GetFileName($unsafeWheel))
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+        }
+        Assert-Match $errorMessage 'Python direct dependency reference is not allowed' 'Direct URL dependency metadata must fail closed.'
+
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $resolveStart = $resolver.IndexOf('function Resolve-SkillSpector')
+        $resolveBody = $resolver.Substring($resolveStart)
+        $directReferenceCheck = $resolveBody.IndexOf('Assert-NoPythonDirectReferences')
+        $dependencyDownload = $resolveBody.IndexOf("'pip', 'download'")
+        Assert-True ($directReferenceCheck -ge 0 -and $directReferenceCheck -lt $dependencyDownload) 'Root direct references must be rejected before pip dependency download.'
     }
 
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
@@ -288,12 +356,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ValidatePolicyOnly' 'Workflow must validate central tool trust policy.'
         Assert-Match $workflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Workflow must resolve Pester through the central resolver.'
+        Assert-Match $workflow 'interpreterIsolation=python-isolated-mode' 'Workflow must verify Python isolation in resolved SkillSpector identity.'
+        Assert-Match $workflow 'directReferences=blocked' 'Workflow must verify SkillSpector direct-reference blocking.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
 
         Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
+        Assert-Match $requiredWorkflow '(?ms)^permissions:\r?\n  contents: read\r?\n\r?\njobs:' 'Required workflow token permissions must be explicitly read-only.'
         Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
         Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ValidatePolicyOnly' 'Required context must validate central tool policy through the resolver.'
         Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ToolName skillspector.*-Install' 'Required context must live-install SkillSpector through the resolver.'
+        Assert-Match $requiredWorkflow 'interpreterIsolation=python-isolated-mode' 'Required context must verify Python isolation in resolved SkillSpector identity.'
+        Assert-Match $requiredWorkflow 'directReferences=blocked' 'Required context must verify SkillSpector direct-reference blocking.'
         Assert-Match $requiredWorkflow 'Resolve-StandardValidationTool\.ps1.*-ToolName pester.*-Install' 'Required context must obtain latest Pester through the resolver.'
         Assert-Match $requiredWorkflow 'skill-repository-standard\.Tests\.ps1' 'Required context must run the authority regression.'
     }
@@ -474,6 +547,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'GOCACHE' 'Review matrix must record isolated Go build-cache enforcement.'
         Assert-Match $matrix 'GOFLAGS' 'Review matrix must record clean Go build flags.'
         Assert-Match $matrix 'pypi.org/simple' 'Review matrix must record the approved Python package index.'
+        Assert-Match $matrix 'Python `-I` isolated mode' 'Review matrix must record inherited Python interpreter isolation.'
+        Assert-Match $matrix 'direct references' 'Review matrix must record direct-reference blocking.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
     }

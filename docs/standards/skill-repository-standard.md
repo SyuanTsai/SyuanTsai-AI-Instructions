@@ -253,6 +253,16 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 
 Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source 或 endpoint 偏離 trust anchor，即使 package name 與 channel 不變，整個 canonical validation **MUST** fail closed。
 
+對 `SkillSpector`，resolver **MUST**：
+
+- 只接受 `NVIDIA/SkillSpector` GitHub latest release 中符合 `v<release-semver>` 的非 draft、非 prerelease 版本；
+- 將 release tag、resolved commit、預期 wheel filename、GitHub asset SHA-256、wheel `METADATA` Name/Version 與安裝後 package version 綁定為同一 identity；
+- 使用 Python `-I` isolated mode 執行 venv 建立、pip dependency acquisition、offline install 與 installed-version verification，避免 `PYTHONPATH`、`PYTHONHOME`、user site 或其他 inherited `PYTHON*` interpreter control 介入 canonical resolution；
+- 只允許 `https://pypi.org/simple` 作為 Python dependency index，隔離 pip config、停用 cache、只接受 wheels，且 inherited `PIP_*` environment 採 deny-by-default；只有值已等於 approved index 的 `PIP_INDEX_URL` 可被接受；
+- 在任何 dependency network resolution 前拒絕 SkillSpector root wheel 的 direct URL / VCS / local-file dependency reference，並在建立 closure 時再次拒絕任何 wheel metadata 中的 direct reference；不得讓 `Requires-Dist` 繞過 approved index；
+- 在 temporary isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，記錄每個 wheel SHA-256 與 deterministic closure identity，再以 `--no-index --require-hashes --no-deps` 從該 wheelhouse 安裝；
+- 在 release、wheel metadata、asset digest、dependency closure 或 installed version 任一 identity 不一致時 fail closed。
+
 對 `skill-tools`，resolver **MUST**：
 
 - 驗證中央 policy 的 registry 為 `https://registry.npmjs.org/`；
@@ -585,6 +595,7 @@ Migration 順序：
 - scanner/analyzer 未完整執行仍 pass；
 - 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
 - `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
+- `SkillSpector` 的 Python invocation 未使用 `-I` isolated mode，dependency acquisition 可繼承 caller-controlled Python/pip import、config、index、link、certificate 或 requirement controls，或 wheel metadata 可用 direct reference 繞過 approved index；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；

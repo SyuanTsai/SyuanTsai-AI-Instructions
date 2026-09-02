@@ -60,6 +60,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion)) { throw 'SkillSpector version was not recorded.' }
           if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'SkillSpector identity was not recorded.' }
           if ($receipt.resolvedIdentity -notmatch 'metadata=skillspector@') { throw 'SkillSpector wheel METADATA identity was not recorded.' }
+          if ($receipt.interpreterIsolation -ne 'python-isolated-mode') { throw 'SkillSpector Python subprocesses were not isolated.' }
+          if ($receipt.resolvedIdentity -notmatch 'interpreterIsolation=python-isolated-mode') { throw 'SkillSpector identity does not record Python interpreter isolation.' }
+          if ([bool]$receipt.directReferencesAllowed) { throw 'SkillSpector direct dependency references were not blocked.' }
+          if ($receipt.resolvedIdentity -notmatch 'directReferences=blocked') { throw 'SkillSpector identity does not record direct-reference blocking.' }
           if ([string]$receipt.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure SHA-256 was not recorded.' }
           if (@($receipt.dependencyClosure).Count -le 1) { throw 'SkillSpector dependency closure did not include runtime dependencies.' }
           if ($receipt.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector resolved identity does not bind the dependency closure.' }

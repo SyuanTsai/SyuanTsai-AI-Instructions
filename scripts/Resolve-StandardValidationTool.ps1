@@ -137,9 +137,12 @@ function Get-Policy {
         [string]$skillSpector.pythonDistribution.environmentOverridePolicy -cne 'deny-by-default' -or
         $allowedInherited.Count -ne 1 -or [string]$allowedInherited[0] -cne 'PIP_INDEX_URL' -or
         -not [bool]$skillSpector.pythonDistribution.onlyBinary -or
+        $null -eq $skillSpector.pythonDistribution.PSObject.Properties['allowDirectReferences'] -or
+        [bool]$skillSpector.pythonDistribution.allowDirectReferences -or
         -not [bool]$skillSpector.pythonDistribution.disableCache -or
         [string]$skillSpector.pythonDistribution.dependencyAcquisition -cne 'verified-wheelhouse' -or
         [string]$skillSpector.pythonDistribution.installEnvironment -cne 'isolated-venv' -or
+        [string]$skillSpector.pythonDistribution.interpreterIsolation -cne 'python-isolated-mode' -or
         -not [bool]$skillSpector.pythonDistribution.installNoIndex -or
         -not [bool]$skillSpector.pythonDistribution.requireHashes -or
         -not [bool]$skillSpector.pythonDistribution.recordDependencyClosureHashes) {
@@ -195,6 +198,15 @@ function Invoke-CheckedCommand {
     return @($output | ForEach-Object { [string]$_ })
 }
 
+function Invoke-IsolatedPythonCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $PythonCommand,
+        [Parameter(Mandatory = $true)][string[]] $Arguments
+    )
+
+    return Invoke-CheckedCommand -Command $PythonCommand -Arguments (@('-I') + $Arguments)
+}
+
 function Get-GitHubHeaders {
     $headers = @{
         'Accept' = 'application/vnd.github+json'
@@ -244,19 +256,37 @@ function Get-PythonWheelMetadata {
             $stream.Dispose()
         }
 
-        $nameMatch = [regex]::Match($text, '(?m)^Name:\s*(.+?)\s*$')
-        $versionMatch = [regex]::Match($text, '(?m)^Version:\s*(.+?)\s*$')
+        $unfoldedText = [regex]::Replace($text, "\r?\n[ `t]+", ' ')
+        $nameMatch = [regex]::Match($unfoldedText, '(?m)^Name:\s*(.+?)\s*$')
+        $versionMatch = [regex]::Match($unfoldedText, '(?m)^Version:\s*(.+?)\s*$')
         if (-not $nameMatch.Success -or -not $versionMatch.Success) {
             throw "Wheel METADATA in '$WheelPath' does not contain Name and Version."
         }
+        $requiresDist = @([regex]::Matches($unfoldedText, '(?m)^Requires-Dist:\s*(.+?)\s*$') | ForEach-Object {
+            $_.Groups[1].Value.Trim()
+        })
 
         return [ordered]@{
             name = $nameMatch.Groups[1].Value.Trim()
             version = $versionMatch.Groups[1].Value.Trim()
+            requiresDist = $requiresDist
         }
     }
     finally {
         $archive.Dispose()
+    }
+}
+
+function Assert-NoPythonDirectReferences {
+    param(
+        [Parameter(Mandatory = $true)] $Metadata,
+        [Parameter(Mandatory = $true)][string] $WheelFileName
+    )
+
+    foreach ($requirement in @($Metadata.requiresDist)) {
+        if ([string]$requirement -match '@|(?:https?|file|git\+https?|git\+ssh|ssh)\s*:') {
+            throw "Python direct dependency reference is not allowed in '$WheelFileName': '$requirement'."
+        }
     }
 }
 
@@ -355,6 +385,7 @@ function New-PythonWheelhouseLock {
             throw "Non-wheel artifact found in verified wheelhouse: '$($file.Name)'."
         }
         $metadata = Get-PythonWheelMetadata -WheelPath $file.FullName
+        Assert-NoPythonDirectReferences -Metadata $metadata -WheelFileName $file.Name
         $normalizedName = Normalize-PythonPackageName -Name ([string]$metadata.name)
         if ($seen.ContainsKey($normalizedName)) {
             throw "Duplicate Python distribution '$normalizedName' in wheelhouse."
@@ -659,6 +690,7 @@ function Resolve-SkillSpector {
     }
 
     $approvedIndex = Normalize-RegistryUri -Value ([string]$ToolPolicy.pythonPackageIndex)
+    $interpreterIsolation = [string]$ToolPolicy.pythonDistribution.interpreterIsolation
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("skillspector-{0}-{1}" -f $version, [guid]::NewGuid().ToString('N'))
     $wheelhouse = Join-Path $tempRoot 'wheelhouse'
     [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
@@ -676,10 +708,11 @@ function Resolve-SkillSpector {
 
         $wheelMetadata = Get-PythonWheelMetadata -WheelPath $wheelPath
         Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
+        Assert-NoPythonDirectReferences -Metadata $wheelMetadata -WheelFileName ([string]$wheel.name)
 
         if ($ShouldInstall) {
             $venvPath = Join-Path $tempRoot 'venv'
-            [void](Invoke-CheckedCommand -Command 'python' -Arguments @('-m', 'venv', $venvPath))
+            [void](Invoke-IsolatedPythonCommand -PythonCommand 'python' -Arguments @('-m', 'venv', $venvPath))
             $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                 Join-Path $venvPath 'Scripts\python.exe'
             }
@@ -693,7 +726,7 @@ function Resolve-SkillSpector {
 
             $closure = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
                 $indexArgument = "--index-url=$approvedIndex"
-                [void](Invoke-CheckedCommand -Command $venvPython -Arguments @(
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
                     '-m', 'pip', 'download', '--disable-pip-version-check', '--no-cache-dir',
                     '--only-binary=:all:', '--dest', $wheelhouse, $indexArgument, $wheelPath
                 ))
@@ -714,13 +747,13 @@ function Resolve-SkillSpector {
                     throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
                 }
 
-                [void](Invoke-CheckedCommand -Command $venvPython -Arguments @(
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
                     '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
                     '--no-index', "--find-links=$wheelhouse", '--require-hashes', '--no-deps', '--force-reinstall',
                     '-r', $lockPath
                 ))
 
-                $installedVersion = ((Invoke-CheckedCommand -Command $venvPython -Arguments @(
+                $installedVersion = ((Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
                     '-c', "import importlib.metadata as m; print(m.version('skillspector'))"
                 )) -join '').Trim()
                 if ($installedVersion -cne $version) {
@@ -735,17 +768,21 @@ function Resolve-SkillSpector {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version"
+    $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#directReferences=blocked"
+    $identityKind = 'release-commit-asset-metadata'
     if ($null -ne $closure) {
-        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#dependencyClosureSha256=$($closure.closureSha256)"
+        $identity += "#pythonIndex=$approvedIndex#installEnvironment=$installEnvironment#interpreterIsolation=$interpreterIsolation#dependencyClosureSha256=$($closure.closureSha256)"
+        $identityKind = 'release-commit-asset-metadata-and-dependency-closure'
     }
 
     return [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity
-        identityKind = 'release-commit-asset-metadata-and-dependency-closure'
+        identityKind = $identityKind
         pythonPackageIndex = $approvedIndex
         installEnvironment = $installEnvironment
+        interpreterIsolation = $interpreterIsolation
+        directReferencesAllowed = [bool]$ToolPolicy.pythonDistribution.allowDirectReferences
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
     }
@@ -805,6 +842,8 @@ else {
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
         $result.installEnvironment = $resolved.installEnvironment
+        $result.interpreterIsolation = [string]$resolved.interpreterIsolation
+        $result.directReferencesAllowed = [bool]$resolved.directReferencesAllowed
         $result.dependencyClosureSha256 = $resolved.dependencyClosureSha256
         $result.dependencyClosure = $resolved.dependencyClosure
     }

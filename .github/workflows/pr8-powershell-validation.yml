@@ -13,6 +13,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   windows-powershell-51:
     name: Pester (Windows PowerShell 5.1)
@@ -151,6 +154,10 @@ jobs:
           $skillSpector = Get-Content -Raw -Encoding UTF8 -LiteralPath $skillSpectorReceipt | ConvertFrom-Json
           if ($skillSpector.source -ne 'NVIDIA/SkillSpector') { throw 'Unexpected SkillSpector source.' }
           if ($skillSpector.installEnvironment -ne 'isolated-venv') { throw 'SkillSpector was not installed in the approved isolated environment.' }
+          if ($skillSpector.interpreterIsolation -ne 'python-isolated-mode') { throw 'SkillSpector Python subprocesses were not isolated.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'interpreterIsolation=python-isolated-mode') { throw 'SkillSpector identity does not record Python interpreter isolation.' }
+          if ([bool]$skillSpector.directReferencesAllowed) { throw 'SkillSpector direct dependency references were not blocked.' }
+          if ($skillSpector.resolvedIdentity -notmatch 'directReferences=blocked') { throw 'SkillSpector identity does not record direct-reference blocking.' }
           if ([string]$skillSpector.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure identity is missing.' }
           if (@($skillSpector.dependencyClosure).Count -le 1) { throw 'SkillSpector runtime dependency closure is incomplete.' }
           if ($skillSpector.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector identity does not bind the dependency closure.' }

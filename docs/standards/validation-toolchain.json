@@ -26,9 +26,11 @@
           "PIP_INDEX_URL"
         ],
         "onlyBinary": true,
+        "allowDirectReferences": false,
         "disableCache": true,
         "dependencyAcquisition": "verified-wheelhouse",
         "installEnvironment": "isolated-venv",
+        "interpreterIsolation": "python-isolated-mode",
         "installNoIndex": true,
         "requireHashes": true,
         "recordDependencyClosureHashes": true
