@@ -183,11 +183,19 @@ function Get-Policy {
 function Assert-Command {
     param([Parameter(Mandatory = $true)][string] $Name)
 
-    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    $command = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $command) {
-        throw "Required command '$Name' is unavailable."
+        throw "Required native command '$Name' is unavailable."
     }
-    return $command
+    $path = if ($null -ne $command.PSObject.Properties['Path']) { [string]$command.Path } else { [string]$command.Source }
+    if ([string]::IsNullOrWhiteSpace($path) -or -not [IO.Path]::IsPathRooted($path)) {
+        throw "Required native command '$Name' did not resolve to an absolute application path."
+    }
+    $resolvedPath = [IO.Path]::GetFullPath($path)
+    if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+        throw "Required native command '$Name' does not exist at '$resolvedPath'."
+    }
+    return $resolvedPath
 }
 
 function Invoke-CheckedCommand {
@@ -196,9 +204,20 @@ function Invoke-CheckedCommand {
         [Parameter(Mandatory = $true)][string[]] $Arguments
     )
 
-    $output = & $Command @Arguments 2>&1
+    $commandPath = if ([IO.Path]::IsPathRooted($Command)) {
+        $resolved = [IO.Path]::GetFullPath($Command)
+        if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+            throw "Required native command does not exist at '$resolved'."
+        }
+        $resolved
+    }
+    else {
+        Assert-Command -Name $Command
+    }
+
+    $output = & $commandPath @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "$Command $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
+        throw "$commandPath $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
     }
     return @($output | ForEach-Object { [string]$_ })
 }
@@ -224,6 +243,33 @@ function Get-GitHubHeaders {
     return $headers
 }
 
+function Get-ApprovedSkillSpectorAssetUri {
+    param(
+        [Parameter(Mandatory = $true)][string] $Value,
+        [Parameter(Mandatory = $true)][string] $Tag,
+        [Parameter(Mandatory = $true)][string] $FileName
+    )
+
+    try {
+        $uri = [Uri]$Value
+    }
+    catch {
+        throw "Invalid SkillSpector release asset URI '$Value'."
+    }
+    $expectedPath = "/NVIDIA/SkillSpector/releases/download/$Tag/$FileName"
+    if (-not $uri.IsAbsoluteUri -or
+        $uri.Scheme -cne 'https' -or
+        $uri.Host -cne 'github.com' -or
+        -not $uri.IsDefaultPort -or
+        -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty($uri.Query) -or
+        -not [string]::IsNullOrEmpty($uri.Fragment) -or
+        $uri.AbsolutePath -cne $expectedPath) {
+        throw "Untrusted SkillSpector release asset URI '$Value'. Expected 'https://github.com$expectedPath'."
+    }
+    return $uri.AbsoluteUri
+}
+
 function Test-StableGoModuleVersion {
     param([Parameter(Mandatory = $true)][string] $Version)
 
@@ -243,14 +289,14 @@ function ConvertFrom-PythonMetadataText {
     )
 
     $unfoldedText = [regex]::Replace($Text, "\r?\n[ `t]+", ' ')
-    $nameMatch = [regex]::Match($unfoldedText, '(?m)^Name:\s*(.+?)\s*$')
-    $versionMatch = [regex]::Match($unfoldedText, '(?m)^Version:\s*(.+?)\s*$')
-    if (-not $nameMatch.Success -or -not $versionMatch.Success) {
-        throw "$Context does not contain Name and Version."
+    $nameMatches = @([regex]::Matches($unfoldedText, '(?m)^Name:\s*(.+?)\s*$'))
+    $versionMatches = @([regex]::Matches($unfoldedText, '(?m)^Version:\s*(.+?)\s*$'))
+    if ($nameMatches.Count -ne 1 -or $versionMatches.Count -ne 1) {
+        throw "$Context must contain exactly one Name field and one Version field. Found Name=$($nameMatches.Count), Version=$($versionMatches.Count)."
     }
 
-    $name = $nameMatch.Groups[1].Value.Trim()
-    $version = $versionMatch.Groups[1].Value.Trim()
+    $name = $nameMatches[0].Groups[1].Value.Trim()
+    $version = $versionMatches[0].Groups[1].Value.Trim()
     $normalizedName = Normalize-PythonPackageName -Name $name
     if ($normalizedName -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
         throw "$Context contains an unsafe Python distribution Name '$name'."
@@ -772,6 +818,7 @@ function Resolve-SkillSpector {
     if ([string]$wheel.name -cne $expectedWheelName) {
         throw "SkillSpector release tag/wheel filename mismatch. Tag '$tag' requires '$expectedWheelName', got '$($wheel.name)'."
     }
+    $assetUri = Get-ApprovedSkillSpectorAssetUri -Value ([string]$wheel.browser_download_url) -Tag $tag -FileName $expectedWheelName
 
     $digest = [string]$wheel.digest
     if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
@@ -790,7 +837,7 @@ function Resolve-SkillSpector {
     $installedMetadataVerification = $null
     try {
         $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
-        Invoke-WebRequest -Uri ([string]$wheel.browser_download_url) -Headers $headers -OutFile $wheelPath -UseBasicParsing
+        Invoke-WebRequest -Uri $assetUri -Headers $headers -OutFile $wheelPath -UseBasicParsing
 
         # GitHub credentials are needed only for the authenticated release API/download calls above.
         # No Python or package-manager subprocess may inherit them.
