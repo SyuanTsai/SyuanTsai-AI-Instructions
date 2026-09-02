@@ -350,7 +350,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($directReferenceCheck -ge 0 -and $directReferenceCheck -lt $dependencyDownload) 'Root direct references must be rejected before pip dependency download.'
 
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
-        Assert-Match $standard 'root wheel.*direct URL.*dependency network resolution' 'Standard must preserve root direct-reference pre-network rejection.'
+        Assert-Match $standard 'dependency network resolution.*root wheel.*direct URL' 'Standard must preserve root direct-reference pre-network rejection.'
         Assert-Match $standard 'post-materialization check.*不得被描述成' 'Standard must state the transitive direct-reference check is post-materialization, not a pre-network proof.'
         Assert-Match $standard 'transport/sandbox egress control' 'Stronger transitive network-egress claims must require an actual transport or sandbox control.'
     }
