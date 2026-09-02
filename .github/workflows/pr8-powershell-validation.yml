@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Ensure Pester 3.4.0
         shell: powershell
@@ -80,6 +81,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -135,6 +137,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Run required Standard v1 authority gate
         shell: pwsh
@@ -161,6 +164,11 @@ jobs:
           if ([string]$skillSpector.dependencyClosureSha256 -notmatch '^[0-9a-f]{64}$') { throw 'SkillSpector dependency closure identity is missing.' }
           if (@($skillSpector.dependencyClosure).Count -le 1) { throw 'SkillSpector runtime dependency closure is incomplete.' }
           if ($skillSpector.resolvedIdentity -notmatch 'dependencyClosureSha256=[0-9a-f]{64}') { throw 'SkillSpector identity does not bind the dependency closure.' }
+
+          # The GitHub API token is needed only while resolving the SkillSpector release.
+          # Do not leave it available while importing third-party modules or running repository tests.
+          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
 
           $pesterReceipt = Join-Path $env:RUNNER_TEMP 'required-standard-validation-pester.json'
           & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName pester -Install -OutputPath $pesterReceipt | Out-Host
