@@ -21,6 +21,32 @@ $trustedSources = [ordered]@{
     'pester' = 'PowerShellGallery:Pester'
 }
 
+$trustedRegistries = [ordered]@{
+    'skill-tools' = 'https://registry.npmjs.org/'
+}
+
+function Normalize-RegistryUri {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $trimmed = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        throw 'Registry URI cannot be empty.'
+    }
+
+    try {
+        $uri = [Uri]$trimmed
+    }
+    catch {
+        throw "Invalid registry URI '$Value'."
+    }
+
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -cne 'https') {
+        throw "Registry URI must use absolute HTTPS: '$Value'."
+    }
+
+    return $uri.AbsoluteUri.TrimEnd('/') + '/'
+}
+
 function Get-Policy {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -70,6 +96,15 @@ function Get-Policy {
         }
     }
 
+    foreach ($entry in $trustedRegistries.GetEnumerator()) {
+        $tool = $policy.tools.($entry.Key)
+        $configuredRegistry = Normalize-RegistryUri -Value ([string]$tool.registry)
+        $expectedRegistry = Normalize-RegistryUri -Value ([string]$entry.Value)
+        if ($configuredRegistry -cne $expectedRegistry) {
+            throw "Untrusted package registry for '$($entry.Key)': '$configuredRegistry'. Expected '$expectedRegistry'."
+        }
+    }
+
     return $policy
 }
 
@@ -108,6 +143,34 @@ function Get-GitHubHeaders {
     return $headers
 }
 
+function Test-StableGoModuleVersion {
+    param([Parameter(Mandatory = $true)][string] $Version)
+
+    return $Version -match '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'
+}
+
+function Assert-ApprovedNpmRegistry {
+    param([Parameter(Mandatory = $true)][string] $ExpectedRegistry)
+
+    $expected = Normalize-RegistryUri -Value $ExpectedRegistry
+
+    if (-not [string]::IsNullOrWhiteSpace($env:NPM_CONFIG_REGISTRY)) {
+        $environmentRegistry = Normalize-RegistryUri -Value $env:NPM_CONFIG_REGISTRY
+        if ($environmentRegistry -cne $expected) {
+            throw "Untrusted npm registry from NPM_CONFIG_REGISTRY: '$environmentRegistry'. Expected '$expected'."
+        }
+    }
+
+    [void](Assert-Command -Name 'npm')
+    $configuredRegistry = (Invoke-CheckedCommand -Command 'npm' -Arguments @('config', 'get', 'registry')) -join ''
+    $configured = Normalize-RegistryUri -Value $configuredRegistry
+    if ($configured -cne $expected) {
+        throw "Untrusted npm registry from npm configuration: '$configured'. Expected '$expected'."
+    }
+
+    return $expected
+}
+
 function Resolve-Pester {
     param([bool] $ShouldInstall)
 
@@ -136,28 +199,33 @@ function Resolve-Pester {
 }
 
 function Resolve-SkillTools {
-    param([bool] $ShouldInstall)
+    param(
+        [bool] $ShouldInstall,
+        [Parameter(Mandatory = $true)][string] $Registry
+    )
 
-    [void](Assert-Command -Name 'npm')
-    $versionJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', 'skill-tools', 'version', '--json')) -join "`n"
+    $approvedRegistry = Assert-ApprovedNpmRegistry -ExpectedRegistry $Registry
+    $registryArgument = "--registry=$approvedRegistry"
+
+    $versionJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', 'skill-tools', 'version', '--json', $registryArgument)) -join "`n"
     $version = [string]($versionJson | ConvertFrom-Json)
     if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('-')) {
         throw "Could not resolve a stable skill-tools version. Resolved='$version'."
     }
 
-    $integrityJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', "skill-tools@$version", 'dist.integrity', '--json')) -join "`n"
+    $integrityJson = (Invoke-CheckedCommand -Command 'npm' -Arguments @('view', "skill-tools@$version", 'dist.integrity', '--json', $registryArgument)) -join "`n"
     $integrity = [string]($integrityJson | ConvertFrom-Json)
     if ([string]::IsNullOrWhiteSpace($integrity)) {
         throw 'npm did not return package integrity for skill-tools.'
     }
 
     if ($ShouldInstall) {
-        [void](Invoke-CheckedCommand -Command 'npm' -Arguments @('install', '--global', '--no-audit', '--no-fund', "skill-tools@$version"))
+        [void](Invoke-CheckedCommand -Command 'npm' -Arguments @('install', '--global', '--no-audit', '--no-fund', $registryArgument, "skill-tools@$version"))
     }
 
     return [ordered]@{
         resolvedVersion = $version
-        resolvedIdentity = "npm:skill-tools@$version#$integrity"
+        resolvedIdentity = "npm:skill-tools@$version#$integrity#registry=$approvedRegistry"
         identityKind = 'registry-integrity'
     }
 }
@@ -171,8 +239,8 @@ function Resolve-SkillValidator {
     $metadataJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
     $metadata = $metadataJson | ConvertFrom-Json
     $version = [string]$metadata.Version
-    if ([string]::IsNullOrWhiteSpace($version)) {
-        throw 'Go did not return a version for skill-validator.'
+    if (-not (Test-StableGoModuleVersion -Version $version)) {
+        throw "Go did not resolve a stable release version for skill-validator. Resolved='$version'."
     }
 
     if ($ShouldInstall) {
@@ -261,6 +329,7 @@ if ($ValidatePolicyOnly) {
             failClosedOnMismatch = [bool]$policy.sourceTrust.failClosedOnMismatch
         }
         trustedSources = $trustedSources
+        trustedRegistries = $trustedRegistries
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
     }
 }
@@ -271,7 +340,7 @@ else {
 
     $resolved = switch ($ToolName) {
         'pester' { Resolve-Pester -ShouldInstall ([bool]$Install) }
-        'skill-tools' { Resolve-SkillTools -ShouldInstall ([bool]$Install) }
+        'skill-tools' { Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) }
         'skill-validator' { Resolve-SkillValidator -ShouldInstall ([bool]$Install) }
         'skillspector' { Resolve-SkillSpector -ShouldInstall ([bool]$Install) }
     }
@@ -286,6 +355,9 @@ else {
         resolvedIdentity = [string]$resolved.resolvedIdentity
         identityKind = [string]$resolved.identityKind
         frozenForRun = [bool]$policy.resolution.freezeForRun
+    }
+    if ($ToolName -eq 'skill-tools') {
+        $result.registry = [string]$toolPolicy.registry
     }
 }
 
