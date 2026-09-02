@@ -1,7 +1,7 @@
 # Agent Skill Repository Standard v1
 
-Status: **Normative**  
-Authority: `SyuanTsai-AI-Instructions/docs/standards/`  
+Status: **Normative**
+Authority: `SyuanTsai-AI-Instructions/docs/standards/`
 Tracking: Jira `SYP-167`
 
 ## 1. Purpose
