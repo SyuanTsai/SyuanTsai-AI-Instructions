@@ -214,7 +214,7 @@ Version: this line also belongs to the description body
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
         Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
-        Assert-NotMatch $resolver '\$output = & \$Command' 'Native execution must not re-resolve the caller-supplied command name.'
+        Assert-NotMatch $resolver '(?m)\$output = & \$Command(?:[ \t]|$)' 'Native execution must not re-resolve the caller-supplied command name.'
     }
 
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
