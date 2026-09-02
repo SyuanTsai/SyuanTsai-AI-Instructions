@@ -46,6 +46,23 @@ jobs:
           Write-Host "Canonical validation policy: $($receipt.policy)"
           Write-Host "Tool source enforcement: $($receipt.sourceTrust.enforcement)"
 
+      - name: Validate latest stable SkillSpector release identity
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'standard-validation-skillspector.json'
+          & ./scripts/Resolve-StandardValidationTool.ps1 -ToolName skillspector -OutputPath $receiptPath | Out-Host
+          $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
+          if ($receipt.source -ne 'NVIDIA/SkillSpector') { throw "Unexpected SkillSpector source '$($receipt.source)'." }
+          if ($receipt.pythonPackageIndex -notmatch '^https://pypi\.org/simple/?$') { throw "Unexpected Python package index '$($receipt.pythonPackageIndex)'." }
+          if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion)) { throw 'SkillSpector version was not recorded.' }
+          if ([string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'SkillSpector identity was not recorded.' }
+          if ($receipt.resolvedIdentity -notmatch 'metadata=skillspector@') { throw 'SkillSpector wheel METADATA identity was not recorded.' }
+          Write-Host "Resolved SkillSpector version: $($receipt.resolvedVersion)"
+          Write-Host "Resolved SkillSpector identity: $($receipt.resolvedIdentity)"
+
       - name: Resolve latest stable Pester from central policy
         shell: pwsh
         env:
