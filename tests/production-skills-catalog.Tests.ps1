@@ -44,14 +44,15 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_eleven_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_twelve_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 11
+        $activeSkills.Count | Should Be 12
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
             'verify-data-access-performance' = 'general'
             'investigate-datadog-logs' = 'general'
+            'manage-notion-ai-memory' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
@@ -126,6 +127,24 @@ Describe 'production Skills Catalog' {
         [string]$skill.dependencies[0].condition.capability | Should Be 'confluence-cloud-api'
         [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
         [string]$skill.dependencies[0].fallback.capability | Should Be 'confluence-cloud-connector'
+    }
+
+    # Scenario: Durable AI memory is selected explicitly and has a configured Notion connector.
+    # Purpose: Keep the new Skill opt-in and fail closed when Notion capability evidence is absent.
+    It 'InterT19_routes_Notion_memory_through_the_opt_in_ai_memory_profile' {
+        $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'ai-memory' })
+        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-notion-ai-memory' })
+
+        $profile.Count | Should Be 1
+        [bool]$profile[0].default | Should Be $false
+        @($profile[0].includes) | Should Be @('manage-notion-ai-memory')
+        $skill.Count | Should Be 1
+        [string]$skill[0].group | Should Be 'knowledge-management'
+        @($skill[0].profiles) | Should Be @('ai-memory')
+        @($skill[0].compatibility.requiredCapabilities).Count | Should Be 1
+        [string]$skill[0].compatibility.requiredCapabilities[0].kind | Should Be 'connector'
+        [string]$skill[0].compatibility.requiredCapabilities[0].id | Should Be 'notion'
+        [string]$skill[0].compatibility.requiredCapabilities[0].state | Should Be 'configured'
     }
 
     # Scenario: The production catalog contains the profiles used by a new installation.

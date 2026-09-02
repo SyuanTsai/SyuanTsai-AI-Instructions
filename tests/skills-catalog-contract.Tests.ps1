@@ -73,8 +73,8 @@ Describe 'Skills Catalog contract' {
             -ManifestPath $script:ManifestExample `
             -ConfigurationPath $script:ConfigurationExample
 
-        $result.SkillCount | Should Be 12
-        $result.ProfileCount | Should Be 6
+        $result.SkillCount | Should Be 13
+        $result.ProfileCount | Should Be 7
         $result.SourceCount | Should Be 1
         $result.ManifestFileCount | Should Be 2
 
@@ -84,7 +84,7 @@ Describe 'Skills Catalog contract' {
         $catalogSkillIds = @($catalog.skills | Select-Object -ExpandProperty id | Sort-Object)
         ($catalogSkillIds -join "`n") | Should Be ($actualSkillIds -join "`n")
 
-        $expectedProfileIds = @('atlassian', 'code-collaboration', 'core', 'external-research', 'knowledge-capture', 'observability')
+        $expectedProfileIds = @('ai-memory', 'atlassian', 'code-collaboration', 'core', 'external-research', 'knowledge-capture', 'observability')
         $catalogProfileIds = @($catalog.profiles | Select-Object -ExpandProperty id | Sort-Object)
         ($catalogProfileIds -join "`n") | Should Be ($expectedProfileIds -join "`n")
     }
