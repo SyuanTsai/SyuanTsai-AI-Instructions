@@ -227,13 +227,20 @@ function Invoke-WithApprovedGoEnvironment {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, [EnvironmentVariableTarget]::Process)
         }
 
+        $processGoEnv = [Environment]::GetEnvironmentVariable('GOENV', [EnvironmentVariableTarget]::Process)
+        if ([string]$processGoEnv -cne 'off') {
+            throw "Canonical Go process environment requires GOENV=off. Actual='$processGoEnv'."
+        }
+
         [void](Assert-Command -Name 'go')
-        $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments @('env', '-json', 'GOENV', 'GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')) -join "`n"
+        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')
+        $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
         $effective = $effectiveJson | ConvertFrom-Json
-        foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
-            $actual = [string]$effective.($entry.Key)
-            if ($actual -cne [string]$entry.Value) {
-                throw "Go did not apply approved environment for '$($entry.Key)': '$actual'. Expected '$($entry.Value)'."
+        foreach ($name in $effectiveNames) {
+            $actual = [string]$effective.$name
+            $expected = [string]$ExpectedEnvironment[$name]
+            if ($actual -cne $expected) {
+                throw "Go did not apply approved environment for '$name': '$actual'. Expected '$expected'."
             }
         }
 
