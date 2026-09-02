@@ -42,18 +42,26 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 [Parameter(Mandatory = $true)][string] $Version
             )
 
+            Add-Type -AssemblyName System.IO.Compression
             Add-Type -AssemblyName System.IO.Compression.FileSystem
-            $token = [guid]::NewGuid().ToString('N')
-            $sourceRoot = Join-Path $Root ("wheel-source-$token")
-            [void](New-Item -ItemType Directory -Path $sourceRoot -Force)
             $distName = ($Name -replace '-', '_')
-            $distInfo = Join-Path $sourceRoot ("$distName-$Version.dist-info")
-            [void](New-Item -ItemType Directory -Path $distInfo -Force)
             $metadata = "Metadata-Version: 2.4`nName: $Name`nVersion: $Version`n"
-            [IO.File]::WriteAllText((Join-Path $distInfo 'METADATA'), $metadata, (New-Object Text.UTF8Encoding($false)))
             $wheelPath = Join-Path $Root ("$distName-$Version-py3-none-any.whl")
-            [IO.Compression.ZipFile]::CreateFromDirectory($sourceRoot, $wheelPath)
-            Remove-Item -LiteralPath $sourceRoot -Recurse -Force
+            $archive = [IO.Compression.ZipFile]::Open($wheelPath, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                $entry = $archive.CreateEntry("$distName-$Version.dist-info/METADATA")
+                $stream = $entry.Open()
+                try {
+                    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($metadata)
+                    $stream.Write($bytes, 0, $bytes.Length)
+                }
+                finally {
+                    $stream.Dispose()
+                }
+            }
+            finally {
+                $archive.Dispose()
+            }
             return $wheelPath
         }
     }
