@@ -472,6 +472,15 @@ function Get-DirectoryClosureIdentity {
     }
 }
 
+function Get-DependencyClosureEntriesArray {
+    param([AllowNull()] $Closure)
+
+    if ($null -eq $Closure) {
+        return ,([object[]]@())
+    }
+    return ,([object[]]@($Closure.entries))
+}
+
 function Get-OrdinalUniqueStrings {
     param([object[]] $Values)
 
@@ -1652,7 +1661,7 @@ function Resolve-Pester {
         executablePath = $modulePath
         executableSha256 = if ($null -eq $modulePath) { $null } else { Get-FileSha256 -Path $modulePath }
         dependencyClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
-        dependencyClosure = if ($null -eq $moduleClosure) { @() } else { @($moduleClosure.entries) }
+        dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $moduleClosure)
     }
 }
 
@@ -1815,7 +1824,7 @@ function Resolve-SkillTools {
                 executableSha256 = $executableSha256
                 packageLockSha256 = if ($null -eq $lockIdentity) { $null } else { [string]$lockIdentity.packageLockSha256 }
                 dependencyClosureSha256 = if ($null -eq $lockIdentity) { $null } else { [string]$lockIdentity.closureSha256 }
-                dependencyClosure = if ($null -eq $lockIdentity) { @() } else { @($lockIdentity.entries) }
+                dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $lockIdentity)
                 installedClosureSha256 = $installedClosureSha256
                 entryPointPath = $entryPointPath
                 entryPointSha256 = $entryPointSha256
@@ -1915,7 +1924,7 @@ function Resolve-SkillValidator {
                 executablePath = $executablePath
                 executableSha256 = $executableSha256
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
-                dependencyClosure = if ($null -eq $installedClosure) { @() } else { @($installedClosure.entries) }
+                dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
                 goRuntimeVersion = $goRuntimeVersion
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
@@ -2199,7 +2208,7 @@ function Resolve-SkillSpector {
         selectedClosureSha256 = if ($null -eq $backtrackingEvidence) { $null } else { [string]$backtrackingEvidence.selectedClosureSha256 }
         offlineResolutionVerified = if ($null -eq $closure) { $false } else { $true }
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
-        dependencyClosure = if ($null -eq $closure) { @() } else { @($closure.entries) }
+        dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $closure)
         installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
     }
 }

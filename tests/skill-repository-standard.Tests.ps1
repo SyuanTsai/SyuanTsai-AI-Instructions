@@ -1522,6 +1522,24 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 catch { $runtimeError = $_.Exception.Message }
                 Assert-Match $runtimeError ([string]$case.Pattern) 'Untrusted Go runtime evidence must fail closed.'
             }
+
+            $singleFileClosureRoot = Join-Path $TestDrive 'single-file-go-closure'
+            [void](New-Item -ItemType Directory -Path $singleFileClosureRoot -Force)
+            [IO.File]::WriteAllText(
+                (Join-Path $singleFileClosureRoot 'skill-validator'),
+                'fixture binary',
+                (New-Object Text.UTF8Encoding($false))
+            )
+            $singleFileClosure = Get-DirectoryClosureIdentity -Path $singleFileClosureRoot
+            $closureJson = [ordered]@{
+                installed = (Get-DependencyClosureEntriesArray -Closure $singleFileClosure)
+                unresolved = (Get-DependencyClosureEntriesArray -Closure $null)
+            } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+            Assert-True ($closureJson.installed -is [array]) 'A one-file installed closure must remain a JSON array instead of scalarizing to an object.'
+            Assert-Equal @($closureJson.installed).Count 1 'A one-file installed closure must contain exactly one entry.'
+            Assert-True ($closureJson.unresolved -is [array]) 'An unresolved closure must remain an empty JSON array.'
+            Assert-Equal @($closureJson.unresolved).Count 0 'An unresolved closure must not contain an entry.'
+            Assert-Equal ([regex]::Matches($resolver, 'dependencyClosure = \(Get-DependencyClosureEntriesArray -Closure \$').Count) 4 'Every resolver receipt must use the scalarization-safe closure-array helper.'
             Assert-Match $resolver '\$result\.moduleCacheIsolation = \[string\]\$resolved\.moduleCacheIsolation' 'The receipt must project module-cache isolation from the resolved installation.'
             Assert-Match $resolver '\$result\.buildCacheIsolation = \[string\]\$resolved\.buildCacheIsolation' 'The receipt must project build-cache isolation from the resolved installation.'
             Assert-Match $resolver 'binarySha256=\$executableSha256' 'The immutable skill-validator identity must include the installed binary hash.'
