@@ -351,7 +351,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         Assert-Match $standard 'dependency network resolution.*root wheel.*direct URL' 'Standard must preserve root direct-reference pre-network rejection.'
-        Assert-Match $standard 'post-materialization check.*不得被描述成' 'Standard must state the transitive direct-reference check is post-materialization, not a pre-network proof.'
+        Assert-Match $standard 'post-materialization check.*pre-network enforcement' 'Standard must state the transitive direct-reference check is post-materialization, not a pre-network proof.'
         Assert-Match $standard 'transport/sandbox egress control' 'Stronger transitive network-egress claims must require an actual transport or sandbox control.'
     }
 
