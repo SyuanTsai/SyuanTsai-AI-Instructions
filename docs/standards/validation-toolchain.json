@@ -21,7 +21,18 @@
     "skill-validator": {
       "source": "github.com/agent-ecosystem/skill-validator/cmd/skill-validator",
       "channel": "latest-stable",
-      "stableVersionRule": "release-semver-only"
+      "stableVersionRule": "release-semver-only",
+      "proxy": "https://proxy.golang.org",
+      "checksumDatabase": "sum.golang.org",
+      "goEnvironment": {
+        "GOENV": "off",
+        "GOPROXY": "https://proxy.golang.org",
+        "GOSUMDB": "sum.golang.org",
+        "GOPRIVATE": "",
+        "GONOPROXY": "none",
+        "GONOSUMDB": "none",
+        "GOINSECURE": ""
+      }
     },
     "skill-tools": {
       "source": "npm:skill-tools",
