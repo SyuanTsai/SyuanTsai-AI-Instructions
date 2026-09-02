@@ -12,6 +12,8 @@ on:
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
+      - '.github/workflows/syp101-production-smoke.yml'
+      - '.github/workflows/syp86-production-lock.yml'
   pull_request:
     branches:
       - main
@@ -23,6 +25,8 @@ on:
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
+      - '.github/workflows/syp101-production-smoke.yml'
+      - '.github/workflows/syp86-production-lock.yml'
   workflow_dispatch:
 
 permissions:
