@@ -175,6 +175,18 @@ Describe 'Standard validation resolver hardening' {
             }
             Assert-Match $errorMessage $case.Pattern 'Unsafe or ambiguous metadata identity text must fail closed.'
         }
+
+        $bodyText = @"
+Metadata-Version: 2.4
+Name: safe-package
+Version: 1.0.0
+
+Name: this line belongs to the description body
+Version: this line also belongs to the description body
+"@
+        $bodyMetadata = ConvertFrom-PythonMetadataText -Text $bodyText -Context 'Body-text METADATA'
+        Assert-Equal $bodyMetadata.normalizedName 'safe-package' 'Description-body Name text must not be treated as a second metadata header.'
+        Assert-Equal $bodyMetadata.version '1.0.0' 'Description-body Version text must not be treated as a second metadata header.'
     }
 
     It 'UnitT60_resolves_only_native_applications_and_ignores_command_shadowing' {
