@@ -35,11 +35,14 @@ $trustedGoEnvironment = [ordered]@{
     'GONOPROXY' = 'none'
     'GONOSUMDB' = 'none'
     'GOINSECURE' = ''
+    'GOFLAGS' = ''
 }
 
 $trustedGoDistribution = [ordered]@{
     'moduleCacheIsolation' = 'temporary-empty'
     'rejectInheritedModuleCache' = $true
+    'buildCacheIsolation' = 'temporary-empty'
+    'rejectInheritedBuildCache' = $true
 }
 
 function Normalize-RegistryUri {
@@ -160,8 +163,10 @@ function Get-Policy {
         }
     }
     if ([string]$skillValidator.goDistribution.moduleCacheIsolation -cne [string]$trustedGoDistribution.moduleCacheIsolation -or
-        [bool]$skillValidator.goDistribution.rejectInheritedModuleCache -ne [bool]$trustedGoDistribution.rejectInheritedModuleCache) {
-        throw 'Go module cache distribution policy is incomplete or untrusted.'
+        [bool]$skillValidator.goDistribution.rejectInheritedModuleCache -ne [bool]$trustedGoDistribution.rejectInheritedModuleCache -or
+        [string]$skillValidator.goDistribution.buildCacheIsolation -cne [string]$trustedGoDistribution.buildCacheIsolation -or
+        [bool]$skillValidator.goDistribution.rejectInheritedBuildCache -ne [bool]$trustedGoDistribution.rejectInheritedBuildCache) {
+        throw 'Go cache distribution policy is incomplete or untrusted.'
     }
 
     return $policy
@@ -433,20 +438,31 @@ function Invoke-WithApprovedGoEnvironment {
     if ([bool]$DistributionPolicy.rejectInheritedModuleCache -and -not [string]::IsNullOrEmpty($inheritedModuleCache)) {
         throw "Untrusted Go environment override for 'GOMODCACHE': '$inheritedModuleCache'. Expected an unset value."
     }
+    $inheritedBuildCache = [Environment]::GetEnvironmentVariable('GOCACHE', [EnvironmentVariableTarget]::Process)
+    if ([bool]$DistributionPolicy.rejectInheritedBuildCache -and -not [string]::IsNullOrEmpty($inheritedBuildCache)) {
+        throw "Untrusted Go environment override for 'GOCACHE': '$inheritedBuildCache'. Expected an unset value."
+    }
     if ([string]$DistributionPolicy.moduleCacheIsolation -cne 'temporary-empty') {
         throw "Unsupported Go module cache isolation '$($DistributionPolicy.moduleCacheIsolation)'."
+    }
+    if ([string]$DistributionPolicy.buildCacheIsolation -cne 'temporary-empty') {
+        throw "Unsupported Go build cache isolation '$($DistributionPolicy.buildCacheIsolation)'."
     }
 
     $previous = [ordered]@{}
     $moduleCachePath = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-module-cache-{0}" -f [guid]::NewGuid().ToString('N'))
+    $buildCachePath = Join-Path ([IO.Path]::GetTempPath()) ("standard-go-build-cache-{0}" -f [guid]::NewGuid().ToString('N'))
     try {
         foreach ($entry in $ExpectedEnvironment.GetEnumerator()) {
             $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, [EnvironmentVariableTarget]::Process)
         }
         $previous.GOMODCACHE = $inheritedModuleCache
+        $previous.GOCACHE = $inheritedBuildCache
         [void](New-Item -ItemType Directory -Path $moduleCachePath)
+        [void](New-Item -ItemType Directory -Path $buildCachePath)
         [Environment]::SetEnvironmentVariable('GOMODCACHE', $moduleCachePath, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('GOCACHE', $buildCachePath, [EnvironmentVariableTarget]::Process)
 
         $processGoEnv = [Environment]::GetEnvironmentVariable('GOENV', [EnvironmentVariableTarget]::Process)
         if ([string]$processGoEnv -cne 'off') {
@@ -454,10 +470,10 @@ function Invoke-WithApprovedGoEnvironment {
         }
 
         [void](Assert-Command -Name 'go')
-        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOMODCACHE')
+        $effectiveNames = @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOFLAGS', 'GOMODCACHE', 'GOCACHE')
         $effectiveJson = (Invoke-CheckedCommand -Command 'go' -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
         $effective = $effectiveJson | ConvertFrom-Json
-        foreach ($name in @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE')) {
+        foreach ($name in @('GOPROXY', 'GOSUMDB', 'GOPRIVATE', 'GONOPROXY', 'GONOSUMDB', 'GOINSECURE', 'GOFLAGS')) {
             $actual = [string]$effective.$name
             $expected = [string]$ExpectedEnvironment[$name]
             if ($actual -cne $expected) {
@@ -475,8 +491,16 @@ function Invoke-WithApprovedGoEnvironment {
         if (-not [string]::Equals($effectiveModuleCache, $expectedModuleCache, $pathComparison)) {
             throw "Go did not apply the isolated module cache '$expectedModuleCache'. Actual='$effectiveModuleCache'."
         }
+        $effectiveBuildCache = [IO.Path]::GetFullPath([string]$effective.GOCACHE)
+        $expectedBuildCache = [IO.Path]::GetFullPath($buildCachePath)
+        if (-not [string]::Equals($effectiveBuildCache, $expectedBuildCache, $pathComparison)) {
+            throw "Go did not apply the isolated build cache '$expectedBuildCache'. Actual='$effectiveBuildCache'."
+        }
         if (@(Get-ChildItem -LiteralPath $moduleCachePath -Force).Count -ne 0) {
             throw "The isolated Go module cache was not empty before module resolution: '$moduleCachePath'."
+        }
+        if (@(Get-ChildItem -LiteralPath $buildCachePath -Force).Count -ne 0) {
+            throw "The isolated Go build cache was not empty before installation: '$buildCachePath'."
         }
 
         return & $Action
@@ -487,6 +511,9 @@ function Invoke-WithApprovedGoEnvironment {
         }
         if (Test-Path -LiteralPath $moduleCachePath) {
             Remove-Item -LiteralPath $moduleCachePath -Recurse -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $buildCachePath) {
+            Remove-Item -LiteralPath $buildCachePath -Recurse -Force -ErrorAction Stop
         }
     }
 }
@@ -577,9 +604,10 @@ function Resolve-SkillValidator {
 
         return [ordered]@{
             resolvedVersion = $version
-            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)"
+            resolvedIdentity = "go:$modulePath@$version#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty"
             identityKind = 'go-module-version-with-trusted-distribution'
             moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
+            buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
         }
     }
 }
@@ -772,6 +800,7 @@ else {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
+        $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
     }
     if ($ToolName -eq 'skillspector') {
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex

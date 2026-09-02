@@ -47,11 +47,14 @@
         "GOPRIVATE": "",
         "GONOPROXY": "none",
         "GONOSUMDB": "none",
-        "GOINSECURE": ""
+        "GOINSECURE": "",
+        "GOFLAGS": ""
       },
       "goDistribution": {
         "moduleCacheIsolation": "temporary-empty",
-        "rejectInheritedModuleCache": true
+        "rejectInheritedModuleCache": true,
+        "buildCacheIsolation": "temporary-empty",
+        "rejectInheritedBuildCache": true
       }
     },
     "skill-tools": {

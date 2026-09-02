@@ -136,8 +136,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOPROXY 'none' 'GONOPROXY must not bypass the approved proxy.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GONOSUMDB 'none' 'GONOSUMDB must not bypass checksum verification.'
         Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOINSECURE '' 'GOINSECURE must be disabled.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goEnvironment.GOFLAGS '' 'GOFLAGS must not inject caller-controlled build behavior.'
         Assert-Equal $toolchain.tools.'skill-validator'.goDistribution.moduleCacheIsolation 'temporary-empty' 'Go module resolution must use a fresh temporary module cache.'
         Assert-True ([bool]$toolchain.tools.'skill-validator'.goDistribution.rejectInheritedModuleCache) 'An inherited Go module cache override must fail closed.'
+        Assert-Equal $toolchain.tools.'skill-validator'.goDistribution.buildCacheIsolation 'temporary-empty' 'Go installation must use a fresh temporary build cache.'
+        Assert-True ([bool]$toolchain.tools.'skill-validator'.goDistribution.rejectInheritedBuildCache) 'An inherited Go build cache override must fail closed.'
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
         Assert-True ([bool]$toolchain.compatibilityLane.requiresExplicitPurpose) 'Compatibility pins require an explicit purpose.'
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'
@@ -340,7 +343,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Name = 'GONOPROXY'; Value = 'github.com/agent-ecosystem' },
             @{ Name = 'GONOSUMDB'; Value = 'github.com/agent-ecosystem' },
             @{ Name = 'GOINSECURE'; Value = 'github.com/agent-ecosystem' },
-            @{ Name = 'GOMODCACHE'; Value = (Join-Path $TestDrive 'untrusted-go-module-cache') }
+            @{ Name = 'GOFLAGS'; Value = '-toolexec=untrusted-wrapper' },
+            @{ Name = 'GOMODCACHE'; Value = (Join-Path $TestDrive 'untrusted-go-module-cache') },
+            @{ Name = 'GOCACHE'; Value = (Join-Path $TestDrive 'untrusted-go-build-cache') }
         )
 
         foreach ($case in $cases) {
@@ -374,6 +379,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             'GONOPROXY' = 'none'
             'GONOSUMDB' = 'none'
             'GOINSECURE' = ''
+            'GOFLAGS' = ''
         }
 
         $previous = [ordered]@{}
@@ -384,28 +390,42 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             }
             $previous.GOMODCACHE = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable('GOMODCACHE', $null, [EnvironmentVariableTarget]::Process)
+            $previous.GOCACHE = [Environment]::GetEnvironmentVariable('GOCACHE', [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('GOCACHE', $null, [EnvironmentVariableTarget]::Process)
 
             $distributionPolicy = [ordered]@{
                 moduleCacheIsolation = 'temporary-empty'
                 rejectInheritedModuleCache = $true
+                buildCacheIsolation = 'temporary-empty'
+                rejectInheritedBuildCache = $true
             }
             $result = Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $distributionPolicy -Action {
                 $moduleCache = [Environment]::GetEnvironmentVariable('GOMODCACHE', [EnvironmentVariableTarget]::Process)
+                $buildCache = [Environment]::GetEnvironmentVariable('GOCACHE', [EnvironmentVariableTarget]::Process)
                 [ordered]@{
                     action = 'approved-action-ran'
                     moduleCache = $moduleCache
                     moduleCacheExists = Test-Path -LiteralPath $moduleCache -PathType Container
                     moduleCacheEntryCount = @(Get-ChildItem -LiteralPath $moduleCache -Force).Count
+                    buildCache = $buildCache
+                    buildCacheExists = Test-Path -LiteralPath $buildCache -PathType Container
+                    buildCacheEntryCount = @(Get-ChildItem -LiteralPath $buildCache -Force).Count
                 }
             }
             Assert-Equal $result.action 'approved-action-ran' 'Approved Go environment must reach the action.'
             Assert-True ([bool]$result.moduleCacheExists) 'Approved Go resolution must provide an isolated module cache.'
             Assert-Equal $result.moduleCacheEntryCount 0 'The isolated Go module cache must be empty before resolution.'
             Assert-False (Test-Path -LiteralPath $result.moduleCache) 'The isolated Go module cache must be removed after resolution.'
+            Assert-True ([bool]$result.buildCacheExists) 'Approved Go installation must provide an isolated build cache.'
+            Assert-Equal $result.buildCacheEntryCount 0 'The isolated Go build cache must be empty before installation.'
+            Assert-False (Test-Path -LiteralPath $result.buildCache) 'The isolated Go build cache must be removed after resolution.'
 
             $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
             Assert-Match $resolver 'resolvedIdentity = "go:.*#moduleCache=\$\(' 'Resolved skill-validator identity must record module-cache isolation.'
+            Assert-Match $resolver '#buildCache=\$\(' 'Resolved skill-validator identity must record build-cache isolation.'
+            Assert-Match $resolver '#goflags=empty' 'Resolved skill-validator identity must record clean build flags.'
             Assert-Match $resolver '\$result\.moduleCacheIsolation = ' 'The machine-readable receipt must expose module-cache isolation.'
+            Assert-Match $resolver '\$result\.buildCacheIsolation = ' 'The machine-readable receipt must expose build-cache isolation.'
         }
         finally {
             foreach ($entry in $previous.GetEnumerator()) {
@@ -451,6 +471,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'authority-level regression' 'Review matrix must record SYP-167 authority regression/CI deliverables.'
         Assert-Match $matrix 'proxy.golang.org' 'Review matrix must record the approved Go module proxy.'
         Assert-Match $matrix 'sum.golang.org' 'Review matrix must record the approved Go checksum database.'
+        Assert-Match $matrix 'GOCACHE' 'Review matrix must record isolated Go build-cache enforcement.'
+        Assert-Match $matrix 'GOFLAGS' 'Review matrix must record clean Go build flags.'
         Assert-Match $matrix 'pypi.org/simple' 'Review matrix must record the approved Python package index.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
