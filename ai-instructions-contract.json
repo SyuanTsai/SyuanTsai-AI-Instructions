@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "primaryLocale": "zh-TW",
+  "fanOutLocale": "en",
+  "locales": [
+    {
+      "id": "zh-TW",
+      "ruleSuffix": ".md"
+    },
+    {
+      "id": "en",
+      "ruleSuffix": ".en.md"
+    }
+  ],
+  "platforms": [
+    {
+      "id": "codex",
+      "base": {
+        "zh-TW": ".codex/AGENTS.md",
+        "en": ".codex/AGENTS.en.md"
+      },
+      "rulesRoot": ".codex/AI-Rules",
+      "fanOut": {
+        "baseTarget": "AGENTS.md",
+        "rulesTarget": ".codex/AI-Rules",
+        "preserveRuleFileName": true
+      }
+    },
+    {
+      "id": "github-copilot",
+      "base": {
+        "zh-TW": ".github/copilot-instructions.md",
+        "en": ".github/copilot-instructions.en.md"
+      },
+      "rulesRoot": ".github/AI-Rules",
+      "fanOut": {
+        "baseTarget": ".github/copilot-instructions.md",
+        "rulesTarget": ".github/AI-Rules",
+        "preserveRuleFileName": true
+      }
+    }
+  ],
+  "modules": [
+    {
+      "id": "code-review",
+      "fileStem": "CodeReview",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ],
+      "triggers": [
+        "code-review",
+        "pull-request-review"
+      ],
+      "invariants": [
+        "code-review.evidence-based-findings",
+        "code-review.impact-boundary",
+        "code-review.findings-first",
+        "code-review.testing-route",
+        "code-review.database-route",
+        "code-review.review-only-default"
+      ]
+    },
+    {
+      "id": "database",
+      "fileStem": "Database",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ],
+      "triggers": [
+        "entity-framework",
+        "sql",
+        "database-query",
+        "data-access-performance"
+      ],
+      "invariants": [
+        "database.root-cause-evidence",
+        "database.projection-evidence",
+        "database.contract-boundary",
+        "database.logic-boundary",
+        "database.performance-validation"
+      ]
+    },
+    {
+      "id": "external-research",
+      "fileStem": "ExternalResearch",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ],
+      "triggers": [
+        "public-current-research",
+        "public-multi-source-research",
+        "public-multilingual-research",
+        "external-search-provider"
+      ],
+      "invariants": [
+        "external-research.local-first",
+        "external-research.public-query-boundary",
+        "external-research.private-content-boundary",
+        "external-research.authoritative-verification",
+        "external-research.adapter-output-boundary",
+        "external-research.approved-fallback",
+        "external-research.fallback-preserves-boundary"
+      ]
+    },
+    {
+      "id": "git-commit",
+      "fileStem": "GitCommit",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ],
+      "triggers": [
+        "git-commit-message-generation"
+      ],
+      "invariants": [
+        "git-commit.no-invention",
+        "git-commit.branch-evidence",
+        "git-commit.placeholder-boundary",
+        "git-commit.complete-staged-purpose",
+        "git-commit.translation-parity",
+        "git-commit.footer-order"
+      ]
+    },
+    {
+      "id": "testing",
+      "fileStem": "Testing",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ],
+      "triggers": [
+        "production-plan-or-change",
+        "executable-build-ci-deploy-configuration-change",
+        "test-or-test-strategy-change"
+      ],
+      "invariants": [
+        "testing.tdd-default",
+        "testing.executable-config-validation",
+        "testing.controller-behavior",
+        "testing.independent-tests"
+      ]
+    }
+  ],
+  "baseInvariants": [
+    {
+      "id": "base.missing-module-no-invention",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
+      "id": "base.optional-capability-no-invention",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
+      "id": "base.jira-credential-nondisclosure",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
+      "id": "base.jira-mutation-explicit-request",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
+      "id": "base.stop-on-missing-authority-or-conflict",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
+      "id": "copilot.external-information-approved-capability-only",
+      "platforms": [
+        "github-copilot"
+      ]
+    }
+  ]
+}

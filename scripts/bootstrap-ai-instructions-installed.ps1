@@ -18,9 +18,11 @@ $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
 $contractPath = Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
 $launcherReferencePath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-installed.ps1'
 $updaterPath = Join-Path $runtimeRoot 'update-ai-instructions.ps1'
+$environmentUpdaterPath = Join-Path $runtimeRoot 'update-agent-environment.ps1'
 $bootstrapPath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
 $stableLauncherPath = [System.IO.Path]::GetFullPath($PSCommandPath)
 $stableUpdaterPath = Join-Path $PSScriptRoot 'update-ai-instructions.ps1'
+$stableEnvironmentUpdaterPath = Join-Path $PSScriptRoot 'update-agent-environment.ps1'
 $stableCleanupPath = Join-Path $PSScriptRoot 'cleanup-ai-instructions-pollution.ps1'
 $canonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 
@@ -109,7 +111,7 @@ function Get-TrustedInventorySha256 {
 function Assert-InstalledRuntime {
     param([switch] $AllowPinMismatch)
 
-    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$launcherReferencePath,$updaterPath,$bootstrapPath,$stableUpdaterPath,$stableCleanupPath)) {
+    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$launcherReferencePath,$updaterPath,$environmentUpdaterPath,$bootstrapPath,$stableUpdaterPath,$stableEnvironmentUpdaterPath,$stableCleanupPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) { throw "Installed AI instruction runtime is incomplete: $requiredPath" }
     }
     $configurationItem = Get-Item -Force -LiteralPath $configurationPath
@@ -193,6 +195,10 @@ function Assert-InstalledRuntime {
     if ((Get-TrustedFileSha256 -Path $stableUpdaterPath) -cne
         (Get-TrustedFileSha256 -Path $updaterPath)) {
         throw 'Installed AI instructions stable updater does not match the active immutable runtime.'
+    }
+    if ((Get-TrustedFileSha256 -Path $stableEnvironmentUpdaterPath) -cne
+        (Get-TrustedFileSha256 -Path $environmentUpdaterPath)) {
+        throw 'Installed AI instructions stable Agent environment updater does not match the active immutable runtime.'
     }
     if ((Get-TrustedFileSha256 -Path $stableCleanupPath) -cne
         (Get-TrustedFileSha256 -Path (Join-Path $runtimeRoot 'cleanup-ai-instructions-pollution.ps1'))) {

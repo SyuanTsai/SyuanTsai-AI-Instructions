@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "92a5bff5d5904d55ea4c9634785769f79cf93bb016d6839ee07763cf19e5a71a",
+  "catalogSha256": "e244ce739542bb326dfcc702058bb1ace99c161fc7fb92bea1c90e990f3f7484",
   "sources": [
     {
       "id": "agent-skills",

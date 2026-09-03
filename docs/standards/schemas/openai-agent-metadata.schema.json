@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenAI Agent Skill metadata semantic baseline",
+  "description": "Semantic validation for a parsed agents/openai.yaml object. YAML lexical rules such as unquoted keys and quoted string scalars, plus exact $<skill-id> binding, require the YAML-aware checks in the Standard.",
+  "type": "object",
+  "required": [
+    "interface"
+  ],
+  "properties": {
+    "interface": {
+      "type": "object",
+      "required": [
+        "display_name",
+        "short_description",
+        "default_prompt"
+      ],
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "[\\s\\S]*\\S[\\s\\S]*"
+        },
+        "short_description": {
+          "type": "string",
+          "minLength": 25,
+          "maxLength": 64,
+          "pattern": "[\\s\\S]*\\S[\\s\\S]*"
+        },
+        "icon_small": {
+          "type": "string",
+          "pattern": "^\\./assets/[^\\r\\n]+$"
+        },
+        "icon_large": {
+          "type": "string",
+          "pattern": "^\\./assets/[^\\r\\n]+$"
+        },
+        "brand_color": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "default_prompt": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "[\\s\\S]*\\$[a-z0-9]+(?:-[a-z0-9]+)*[\\s\\S]*"
+        }
+      },
+      "additionalProperties": true
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "value"
+            ],
+            "properties": {
+              "type": {
+                "const": "mcp"
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*"
+              },
+              "transport": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^\\s/?#]+(?:[/?#][^\\s]*)?$"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

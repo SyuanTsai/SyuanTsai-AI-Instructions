@@ -2,18 +2,18 @@
 
 ## Test-First Development
 
-- Use the TDD Red-Green-Refactor cycle by default: first create the smallest test that fails because the target behavior is missing, write the smallest production change that makes it pass, then refactor under test protection.
+- Use the TDD Red-Green-Refactor cycle by default: first create the smallest test that fails because the target behavior is missing, write the smallest production change that makes it pass, then refactor under test protection. <!-- ai-invariant:testing.tdd-default -->
 - During feature analysis or planning, define the expected behavior, suitable test level, and smallest failing test, then plan smoke and regression coverage according to the change's risk.
 - Prefer unit tests.
 - If unit testing is unsuitable, explain why to the user first, then use the closest applicable approach in the existing test architecture.
 
 The following changes are exempt from test-first development:
 
-- Configuration-only changes such as YAML, pipelines, CI/CD, or appsettings.
+- Configuration-only changes such as YAML, pipelines, CI/CD, or appsettings are exempt from the TDD sequence. A change that alters executable build, CI, deployment, or runtime behavior, permissions, security boundaries, or contracts still requires suitable syntax, contract, smoke, security, or existing repository validation to be added or run. <!-- ai-invariant:testing.executable-config-validation -->
 - Thin Controller changes limited to routes, attributes, binding, authorization annotations, or calls to an existing service.
 - Formatting, comments, log messages, or renaming only.
 
-A Controller containing business logic, conditions, error handling, or data transformation still requires tests first.
+A Controller containing business logic, conditions, error handling, or data transformation still requires tests first. <!-- ai-invariant:testing.controller-behavior -->
 
 ## Testing Strategy
 
@@ -28,7 +28,7 @@ A Controller containing business logic, conditions, error handling, or data tran
 - Structure tests using Given-When-Then.
 - When adding tests, prefix every test name or IDE display name with its test level and a fixed-width two-digit scenario number: use the `UnitT00_` format for unit tests and the `InterT00_` format for integration tests, such as `UnitT10_`, `UnitT20_`, `InterT10_`, or `InterT20_`; when modifying an existing test that lacks a number, add one as part of the change. Scope numbering to the same test class, fixture, or context, and use stable numbers with reserved gaps that follow the business flow under test.
 - When new behavior is inserted into the middle of a production-code flow, also check and adjust the display order of the related tests. Prefer an available number between adjacent scenarios at the same test level, such as `UnitT25_` between `UnitT20_` and `UnitT30_`, or `InterT25_` between `InterT20_` and `InterT30_`. Renumber related tests within the same class, fixture, or context only when no suitable number remains or the current order has become misleading; do not renumber unrelated tests.
-- Scenario numbers express reading order in the IDE only, not execution order. Every test must run independently; do not use NUnit `Order`, an xUnit test orderer, or shared state to create test dependencies for the sake of numbered order.
+- Scenario numbers express reading order in the IDE only, not execution order. Every test must run independently; do not use NUnit `Order`, an xUnit test orderer, or shared state to create test dependencies for the sake of numbered order. <!-- ai-invariant:testing.independent-tests -->
 - When adding tests, place a `Scenario` explanation (preconditions and triggering action) and a `Purpose` explanation (the protected behavior, risk, or regression) next to every test declaration; when modifying an existing test that lacks them, add them as part of the change. Prefer a framework-visible description when available, otherwise use concise comments. The test name must still describe the behavior and expected result; neither the number nor the explanation replaces a meaningful name.
 - In NUnit, prefer `Assert.Multiple` when verifying multiple conditions.
 - In xUnit, follow the project's existing assertion style and do not use NUnit-only APIs.

@@ -2,18 +2,18 @@
 
 ## 測試先行
 
-- 預設採用 TDD 的 Red-Green-Refactor 循環：先建立會因缺少目標行為而失敗的最小測試，再以最小 production code 使測試通過，最後在測試保護下重構。
+- 預設採用 TDD 的 Red-Green-Refactor 循環：先建立會因缺少目標行為而失敗的最小測試，再以最小 production code 使測試通過，最後在測試保護下重構。 <!-- ai-invariant:testing.tdd-default -->
 - 分析或規劃功能時，先定義預期行為、適合的測試層級與最小失敗測試，並依變更風險安排 Smoke Test 與 Regression Test。
 - 優先新增或更新單元測試。
 - 不適合單元測試時，先向使用者說明原因，再採用既有測試架構中最接近的測試方式。
 
 下列修改可排除測試先行：
 
-- YAML、pipeline、CI/CD、appsettings 等純設定檔。
+- YAML、pipeline、CI/CD、appsettings 等純設定檔可免除 TDD 執行順序；若修改會改變可執行的 build、CI、deploy 或 runtime 行為、權限、安全邊界或契約，仍須新增或執行適合的 syntax、contract、smoke、安全或 Repository 既有驗證。 <!-- ai-invariant:testing.executable-config-validation -->
 - Controller 僅調整 route、attribute、binding、權限標記，或呼叫既有 service 的薄層修改。
 - 純格式化、註解、log message 或命名調整。
 
-Controller 若包含 business logic、條件判斷、錯誤處理或資料轉換，仍必須測試先行。
+Controller 若包含 business logic、條件判斷、錯誤處理或資料轉換，仍必須測試先行。 <!-- ai-invariant:testing.controller-behavior -->
 
 ## 測試方針
 
@@ -28,7 +28,7 @@ Controller 若包含 business logic、條件判斷、錯誤處理或資料轉換
 - 測試使用 Given-When-Then 結構。
 - 新增測試時，每個測試都必須在測試名稱或 IDE 顯示名稱前加上測試層級與固定寬度的兩位數情境編號：單元測試使用 `UnitT00_` 格式，整合測試使用 `InterT00_` 格式，例如 `UnitT10_`、`UnitT20_` 或 `InterT10_`、`InterT20_`；修改缺少編號的既有測試時，一併補齊。編號以同一個 test class、fixture 或 context 為範圍，依受測業務流程使用保留間隔的穩定編號。
 - production code 的中間流程插入新行為時，必須同步檢查相關測試的顯示順序；優先使用相同測試層級相鄰情境之間的可用編號，例如在 `UnitT20_` 與 `UnitT30_` 之間加入 `UnitT25_`，或在 `InterT20_` 與 `InterT30_` 之間加入 `InterT25_`。只有沒有合適編號或現有順序已造成誤解時，才重新編排同一個 class、fixture 或 context 內的相關測試；不得連帶重編無關測試。
-- 情境編號只表達 IDE 中的閱讀順序，不代表執行順序；每個測試必須能獨立執行，不得為維持編號順序而使用 NUnit `Order`、xUnit test orderer 或共享狀態建立測試依賴。
+- 情境編號只表達 IDE 中的閱讀順序，不代表執行順序；每個測試必須能獨立執行，不得為維持編號順序而使用 NUnit `Order`、xUnit test orderer 或共享狀態建立測試依賴。 <!-- ai-invariant:testing.independent-tests -->
 - 新增測試時，每個測試都必須緊鄰測試宣告說明 `Scenario`（前置條件與觸發行為）及 `Purpose`（要保護的行為、風險或回歸問題）；修改缺少說明的既有測試時，一併補齊。優先使用 framework 可顯示的描述，否則使用簡潔註解；測試名稱仍須描述行為與預期結果，編號或說明不得取代有意義的名稱。
 - NUnit 驗證多個條件時，優先使用 `Assert.Multiple`。
 - xUnit 沿用專案既有 assertion 風格，不得使用 NUnit-only API。

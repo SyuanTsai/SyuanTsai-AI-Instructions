@@ -12,7 +12,7 @@
 | Managed manifest | 2 | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
 | User Skills managed manifest | 1 | 記錄 `$HOME/.agents/skills` 中由 Catalog 管理的檔案、Catalog commit、來源 pin 與逐檔 hash；未列入此 manifest 的個人 Skill 永遠視為 unmanaged。 |
 | Personal sync configuration | 4 | 記錄 exclusions、已安裝 AI-Instructions runtime/Catalog bundle 的 canonical GitHub Repository 與完整 commit SHA、Skill selection，以及更新 mode／channel／interval；不含任何 auto-commit 設定。 |
-| Runtime bundle metadata | 2 | 安裝時產生 `runtime-bundle.json`，記錄 Repository、commit、acquisition、archive hash，以及 runtime 精確檔案 inventory／hash；launcher 與 updater 每次執行前都必須完整驗證。 |
+| Runtime bundle metadata | 2 | 安裝時產生 `runtime-bundle.json`，記錄 Repository、commit、acquisition、archive hash，以及 runtime 精確檔案 inventory／hash；launcher 與所有 stable commands 每次執行前都必須完整驗證。 |
 | Update receipt | 1 | 記錄上次檢查時間、policy、current/candidate commit、結果、archive hash 與診斷訊息；`current` outcome 的 `candidateCommit` 固定為 `null`，已解析版本由 `currentCommit` 唯一表示。 |
 
 正式 schema 位於 [`schemas/`](schemas/)，去識別化、可通過 parser 的完整文件位於 [`examples/`](examples/)。`scripts/skills-catalog-contract.psm1` 負責 PowerShell 5.1 相容的跨文件驗證；JSON Schema 負責標準工具可讀的結構契約。
@@ -20,7 +20,7 @@
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
-- Group 與 profile 只是 metadata，不是 Skill identity；實體來源永遠維持 `.agents/skills/<skill-id>/**` 平面結構。
+- Group 與 profile 只是 metadata，不是 Skill identity。Standard v1 canonical source 是 `skills/<skill-id>/**` 平面結構；SYP-155～159 完成前，production Catalog/Lock 仍可指向 legacy `.agents/skills/<skill-id>/**`。Consumer projection 仍由 runtime 獨立決定，不得把 target path 當成 source layout authority。
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
@@ -33,7 +33,7 @@ Resolver 依固定順序處理：
 1. 合併所有選定 profile 的 `includes`。
 2. 套用個人 `includeSkills`，並遷移 alias／replacement ID。
 3. 套用個人 `excludeSkills`，並遷移 alias／replacement ID；明確 exclude 最終優先。
-4. 過濾 platform、shell 與 capability compatibility；profile 帶入但不相容的 Skill 會被移除，明確 `includeSkills` 指定但不相容則 fail closed。
+4. 過濾 platform、shell 與 capability compatibility；profile 帶入但不相容的 Skill 會被移除，明確 `includeSkills` 指定但不相容則 fail closed。唯一例外是缺少的 `anyOfCapabilities` alternative set 同時包含某個 conditional dependency 的 condition 與 fallback capability，而且該 dependency 目前 required 且本身相容；此時保留 workflow Skill 供下一步加入 setup fallback。Platform、shell、`requiredCapabilities` 或無關 capability set 的失敗不可以這個例外放寬。
 5. 驗證 dependencies：
    - `hard`：必須存在且相容；若被 exclude 或無法滿足，整次 resolution 失敗。
    - `conditional`：依 `condition.operator` 判斷條件，且 `fallback.capability` 不可用時才要求 dependency。
@@ -41,12 +41,16 @@ Resolver 依固定順序處理：
 
 Conditional operator 的 production semantics：
 
-- `available`：condition capability 有 evidence 時成立。
+- `available`：condition capability 有符合其 compatibility 宣告的 evidence 時成立。
 - `missing`：condition capability 沒有 evidence 時成立。
 - `unavailable`：目前 evidence model 中等同沒有可用 evidence。
 - `missing-or-invalid`：無有效 evidence 時成立；格式不合法的 evidence 會在載入時直接拒絕。
 
+每個 conditional dependency 的 condition 與 fallback capability 都必須在同一個 `anyOfCapabilities` alternative set 各唯一宣告一次；availability 必須以該宣告的完整 `kind`／`id`／`state` tuple 判定，不能只比對 ID。
+
 `work-with-jira` 對 `configure-jira-api-access` 使用 `missing-or-invalid` conditional dependency。若已有核准且已設定的 `jira-cloud-connector` fallback，不強制安裝 API setup Skill。
+
+`configure-*` setup Skills 不應直接列入一般工作 profile；它們保持 active，只有使用者明確選取，或某個已選 Skill 的 conditional dependency 在 fallback capability 缺失時才會解析進來。否則 profile include 會先把 setup Skill 加入 resolved set，讓 conditional fallback 語意失效。
 
 ## Compatibility contract
 
@@ -77,7 +81,7 @@ Conditional operator 的 production semantics：
 - `resolvedCommit` 必須是 40 個小寫十六進位字元的完整 commit SHA。Bootstrap 不得重新以 mutable ref 決定內容。
 - `catalogSha256` 是 Catalog JSON 原始檔案 bytes 的 SHA-256。
 - `archiveSha256` 是 GitHub codeload archive 原始 bytes 的 SHA-256。
-- Skill `contentSha256` 是 deterministic inventory 的 SHA-256：以 repository-relative forward-slash path 做 ordinal 排序，每行使用 `<path>\t<raw-file-sha256>\n` 的 UTF-8（無 BOM）資料串接後計算。
+- Skill `contentSha256` 是 deterministic inventory 的 SHA-256：以 repository-relative forward-slash path 做 ordinal 排序，每行使用 `<path>\t<raw-file-sha256>\n` 的 UTF-8（無 BOM）資料串接後計算。可雜湊的 path 必須先通過 portable safe-path contract；control characters、tab/newline、colon、empty／dot segments、absolute／traversal path、symlink／reparse／special file 與 case-collision 一律拒絕，避免 inventory ambiguity。
 - Manifest `sha256` 是實際套用到 target path 的檔案 bytes SHA-256。
 - `resolvedVersion`／`sourceVersion` 只供顯示與稽核；重現性仍以完整 commit SHA 與 hash 為準。
 
@@ -85,9 +89,11 @@ Conditional operator 的 production semantics：
 
 Executable contract 與 JSON Schemas 採相同的 strict object／scalar boundary：Catalog、source pins、Lock、manifest、config 與其巢狀物件都拒絕未知 property；SHA、commit、enum 與其他 scalar 欄位不得以 singleton array 透過 PowerShell coercion 混入。Manifest 的 `artifactType` 必須與路徑 family 一致，`instruction` 不得宣告 `.agents/skills/**` ownership，`skill` 則必須維持同一 stable ID 的 flat Skill path。非 conditional dependency 也不得帶入 `condition` 或 `fallback`。
 
+Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、description、metadata 與 non-empty body 實作 fail-closed lexical subset；它不宣稱是完整 YAML conformance authority。完整 frontmatter type／syntax contract 仍必須由 Standard v1 指定的 safe YAML formal validators 執行；subset 無法明確接受的 YAML scalar、tag、duplicate key 或複雜形態一律拒絕，不得以 PowerShell coercion 猜測。
+
 ## Managed manifest v2 provenance
 
-每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。Skill entry 的 source 與 target 必須維持 `.agents/skills/<artifactId>/...`。Manifest v2 不使用 Git submodule metadata。
+每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。現行 production manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；SYP-155～159 要切換 canonical `skills/<artifactId>/...` source 前，必須先版本化升級 central schema、parser、bootstrap 與 migration tests，target projection 不隨 source root 自動改名。Manifest v2 不使用 Git submodule metadata。
 
 ## 個人設定 schema v4、runtime v2、安裝與升級
 
@@ -98,9 +104,9 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須介於 1 與 2147483647，確保所有 schema-valid v4 設定都能由 installer idempotent 遷移並交給 updater。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
-- Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
+- Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／Agent environment updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
 - Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。Windows PowerShell 的 WebException 與 PowerShell 7 的 HttpResponseException rate-limit 形態都會安全退回 offline。Receipt 使用同目錄原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
 - `rate-limit` 與 `concurrent` 是不落盤的 workflow 結果；前者在最小檢查間隔尚未經過時保留上一份有效 receipt，後者讓 manual command／launcher fail closed，避免與 runtime swap 交錯，因此 receipt schema 只列出實際 persisted outcomes。
-- Stable installer 先以內建 canonical identity／archive hash／git HEAD verifier 驗證 candidate source，通過後才 import candidate contract；接著在 install lock 內重驗 expected current commit 與 updater 決策時的 mode/channel/ref，並於 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、cleanup、runtime 與 config。任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
+- Stable installer 先以內建 canonical identity／archive hash／git HEAD verifier 驗證 candidate source，通過後才 import candidate contract；接著在 install lock 內重驗 expected current commit 與 updater 決策時的 mode/channel/ref，並於 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、Agent environment updater、cleanup、runtime 與 config。任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
 
 Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除。Tracked reserved artifact 會先由隔離 remediation 備份並解除追蹤，再進入正常 v1／v2 migration；相同 strict legacy parser 也供舊 runtime 的明確授權 pollution cleanup 使用。

@@ -4,6 +4,8 @@
 
 This is the historical SYP-79 readiness contract. The four external Skill repositories are now provisioned and SYP-86 uses their immutable production pins. Current cutover and rollback gates are in `docs/syp-86-production-cutover.md`.
 
+> **Superseded source-layout rule:** SYP-79 historically defined `.agents/skills/<skill-id>` as the physical source repository layout. SYP-167 / `docs/standards/skill-repository-standard.md` supersedes that rule for Standard v1: canonical source packages use `skills/<skill-id>`, while `.agents/skills/<skill-id>` remains a consumer/runtime projection. Existing production Catalog/Lock entries may continue to reference the historical layout until the corresponding SYP-155～159 source migration and immutable repin are completed.
+
 ## Initial source inventory
 
 The runtime does not hard-code these IDs. They are the production Catalog sources:
@@ -19,7 +21,7 @@ Adding a fifth source must require only Catalog + Lock changes, not bootstrap co
 
 ## Required repository layout
 
-Each new Skill repository uses the same flat stable-ID layout:
+The following layout is the **historical SYP-79 migration layout**, retained here for auditability. It is no longer the Standard v1 target layout.
 
 ```text
 <repository-root>/
@@ -33,13 +35,15 @@ Each new Skill repository uses the same flat stable-ID layout:
       └─ ...
 ```
 
-Rules:
+Historical rules used by SYP-79:
 
-- Every physical Skill directory is `.agents/skills/<stable-skill-id>`.
-- `SKILL.md` is mandatory.
-- Skill stable IDs do not change when moving repositories.
-- Repository/domain names are metadata and never become routing conditions.
-- A source repository must not contain AI-Instructions base/rule files as part of Skill delivery.
+- Every physical Skill directory was `.agents/skills/<stable-skill-id>`.
+- `SKILL.md` was mandatory.
+- Skill stable IDs did not change when moving repositories.
+- Repository/domain names were metadata and never routing conditions.
+- A source repository did not contain AI-Instructions base/rule files as part of Skill delivery.
+
+For new work and SYP-155～159 migration targets, use `docs/standards/skill-repository-standard.md` instead.
 
 ## Catalog entry required for a new repository
 
@@ -50,7 +54,7 @@ Rules:
 }
 ```
 
-Each migrated Skill changes only its source metadata:
+Each SYP-79 migrated Skill changed only its source metadata:
 
 ```json
 {
@@ -61,7 +65,9 @@ Each migrated Skill changes only its source metadata:
 }
 ```
 
-No bootstrap code change is allowed for this migration.
+That source path is historical production state. Standard v1 source migration changes are intentionally handled later by SYP-155～159 and corresponding Catalog/Lock repin work.
+
+No bootstrap code change was allowed for the SYP-79 migration.
 
 ## Lock entry required before runtime use
 
@@ -102,7 +108,7 @@ The mutation engine protects customized/unmanaged files, writes manifest v2 when
 
 ## Repository provisioning sequence
 
-For each source repository:
+The following sequence records the historical SYP-79 provisioning process:
 
 1. Create the repository without moving Skills yet.
 2. Add `.agents/skills/` structure.

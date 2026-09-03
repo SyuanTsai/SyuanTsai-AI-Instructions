@@ -1,13 +1,13 @@
 # Code Review 規則
 
-- Review 優先辨識會影響正確性、安全性、資料完整性、相容性或維運可靠性的問題，以及與這些風險直接相關的必要測試遺漏。Finding 應以可證明的實際風險為依據。在影響邊界內，能實質改善可維護性或降低風險的其他可行寫法，可與 findings 分開列為不標示嚴重程度的非阻擋建議。
-- Review 先以本次修改的程式碼為起點，檢查判斷實際影響所需的直接關聯程式碼、資料契約與測試，建立本次變更的影響邊界。具體證據顯示風險跨出目前邊界時，再沿該證據以確認影響所需的最小範圍逐步擴大。
+- Review 優先辨識會影響正確性、安全性、資料完整性、相容性或維運可靠性的問題，以及與這些風險直接相關的必要測試遺漏。Finding 應以可證明的實際風險為依據。在影響邊界內，能實質改善可維護性或降低風險的其他可行寫法，可與 findings 分開列為不標示嚴重程度的非阻擋建議。 <!-- ai-invariant:code-review.evidence-based-findings -->
+- Review 先以本次修改的程式碼為起點，檢查判斷實際影響所需的直接關聯程式碼、資料契約與測試，建立本次變更的影響邊界。具體證據顯示風險跨出目前邊界時，再沿該證據以確認影響所需的最小範圍逐步擴大。 <!-- ai-invariant:code-review.impact-boundary -->
 - 當修改行為、直接依賴及必要測試的影響已確認，且現有證據足以界定風險邊界時，即完成本次 Review 範圍。其他既有問題只在與本次修改具有因果關係，或其風險因本次修改增加時，納入 finding。
 - Finding 必須有足夠的程式碼或行為證據，並指出具體檔案與位置、問題成立的條件、可能影響，以及可執行的修正或驗證方向。證據尚不足的疑慮列為未驗證項目，待取得必要證據後再判斷是否構成缺陷。
-- 先列 findings，並依實際影響與發生可能性排序。沒有 finding 時應明確說明，並列出殘餘風險、假設及未完成的驗證。
-- Review 涉及 production code 或測試時，載入 `.github/AI-Rules/Testing.md`。審查重點是最終程式行為、測試有效性與必要涵蓋；使用者明確要求審查開發流程時，再將 TDD 執行順序納入 finding 判斷。
+- 先列 findings，並依實際影響與發生可能性排序。沒有 finding 時應明確說明，並列出殘餘風險、假設及未完成的驗證。 <!-- ai-invariant:code-review.findings-first -->
+- Review 涉及 production code、可執行的 build／CI／deploy／configuration 行為或測試時，載入 `.github/AI-Rules/Testing.md`。審查重點是最終程式行為、測試有效性與必要涵蓋；使用者明確要求審查開發流程時，再將 TDD 執行順序納入 finding 判斷。 <!-- ai-invariant:code-review.testing-route -->
 - 測試 finding 必須對應具體產品風險，例如重要行為未受保護、assertion 無法驗證目標結果、測試可能因錯誤原因通過，或測試所描述的行為與實作不一致。嚴重程度依未受保護行為的影響與發生可能性判定。
 - 依 Testing 規則判斷變更是否需要測試，以及單元測試、整合測試或其他既有驗證方式是否適合。
 - 若執行或引用測試及 coverage，優先採用 Repository 或使用者指定的命令、計算方式與門檻，並回報命令、量測範圍、排除項目及結果。Repository 未定義門檻時，回報實際數值及未涵蓋的高風險行為，作為風險判斷依據。
-- Review 涉及 EF、SQL、query 或資料存取效能時，載入 `.github/AI-Rules/Database.md`。效能 finding 應說明尚未解決的資料載入或 round-trip 根因及其實際影響，而不只指出查詢寫法不同。
-- Review 預設只提供審查結果；使用者明確要求修正時，再進入修改與驗證流程。
+- Review 涉及 EF、SQL、query 或資料存取效能時，載入 `.github/AI-Rules/Database.md`。效能 finding 應說明尚未解決的資料載入或 round-trip 根因及其實際影響，而不只指出查詢寫法不同。 <!-- ai-invariant:code-review.database-route -->
+- Review 預設只提供審查結果；使用者明確要求修正時，再進入修改與驗證流程。 <!-- ai-invariant:code-review.review-only-default -->

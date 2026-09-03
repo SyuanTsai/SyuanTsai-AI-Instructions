@@ -1,0 +1,80 @@
+name: Standards Conformance
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/standards/**'
+      - 'scripts/Resolve-StandardValidationTool.ps1'
+      - 'scripts/Resolve-PythonWheelClosure.py'
+      - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'tests/skill-repository-standard.Tests.ps1'
+      - 'tests/skill-repository-workflows.Tests.ps1'
+      - 'tests/standard-validation-resolver-hardening.Tests.ps1'
+      - '.github/workflows/standards-conformance.yml'
+      - '.github/workflows/pr8-powershell-validation.yml'
+      - '.github/workflows/syp101-production-smoke.yml'
+      - '.github/workflows/syp86-production-lock.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/standards/**'
+      - 'scripts/Resolve-StandardValidationTool.ps1'
+      - 'scripts/Resolve-PythonWheelClosure.py'
+      - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'tests/skill-repository-standard.Tests.ps1'
+      - 'tests/skill-repository-workflows.Tests.ps1'
+      - 'tests/standard-validation-resolver-hardening.Tests.ps1'
+      - '.github/workflows/standards-conformance.yml'
+      - '.github/workflows/pr8-powershell-validation.yml'
+      - '.github/workflows/syp101-production-smoke.yml'
+      - '.github/workflows/syp86-production-lock.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-stable-authority-regression:
+    name: Standard v1 (latest stable tooling)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up approved Go runtime
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.8'
+          check-latest: false
+          cache: false
+
+      - name: Run canonical Standard v1 authority gate
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP
+
+      - name: Check whitespace in the event range
+        shell: bash
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PULL_REQUEST_BASE_SHA...HEAD"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff --check "$PUSH_BEFORE_SHA..HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff-tree --check --root -r HEAD
+          fi

@@ -10,14 +10,20 @@ function Test-ZipDirectoryEntry {
 
 function Assert-SafeZipEntry {
     param(
-        [Parameter(Mandatory = $true)][object] $Entry,
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Entry,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.Dictionary[string,string]] $PathCasings,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitEntries,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $ExplicitFiles,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $Roots
     )
 
+    if ($null -eq $Entry) {
+        throw 'Unsafe ZIP entry path: unreadable archive entry metadata.'
+    }
     $name = [string] $Entry.FullName
+    if (@($name.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) {
+        throw 'Unsafe ZIP entry path: control characters are forbidden.'
+    }
     if ([string]::IsNullOrWhiteSpace($name) -or
         $name.Contains('\') -or
         $name.StartsWith('/', [System.StringComparison]::Ordinal) -or
@@ -87,6 +93,10 @@ function Assert-SafeZipEntry {
     if ($unixFileType -eq 0xA000L) {
         throw "ZIP archive contains a symbolic link entry: $name"
     }
+    $expectedUnixFileType = if ($isDirectory) { 0x4000L } else { 0x8000L }
+    if ($unixFileType -ne 0 -and $unixFileType -ne $expectedUnixFileType) {
+        throw "ZIP archive contains a special file entry: $name"
+    }
     if (($externalAttributes -band 0x400L) -ne 0) {
         throw "ZIP archive contains a reparse-point entry: $name"
     }
@@ -133,7 +143,12 @@ function Expand-SafeZipRepository {
             (-not $ownsStream)
         )
         try {
-            $entries = @($archive.Entries)
+            try {
+                $entries = @($archive.Entries)
+            }
+            catch {
+                throw 'Unsafe ZIP entry path: unreadable archive entry metadata.'
+            }
             if ($entries.Count -eq 0) {
                 throw 'ZIP archive is empty.'
             }

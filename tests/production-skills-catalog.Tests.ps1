@@ -1,16 +1,31 @@
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$catalogPath = Join-Path $repositoryRoot 'catalog\skills-catalog.json'
-$sourcePinsPath = Join-Path $repositoryRoot 'catalog\skills-catalog.sources.json'
-$lockPath = Join-Path $repositoryRoot 'catalog\skills-catalog-lock.json'
-$contractModule = Join-Path $repositoryRoot 'scripts\skills-catalog-contract.psm1'
-
-Import-Module $contractModule -Force
-
 Describe 'production Skills Catalog' {
     BeforeAll {
+        $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $catalogPath = Join-Path $repositoryRoot 'catalog\skills-catalog.json'
+        $sourcePinsPath = Join-Path $repositoryRoot 'catalog\skills-catalog.sources.json'
+        $lockPath = Join-Path $repositoryRoot 'catalog\skills-catalog-lock.json'
+        $contractModule = Join-Path $repositoryRoot 'scripts\skills-catalog-contract.psm1'
+
+        Import-Module $contractModule -Force
+        Import-Module (Join-Path $repositoryRoot 'scripts\skills-selection.psm1') -Force
         $script:catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
         $script:pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $sourcePinsPath -CatalogPath $catalogPath
         $script:lock = Test-SkillsCatalogLockDocument -LockPath $lockPath -CatalogPath $catalogPath
+
+        function Assert-StringSequence {
+            param([object[]] $Actual, [object[]] $Expected, [string] $Message = 'String sequences differ.')
+
+            $actualValues = @($Actual | ForEach-Object { [string]$_ })
+            $expectedValues = @($Expected | ForEach-Object { [string]$_ })
+            if ($actualValues.Count -ne $expectedValues.Count) {
+                throw "$Message Expected count '$($expectedValues.Count)', got '$($actualValues.Count)'."
+            }
+            for ($index = 0; $index -lt $expectedValues.Count; $index++) {
+                if ($actualValues[$index] -cne $expectedValues[$index]) {
+                    throw "$Message Index '$index' expected '$($expectedValues[$index])', got '$($actualValues[$index])'."
+                }
+            }
+        }
     }
 
     # Scenario: The tracked production catalog defines the repositories available to installed consumers.
@@ -22,7 +37,7 @@ Describe 'production Skills Catalog' {
             'general',
             'knowledge-content'
         )
-        @($script:catalog.sources.id | Sort-Object) | Should Be $expected
+        Assert-StringSequence -Actual @($script:catalog.sources.id | Sort-Object) -Expected $expected
         @($script:catalog.sources | Where-Object { $_.repository -match 'SyuanTsai-AI-Instructions' }).Count | Should Be 0
         @($script:catalog.sources | Where-Object { $_.repository -match 'Skill-Darktide-Translate' }).Count | Should Be 0
     }
@@ -40,6 +55,47 @@ Describe 'production Skills Catalog' {
         else {
             Test-Path -LiteralPath $builtInSkillRoot | Should Be $false
         }
+    }
+
+    # Scenario: Product workflows expose API setup only as an explicit or conditional fallback.
+    # Purpose: A configured connector must not install credential-setup Skills merely because a product profile was selected.
+    It 'InterT14_keeps_API_setup_Skills_out_of_product_profile_membership' {
+        $setupSkills = @(
+            @{ Id='configure-bitbucket-api-access'; Profile='code-collaboration' },
+            @{ Id='configure-confluence-api-access'; Profile='atlassian' },
+            @{ Id='configure-jira-api-access'; Profile='atlassian' }
+        )
+        foreach ($setup in $setupSkills) {
+            $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq [string]$setup.Profile })[0]
+            $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq [string]$setup.Id })[0]
+            @($profile.includes | Where-Object { [string]$_ -eq [string]$setup.Id }).Count | Should Be 0
+            @($skill.profiles).Count | Should Be 0
+        }
+    }
+
+    # Scenario: A product profile is selected before either connector or API evidence exists.
+    # Purpose: Keep setup Skills conditional while still installing the workflow and the setup fallback that can make it usable.
+    It 'InterT13_selects_API_setup_fallbacks_only_when_product_capabilities_are_missing' {
+        $cases = @(
+            @{
+                Profile='code-collaboration'
+                Expected=@('configure-bitbucket-api-access','review-bitbucket-pull-request','write-copilot-implementation-prompt')
+            },
+            @{
+                Profile='atlassian'
+                Expected=@('configure-confluence-api-access','configure-jira-api-access','publish-requirements-to-confluence','work-with-jira')
+            }
+        )
+        try {
+            Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
+            foreach ($case in $cases) {
+                $selection = [pscustomobject]@{ profiles=@([string]$case.Profile); includeSkills=@(); excludeSkills=@() }
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @($case.Expected)
+            }
+        }
+        finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
@@ -115,6 +171,12 @@ Describe 'production Skills Catalog' {
         [string]$skill.dependencies[0].condition.capability | Should Be 'bitbucket-cloud-api'
         [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
         [string]$skill.dependencies[0].fallback.capability | Should Be 'bitbucket-cloud-connector'
+        $connectorRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'connector' })[0]
+        $apiRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'environment' })[0]
+        [string]$connectorRequirement.id | Should Be ([string]$skill.dependencies[0].fallback.capability)
+        [string]$connectorRequirement.state | Should Be 'configured'
+        [string]$apiRequirement.id | Should Be ([string]$skill.dependencies[0].condition.capability)
+        [string]$apiRequirement.state | Should Be 'configured'
     }
 
     # Scenario: Confluence publishing can repair missing or invalid scoped API access without forcing setup when a connector is available.
@@ -127,6 +189,53 @@ Describe 'production Skills Catalog' {
         [string]$skill.dependencies[0].condition.capability | Should Be 'confluence-cloud-api'
         [string]$skill.dependencies[0].condition.operator | Should Be 'missing-or-invalid'
         [string]$skill.dependencies[0].fallback.capability | Should Be 'confluence-cloud-connector'
+        $connectorRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'connector' })[0]
+        $apiRequirement = @(@($skill.compatibility.anyOfCapabilities)[0] | Where-Object { [string]$_.kind -eq 'environment' })[0]
+        [string]$connectorRequirement.id | Should Be ([string]$skill.dependencies[0].fallback.capability)
+        [string]$connectorRequirement.state | Should Be 'configured'
+        [string]$apiRequirement.id | Should Be ([string]$skill.dependencies[0].condition.capability)
+        [string]$apiRequirement.state | Should Be 'configured'
+    }
+
+    # Scenario: Each workflow is explicitly selected with exact, weaker-state, or wrong-kind capability evidence.
+    # Purpose: Suppress setup only for the complete declared tuple and keep it for ID-only false matches.
+    It 'InterT21_requires_the_exact_capability_tuple_to_suppress_setup_fallbacks' {
+        $positiveCases = @(
+            @{ Skill='review-bitbucket-pull-request'; Kind='connector'; Capability='bitbucket-cloud-connector' },
+            @{ Skill='review-bitbucket-pull-request'; Kind='environment'; Capability='bitbucket-cloud-api' },
+            @{ Skill='publish-requirements-to-confluence'; Kind='connector'; Capability='confluence-cloud-connector' },
+            @{ Skill='publish-requirements-to-confluence'; Kind='environment'; Capability='confluence-cloud-api' },
+            @{ Skill='work-with-jira'; Kind='connector'; Capability='jira-cloud-connector' },
+            @{ Skill='work-with-jira'; Kind='environment'; Capability='jira-cloud-api' }
+        )
+        try {
+            foreach ($case in $positiveCases) {
+                $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = "[{`"kind`":`"$($case.Kind)`",`"id`":`"$($case.Capability)`",`"state`":`"configured`"}]"
+                $selection = [pscustomobject]@{ profiles=@('external-research'); includeSkills=@([string]$case.Skill); excludeSkills=@() }
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @([string]$case.Skill)
+            }
+
+            $negativeCases = @(
+                @{
+                    Skill='work-with-jira'; Setup='configure-jira-api-access'
+                    Evidence='[{"kind":"connector","id":"jira-cloud-connector","state":"available"}]'
+                },
+                @{
+                    Skill='review-bitbucket-pull-request'; Setup='configure-bitbucket-api-access'
+                    Evidence='[{"kind":"environment","id":"bitbucket-cloud-connector","state":"configured"}]'
+                }
+            )
+            foreach ($case in $negativeCases) {
+                $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = [string]$case.Evidence
+                $selection = [pscustomobject]@{ profiles=@('external-research'); includeSkills=@([string]$case.Skill); excludeSkills=@() }
+                Assert-StringSequence `
+                    -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                    -Expected @([string]$case.Setup,[string]$case.Skill)
+            }
+        }
+        finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
 
     # Scenario: Durable AI memory is selected explicitly and has a configured Notion connector.
@@ -137,10 +246,10 @@ Describe 'production Skills Catalog' {
 
         $profile.Count | Should Be 1
         [bool]$profile[0].default | Should Be $false
-        @($profile[0].includes) | Should Be @('manage-notion-ai-memory')
+        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-notion-ai-memory')
         $skill.Count | Should Be 1
         [string]$skill[0].group | Should Be 'knowledge-management'
-        @($skill[0].profiles) | Should Be @('ai-memory')
+        Assert-StringSequence -Actual @($skill[0].profiles) -Expected @('ai-memory')
         @($skill[0].compatibility.requiredCapabilities).Count | Should Be 1
         [string]$skill[0].compatibility.requiredCapabilities[0].kind | Should Be 'connector'
         [string]$skill[0].compatibility.requiredCapabilities[0].id | Should Be 'notion'

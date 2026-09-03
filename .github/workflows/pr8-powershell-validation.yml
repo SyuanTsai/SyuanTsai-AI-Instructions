@@ -13,15 +13,19 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   windows-powershell-51:
     name: Pester (Windows PowerShell 5.1)
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Ensure Pester 3.4.0
         shell: powershell
@@ -65,8 +69,16 @@ jobs:
           if ($null -eq $invokePester) { throw 'Invoke-Pester 3.4.0 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
           $result = & $invokePester -Script ./tests -PassThru
+          if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ([int]$result.TotalCount -ne 416) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 416." }
           if ($result.FailedCount -gt 0) { exit 1 }
+          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
+          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
+          if ([int]$result.SkippedCount -ne 6) { throw "Windows PowerShell 5.1 expected exactly 6 platform/version skips; got $($result.SkippedCount)." }
+          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
+            throw 'Pester result counts are incomplete.'
+          }
           exit 0
 
   powershell-7:
@@ -74,9 +86,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -120,8 +133,16 @@ jobs:
           if ($null -eq $invokePester) { throw 'Invoke-Pester 4.10.1 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
           $result = & $invokePester -Script ./tests -PassThru
+          if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ([int]$result.TotalCount -ne 416) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 416." }
           if ($result.FailedCount -gt 0) { exit 1 }
+          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
+          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
+          if ([int]$result.SkippedCount -ne 5) { throw "PowerShell 7 on Windows expected exactly 5 platform skips; got $($result.SkippedCount)." }
+          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
+            throw 'Pester result counts are incomplete.'
+          }
           exit 0
 
   powershell-7-unix-composition:
@@ -129,7 +150,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up approved Go runtime
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.8'
+          check-latest: false
+          cache: false
+
+      - name: Run required Standard v1 authority gate
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP
+
+      - name: Check whitespace
+        shell: bash
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PULL_REQUEST_BASE_SHA...HEAD"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff --check "$PUSH_BEFORE_SHA..HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff-tree --check --root -r HEAD
+          fi
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -141,13 +199,31 @@ jobs:
           }
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
 
-      - name: Run cross-platform composition tests
+      - name: Run cross-platform composition and acquisition tests
         shell: pwsh
         run: |
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
           Import-Module $pester.Path -Force
-          $result = Invoke-Pester -Script ./tests/skills-source-composition.Tests.ps1 -PassThru
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ($result.FailedCount -gt 0) { exit 1 }
+          $testPaths = @(
+            './tests/skills-source-composition.Tests.ps1',
+            './tests/skills-source-acquisition.Tests.ps1'
+          )
+          $expectedTestCounts = @{
+            './tests/skills-source-composition.Tests.ps1' = 6
+            './tests/skills-source-acquisition.Tests.ps1' = 45
+          }
+          foreach ($testPath in $testPaths) {
+            $result = Invoke-Pester -Script $testPath -PassThru
+            if ($null -eq $result) { throw "Pester did not return a result object for $testPath." }
+            Write-Host "$testPath - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+            if ($result.TotalCount -isnot [int] -and $result.TotalCount -isnot [long]) { throw "Pester returned a non-integer TotalCount for $testPath." }
+            if ([int64]$result.TotalCount -ne [int64]$expectedTestCounts[$testPath]) { throw "Pester discovered $($result.TotalCount) tests in $testPath; expected exactly $($expectedTestCounts[$testPath])." }
+            if ([int]$result.FailedCount -ne 0) { throw "Pester reported $($result.FailedCount) failed tests in $testPath." }
+            if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests in $testPath." }
+            if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests in $testPath." }
+            if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
+            if ([int]$result.PassedCount -ne [int]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
+          }
+          exit 0

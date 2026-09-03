@@ -1,9 +1,12 @@
+Describe 'Skills Catalog contract' {
+    BeforeAll {
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:ContractModule = Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
 $script:ProductionCatalog = Join-Path $script:RepositoryRoot 'catalog\skills-catalog.json'
 $script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog.example.json'
 $script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
 $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
+$script:UserManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v1.example.json'
 $script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
 $script:FixtureRoot = Join-Path $PSScriptRoot 'fixtures\skills-catalog-contract'
 
@@ -49,7 +52,20 @@ function Write-TestJsonDocument {
     return $path
 }
 
-Describe 'Skills Catalog contract' {
+function Get-TestRawSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($Path))
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+    }
+
     # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
     # Purpose: Detect malformed schema artifacts before downstream tools depend on them.
     It 'UnitT05_parses_every_checked_in_json_schema_document' {
@@ -79,6 +95,20 @@ Describe 'Skills Catalog contract' {
         $result.ManifestFileCount | Should Be 2
 
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+        $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+        $userManifest = Import-SkillsCatalogJson -Path $script:UserManifestExample -DocumentName 'user Skills managed manifest'
+        Assert-UserSkillsManagedManifestV1 -Manifest $userManifest
+        [string]$userManifest.catalogId | Should Be ([string]$catalog.catalogId)
+        [string]$userManifest.lockSha256 | Should Be (Get-TestRawSha256 -Path $script:LockExample)
+        $userSkill = @($userManifest.files)[0]
+        $lockedSkill = @($lock.skills | Where-Object { [string]$_.id -eq [string]$userSkill.skillId })[0]
+        $lockedSource = @($lock.sources | Where-Object { [string]$_.id -eq [string]$userSkill.sourceId })[0]
+        [string]$userSkill.sourceId | Should Be ([string]$lockedSkill.sourceId)
+        ([string]$userSkill.sourcePath).StartsWith(([string]$lockedSkill.sourcePath + '/'),[System.StringComparison]::Ordinal) | Should Be $true
+        [string]$userSkill.sourceRepository | Should Be ([string]$lockedSource.repository)
+        [string]$userSkill.sourceRef | Should Be ([string]$lockedSource.requestedRef)
+        [string]$userSkill.sourceCommit | Should Be ([string]$lockedSource.resolvedCommit)
+        [string]$userSkill.sourceVersion | Should Be ([string]$lockedSource.resolvedVersion)
         $productionCatalog = Test-SkillsCatalogDocument -CatalogPath $script:ProductionCatalog
         $actualSkillIds = @($productionCatalog.skills | Select-Object -ExpandProperty id | Sort-Object)
         $catalogSkillIds = @($catalog.skills | Select-Object -ExpandProperty id | Sort-Object)
@@ -182,6 +212,54 @@ Describe 'Skills Catalog contract' {
             $errorMessage = Get-ContractValidationError -CatalogPath $catalogPath
 
             $errorMessage | Should Match $case.Expected
+        }
+    }
+
+    # Scenario: Conditional IDs are absent, duplicated, or split across unrelated compatibility alternatives.
+    # Purpose: Give selection one authoritative kind/state tuple for both the condition and fallback evidence.
+    It 'UnitT55_requires_unique_conditional_capability_contracts_in_one_alternative_set' {
+        $cases = @(
+            @{
+                Name = 'undeclared-condition'
+                Expected = 'must declare exactly one compatibility requirement with its required kind and state'
+                Apply = {
+                    param($skill,$dependency)
+                    $dependency.condition.capability = 'undeclared-jira-api'
+                }
+            },
+            @{
+                Name = 'duplicate-fallback'
+                Expected = 'must declare exactly one compatibility requirement with its required kind and state'
+                Apply = {
+                    param($skill,$dependency)
+                    $alternativeSet = @($skill.compatibility.anyOfCapabilities)[0]
+                    $skill.compatibility.anyOfCapabilities[0] = @($alternativeSet) + @(
+                        [pscustomobject]@{ kind='connector'; id='jira-cloud-connector'; state='configured' }
+                    )
+                }
+            },
+            @{
+                Name = 'split-alternatives'
+                Expected = 'must be declared together in exactly one compatibility anyOfCapabilities set'
+                Apply = {
+                    param($skill,$dependency)
+                    $alternativeSet = @($skill.compatibility.anyOfCapabilities)[0]
+                    $skill.compatibility.anyOfCapabilities = @(
+                        [object[]]@($alternativeSet[0]),
+                        [object[]]@($alternativeSet[1])
+                    )
+                }
+            }
+        )
+
+        foreach ($case in $cases) {
+            $catalog = Import-SkillsCatalogJson -Path $script:CatalogExample -DocumentName 'Skills Catalog'
+            $skill = @($catalog.skills | Where-Object { $_.id -eq 'work-with-jira' })[0]
+            $dependency = @($skill.dependencies | Where-Object { $_.type -eq 'conditional' })[0]
+            & $case.Apply $skill $dependency
+            $catalogPath = Write-TestJsonDocument -Document $catalog -Name "$($case.Name).json"
+
+            (Get-ContractValidationError -CatalogPath $catalogPath) | Should Match $case.Expected
         }
     }
 
@@ -364,7 +442,7 @@ Describe 'Skills Catalog contract' {
             })
         }
 
-        { Assert-LegacyManagedManifestV1 -Manifest $legacyManifest } | Should Not Throw
+        Assert-LegacyManagedManifestV1 -Manifest $legacyManifest
 
         $legacyManifest.files[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
         try { Assert-LegacyManagedManifestV1 -Manifest $legacyManifest; $errorMessage = $null }
@@ -403,6 +481,63 @@ Describe 'Skills Catalog contract' {
         $typeRule.Count | Should Be 1
         [string]$typeRule[0].then.properties.targetPath.pattern | Should Be '^\.agents/skills/'
         [string]$typeRule[0].else.properties.targetPath.not.pattern | Should Be '^\.agents/skills/'
+    }
+
+    # Scenario: A repository-relative path contains a control character or a segment that can normalize ambiguously.
+    # Purpose: Keep the portable schemas and executable manifest validators on the same traversal-safe path grammar.
+    It 'UnitT65_keeps_manifest_repository_path_schema_and_parser_behavior_aligned' {
+        $managedSchema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v2.schema.json') `
+            -DocumentName 'managed manifest schema'
+        $userSchema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v1.schema.json') `
+            -DocumentName 'user Skills managed manifest schema'
+        $managedPattern = [string]$managedSchema.'$defs'.repositoryPath.pattern
+        $userPattern = [string]$userSchema.'$defs'.repositoryPath.pattern
+        $cases = @(
+            @{ Name='valid'; Path='.agents/skills/work-with-jira/SKILL.md'; Valid=$true },
+            @{ Name='empty'; Path=''; Valid=$false },
+            @{ Name='absolute'; Path='/outside'; Valid=$false },
+            @{ Name='trailing-slash'; Path='folder/'; Valid=$false },
+            @{ Name='empty-segment'; Path='folder//file'; Valid=$false },
+            @{ Name='dot-segment'; Path='folder/./file'; Valid=$false },
+            @{ Name='parent-segment'; Path='folder/../file'; Valid=$false },
+            @{ Name='whitespace-segment'; Path='folder/   /file'; Valid=$false },
+            @{ Name='backslash'; Path='folder\file'; Valid=$false },
+            @{ Name='colon'; Path='folder/file:stream'; Valid=$false },
+            @{ Name='tab'; Path="folder/file`tname"; Valid=$false },
+            @{ Name='newline'; Path="folder/file`nname"; Valid=$false },
+            @{ Name='delete-control'; Path=('folder/file' + [char]0x7f + 'name'); Valid=$false },
+            @{ Name='c1-control'; Path=('folder/file' + [char]0x85 + 'name'); Valid=$false }
+        )
+
+        foreach ($case in $cases) {
+            ([string]$case.Path -cmatch $managedPattern) | Should Be ([bool]$case.Valid)
+            ([string]$case.Path -cmatch $userPattern) | Should Be ([bool]$case.Valid)
+            if ([bool]$case.Valid) { continue }
+
+            foreach ($propertyName in @('sourcePath','targetPath')) {
+                $managedManifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest'
+                @($managedManifest.files)[0].PSObject.Properties[$propertyName].Value = [string]$case.Path
+                $managedError = $null
+                try { Assert-ManagedManifestV2 -Manifest $managedManifest }
+                catch { $managedError = $_.Exception.Message }
+                if ([string]::IsNullOrWhiteSpace($managedError)) {
+                    throw "Managed manifest accepted unsafe $propertyName case '$($case.Name)'."
+                }
+                $managedError | Should Match 'Unsafe .*path|must preserve the flat'
+
+                $userManifest = Import-SkillsCatalogJson -Path $script:UserManifestExample -DocumentName 'user Skills managed manifest'
+                @($userManifest.files)[0].PSObject.Properties[$propertyName].Value = [string]$case.Path
+                $userError = $null
+                try { Assert-UserSkillsManagedManifestV1 -Manifest $userManifest }
+                catch { $userError = $_.Exception.Message }
+                if ([string]::IsNullOrWhiteSpace($userError)) {
+                    throw "User Skills managed manifest accepted unsafe $propertyName case '$($case.Name)'."
+                }
+                $userError | Should Match 'Unsafe .*path|must preserve the flat'
+            }
+        }
     }
 
     # Scenario: Catalog, source-pin, and lock objects carry fields forbidden by their additionalProperties=false schemas.
@@ -491,6 +626,14 @@ Describe 'Skills Catalog contract' {
         $dependency.type | Should Be 'conditional'
         $dependency.condition.capability | Should Be 'jira-cloud-api'
         $dependency.fallback.capability | Should Be 'jira-cloud-connector'
+        $requirements = @(@($jiraSkill.compatibility.anyOfCapabilities)[0])
+        $requirements.Count | Should Be 2
+        $connectorRequirement = @($requirements | Where-Object { [string]$_.id -eq 'jira-cloud-connector' })[0]
+        $apiRequirement = @($requirements | Where-Object { [string]$_.id -eq 'jira-cloud-api' })[0]
+        [string]$connectorRequirement.kind | Should Be 'connector'
+        [string]$connectorRequirement.state | Should Be 'configured'
+        [string]$apiRequirement.kind | Should Be 'environment'
+        [string]$apiRequirement.state | Should Be 'configured'
     }
 
     # Scenario: The catalog source uses a human-selected ref that is resolved in the lock document.
@@ -522,6 +665,23 @@ Describe 'Skills Catalog contract' {
 
             # Then
             $errorMessage | Should Match "Skills Catalog lock Skill '.*' is missing required property '$propertyName'"
+        }
+    }
+
+    # Scenario: A lock Skill sourceId uses a JSON scalar or collection that PowerShell can coerce to text.
+    # Purpose: Keep the executable validator aligned with the schema's stable-ID string boundary.
+    It 'UnitT83_rejects_non_string_lock_skill_source_ids_before_comparison' {
+        $cases = @(
+            @{ Name='number'; Value=[long]1 },
+            @{ Name='singleton-array'; Value=[object[]]@('agent-skills') }
+        )
+        foreach ($case in $cases) {
+            $lock = Import-SkillsCatalogJson -Path $script:LockExample -DocumentName 'Skills Catalog lock'
+            @($lock.skills)[0].sourceId = $case.Value
+            $lockPath = Write-TestJsonDocument -Document $lock -Name "$($case.Name)-lock-source-id.json"
+
+            (Get-ContractValidationError -CatalogPath $script:CatalogExample -LockPath $lockPath) |
+                Should Match 'sourceId must be a non-empty string'
         }
     }
 
