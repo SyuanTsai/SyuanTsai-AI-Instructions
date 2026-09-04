@@ -66,6 +66,7 @@ if (-not (Test-Path -LiteralPath $runtimeContractPath -PathType Leaf)) {
     throw "AI instructions runtime contract module was not found: $runtimeContractPath"
 }
 Import-Module $runtimeContractPath -Force
+Import-Module (Join-Path (Split-Path -Parent $runtimeContractPath) 'license-delivery.psm1') -Force
 
 function Invoke-CleanupGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -352,6 +353,7 @@ function Test-CleanupCanonicalSourceRepository {
 
 function Test-CleanupManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
+    if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
     if ($Path -eq 'AGENTS.md' -or $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') { return $true }
@@ -386,7 +388,7 @@ function Get-CleanupNormalizedHash {
 
 function Get-CleanupManagedHash {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $TargetPath)
-    if ($TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) { return Get-CleanupRawHash -Path $Path }
+    if ($TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -or (Test-InstructionLicenseDeliveryPath $TargetPath)) { return Get-CleanupRawHash -Path $Path }
     return Get-CleanupNormalizedHash -Path $Path
 }
 
@@ -424,7 +426,7 @@ function Get-CleanupIndexManagedHash {
         $process.Dispose()
     }
 
-    if (-not $TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) {
+    if (-not $TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -and -not (Test-InstructionLicenseDeliveryPath $TargetPath)) {
         $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { 3 } else { 0 }
         $encoding = New-Object System.Text.UTF8Encoding($false,$true)
         try { $content = $encoding.GetString($bytes,$offset,$bytes.Length - $offset) }

@@ -232,6 +232,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/license-delivery.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/plans/ai-quota-observability-mcp/discussion-record.md",
       "license": "NOASSERTION"
     },
@@ -364,6 +368,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/license-delivery.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/safe-zip.psm1",
       "license": "Apache-2.0"
     },
@@ -477,6 +485,10 @@
     },
     {
       "path": "tests/invoke-ai-instructions-rollout.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/license-delivery.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

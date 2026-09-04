@@ -278,6 +278,14 @@ try {
 
     $instructionRoot = Expand-SafeZipRepository -ArchivePath $instructionArchive -DestinationRoot $instructionExtract
 
+    $sourcePlansById = @{}
+    foreach ($sourcePlan in @($plan.Sources)) { $sourcePlansById[[string]$sourcePlan.id] = $sourcePlan }
+    foreach ($skill in @($resolved.Skills)) {
+        $sourcePlan = $sourcePlansById[[string]$skill.sourceId]
+        $skill | Add-Member -NotePropertyName sourceRepository -NotePropertyValue ([string]$sourcePlan.repository) -Force
+        $skill | Add-Member -NotePropertyName sourceCommit -NotePropertyValue ([string]$sourcePlan.resolvedCommit) -Force
+    }
+
     New-ComposedBootstrapSource `
         -InstructionSourceRoot $instructionRoot `
         -ResolvedSkills $resolved.Skills `
@@ -285,10 +293,6 @@ try {
 
     New-ComposedBootstrapArchive -SourceRoot $composedRoot -DestinationPath $composedArchive | Out-Null
 
-    $sourcePlansById = @{}
-    foreach ($sourcePlan in @($plan.Sources)) {
-        $sourcePlansById[[string]$sourcePlan.id] = $sourcePlan
-    }
     $skillProvenance = @(
         foreach ($skill in @($resolved.Skills | Sort-Object id)) {
             $sourcePlan = $sourcePlansById[[string]$skill.sourceId]

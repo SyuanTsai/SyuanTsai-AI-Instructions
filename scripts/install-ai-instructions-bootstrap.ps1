@@ -378,12 +378,13 @@ $runtimeFiles = @(
     'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
     'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
     'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-    'cleanup-ai-instructions-pollution.ps1'
+    'cleanup-ai-instructions-pollution.ps1','license-delivery.psm1'
 )
 $stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')
 $relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
+$runtimeArtifactPaths = @($relativeSourcePaths)
 
 $archiveSourceWorkingRoot = $null
 try {
@@ -402,6 +403,19 @@ if ($Acquisition -ceq 'git-checkout') {
     $tempRootPath = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
     $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
+    # Load the selector from HEAD as well; a dirty checkout must not execute an unpinned helper.
+    $licensePreflightRoot = Join-Path $archiveSourceWorkingRoot 'license-preflight'
+    New-Item -ItemType Directory -Path $licensePreflightRoot | Out-Null
+    $licensePreflightArchive = Join-Path $licensePreflightRoot 'source.zip'
+    Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @(
+        'archive','--format=zip',"--output=$licensePreflightArchive",'--prefix=candidate-root/',$catalogRef,'--','scripts/license-delivery.psm1'
+    ) | Out-Null
+    $licensePreflightSource = Expand-InstallerGitSnapshotArchive -ArchivePath $licensePreflightArchive `
+        -DestinationRoot $licensePreflightRoot -RelativePaths @('scripts/license-delivery.psm1')
+    Import-Module (Join-Path $licensePreflightSource 'scripts/license-delivery.psm1') -Force
+    $snapshotPaths = @(Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @('-c','core.quotepath=false','ls-tree','-r','--name-only',$catalogRef))
+    $relativeSourcePaths += @(Select-LicenseDeliveryDocumentPaths -ArtifactPaths $runtimeArtifactPaths -SourcePaths $snapshotPaths)
+    $relativeSourcePaths = @($relativeSourcePaths | Sort-Object -Unique)
     $gitSnapshotArchive = Join-Path $archiveSourceWorkingRoot 'source.zip'
     Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments (@(
         'archive','--format=zip',"--output=$gitSnapshotArchive",'--prefix=candidate-root/',$catalogRef,'--'
@@ -476,6 +490,9 @@ foreach ($relativePath in $relativeSourcePaths) {
 $runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
 Import-Module $runtimeContractSource -Force
 Import-Module (Join-Path $repositoryRootPath 'scripts\installer-safe-mutation.psm1') -Force
+Import-Module (Join-Path $repositoryRootPath 'scripts\license-delivery.psm1') -Force
+$runtimeLicenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRootPath -ArtifactPaths $runtimeArtifactPaths `
+    -SourceRepository $catalogRepository -SourceCommit $catalogRef -ArtifactId 'ai-instructions-runtime'
 
 if ([string]::IsNullOrWhiteSpace($CodexHome)) {
     $CodexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
@@ -589,6 +606,7 @@ try {
         foreach ($fileName in $runtimeFiles) { Copy-Item -LiteralPath (Join-Path $repositoryRootPath "scripts\$fileName") -Destination (Join-Path $stagingRuntime $fileName) -Force }
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -Force
+        Write-LicenseDeliveryPackage -Package $runtimeLicenses -DestinationRoot (Join-Path $stagingRuntime 'licenses')
         Write-AiInstructionsJsonFile -Path $stagingConfiguration -Document $configuration
         Import-Module (Join-Path $stagingRuntime 'ai-instructions-runtime-contract.psm1') -Force
         $bundle = New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256

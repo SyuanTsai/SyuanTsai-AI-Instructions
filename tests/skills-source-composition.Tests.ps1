@@ -15,10 +15,29 @@ function New-TestSkill {
     $skillRoot=Join-Path $Root $Id
     New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
     Set-Content -LiteralPath (Join-Path $skillRoot 'SKILL.md') -Value "# $Id`n$Marker" -Encoding UTF8
-    [pscustomobject]@{ id=$Id; skillRootPath=$skillRoot }
+    [pscustomobject]@{ id=$Id; skillRootPath=$skillRoot; sourceRootPath=$Root; sourceRepository='https://example.org/skills.git'; sourceCommit=('a' * 40) }
 }
 
 Describe 'Skills source composition' {
+    # Scenario: Only one Skill is selected from a source with root and package-local declarations.
+    # Purpose: Deliver inherited licenses with exact source identity while leaving the verified source unchanged.
+    It 'UnitT05_delivers_root_and_local_licenses_for_one_selected_skill' {
+        $instructionRoot = Join-Path $TestDrive 'licensed-instructions'
+        New-Item -ItemType Directory -Path $instructionRoot | Out-Null
+        $source = Join-Path $TestDrive 'licensed-source'
+        $skill = New-TestSkill $source 'one' 'selected'
+        Set-Content -LiteralPath (Join-Path $source 'LICENSE') 'root license'
+        Set-Content -LiteralPath (Join-Path $skill.skillRootPath 'NOTICE') 'local attribution'
+        $null = New-TestSkill $source 'two' 'unselected'
+        $destination = Join-Path $TestDrive 'licensed-composed'
+        New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @($skill) -DestinationRoot $destination | Out-Null
+        $delivery = Join-Path $destination ".agents/skills/one/.ai-instructions-licenses/$('a'*40)"
+        (Get-Content -Raw -LiteralPath (Join-Path $delivery 'source/LICENSE')).Trim() | Should Be 'root license'
+        (Get-Content -Raw -LiteralPath (Join-Path $delivery 'source/one/NOTICE')).Trim() | Should Be 'local attribution'
+        (Get-Content -Raw -LiteralPath (Join-Path $delivery 'delivery.json') | ConvertFrom-Json).sourceCommit | Should Be ('a' * 40)
+        Test-Path -LiteralPath (Join-Path $destination '.agents/skills/two') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $skill.skillRootPath '.ai-instructions-licenses') | Should Be $false
+    }
     # Scenario: Two validated Skills originate from independent repositories and the instruction source contains a legacy Skill copy.
     # Purpose: Compose one desired source containing only the selected external Skills alongside the instruction families.
     It 'UnitT10_composes_two_independent_skill_sources_into_one_desired_set' {
