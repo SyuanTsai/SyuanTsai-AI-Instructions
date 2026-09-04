@@ -265,6 +265,8 @@ Select Human-Approved Immutable Release
 
 Host、企業政策或實際操作若涉及新的外部寫入、credential grant、elevated permission 或其他使用者授權，仍 **MAY / MUST** 依該操作自己的 authorization boundary 取得同意；這與 release approval 是不同概念。
 
+Managed consumer replacement、known-legacy adoption、ownership evidence、transaction backup/rollback、crash recovery 與 exact post-install inventory verification 的詳細 normative contract 位於 `docs/standards/managed-skill-lifecycle.md`，其 machine-readable evidence shape 位於 `docs/standards/schemas/managed-skill-lifecycle-v1.schema.json`。所有 repository adapter **MUST** 實作相同的 classification、destructive-change proof、fail-closed collision/drift behavior、transaction-owned staging 與 verification semantics；不得在 repository-local 另建 lifecycle policy。
+
 Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate 或另建不同 policy pipeline。
 
 ## 8. Canonical validation entry and validation tool policy

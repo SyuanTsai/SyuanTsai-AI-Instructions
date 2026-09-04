@@ -18,6 +18,179 @@ function Get-AgentEnvironmentBytesSha256 {
     finally { $algorithm.Dispose() }
 }
 
+function New-AgentEnvironmentOwnershipEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('managed','known-legacy','unmanaged-unknown','managed-drift','controlled-candidate')][string] $Classification,
+        [Parameter(Mandatory = $true)][string] $Owner,
+        [Parameter(Mandatory = $true)][string] $Evidence,
+        [Parameter(Mandatory = $true)][bool] $DestructiveChangeAllowed
+    )
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        skillId = $SkillId
+        path = $Path
+        classification = $Classification
+        owner = $Owner
+        evidence = $Evidence
+        destructiveChangeAllowed = $DestructiveChangeAllowed
+    }
+}
+
+function New-AgentEnvironmentFailureDetail {
+    param(
+        [Parameter(Mandatory = $true)][string] $Code,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][ValidateSet('managed','known-legacy','unmanaged-unknown','managed-drift','controlled-candidate')][string] $Classification,
+        [Parameter(Mandatory = $true)][string] $Owner,
+        [Parameter(Mandatory = $true)][string] $Evidence,
+        [Parameter(Mandatory = $true)][bool] $DestructiveChangeAllowed,
+        [Parameter(Mandatory = $true)][bool] $BackupCreated,
+        [Parameter(Mandatory = $true)][string[]] $Remediation,
+        [AllowNull()][object] $ExpectedSha256,
+        [AllowNull()][object] $ActualSha256
+    )
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        code = $Code
+        skillId = $SkillId
+        path = $Path
+        classification = $Classification
+        owner = $Owner
+        evidence = $Evidence
+        destructiveChangeAllowed = $DestructiveChangeAllowed
+        backupCreated = $BackupCreated
+        expectedSha256 = $ExpectedSha256
+        actualSha256 = $ActualSha256
+        remediation = @($Remediation)
+    }
+}
+
+function Get-AgentEnvironmentManifestBytes {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    return $encoding.GetBytes(($Manifest | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+}
+
+function Get-AgentEnvironmentStagedFileSnapshot {
+    param([Parameter(Mandatory = $true)][object] $File)
+
+    $skillIdProperty = $File.PSObject.Properties['skillId']
+    $targetPathProperty = $File.PSObject.Properties['targetPath']
+    $expectedProperty = $File.PSObject.Properties['sha256']
+    $stagedProperty = $File.PSObject.Properties['stagedPath']
+    $skillId = if ($null -ne $skillIdProperty) { [string]$skillIdProperty.Value } else { '<unknown>' }
+    $targetPath = if ($null -ne $targetPathProperty) { [string]$targetPathProperty.Value } else { '<unknown>' }
+    $expected = if ($null -ne $expectedProperty) { [string]$expectedProperty.Value } else { $null }
+
+    if ($null -eq $stagedProperty -or $stagedProperty.Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$stagedProperty.Value) -or
+        -not [System.IO.Path]::IsPathRooted([string]$stagedProperty.Value)) {
+        return [pscustomobject][ordered]@{
+            valid = $false; skillId = $skillId; targetPath = $targetPath; expectedSha256 = $expected
+            actualSha256 = $null; bytes = $null
+            message = "Controlled candidate staging path is missing or not absolute: $targetPath"
+        }
+    }
+
+    $bytes = $null
+    try {
+        $stagedPath = [System.IO.Path]::GetFullPath([string]$stagedProperty.Value)
+        if (-not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
+            throw "Controlled candidate staged file is missing: $targetPath"
+        }
+        $item = Get-Item -Force -LiteralPath $stagedPath
+        if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Controlled candidate staged file must be a regular non-reparse file: $targetPath"
+        }
+        $directory = $item.Directory
+        while ($null -ne $directory) {
+            if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Controlled candidate staging path crosses a reparse point: $targetPath"
+            }
+            $parent = $directory.Parent
+            if ($null -eq $parent -or $parent.FullName -ceq $directory.FullName) { break }
+            $directory = $parent
+        }
+        if ($expected -notmatch '^[0-9a-f]{64}$') {
+            throw "Controlled candidate staged hash is invalid: $targetPath"
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($stagedPath)
+        $actual = Get-AgentEnvironmentBytesSha256 -Bytes $bytes
+        if ($actual -cne $expected) {
+            throw "Controlled candidate staged hash mismatch: $targetPath"
+        }
+        return [pscustomobject][ordered]@{
+            valid = $true; skillId = $skillId; targetPath = $targetPath; expectedSha256 = $expected
+            actualSha256 = $actual; bytes = $bytes; message = $null
+        }
+    }
+    catch {
+        $actual = $null
+        if ($null -ne (Get-Variable -Name bytes -ErrorAction SilentlyContinue) -and $null -ne $bytes) {
+            $actual = Get-AgentEnvironmentBytesSha256 -Bytes $bytes
+        }
+        return [pscustomobject][ordered]@{
+            valid = $false; skillId = $skillId; targetPath = $targetPath; expectedSha256 = $expected
+            actualSha256 = $actual; bytes = $null; message = [string]$_.Exception.Message
+        }
+    }
+}
+
+function Get-AgentEnvironmentTransactionStagePath {
+    param(
+        [Parameter(Mandatory = $true)][string] $TransactionRoot,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.StartsWith('/') -or
+        $RelativePath.Contains('\') -or $RelativePath.Contains(':')) {
+        throw "Unsafe Agent environment transaction stage path: $RelativePath"
+    }
+    foreach ($segment in @($RelativePath.Split('/'))) {
+        if ([string]::IsNullOrWhiteSpace($segment) -or $segment -ceq '.' -or $segment -ceq '..' -or
+            $segment.IndexOfAny([char[]]@([char]0..([char]31) + [char]127)) -ge 0) {
+            throw "Unsafe Agent environment transaction stage path: $RelativePath"
+        }
+    }
+    $root = [System.IO.Path]::GetFullPath($TransactionRoot).TrimEnd([char[]]@('\','/'))
+    $stageRoot = Join-Path $root 'staged'
+    $full = [System.IO.Path]::GetFullPath((Join-Path $stageRoot $RelativePath.Replace('/',[System.IO.Path]::DirectorySeparatorChar)))
+    $prefix = $stageRoot.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $full.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Agent environment transaction stage path resolves outside its root: $RelativePath"
+    }
+    return $full
+}
+
+function Assert-AgentEnvironmentManifestMatchesDesired {
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $DesiredFiles
+    )
+    $expectedByPath = @{}
+    foreach ($file in @($DesiredFiles)) {
+        $path = [string]$file.targetPath
+        if ($expectedByPath.ContainsKey($path)) { throw "Duplicate desired user Skill path: $path" }
+        $expectedByPath[$path] = [string]$file.sha256
+    }
+    $actualByPath = @{}
+    foreach ($file in @($Manifest.files)) {
+        $path = [string]$file.targetPath
+        if ($actualByPath.ContainsKey($path)) { throw "Final user Skills manifest contains a duplicate target path: $path" }
+        $actualByPath[$path] = [string]$file.sha256
+    }
+    if ($actualByPath.Count -ne $expectedByPath.Count) {
+        throw 'Final user Skills manifest inventory does not match the desired inventory.'
+    }
+    foreach ($path in @($expectedByPath.Keys)) {
+        if (-not $actualByPath.ContainsKey($path) -or [string]$actualByPath[$path] -cne [string]$expectedByPath[$path]) {
+            throw "Final user Skills manifest inventory mismatch: $path"
+        }
+    }
+}
+
 function Get-AgentEnvironmentFullPath {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -363,7 +536,19 @@ function Get-AgentEnvironmentManifest {
 }
 
 function New-AgentEnvironmentResult {
-    param([string] $Outcome,[object] $DesiredState,[object[]] $Installed,[object[]] $Updated,[object[]] $Removed,[object[]] $Preserved,[object[]] $Failed,[string] $RollbackState,[string] $BackupPath)
+    param(
+        [string] $Outcome,
+        [object] $DesiredState,
+        [object[]] $Installed,
+        [object[]] $Updated,
+        [object[]] $Removed,
+        [object[]] $Preserved,
+        [object[]] $Failed,
+        [string] $RollbackState,
+        [string] $BackupPath,
+        [object[]] $FailureDetails = @(),
+        [object[]] $Ownership = @()
+    )
     $exitCode = switch ($Outcome) {
         'failed' { 1 }
         'drift' { 2 }
@@ -374,6 +559,7 @@ function New-AgentEnvironmentResult {
         schemaVersion=1; outcome=$Outcome; exitCode=$exitCode; catalogCommit=[string]$DesiredState.Manifest.catalogCommit
         catalogLockSha256=[string]$DesiredState.Manifest.lockSha256
         installed=@($Installed); updated=@($Updated); removed=@($Removed); preserved=@($Preserved); failed=@($Failed)
+        failureDetails=@($FailureDetails); ownership=@($Ownership)
         rollbackState=$RollbackState; backupPath=$BackupPath
         licenseWarnings=@(if ($null -ne $DesiredState.PSObject.Properties['LicenseWarnings']) { $DesiredState.LicenseWarnings })
     }
@@ -446,12 +632,45 @@ function Invoke-UserSkillsReconciliation {
         $removed = New-Object System.Collections.Generic.List[string]
         $preserved = New-Object System.Collections.Generic.List[string]
         $failed = New-Object System.Collections.Generic.List[string]
+        $failureDetails = New-Object System.Collections.Generic.List[object]
+        $ownership = New-Object System.Collections.Generic.List[object]
         $catalogNames = Get-AgentEnvironmentCatalogNames -Catalog $DesiredState.Catalog
+        $catalogOwnership = @{}
+        foreach ($skill in @($DesiredState.Catalog.skills)) {
+            $skillId = [string]$skill.id
+            $catalogOwnership[$skillId] = [pscustomobject][ordered]@{ skillId=$skillId; catalogName=$skillId; kind='active-id' }
+            foreach ($alias in @($skill.lifecycle.aliases)) {
+                $catalogOwnership[[string]$alias] = [pscustomobject][ordered]@{ skillId=$skillId; catalogName=[string]$alias; kind='lifecycle-alias' }
+            }
+        }
+        $stagedSnapshots = @{}
+        foreach ($file in @($DesiredState.Files)) {
+            $targetPath = [string]$file.targetPath
+            $snapshot = Get-AgentEnvironmentStagedFileSnapshot -File $file
+            $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$file.skillId) -Path $targetPath -Classification 'controlled-candidate' -Owner 'desired-state-staged-inventory' -Evidence 'Desired candidate path and SHA-256 were evaluated before any user-environment mutation.' -DestructiveChangeAllowed $false))
+            if (-not [bool]$snapshot.valid) {
+                $failed.Add("Controlled candidate failed integrity verification: $targetPath")
+                $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'staged-integrity-mismatch' -SkillId ([string]$file.skillId) -Path $targetPath -Classification 'controlled-candidate' -Owner 'desired-state-staged-inventory' -Evidence ([string]$snapshot.message) -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $snapshot.expectedSha256 -ActualSha256 $snapshot.actualSha256 -Remediation @('Reacquire the immutable candidate and rebuild the staged inventory.','Do not retry mutation with a changed or incomplete staged file.')))
+                continue
+            }
+            $stagedSnapshots[$targetPath] = $snapshot
+        }
+        $manifestBytes = Get-AgentEnvironmentManifestBytes -Manifest $DesiredState.Manifest
+        $manifestSha = Get-AgentEnvironmentBytesSha256 -Bytes $manifestBytes
+        try {
+            Assert-AgentEnvironmentManifestMatchesDesired -Manifest $DesiredState.Manifest -DesiredFiles ([object[]]$DesiredState.Files)
+        }
+        catch {
+            $failed.Add('Desired managed manifest inventory does not match the candidate file inventory.')
+            $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'desired-manifest-mismatch' -SkillId 'managed-manifest' -Path '.agents/catalog-skills.manifest.json' -Classification 'controlled-candidate' -Owner 'desired-state-manifest' -Evidence ([string]$_.Exception.Message) -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $null -ActualSha256 $null -Remediation @('Rebuild the desired state from the same validated candidate inventory.','Do not apply a manifest whose target/hash inventory differs from the candidate files.')))
+            return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
+        }
         $migrationPaths = @{}
         if ($MigrateLegacyCatalogSkills -and (Test-Path -LiteralPath $skillsRoot -PathType Container)) {
             foreach ($directory in @(Get-ChildItem -LiteralPath $skillsRoot -Directory -Force -ErrorAction Stop)) {
                 if (-not $catalogNames.ContainsKey($directory.Name)) { continue }
                 if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Legacy Catalog Skill directory is a reparse point: $($directory.Name)" }
+                $catalogEvidence = $catalogOwnership[$directory.Name]
                 foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Recurse -Force)) {
                     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Legacy Catalog Skill contains a reparse point: $($directory.Name)" }
                 }
@@ -460,14 +679,16 @@ function Invoke-UserSkillsReconciliation {
                     $legacyDefinitionPath = ".agents/skills/$($directory.Name)/SKILL.md"
                     if ($desiredByPath.ContainsKey($relative) -or $relative -ceq $legacyDefinitionPath) {
                         $migrationPaths[$relative] = $true
+                        $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$catalogEvidence.skillId) -Path $relative -Classification 'known-legacy' -Owner 'catalog-lifecycle' -Evidence ("Explicit -MigrateLegacyCatalogSkills; catalog $($catalogEvidence.kind) '$($catalogEvidence.catalogName)' resolves to active skill '$($catalogEvidence.skillId)'.") -DestructiveChangeAllowed $true))
                     }
                     else {
                         $failed.Add("Legacy Catalog Skill contains an unmanaged file that cannot be migrated safely: $relative")
+                        $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'legacy-unmanaged-content' -SkillId ([string]$catalogEvidence.skillId) -Path $relative -Classification 'unmanaged-unknown' -Owner 'none' -Evidence ("Catalog $($catalogEvidence.kind) identifies the directory, but this file is outside the desired inventory and known legacy definition path.") -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $null -ActualSha256 $null -Remediation @('Preserve the file or provide explicit legacy ownership evidence.','Do not delete the path based only on its directory name.')))
                     }
                 }
             }
         }
-        if ($failed.Count -gt 0) { return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null }
+        if ($failed.Count -gt 0) { return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray()) }
         $observationsByPath = @{}
         $observationsByPath[$manifestRelative] = $manifestObservation
         $observedTargetPaths = @(@($oldByPath.Keys) + @($desiredByPath.Keys) + @($migrationPaths.Keys) | Sort-Object -Unique)
@@ -478,9 +699,19 @@ function Invoke-UserSkillsReconciliation {
         $deletes = @{}
         foreach ($path in @($oldByPath.Keys)) {
             $observation = $observationsByPath[$path]
+            $managedExpected = [string]$oldByPath[$path].sha256
+            $managedActual = if ([bool]$observation.existed) { [string]$observation.sha256 } else { $null }
+            $managedDrift = [bool]$observation.existed -and $managedActual -cne $managedExpected
+            $managedClassification = if ($managedDrift) { 'managed-drift' } else { 'managed' }
+            $managedDestructiveAllowed = [bool](-not $managedDrift -or $ForceReinstallManagedSkills)
+            $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$oldByPath[$path].skillId) -Path $path -Classification $managedClassification -Owner 'managed-manifest-v1' -Evidence ("Validated .agents/catalog-skills.manifest.json schemaVersion 1 entry; expected SHA-256 $managedExpected, observed SHA-256 $managedActual.") -DestructiveChangeAllowed $managedDestructiveAllowed))
             if ([bool]$observation.existed) {
                 $actual = [string]$observation.sha256
-                if ($actual -cne [string]$oldByPath[$path].sha256 -and -not $ForceReinstallManagedSkills) { $failed.Add("Managed Skill file was customized: $path"); continue }
+                if ($actual -cne $managedExpected -and -not $ForceReinstallManagedSkills) {
+                    $failed.Add("Managed Skill file was customized: $path")
+                    $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'managed-local-drift' -SkillId ([string]$oldByPath[$path].skillId) -Path $path -Classification 'managed-drift' -Owner 'managed-manifest-v1' -Evidence ("Manifest SHA-256 $managedExpected does not match observed SHA-256 $actual.") -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $managedExpected -ActualSha256 $actual -Remediation @('Review the local change and restore the managed hash, or explicitly use -ForceReinstallManagedSkills after backup review.','Do not silently replace locally changed managed content.')))
+                    continue
+                }
             }
             if (-not $desiredByPath.ContainsKey($path) -and [bool]$observation.existed) { $deletes[$path] = $true; $removed.Add($path) }
         }
@@ -492,8 +723,18 @@ function Invoke-UserSkillsReconciliation {
             $observation = $observationsByPath[$path]
             if ([bool]$observation.existed) {
                 $actual = [string]$observation.sha256
-                if ($actual -ceq [string]$file.sha256) { $preserved.Add($path); continue }
-                if (-not $oldByPath.ContainsKey($path) -and -not $migrationPaths.ContainsKey($path)) { $failed.Add("Unmanaged Skill file conflicts with selected Catalog content: $path"); continue }
+                if ($actual -ceq [string]$file.sha256) {
+                    $preserved.Add($path)
+                    if (-not $oldByPath.ContainsKey($path) -and -not $migrationPaths.ContainsKey($path)) {
+                        $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$file.skillId) -Path $path -Classification 'unmanaged-unknown' -Owner 'none' -Evidence 'Existing bytes match the desired candidate, but no managed manifest or explicit legacy ownership evidence exists.' -DestructiveChangeAllowed $false))
+                    }
+                    continue
+                }
+                if (-not $oldByPath.ContainsKey($path) -and -not $migrationPaths.ContainsKey($path)) {
+                    $failed.Add("Unmanaged Skill file conflicts with selected Catalog content: $path")
+                    $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'unmanaged-collision' -SkillId ([string]$file.skillId) -Path $path -Classification 'unmanaged-unknown' -Owner 'none' -Evidence 'No current managed manifest entry or explicit known-legacy migration evidence proves ownership of the existing bytes.' -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 ([string]$file.sha256) -ActualSha256 $actual -Remediation @('Preserve or manually rename the unmanaged file, or confirm a known legacy migration before rerunning.','Do not delete or overwrite unmanaged content based only on a matching target path.')))
+                    continue
+                }
                 $updated.Add($path)
             }
             elseif ($oldByPath.ContainsKey($path)) { $updated.Add($path) }
@@ -505,7 +746,7 @@ function Invoke-UserSkillsReconciliation {
                 if (-not $catalogNames.ContainsKey($directory.Name)) { $preserved.Add(".agents/skills/$($directory.Name)/") }
             }
         }
-        if ($failed.Count -gt 0) { return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null }
+        if ($failed.Count -gt 0) { return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray()) }
         $manifestFileSetMatches = $null -ne $existing -and $oldByPath.Count -eq $desiredByPath.Count
         if ($manifestFileSetMatches) {
             foreach ($path in @($desiredByPath.Keys)) {
@@ -516,10 +757,10 @@ function Invoke-UserSkillsReconciliation {
             [string]$existing.catalogCommit -ceq [string]$DesiredState.Manifest.catalogCommit -and [string]$existing.lockSha256 -ceq [string]$DesiredState.Manifest.lockSha256
         if ($Mode -eq 'VerifyOnly') {
             $outcome = if ($writes.Count -eq 0 -and $deletes.Count -eq 0 -and $manifestMatches) { 'current' } else { 'drift' }
-            return New-AgentEnvironmentResult -Outcome $outcome -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-started' -BackupPath $null
+            return New-AgentEnvironmentResult -Outcome $outcome -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-started' -BackupPath $null -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
         }
-        if ($Mode -eq 'WhatIf') { return New-AgentEnvironmentResult -Outcome 'planned' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-started' -BackupPath $null }
-        if ($writes.Count -eq 0 -and $deletes.Count -eq 0 -and $manifestMatches) { return New-AgentEnvironmentResult -Outcome 'current' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed @() -RollbackState 'not-started' -BackupPath $null }
+        if ($Mode -eq 'WhatIf') { return New-AgentEnvironmentResult -Outcome 'planned' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-started' -BackupPath $null -FailureDetails @() -Ownership ([object[]]$ownership.ToArray()) }
+        if ($writes.Count -eq 0 -and $deletes.Count -eq 0 -and $manifestMatches) { return New-AgentEnvironmentResult -Outcome 'current' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath $null -FailureDetails @() -Ownership ([object[]]$ownership.ToArray()) }
         $mutationPaths = @(@($writes.Keys) + @($deletes.Keys) + @($manifestRelative) | Sort-Object -Unique)
         if ($null -ne $BeforeBackupValidationAction) { & $BeforeBackupValidationAction }
         foreach ($path in $mutationPaths) {
@@ -534,6 +775,24 @@ function Invoke-UserSkillsReconciliation {
         else { New-Item -ItemType Directory -Path $backupsRoot | Out-Null }
         $backupRoot = Join-Path $backupsRoot ("update-agent-environment-$transactionId")
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+        $transactionStagePaths = @{}
+        try {
+            foreach ($path in @($desiredByPath.Keys)) {
+                $stagePath = Get-AgentEnvironmentTransactionStagePath -TransactionRoot $backupRoot -RelativePath $path
+                $stageParent = [System.IO.Path]::GetDirectoryName($stagePath)
+                New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
+                [System.IO.File]::WriteAllBytes($stagePath,[byte[]]$stagedSnapshots[$path].bytes)
+                $stagedHash = Get-AgentEnvironmentSha256 -Path $stagePath
+                if ($stagedHash -cne [string]$desiredByPath[$path].sha256) {
+                    throw "Transaction candidate staging hash mismatch: $path"
+                }
+                $transactionStagePaths[$path] = $stagePath
+            }
+        }
+        catch {
+            if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            throw "Agent environment transaction candidate staging failed: $($_.Exception.Message)"
+        }
         $states = New-Object System.Collections.Generic.List[object]
         $statesByPath = @{}
         foreach ($path in $mutationPaths) {
@@ -574,7 +833,7 @@ function Invoke-UserSkillsReconciliation {
             }
             foreach ($path in @($writes.Keys | Sort-Object)) {
                 Assert-AgentEnvironmentOriginalState -Root $home -State $statesByPath[$path]
-                Set-AgentEnvironmentFileBytes -Root $home -RelativePath $path -Bytes ([System.IO.File]::ReadAllBytes([string]$writes[$path].stagedPath))
+                Set-AgentEnvironmentFileBytes -Root $home -RelativePath $path -Bytes ([System.IO.File]::ReadAllBytes([string]$transactionStagePaths[$path]))
                 $mutationCount++; if ($FailureAfterMutationCount -gt 0 -and $mutationCount -ge $FailureAfterMutationCount) { throw 'Injected Agent environment transaction failure.' }
             }
             Assert-AgentEnvironmentOriginalState -Root $home -State $statesByPath[$manifestRelative]
@@ -584,7 +843,9 @@ function Invoke-UserSkillsReconciliation {
                 if (-not (Test-Path -LiteralPath $full -PathType Leaf) -or (Get-AgentEnvironmentSha256 -Path $full) -cne [string]$desiredByPath[$path].sha256) { throw "Final user Skill inventory verification failed: $path" }
             }
             $verified = Get-AgentEnvironmentManifest -Path $manifestPath
+            if ((Get-AgentEnvironmentSha256 -Path $manifestPath) -cne $manifestSha) { throw 'Final user Skills manifest byte verification failed.' }
             if ([string]$verified.lockSha256 -cne [string]$DesiredState.Manifest.lockSha256) { throw 'Final user Skills manifest verification failed.' }
+            Assert-AgentEnvironmentManifestMatchesDesired -Manifest $verified -DesiredFiles ([object[]]$DesiredState.Files)
             $managedDirectories = @{}
             foreach ($path in @($deletes.Keys)) {
                 $directoryPath = [System.IO.Path]::GetDirectoryName((Get-AgentEnvironmentFullPath -Root $home -RelativePath $path))
@@ -600,7 +861,7 @@ function Invoke-UserSkillsReconciliation {
                 if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) { Remove-Item -LiteralPath $directoryPath -Force }
             }
             Remove-Item -LiteralPath $journalPath -Force
-            return New-AgentEnvironmentResult -Outcome 'applied' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath $backupRoot
+            return New-AgentEnvironmentResult -Outcome 'applied' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath $backupRoot -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
         }
         catch {
             $applyError = $_

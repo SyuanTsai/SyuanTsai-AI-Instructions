@@ -10,6 +10,8 @@
 - Validation tool policy: `docs/standards/validation-toolchain.json`
 - Source inventory schema: `docs/standards/schemas/source-inventory-v2.schema.json`
 - OpenAI metadata semantic schema: `docs/standards/schemas/openai-agent-metadata.schema.json`
+- Managed replacement/migration contract: `docs/standards/managed-skill-lifecycle.md`
+- Managed lifecycle evidence schema: `docs/standards/schemas/managed-skill-lifecycle-v1.schema.json`
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
@@ -27,6 +29,7 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 - canonical source repository contract；
 - Skill package 與 `agents/openai.yaml` metadata contract；
 - source inventory、pin、provenance 與 integrity contract；
+- managed replacement、known legacy migration、ownership evidence、rollback 與 post-install lifecycle contract；
 - immutable authority distribution/revision binding；
 - canonical validation / security lifecycle；
 - local / pre-push / CI 共用 validation contract；

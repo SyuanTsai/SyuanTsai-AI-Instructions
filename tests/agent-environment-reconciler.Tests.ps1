@@ -95,13 +95,22 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\beta') | Should Be $false
     }
 
-    It 'fails closed on an unmanaged collision unless legacy migration is explicit' {
+    # Scenario: A path named like a Catalog Skill already contains bytes with no managed-manifest or explicit legacy proof.
+    # Purpose: Verify the collision is blocked and the result exposes ownership evidence and remediation before any mutation.
+    It 'InterT35_reports_unmanaged_collision_and_requires_explicit_legacy_migration' {
         $legacy = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacy) | Out-Null
         [System.IO.File]::WriteAllText($legacy,'legacy')
         $desired = New-TestDesiredState -Root $staging
         $blocked = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
         $blocked.outcome | Should Be 'failed'
+        @($blocked.failureDetails).Count | Should Be 1
+        $detail = @($blocked.failureDetails)[0]
+        $detail.code | Should Be 'unmanaged-collision'
+        $detail.classification | Should Be 'unmanaged-unknown'
+        $detail.path | Should Be '.agents/skills/alpha/SKILL.md'
+        $detail.destructiveChangeAllowed | Should Be $false
+        @($detail.remediation).Count | Should BeGreaterThan 0
         [System.IO.File]::ReadAllText($legacy) | Should Be 'legacy'
         $migrated = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -MigrateLegacyCatalogSkills
         $migrated.outcome | Should Be 'applied'
@@ -109,7 +118,9 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $migrated.backupPath | Should Be $true
     }
 
-    It 'backs up and removes a legacy alias while installing its replacement' {
+    # Scenario: An explicit Catalog lifecycle alias points an old managed directory at the current Skill ID.
+    # Purpose: Verify alias evidence permits only the proven legacy path to be removed and is retained in the result.
+    It 'InterT45_reports_known_legacy_ownership_for_alias_replacement' {
         $legacy = Join-Path $userHome '.agents\skills\old-alpha\SKILL.md'
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacy) | Out-Null
         [System.IO.File]::WriteAllText($legacy,'legacy alias')
@@ -119,6 +130,64 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $legacy | Should Be $false
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $true
         Test-Path -LiteralPath (Join-Path $result.backupPath '.agents\skills\old-alpha\SKILL.md') | Should Be $true
+        $legacyEvidence = @($result.ownership | Where-Object { $_.path -ceq '.agents/skills/old-alpha/SKILL.md' })
+        $legacyEvidence.Count | Should Be 1
+        $legacyEvidence[0].classification | Should Be 'known-legacy'
+        $legacyEvidence[0].owner | Should Be 'catalog-lifecycle'
+        $legacyEvidence[0].destructiveChangeAllowed | Should Be $true
+        $legacyEvidence[0].evidence | Should Match 'lifecycle-alias'
+    }
+
+    # Scenario: The immutable candidate changes at its original staging path after reconciliation preflight has completed.
+    # Purpose: Verify writes use the transaction-owned preflight snapshot instead of a mutable staging path.
+    It 'InterT40_writes_from_a_transaction_owned_candidate_snapshot' {
+        $desired = New-TestDesiredState -Root $staging
+        $expectedSha = [string]$desired.Files[0].sha256
+        $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -BeforeBackupValidationAction {
+            [System.IO.File]::WriteAllText([string]$desired.Files[0].stagedPath,'candidate drift after preflight')
+        }
+
+        $result.outcome | Should Be 'applied'
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md')).Hash.ToLowerInvariant() | Should Be $expectedSha
+        (Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$desired.Files[0].stagedPath)).Hash.ToLowerInvariant() | Should Not Be $expectedSha
+    }
+
+    # Scenario: The candidate inventory records one SHA-256 while its staged bytes are tampered before any target exists.
+    # Purpose: Verify integrity failure is fail-closed, structured, and occurs before backup or consumer mutation.
+    It 'InterT30_rejects_a_tampered_staged_candidate_before_target_mutation' {
+        $desired = New-TestDesiredState -Root $staging
+        [System.IO.File]::WriteAllText([string]$desired.Files[0].stagedPath,'tampered candidate')
+
+        $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails).Count | Should Be 1
+        $detail = @($result.failureDetails)[0]
+        $detail.code | Should Be 'staged-integrity-mismatch'
+        $detail.classification | Should Be 'controlled-candidate'
+        $detail.path | Should Be '.agents/skills/alpha/SKILL.md'
+        $detail.destructiveChangeAllowed | Should Be $false
+        $detail.backupCreated | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\backups') | Should Be $false
+    }
+
+    # Scenario: The desired user manifest and candidate file inventory disagree on the same target hash.
+    # Purpose: Verify manifest transition is blocked before consumer mutation instead of creating a self-inconsistent install.
+    It 'InterT32_rejects_a_desired_manifest_inventory_mismatch' {
+        $desired = New-TestDesiredState -Root $staging
+        $desired.Manifest.files[0].sha256 = ('b' * 64)
+
+        $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails).Count | Should Be 1
+        $detail = @($result.failureDetails)[0]
+        $detail.code | Should Be 'desired-manifest-mismatch'
+        $detail.path | Should Be '.agents/catalog-skills.manifest.json'
+        $detail.destructiveChangeAllowed | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\backups') | Should Be $false
     }
 
     It 'fails closed without deleting an unmanaged file mixed into an explicit legacy migration' {

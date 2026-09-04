@@ -8,6 +8,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
         $script:SourceInventorySchemaPath = Join-Path $script:StandardsRoot 'schemas\source-inventory-v2.schema.json'
         $script:OpenAiMetadataSchemaPath = Join-Path $script:StandardsRoot 'schemas\openai-agent-metadata.schema.json'
+        $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
+        $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -1923,5 +1925,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'persist-credentials' 'Review matrix must record CI checkout credential isolation.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
+    }
+
+    # Scenario: The managed lifecycle contract or its machine-readable evidence schema is removed or detached from the central authority.
+    # Purpose: Bind SYP-194 ownership, migration, rollback, and post-install semantics to Standard v1 regression coverage.
+    It 'UnitT70_binds_managed_lifecycle_to_the_central_standard_authority' {
+        Assert-True (Test-Path -LiteralPath $script:LifecyclePath -PathType Leaf) 'Managed lifecycle contract is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:LifecycleSchemaPath -PathType Leaf) 'Managed lifecycle evidence schema is missing from the central standards directory.'
+        $lifecycle = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecyclePath
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecycleSchemaPath | ConvertFrom-Json
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+
+        Assert-Match $index 'managed-skill-lifecycle\.md' 'Standards index must expose the managed lifecycle contract.'
+        Assert-Match $index 'managed-skill-lifecycle-v1\.schema\.json' 'Standards index must expose the managed lifecycle evidence schema.'
+        Assert-Match $standard 'managed-skill-lifecycle\.md' 'Normative Standard must bind the detailed managed lifecycle contract.'
+        Assert-Match $matrix 'Managed lifecycle / legacy migration' 'Cross-repository matrix must record the SYP-194 lifecycle boundary.'
+        Assert-Match $lifecycle 'Managed drift' 'Lifecycle contract must distinguish managed drift from clean ownership.'
+        Assert-Match $lifecycle 'known-legacy' 'Lifecycle contract must define explicit known-legacy adoption.'
+        Assert-Match $lifecycle 'unmanaged-unknown' 'Lifecycle contract must preserve unknown ownership and block collisions.'
+        Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle contract must prevent mutable staging TOCTOU writes.'
+        Assert-Match $lifecycle 'post-install' 'Lifecycle contract must require post-install verification.'
+        Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema title must remain bound to v1.'
+        Assert-Equal @($schema.oneOf).Count 2 'Lifecycle evidence schema must distinguish ownership and failure records.'
+        Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
+        Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
     }
 }

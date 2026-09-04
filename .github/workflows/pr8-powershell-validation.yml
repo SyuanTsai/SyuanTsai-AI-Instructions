@@ -71,7 +71,7 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 437) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 437." }
+          if ([int]$result.TotalCount -ne 443) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 443." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
@@ -135,7 +135,7 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 437) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 437." }
+          if ([int]$result.TotalCount -ne 443) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 443." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }

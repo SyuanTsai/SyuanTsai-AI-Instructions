@@ -3,6 +3,8 @@ Describe 'Standard validation resolver hardening' {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1'
         $script:ToolchainPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json'
+        $script:LifecyclePath = Join-Path $script:RepositoryRoot 'docs/standards/managed-skill-lifecycle.md'
+        $script:LifecycleSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/managed-skill-lifecycle-v1.schema.json'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -286,5 +288,20 @@ Version: this line also belongs to the description body
             }
             Assert-Match $errorMessage 'Untrusted SkillSpector release asset URI' "Untrusted release asset URI '$value' must fail closed."
         }
+    }
+
+    # Scenario: A resolver change introduces a second lifecycle policy or detaches lifecycle evidence from Standard v1.
+    # Purpose: Ensure resolver hardening keeps lifecycle semantics in the central standards authority and does not replace them.
+    It 'UnitT80_keeps_managed_lifecycle_policy_outside_the_validation_tool_resolver' {
+        Assert-True (Test-Path -LiteralPath $script:LifecyclePath -PathType Leaf) 'Managed lifecycle policy must remain in the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:LifecycleSchemaPath -PathType Leaf) 'Managed lifecycle evidence schema must remain in the central standards directory.'
+        $lifecycle = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecyclePath
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecycleSchemaPath | ConvertFrom-Json
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+
+        Assert-Match $lifecycle 'destructiveChangeAllowed' 'Lifecycle policy must define explicit destructive-change evidence.'
+        Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle policy must define transaction-owned candidate staging.'
+        Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema must remain the v1 central contract.'
+        Assert-NotMatch $resolver 'function (Resolve|Invoke)-ManagedSkillLifecycle' 'Validation tool resolver must not grow a repository-local lifecycle policy entry point.'
     }
 }
