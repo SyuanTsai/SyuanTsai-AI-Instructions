@@ -11,6 +11,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
         $script:UpstreamInteroperabilityPath = Join-Path $script:StandardsRoot 'upstream-interoperability.md'
+        $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
+        $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -317,6 +319,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-Path -LiteralPath $script:ResolverPath -PathType Leaf) 'Missing central validation tool resolver.'
         Assert-True (Test-Path -LiteralPath $script:PythonClosureHelperPath -PathType Leaf) 'Missing verified Python wheel closure helper.'
         Assert-True (Test-Path -LiteralPath $script:AuthorityGatePath -PathType Leaf) 'Missing shared Standard authority gate.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Missing canonical validation/security gate policy.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGateSchemaPath -PathType Leaf) 'Missing canonical validation/security gate schema.'
         Assert-True (Test-Path -LiteralPath $script:WorkflowPath -PathType Leaf) 'Missing Standards Conformance workflow.'
         Assert-True (Test-Path -LiteralPath $script:RequiredPowerShellWorkflowPath -PathType Leaf) 'Missing required PowerShell workflow authority bridge.'
 
@@ -324,6 +328,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $index 'skill-repository-standard\.md' 'Standards index must link the normative Standard.'
         Assert-Match $index 'skill-repository-review-matrix\.md' 'Standards index must link the review matrix.'
         Assert-Match $index 'validation-toolchain\.json' 'Standards index must link the toolchain policy.'
+        Assert-Match $index 'validation-security-gate\.json' 'Standards index must link the canonical validation/security gate policy.'
+        Assert-Match $index 'validation-security-gate-v1\.schema\.json' 'Standards index must link the canonical validation/security gate schema.'
         Assert-Match $index 'Resolve-StandardValidationTool\.ps1' 'Standards index must name the central validation tool resolver.'
     }
 
@@ -1974,5 +1980,84 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $upstream 'Do Not Adopt' 'The upstream decision record must contain Do Not Adopt decisions.'
         Assert-Match $upstream 'MUST NOT.*replace.*central Catalog/Lock' 'Upstream packaging must not replace central provenance and lifecycle authority.'
         Assert-Match $upstream 'schema' 'Schema/pin limitations must be recorded instead of inferred from mutable documentation.'
+    }
+
+    # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.
+    # Purpose: Bind SYP-192's exact canonical sequence and fail-closed semantics to the central Standard and executable gate.
+    It 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' {
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Canonical validation/security gate policy is missing.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGateSchemaPath -PathType Leaf) 'Canonical validation/security gate schema is missing.'
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+
+        Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
+        Assert-Equal $policy.schemaVersion 1 'Canonical validation/security gate policy must remain v1.'
+        Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security gate policy identity changed.'
+        $expectedIds = @(
+            'controlled-acquisition',
+            'integrity-verification',
+            'package-validation',
+            'skillspector-static',
+            'repository-tests',
+            'conditional-semantic-scan',
+            'ai-review',
+            'human-approval',
+            'publish-or-install',
+            'post-install-verification'
+        )
+        $expectedNames = @(
+            'Controlled Acquisition',
+            'Integrity Verification',
+            'Package Validation',
+            'SkillSpector Static',
+            'Repository Tests',
+            'Conditional Semantic Scan',
+            'AI Review',
+            'Human Approval',
+            'Publish / Install',
+            'Post-install Verification'
+        )
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.order }) (@(1..10 | ForEach-Object { [string]$_ })) 'Canonical validation/security stage order numbers must be contiguous.'
+        foreach ($stage in @($policy.stages)) {
+            Assert-Equal $stage.failureAction 'BLOCK' "Stage '$($stage.id)' must fail closed."
+            Assert-True (@($stage.evidence).Count -gt 0) "Stage '$($stage.id)' must declare evidence."
+        }
+        Assert-Equal $policy.security.scannerFailure 'BLOCK' 'Scanner failure must block.'
+        Assert-Equal $policy.security.analyzerIncomplete 'BLOCK' 'Analyzer incompleteness must block.'
+        Assert-Equal $policy.security.unparsableResult 'BLOCK' 'Unparsable results must block.'
+        Assert-Equal $policy.security.unknownSeverity 'BLOCK' 'Unknown severity must block.'
+        $severity = @($policy.security.severity)
+        Assert-Equal $severity.Count 5 'Canonical security severity mapping must contain five levels.'
+        foreach ($expected in @(
+            @{ level='critical'; action='BLOCK' },
+            @{ level='high'; action='BLOCK' },
+            @{ level='medium'; action='HUMAN_REVIEW_REQUIRED' },
+            @{ level='low'; action='RECORD_AND_TRACK' },
+            @{ level='informational'; action='RECORD_AND_TRACK' }
+        )) {
+            $actual = @($severity | Where-Object { [string]$_.level -ceq $expected.level })
+            Assert-Equal $actual.Count 1 "Severity '$($expected.level)' must have one mapping."
+            Assert-Equal $actual[0].action $expected.action "Severity '$($expected.level)' has the wrong action."
+        }
+        Assert-True ([bool]$policy.security.aiReviewCannotReplaceHumanApproval) 'AI Review must not replace Human Approval.'
+        Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
+
+        Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
+        Assert-Match $standard 'validation-security-gate\.json' 'Normative Standard must bind the canonical validation/security gate policy.'
+        Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
+        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
+        Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
+        $packageValidationIndex = $gate.IndexOf("Context 'skill-validator package validation'")
+        $skillSpectorStaticIndex = $gate.IndexOf("Context 'SkillSpector static scan'")
+        $repositoryTestsIndex = $gate.IndexOf("Context 'skill-tools combined check'")
+        Assert-True ($packageValidationIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
+        Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
 }

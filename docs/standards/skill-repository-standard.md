@@ -244,14 +244,17 @@ Standard v1 將「release candidate 核准」與「安裝已核准 release」明
 ```text
 Controlled Candidate Acquisition
 → Integrity Verification
-→ SkillSpector Static Security Scan
-→ Repository Validation
-→ Tests / Regression / Conformance
-→ Conditional SkillSpector Semantic Scan
+→ Package Validation
+→ SkillSpector Static
+→ Repository Tests
+→ Conditional Semantic Scan
 → AI Review
 → Human Release Approval
-→ Publish Approved Immutable Release
+→ Publish / Install
+→ Post-install Verification
 ```
+
+上述十個 stage 的唯一 machine-readable authority 是 `docs/standards/validation-security-gate.json`，其 schema 是 `docs/standards/schemas/validation-security-gate-v1.schema.json`。Canonical entry **MUST** 依該檔案的 exact order 執行；stage failure、缺少 required evidence 或不可解析結果 **MUST** 依該檔案的 failure action fail closed。
 
 Human approval 在這條 flow 核准的是**特定 immutable release candidate**，不是核准某一台電腦的每次安裝。
 
@@ -271,7 +274,7 @@ Host、企業政策或實際操作若涉及新的外部寫入、credential grant
 
 Managed consumer replacement、known-legacy adoption、ownership evidence、transaction backup/rollback、crash recovery 與 exact post-install inventory verification 的詳細 normative contract 位於 `docs/standards/managed-skill-lifecycle.md`，其 machine-readable evidence shape 位於 `docs/standards/schemas/managed-skill-lifecycle-v1.schema.json`。所有 repository adapter **MUST** 實作相同的 classification、destructive-change proof、fail-closed collision/drift behavior、transaction-owned staging 與 verification semantics；不得在 repository-local 另建 lifecycle policy。
 
-Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate 或另建不同 policy pipeline。
+Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate、改變 severity action 或另建不同 policy pipeline。
 
 ## 8. Canonical validation entry and validation tool policy
 
@@ -367,10 +370,10 @@ Scheduled update job 與正式 validation 不需要兩套版本政策；下一�
 
 ### 8.3 Required tool-to-stage execution contract
 
-Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool；canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並實際執行：
+Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-security-gate.json` 定義 stage order 與 security action；`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool。Canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並依 `Package Validation → SkillSpector Static → Repository Tests` 的順序實際執行：
 
-- resolved SkillSpector executable：對 source inventory 中每個 active Skill 執行 Static Scan，並在第 11 節 trigger 成立時執行 Semantic Scan；
 - resolved `skill-validator` executable：對每個 active Skill package 執行完整 package/spec validation，至少涵蓋第 4.5 節 `SKILL.md` contract；
+- resolved SkillSpector executable：在 Package Validation 成功後，對 source inventory 中每個 active Skill 執行 stage 4 Static Scan；僅在 Repository Tests 完成且第 11 節 trigger 成立時，執行 stage 6 Conditional Semantic Scan；
 - resolved `skill-tools` executable：使用該次已解析、已驗證的 package 執行 `check`（不得由 `npx` 或其他 wrapper 再解析另一版本）於每個 active Skill package；
 - resolved Pester module：執行該 repository 的 Standard conformance、repository contract、security adapter 與適用的 domain regression suites。
 
@@ -384,7 +387,7 @@ Dedicated source repository **MUST** 以上述完整 active source inventory 作
 
 ### 9.1 Required stage
 
-所有 active Skill packages **MUST** 在 Repository Validation 之前通過 SkillSpector Static Security Scan。
+所有 active Skill packages **MUST** 在 Package Validation 成功後、Repository Tests 開始前通過 SkillSpector Static Security Scan。
 
 Catalog-driven repository **MUST** 自動從 source inventory discover 所有 active Skill；新增 Skill **MUST NOT** 能因忘記修改 CI hard-coded list 而繞過 scan。
 
@@ -412,10 +415,12 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 Repository **MUST** 使用 central severity semantics：
 
 - **Critical / High**：預設 BLOCK；只有正式 approved exception 才可放行。
-- **Medium**：需要 triage。若屬 exploit/security boundary violation 或 analyzer 明確定義為 blocking 類型，BLOCK；其餘需有 resolution/suppression evidence 才可 release。
-- **Low / Informational**：可不阻擋，但 **SHOULD** 保留 evidence 供 trend/review；不得藉由降級 severity 隱藏實質 High/Critical risk。
+- **Medium**：**MUST** 進入 Human Review；在 reviewer 記錄 disposition、scope、evidence 與 release decision 前，release/install **MUST** BLOCK。若屬 exploit/security boundary violation 或 analyzer 明確定義為 blocking 類型，仍 **MUST** BLOCK。
+- **Low / Informational**：**MUST** 記錄並追蹤；可不阻擋，但不得藉由降級 severity 隱藏實質 High/Critical risk。
 
 實際 scanner severity 名稱若不同，adapter **MUST** 做 deterministic mapping，mapping 必須受版本控制與 tests 保護。
+
+Scanner failure、analyzer incomplete、unparsable result 或 unknown severity **MUST** BLOCK。AI Review **MUST NOT** replace Human Approval；local、pre-push 與 CI **MUST** 使用相同的 pass/block semantics，差異只能是執行環境與 evidence destination。
 
 ### 9.5 Capability is not automatically vulnerability
 
@@ -468,11 +473,11 @@ Semantic Scan **MUST** 在下列任一情況觸發：
 
 Semantic Scan failure、timeout、unavailable 或 unparsable result，在已觸發的情況 **MUST** fail closed；不得退化成「略過但 pass」。
 
-## 12. Repository validation and tests
+## 12. Repository tests and validation
 
 ### 12.1 Repository validation
 
-Repository Validation **MUST** 驗證至少：
+Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static 成功後執行。其 Repository Validation portion **MUST** 驗證至少：
 
 - immutable authority snapshot revision/hash binding；
 - `catalog/source.json` schema v2、repository binding、ordinal unique inventory；
@@ -589,7 +594,7 @@ Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或
 除非先依第 19 節修改 normative authority，repository exception **MUST NOT** 豁免或降低下列 core requirements：
 
 - immutable authority/candidate acquisition、identity、provenance、integrity 與 post-install verification；
-- complete active package inventory discovery，以及 required Static Scan、Repository Validation、formal baseline tool execution、tests 與 triggered Semantic Scan；
+- complete active package inventory discovery，以及依 canonical order 執行 required Package Validation、Static Scan、Repository Tests、formal baseline tool execution 與 triggered Semantic Scan；
 - canonical gate 的 approved tool source/endpoint、latest-stable resolution、stable-release semantics、resolved identity 與 per-run freeze；第 8.2 節明確隔離的 non-canonical compatibility lane 仍依其 boundary 處理；
 - scanner/analyzer completeness、unparsable/missing/error fail-closed semantics；
 - single canonical validation entry 與 local/pre-push/CI 相同 pass/block policy；
@@ -620,7 +625,7 @@ Extension **MUST**：
 
 - 由 config/adapter/declared stage 表達；
 - 對 executable tool 使用上述 central trusted-source/version policy，並一律沿用 canonical severity/fail semantics；
-- 不得跳過 Static Security、Repository Validation、Tests 或 required Semantic Scan；
+- 不得跳過 Package Validation、Static Security、Repository Tests 或 required Semantic Scan；
 - local/CI/pre-push 使用同一判斷；
 - 不得把 temporary evidence 寫成 uncontrolled tracked state。
 

@@ -145,4 +145,30 @@ Describe 'Agent Skill authority workflow contract' {
         }
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
     }
+
+    # Scenario: The canonical validation/security policy changes without reaching both authority workflows and its executable gate.
+    # Purpose: Keep SYP-192 stage order and fail-closed semantics under the same merge-blocking authority path.
+    It 'UnitT60_routes_validation_security_gate_changes_through_the_central_authority_gate' {
+        $policyPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
+        $schemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/validation-security-gate-v1.schema.json'
+        $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
+        $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
+        $gatePath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
+        $standardTestsPath = Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1'
+
+        Assert-True (Test-Path -LiteralPath $policyPath -PathType Leaf) 'Canonical validation/security policy is missing.'
+        Assert-True (Test-Path -LiteralPath $schemaPath -PathType Leaf) 'Canonical validation/security policy schema is missing.'
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
+        $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
+
+        Assert-Match $standards 'docs/standards/\*\*' 'Dedicated authority workflow must watch the central validation/security policy.'
+        foreach ($workflow in @($standards, $required)) {
+            Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Authority workflows must execute the shared gate for validation/security changes.'
+        }
+        Assert-Match $gate 'validation-security-gate\.json' 'Shared authority gate must load the canonical validation/security policy.'
+        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
+        Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'
+    }
 }
