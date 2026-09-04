@@ -304,4 +304,17 @@ Version: this line also belongs to the description body
         Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema must remain the v1 central contract.'
         Assert-NotMatch $resolver 'function (Resolve|Invoke)-ManagedSkillLifecycle' 'Validation tool resolver must not grow a repository-local lifecycle policy entry point.'
     }
+
+    # Scenario: Plugin or marketplace support is added to the validation-tool resolver as an implicit policy path.
+    # Purpose: Keep upstream packaging and MCP discovery in the central adapter decision record rather than a second resolver policy.
+    It 'UnitT90_keeps_upstream_packaging_and_discovery_outside_the_validation_tool_resolver' {
+        $upstreamPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-interoperability.md'
+        Assert-True (Test-Path -LiteralPath $upstreamPath -PathType Leaf) 'Upstream interoperability policy must remain in the central standards directory.'
+        $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $upstreamPath
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+
+        Assert-Match $upstream 'adapter' 'Upstream packaging must be described as an explicit adapter boundary.'
+        Assert-Match $upstream 'dynamic.*discovery' 'Dynamic MCP discovery must be explicitly bounded.'
+        Assert-NotMatch $resolver '\.codex-plugin/plugin\.json|\.mcp\.json|marketplace\.json' 'Validation-tool resolution must not become an upstream packaging or marketplace policy engine.'
+    }
 }

@@ -10,6 +10,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:OpenAiMetadataSchemaPath = Join-Path $script:StandardsRoot 'schemas\openai-agent-metadata.schema.json'
         $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
+        $script:UpstreamInteroperabilityPath = Join-Path $script:StandardsRoot 'upstream-interoperability.md'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -1951,5 +1952,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal @($schema.oneOf).Count 2 'Lifecycle evidence schema must distinguish ownership and failure records.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
+    }
+
+    # Scenario: An upstream Plugin or Agent Skills change is accepted without an explicit central boundary.
+    # Purpose: Keep the portable contract, adapter decisions, and SYP-specific governance in one reviewable authority record.
+    It 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' {
+        Assert-True (Test-Path -LiteralPath $script:UpstreamInteroperabilityPath -PathType Leaf) 'Upstream interoperability decision record is missing from the central standards directory.'
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamInteroperabilityPath
+
+        Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
+        Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
+        Assert-Match $matrix 'Upstream interoperability' 'Cross-repository matrix must record the SYP-193 upstream boundary.'
+        Assert-Match $upstream '69ef37e9424c0a7ea9dd2293b559e43ec8176379' 'Agent Skills evidence must bind an immutable upstream revision.'
+        Assert-Match $upstream '\.codex-plugin/plugin\.json' 'Plugin manifest adoption must be explicit.'
+        Assert-Match $upstream '\.mcp\.json' 'MCP package adoption must be explicit.'
+        Assert-Match $upstream 'Adopt' 'The upstream decision record must contain Adopt decisions.'
+        Assert-Match $upstream 'Partial Adopt' 'The upstream decision record must contain Partial Adopt decisions.'
+        Assert-Match $upstream 'Do Not Adopt' 'The upstream decision record must contain Do Not Adopt decisions.'
+        Assert-Match $upstream 'MUST NOT.*replace.*central Catalog/Lock' 'Upstream packaging must not replace central provenance and lifecycle authority.'
+        Assert-Match $upstream 'schema' 'Schema/pin limitations must be recorded instead of inferred from mutable documentation.'
     }
 }

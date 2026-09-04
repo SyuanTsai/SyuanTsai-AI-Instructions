@@ -126,4 +126,23 @@ Describe 'Agent Skill authority workflow contract' {
         }
         Assert-Match $standardTests 'UnitT70_binds_managed_lifecycle_to_the_central_standard_authority' 'The workflow gate must execute lifecycle-specific authority regression.'
     }
+
+    # Scenario: An upstream interoperability decision changes without reaching the required authority workflow or regression gate.
+    # Purpose: Keep SYP-193 Plugin/Agent Skills boundary changes under the same central Standard CI semantics.
+    It 'UnitT50_routes_upstream_interoperability_changes_through_the_central_authority_gate' {
+        $upstreamPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-interoperability.md'
+        $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
+        $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
+        $standardTestsPath = Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1'
+
+        Assert-True (Test-Path -LiteralPath $upstreamPath -PathType Leaf) 'Upstream interoperability authority document is missing.'
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+        $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
+        Assert-Match $standards "'docs/standards/\*\*'" 'Dedicated authority workflow must watch the upstream interoperability record.'
+        foreach ($workflow in @($standards, $required)) {
+            Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared gate for upstream changes.'
+        }
+        Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
+    }
 }

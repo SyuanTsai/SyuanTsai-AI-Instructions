@@ -54,6 +54,10 @@ Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標�
 
 `Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference。若 reference implementation 與本標準衝突，**MUST** 修正 implementation，或先修改本標準並完成 review/tests；不得以 implementation 現況覆蓋 normative policy。
 
+### 3.5 Upstream interoperability boundary
+
+SYP-193 的上游採用與 adapter 邊界記錄於 [`upstream-interoperability.md`](upstream-interoperability.md)。Standard v1 **MUST** 採用其 pinned Agent Skills portable core；Plugin manifest、MCP/app mapping、marketplace、hooks 與上游 metadata 只能依該 decision record 作為 declared adapter/extension，**MUST NOT** 取代 central Catalog/Lock、provenance、canonical validation、security、approval 或 managed lifecycle authority。上游文件若沒有可重現的 immutable schema/revision，**MUST NOT** 以 mutable 文件變更靜默改寫 Standard v1。
+
 ## 4. Repository and Skill package contract
 
 ### 4.1 Canonical source layout

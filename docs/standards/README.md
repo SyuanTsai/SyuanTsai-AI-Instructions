@@ -12,6 +12,7 @@
 - OpenAI metadata semantic schema: `docs/standards/schemas/openai-agent-metadata.schema.json`
 - Managed replacement/migration contract: `docs/standards/managed-skill-lifecycle.md`
 - Managed lifecycle evidence schema: `docs/standards/schemas/managed-skill-lifecycle-v1.schema.json`
+- Upstream interoperability decision record: `docs/standards/upstream-interoperability.md`
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
@@ -41,6 +42,7 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 - AI Review / Human Release Approval boundary；
 - approved immutable release installation semantics；
 - repository-specific extension / adapter / exception policy。
+- upstream Agent Skills / Agent Plugins interoperability and adapter boundary。
 
 ## Normative language
 
