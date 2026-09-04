@@ -1,0 +1,543 @@
+{
+  "schemaVersion": 1,
+  "scope": "This revision only; no blanket historical or external-source grant.",
+  "unlistedFiles": "No additional license granted by this declaration.",
+  "files": [
+    {
+      "path": ".codex/AGENTS.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AGENTS.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/CodeReview.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/CodeReview.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/Database.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/Database.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/ExternalResearch.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/ExternalResearch.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/GitCommit.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/GitCommit.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/Testing.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".codex/AI-Rules/Testing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".gitattributes",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/CodeReview.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/CodeReview.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/Database.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/Database.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/ExternalResearch.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/ExternalResearch.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/GitCommit.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/GitCommit.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/Testing.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/AI-Rules/Testing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/copilot-instructions.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/copilot-instructions.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/pr8-powershell-validation.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/standards-conformance.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/syp101-production-smoke.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/syp86-production-lock.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".gitignore",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "AGENTS.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "LICENSE",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "LICENSE-SCOPE.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "NOTICE",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "PROVENANCE.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "ai-instructions-contract.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/ai-instructions-sync-v4.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/ai-instructions-update-receipt-v1.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/managed-manifest-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/runtime-bundle-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/skills-catalog-lock.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/skills-catalog.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/user-skills-managed-manifest-v1.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/ai-instructions-sync-v4.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/ai-instructions-update-receipt-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/managed-manifest-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/runtime-bundle-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/skills-catalog-lock.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/skills-catalog-sources.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/skills-catalog.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/user-skills-managed-manifest-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/skills-catalog-lock.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/skills-catalog.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/skills-catalog.sources.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/plans/ai-quota-observability-mcp/discussion-record.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/ai-quota-observability-mcp/handoff.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/ai-quota-routing/discussion-record.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/ai-quota-routing/handoff.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/felo-ai-usage/discussion-record.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/felo-ai-usage/handoff.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/plans/guide-agent-cli-installation/installation-reference.md",
+      "license": "NOASSERTION"
+    },
+    {
+      "path": "docs/standards/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/openai-agent-metadata.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/source-inventory-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/skill-repository-review-matrix.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/skill-repository-standard.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/validation-toolchain.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/syp-101-autonomous-update-self-healing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/syp-79-multi-source-routing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/syp-79-new-skill-repository-readiness.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/syp-86-production-cutover.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "licensing-scope.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardAuthorityGate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Resolve-PythonWheelClosure.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Resolve-StandardValidationTool.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/agent-artifact-remediation.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/agent-environment-reconciler.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/ai-instructions-rollout.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/ai-instructions-runtime-contract.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/ai-instructions-updater.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/bootstrap-ai-instructions-installed.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/bootstrap-ai-instructions-multisource.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/bootstrap-ai-instructions.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/cleanup-ai-instructions-pollution.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/install-ai-instructions-bootstrap.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/installer-safe-mutation.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/invoke-ai-instructions-rollout.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/safe-zip.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-catalog-contract.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-selection.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-source-acquisition.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-source-composition.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-source-retrieval.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/skills-source-routing.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/syp101-production-smoke-contract.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/test-production-cutover.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/test-syp101-production-smoke.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/update-agent-environment.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/update-ai-instructions.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/update-skills-catalog-lock.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/agent-artifact-remediation.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/agent-environment-reconciler.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-runtime-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/bootstrap-ai-instructions-multisource.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/bootstrap-ai-instructions.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/cleanup-ai-instructions-pollution.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/duplicate-stable-id.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/invalid-dependency.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/unknown-schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/unresolved-pin.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/unsafe-path.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skills-catalog-contract/valid-rename-removal.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/invoke-ai-instructions-rollout.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/licensing-scope.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/production-skills-catalog.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/safe-zip.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skill-repository-standard.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skill-repository-workflows.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-catalog-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-catalog-source-host.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-selection.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-source-acquisition.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-source-composition.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-source-retrieval.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skills-source-routing.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-validation-resolver-hardening.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/syp101-production-smoke-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/update-ai-instructions.Tests.ps1",
+      "license": "Apache-2.0"
+    }
+  ]
+}

@@ -284,6 +284,14 @@ Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，
 
 CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lock 與 production smoke。
 
+## 授權
+
+本 Repository 自行撰寫且明列於 [逐檔範圍表](licensing-scope.json) 的通用核心採 [Apache-2.0](LICENSE)。這不是涵蓋全部檔案、歷史版本或外部 Skill source 的統一授權；八個待確認模板／歷史規劃檔不在本次授權範圍。
+
+請一併閱讀 [授權範圍](LICENSE-SCOPE.md)、[NOTICE](NOTICE)、[來源說明](PROVENANCE.md) 與 [外部來源聲明](THIRD_PARTY_NOTICES.md)。四個 Skill Repository 為同源拆分、分別維護的來源，其版本授權由各自文件說明。
+
+目前授權文件的 runtime／Instructions／Skill 安裝遞送尚未補齊；根目錄授權文件不代表安裝產物已完成授權文件保留驗證。
+
 ## 主要檔案
 
 - `scripts/install-ai-instructions-bootstrap.ps1`：transactional installer 與 v1–v4 migration。
