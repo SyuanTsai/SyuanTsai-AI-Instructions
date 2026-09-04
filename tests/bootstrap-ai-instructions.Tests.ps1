@@ -230,6 +230,34 @@ Describe 'bootstrap-ai-instructions' {
         New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
+    # Scenario: A consumer with its own root license receives, updates, and removes source declarations.
+    # Purpose: Keep delivery inventoried, byte-exact and idempotent while protecting customized copies and product licenses.
+    It 'InterT04_manages_instruction_license_delivery_without_touching_product_licenses' {
+        Set-TestText -Path (Join-Path $targetRoot 'LICENSE') -Value 'product license'
+        [IO.File]::WriteAllText((Join-Path $sourceRoot 'LICENSE'), "source license`r`n")
+        Set-TestText -Path (Join-Path $sourceRoot 'NOTICE') -Value 'source attribution'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $licensePath = Join-Path $targetRoot '.codex/ai-instructions-licenses/source/LICENSE'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($licensePath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $sourceRoot 'LICENSE'))))
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        @($manifest.files | Where-Object targetPath -like '*/ai-instructions-licenses/*').Count | Should Be 6
+        $receipt = Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/delivery.json') | ConvertFrom-Json
+        $receipt.sourceCommit | Should Be ('c' * 40)
+        $again = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        ($again -join ' ') | Should Match 'up to date'
+        Set-TestText -Path $licensePath -Value 'customized license'
+        Set-TestText -Path (Join-Path $sourceRoot 'LICENSE') -Value 'source license v2'
+        Remove-Item -LiteralPath (Join-Path $sourceRoot 'NOTICE')
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $updated = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        (Get-Content -Raw -LiteralPath $licensePath).Trim() | Should Be 'customized license'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/source/LICENSE')).Trim() | Should Be 'source license v2'
+        Test-Path -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/source/NOTICE') | Should Be $false
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'LICENSE')).Trim() | Should Be 'product license'
+        ($updated -join ' ') | Should Match 'customized'
+    }
+
     # Scenario: A clean product repository receives both instruction families for the first time.
     # Purpose: Materialize the complete local ignored model without changing product history or status.
     It 'InterT05_creates_both_English_instruction_families_without_changing_HEAD_or_status' {

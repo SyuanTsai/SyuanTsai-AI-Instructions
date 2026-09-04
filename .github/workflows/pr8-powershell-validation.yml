@@ -71,7 +71,7 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 420) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 420." }
+          if ([int]$result.TotalCount -ne 436) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 436." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
@@ -135,7 +135,7 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 420) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 420." }
+          if ([int]$result.TotalCount -ne 436) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 436." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
@@ -211,7 +211,7 @@ jobs:
             './tests/skills-source-acquisition.Tests.ps1'
           )
           $expectedTestCounts = @{
-            './tests/skills-source-composition.Tests.ps1' = 6
+            './tests/skills-source-composition.Tests.ps1' = 7
             './tests/skills-source-acquisition.Tests.ps1' = 45
           }
           foreach ($testPath in $testPaths) {

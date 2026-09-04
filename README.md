@@ -290,7 +290,7 @@ CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lo
 
 請一併閱讀 [授權範圍](LICENSE-SCOPE.md)、[NOTICE](NOTICE)、[來源說明](PROVENANCE.md) 與 [外部來源聲明](THIRD_PARTY_NOTICES.md)。四個 Skill Repository 為同源拆分、分別維護的來源，其版本授權由各自文件說明。
 
-目前授權文件的 runtime／Instructions／Skill 安裝遞送尚未補齊；根目錄授權文件不代表安裝產物已完成授權文件保留驗證。
+Runtime／Instructions／選取的 Skill 會遞送來源版本的授權文件、來源路徑與 hash 收據，並納入既有受管 inventory。詳見 [授權文件遞送](docs/license-delivery.md)。既有舊 pin 若沒有授權聲明，會明確提示缺失；不會套用中央來源的新授權。
 
 ## 主要檔案
 

@@ -26,6 +26,7 @@ Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'license-delivery.psm1') -Force
 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -986,7 +987,7 @@ function Get-ManagedContentHash {
         [string] $TargetPath
     )
 
-    if ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
+    if ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal) -or (Test-InstructionLicenseDeliveryPath $TargetPath)) {
         return Get-RawContentHash -Path $Path
     }
 
@@ -995,6 +996,8 @@ function Get-ManagedContentHash {
 
 function Test-IsAllowedManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
+
+    if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
 
     if ($Path -eq 'AGENTS.md' -or
         $Path -eq '.github/copilot-instructions.md' -or
@@ -1513,6 +1516,9 @@ function New-ManifestEntry {
     }
     elseif ($TargetPath -eq '.github/copilot-instructions.md') {
         $artifactId = 'copilot-base'
+    }
+    elseif (Test-InstructionLicenseDeliveryPath $TargetPath) {
+        $artifactId = if ($TargetPath.StartsWith('.codex/')) { 'codex-licensing' } else { 'copilot-licensing' }
     }
     elseif ($TargetPath.StartsWith('.codex/AI-Rules/', [System.StringComparison]::Ordinal)) {
         $ruleName = [regex]::Replace(
@@ -2727,6 +2733,20 @@ try {
                 Sha256 = Get-NormalizedContentHash -Path $sourceRule.FullName
             })
         }
+        $artifactPaths = @($desiredEntries | Where-Object FamilyName -eq $family.Name | ForEach-Object SourcePath)
+        $licenses = New-LicenseDeliveryPackage -SourceRoot $sourceRootPath -ArtifactPaths $artifactPaths `
+            -SourceRepository $script:instructionProvenance.sourceRepository -SourceCommit $script:instructionProvenance.sourceCommit `
+            -ArtifactId $family.Name
+        $licenseRoot = Join-Path $workingPath "licenses/$($family.Name)"
+        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot $licenseRoot
+        $licenseTargetPrefix = if ($family.Name -eq 'Codex') { '.codex' } else { '.github' }
+        foreach ($licenseFile in @($licenses.Files)) {
+            $desiredEntries.Add([pscustomobject]@{
+                FamilyName = $family.Name; SourcePath = $licenseFile.sourcePath
+                TargetPath = "$licenseTargetPrefix/ai-instructions-licenses/$($licenseFile.relativePath)"
+                SourceFullPath = (Join-Path $licenseRoot $licenseFile.relativePath); Sha256 = $licenseFile.sha256
+            })
+        }
     }
 
     $sourceSkillsPath = Join-Path $sourceRootPath $sharedSkillsSource.Replace('/', '\')
@@ -2754,7 +2774,7 @@ try {
         }
 
         $sourceSkillFiles = @(
-            Get-ChildItem -LiteralPath $sourceSkillDirectory.FullName -Recurse -File |
+            Get-ChildItem -LiteralPath $sourceSkillDirectory.FullName -Recurse -File -Force |
                 Where-Object { $_.Name -ne '.gitkeep' } |
                 Sort-Object FullName
         )

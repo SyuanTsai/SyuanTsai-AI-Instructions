@@ -17,6 +17,17 @@ Describe 'Agent artifact remediation transaction' {
         }
     }
 
+    # Scenario: A tracked declaration is placed under a managed instruction license namespace.
+    # Purpose: Reserve only Agent delivery paths while protecting product LICENSE and NOTICE files.
+    It 'UnitT05_classifies_license_delivery_without_reserving_product_licenses' {
+        foreach ($path in @('.codex/ai-instructions-licenses/source/LICENSE','.github/ai-instructions-licenses/delivery.json')) {
+            (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $true
+        }
+        foreach ($path in @('LICENSE','NOTICE','docs/LICENSE','.codex/ai-instructions-licenses/../../LICENSE')) {
+            (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $false
+        }
+    }
+
     # Given: Remediation removed a tracked Agent file, then an external editor recreates it and an external Git process stages product work.
     # When: A later bootstrap failure asks remediation to roll back.
     # Then: Applied-state drift is reported and both external file bytes and index entries are preserved for automatic retry.

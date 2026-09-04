@@ -36,7 +36,7 @@
 
 ## 安裝與再散布狀態
 
-本次文件變更尚未修正 runtime／Instructions／外部 Skill 的授權文件遞送。根目錄有 LICENSE 不代表安裝產物已完整攜帶授權文件。
+Runtime／Instructions／外部 Skill 的授權遞送保留實際來源版本的聲明，並以 inventory 與來源收據追蹤，詳見 [授權文件遞送](docs/license-delivery.md)。根目錄有 LICENSE 不代表所有舊 pin 或 customized 安裝產物已完整攜帶授權文件；缺失或未確認的來源仍須另行處理。
 
 再散布本次涵蓋的內容時，應一併提供 LICENSE、適用 NOTICE 與範圍對照，並保留適用的第三方聲明。安裝產物尚待專項驗證，不能以本文件當成安裝／再散布合規已通過的證明。
 

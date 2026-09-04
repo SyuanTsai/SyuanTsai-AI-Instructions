@@ -88,6 +88,9 @@ function Write-AgentEnvironmentResult {
         if ($value -is [array]) { $value = @($value).Count }
         Write-Output ("{0}: {1}" -f $name,$value)
     }
+    if ($null -ne $Result.PSObject.Properties['licenseWarnings']) {
+        foreach ($warning in @($Result.licenseWarnings)) { Write-Output "License warning: $warning" }
+    }
 }
 
 $temporaryRoot = $null

@@ -25,7 +25,9 @@ function New-InstallerSourceArchive {
             }
             else {
                 $sourceRootPath = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
-                foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path $sourceRootPath 'scripts'),(Join-Path $sourceRootPath 'catalog') -Recurse -File | Sort-Object FullName)) {
+                $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $sourceRootPath 'scripts'),(Join-Path $sourceRootPath 'catalog') -Recurse -File)
+                $sourceFiles += @(Get-ChildItem -LiteralPath $sourceRootPath -File | Where-Object { $_.Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json') })
+                foreach ($file in @($sourceFiles | Sort-Object FullName)) {
                     $relativePath = $file.FullName.Substring($sourceRootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
                     $entry = $archive.CreateEntry("candidate-root/$relativePath")
                     $input = [System.IO.File]::OpenRead($file.FullName)
@@ -128,6 +130,19 @@ Describe 'install-ai-instructions-bootstrap' {
     BeforeEach {
         $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $codexHome = Join-Path $TestDrive ('.codex-' + [Guid]::NewGuid().ToString('N'))
+    }
+
+    # Scenario: An exact source archive supplies its licensing declarations alongside the runtime.
+    # Purpose: Bind installed license bytes to the bundle inventory and immutable source commit.
+    It 'InterT04_inventories_runtime_licenses_from_the_verified_source_archive' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome | Out-Null
+        $runtime = Join-Path $codexHome 'hooks/ai-instructions-runtime'
+        $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtime 'runtime-bundle.json') | ConvertFrom-Json
+        $license = Join-Path $runtime 'licenses/source/LICENSE'
+        (Get-FileHash -LiteralPath $license).Hash | Should Be ((Get-FileHash -LiteralPath (Join-Path $repositoryRoot 'LICENSE')).Hash)
+        $receipt = Get-Content -Raw -LiteralPath (Join-Path $runtime 'licenses/delivery.json') | ConvertFrom-Json
+        $receipt.sourceCommit | Should Be $bundle.commit
+        @($bundle.inventory | Where-Object path -like 'licenses/*').Count | Should Be 7
     }
 
     # Scenario: A clean Codex Home installs the verified multi-source runtime for the first time.
@@ -463,7 +478,7 @@ Keep this section too.
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
             'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1'
+            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','license-delivery.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
         }
@@ -471,6 +486,8 @@ Keep this section too.
         & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
         $executionEvidence = Join-Path $TestDrive 'dirty-contract-executed.txt'
+        $licenseExecutionEvidence = Join-Path $TestDrive 'dirty-license-module-executed.txt'
+        [IO.File]::AppendAllText((Join-Path $cloneRoot 'scripts/license-delivery.psm1'), "`n[IO.File]::WriteAllText('$licenseExecutionEvidence','executed')`n")
         $committedRuntimeSource = [System.IO.File]::ReadAllText(
             (Join-Path $cloneRoot 'scripts\ai-instructions-runtime-contract.psm1')
         ).Replace("`r`n","`n").Replace("`r","`n")
@@ -478,15 +495,24 @@ Keep this section too.
             (Join-Path $cloneRoot 'scripts\ai-instructions-runtime-contract.psm1'),
             "`n[System.IO.File]::WriteAllText('$executionEvidence','executed')`n"
         )
+        $committedLicense = [IO.File]::ReadAllText((Join-Path $cloneRoot 'LICENSE')).Replace("`r`n","`n")
+        Set-TestText -Path (Join-Path $cloneRoot 'LICENSE') -Value 'Dirty working tree license must not install'
 
-        $result = Invoke-InstallExpectFailure -RepositoryRoot $cloneRoot -CodexHome $codexHome -GitCheckout
+        $savedInstallScript = $script:InstallScript
+        try {
+            $script:InstallScript = Join-Path $cloneRoot 'scripts/install-ai-instructions-bootstrap.ps1'
+            $result = Invoke-InstallExpectFailure -RepositoryRoot $cloneRoot -CodexHome $codexHome -GitCheckout
+        }
+        finally { $script:InstallScript = $savedInstallScript }
         $result.ExitCode | Should Be 0
         Test-Path -LiteralPath $executionEvidence | Should Be $false
+        Test-Path -LiteralPath $licenseExecutionEvidence | Should Be $false
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | Should Be $true
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $true
         [System.IO.File]::ReadAllText(
             (Join-Path $codexHome 'hooks\ai-instructions-runtime\ai-instructions-runtime-contract.psm1')
         ).Replace("`r`n","`n").Replace("`r","`n") | Should Be $committedRuntimeSource
+        [IO.File]::ReadAllText((Join-Path $codexHome 'hooks/ai-instructions-runtime/licenses/source/LICENSE')).Replace("`r`n","`n") | Should Be $committedLicense
     }
 
     # Scenario: A malformed codeload candidate fails during staged PowerShell validation.
@@ -499,7 +525,7 @@ Keep this section too.
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
         foreach ($fileName in @(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
-            'agent-environment-reconciler.psm1','update-agent-environment.ps1'
+            'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
                 -Destination (Join-Path $invalidSource "scripts\$fileName") -Force

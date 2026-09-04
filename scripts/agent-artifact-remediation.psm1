@@ -125,6 +125,8 @@ function Test-IsReservedAgentArtifactPath {
     foreach ($prefix in @(
         '.agents/',
         '.codex/skills/',
+        '.codex/ai-instructions-licenses/',
+        '.github/ai-instructions-licenses/',
         '.github/AI-Rules/',
         '.github/agents/',
         '.github/instructions/',

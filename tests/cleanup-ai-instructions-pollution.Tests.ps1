@@ -69,6 +69,34 @@ Describe 'tracked AI instructions pollution cleanup' {
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
     }
 
+    # Scenario: A manifest owns a tracked CRLF license copy beside a product-owned root LICENSE.
+    # Purpose: Use byte hashes for license cleanup and retain product files and local delivery bytes.
+    It 'InterT15_cleans_tracked_license_delivery_using_raw_hashes' {
+        $targetRoot = Join-Path $TestDrive 'licensed-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('config','core.autocrlf','false') | Out-Null
+        $relative = '.codex/ai-instructions-licenses/source/LICENSE'
+        $path = Join-Path $targetRoot $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        [IO.File]::WriteAllText($path,"source license`r`n")
+        Set-CleanupTestText -Path (Join-Path $targetRoot 'LICENSE') -Value 'Product license'
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+        $entry = $manifest.files[0] | ConvertTo-Json | ConvertFrom-Json
+        $entry.artifactId='codex-licensing'; $entry.sourcePath='LICENSE'; $entry.targetPath=$relative
+        $entry.sha256=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
+        $manifest.files=@($manifest.files)+@($entry)
+        Set-CleanupTestText -Path $manifestPath -Value ($manifest | ConvertTo-Json -Depth 10)
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$relative,$script:ManifestRelativePath,'LICENSE') | Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','license fixture') | Out-Null
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        $result.ExitCode | Should Be 0
+        (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() | Should Be $entry.sha256
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        ($deleted -contains $relative) | Should Be $true
+        ($deleted -contains 'LICENSE') | Should Be $false
+    }
+
     # Scenario: The user explicitly authorizes cleanup of manifest-proven tracked files.
     # Purpose: Stage only index deletions, preserve local bytes, add local ignores, and never commit or push.
     It 'InterT20_stages_precise_deletions_and_preserves_local_materialization' {

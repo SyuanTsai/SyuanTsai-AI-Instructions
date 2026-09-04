@@ -258,7 +258,7 @@ function Import-AgentEnvironmentRuntimeModules {
     param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
     foreach ($moduleName in @(
         'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
-        'skills-source-retrieval.psm1','skills-source-acquisition.psm1'
+        'skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1'
     )) {
         $modulePath = Join-Path $RuntimeRoot $moduleName
         if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) { throw "Installed Agent environment runtime module is missing: $moduleName" }
@@ -291,10 +291,12 @@ function Get-UserSkillsDesiredState {
     $sourceById = @{}
     foreach ($source in @($plan.Sources)) { $sourceById[[string]$source.id] = $source }
     $files = New-Object System.Collections.Generic.List[object]
+    $licenseWarnings = New-Object System.Collections.Generic.List[string]
     foreach ($skill in @($resolved.Skills | Sort-Object id)) {
         $source = $sourceById[[string]$skill.sourceId]
         $skillRoot = [System.IO.Path]::GetFullPath([string]$skill.skillRootPath).TrimEnd([char[]]@('\','/'))
         $repositoryRoot = [System.IO.Path]::GetFullPath([string]$skill.sourceRootPath).TrimEnd([char[]]@('\','/'))
+        if (Test-Path -LiteralPath (Join-Path $skillRoot '.ai-instructions-licenses')) { throw "Skill source already owns the license delivery namespace: $($skill.id)" }
         foreach ($file in @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force | Sort-Object FullName)) {
             $skillRelative = $file.FullName.Substring($skillRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
             $sourceRelative = $file.FullName.Substring($repositoryRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
@@ -309,6 +311,23 @@ function Get-UserSkillsDesiredState {
                 targetPath = ".agents/skills/$([string]$skill.id)/$skillRelative"
                 sha256 = Get-AgentEnvironmentSha256 -Path $file.FullName
                 stagedPath = $file.FullName
+            })
+        }
+        $artifactPaths = @($files | Where-Object skillId -eq $skill.id | ForEach-Object sourcePath)
+        $licenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRoot -ArtifactPaths $artifactPaths `
+            -SourceRepository $source.repository -SourceCommit $source.resolvedCommit -ArtifactId $skill.id `
+            -WarningAction SilentlyContinue -WarningVariable sourceLicenseWarnings
+        foreach ($warning in @($sourceLicenseWarnings)) { $licenseWarnings.Add([string]$warning) }
+        $licenseRoot = Join-Path $WorkingRoot "licenses/$($skill.id)"
+        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot $licenseRoot
+        foreach ($licenseFile in @($licenses.Files)) {
+            $files.Add([pscustomobject][ordered]@{
+                skillId = [string]$skill.id; sourceId = [string]$source.id
+                sourceRepository = [string]$source.repository; sourceRef = [string]$source.requestedRef
+                sourceCommit = [string]$source.resolvedCommit; sourceVersion = [string]$source.resolvedVersion
+                sourcePath = [string]$licenseFile.sourcePath
+                targetPath = ".agents/skills/$($skill.id)/.ai-instructions-licenses/$($licenseFile.relativePath)"
+                sha256 = [string]$licenseFile.sha256; stagedPath = (Join-Path $licenseRoot $licenseFile.relativePath)
             })
         }
     }
@@ -330,6 +349,7 @@ function Get-UserSkillsDesiredState {
     Assert-UserSkillsManagedManifestV1 -Manifest $manifest
     return [pscustomobject][ordered]@{
         RuntimeRoot=$RuntimeRoot; Catalog=$catalog; Lock=$lock; SkillIds=$skillIds; Files=[object[]]$files.ToArray(); Manifest=$manifest
+        LicenseWarnings=[string[]]$licenseWarnings.ToArray()
     }
 }
 
@@ -355,6 +375,7 @@ function New-AgentEnvironmentResult {
         catalogLockSha256=[string]$DesiredState.Manifest.lockSha256
         installed=@($Installed); updated=@($Updated); removed=@($Removed); preserved=@($Preserved); failed=@($Failed)
         rollbackState=$RollbackState; backupPath=$BackupPath
+        licenseWarnings=@(if ($null -ne $DesiredState.PSObject.Properties['LicenseWarnings']) { $DesiredState.LicenseWarnings })
     }
 }
 
