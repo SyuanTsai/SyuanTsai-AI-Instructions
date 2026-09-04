@@ -138,7 +138,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
         New-TestTargetRepository $targetRoot
         & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
-        $prefix='.agents/skills/skill-a/.ai-instructions-licenses'
+        $prefix=".agents/skills/skill-a/.ai-instructions-licenses/$('a'*40)"
         [IO.File]::ReadAllText((Join-Path $targetRoot "$prefix/source/LICENSE")) | Should Be 'External source license'
         $receipt=Get-Content -Raw -LiteralPath (Join-Path $targetRoot "$prefix/delivery.json") | ConvertFrom-Json
         $receipt.sourceRepository | Should Be 'https://github.com/example/source-a.git'
@@ -401,7 +401,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
     It 'InterT45_preserves_a_customized_v2_skill_across_a_pin_update' {
         $catalogPath=Join-Path $TestDrive 'custom-pin-catalog.json';$lockPath=Join-Path $TestDrive 'custom-pin-catalog.lock.json';$configurationPath=Join-Path $TestDrive 'custom-pin-sync-config.json';$instructionArchive=Join-Path $TestDrive 'custom-pin-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'custom-pin-source-v1.zip';$targetRoot=Join-Path $TestDrive 'custom-pin-target'
         New-TestInstructionArchive (Join-Path $TestDrive 'custom-pin-instruction-root') $instructionArchive
-        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v1') $skillArchivePath
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v1') $skillArchivePath -LicenseText 'Original grant'
         New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
         New-TestTargetRepository $targetRoot
         $arguments=@{CatalogPath=$catalogPath;LockPath=$lockPath;ConfigurationPath=$configurationPath;InstructionSourceArchivePath=$instructionArchive;InstructionSourceCommit=('c'*40);SourceArchivePaths=@{'source-a'=$skillArchivePath};TargetRoot=$targetRoot}
@@ -410,7 +410,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         Set-TestUtf8Text $skillPath 'locally customized v2 skill'
 
         $newArchivePath=Join-Path $TestDrive 'custom-pin-source-v2.zip'
-        $newArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v2') $newArchivePath -Marker 'Selected external fixture skill v2.'
+        $newArchive=New-TestSkillArchive (Join-Path $TestDrive 'custom-pin-skill-root-v2') $newArchivePath -Marker 'Selected external fixture skill v2.' -LicenseText 'New revision grant'
         $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
         @($lock.sources)[0].resolvedCommit=('b'*40)
         @($lock.sources)[0].resolvedVersion='test-v2'
@@ -427,7 +427,14 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $entry=@($manifest.files|Where-Object {$_.targetPath -eq '.agents/skills/skill-a/SKILL.md'})[0]
         [string]$entry.sourceCommit|Should Be ('a'*40)
         [string]$entry.sourceVersion|Should Be 'test'
+        $licenseCopies=@(Get-ChildItem -LiteralPath (Join-Path $targetRoot '.agents/skills/skill-a/.ai-instructions-licenses') -Recurse -File | Where-Object Name -eq 'LICENSE')
+        @($licenseCopies | Where-Object { [IO.File]::ReadAllText($_.FullName) -ceq 'Original grant' }).Count | Should Be 1
+        @($licenseCopies | Where-Object { [IO.File]::ReadAllText($_.FullName) -ceq 'New revision grant' }).Count | Should Be 1
         (@(Invoke-TestGit $targetRoot @('status','--porcelain','.agents/skills/skill-a/SKILL.md')) -join '')|Should BeNullOrEmpty
         (@(Invoke-TestGit $targetRoot @('stash','list','--format=%s')) -join "`n")|Should Match 'PersonalAgent'
+        Copy-Item -LiteralPath (Join-Path $TestDrive 'custom-pin-skill-root-v2/external-skills-aaaaaaaa/.agents/skills/skill-a/SKILL.md') -Destination $skillPath
+        & $script:BootstrapScript @arguments
+        Test-Path -LiteralPath (Join-Path $targetRoot ".agents/skills/skill-a/.ai-instructions-licenses/$('a'*40)/source/LICENSE") | Should Be $false
+        [IO.File]::ReadAllText((Join-Path $targetRoot ".agents/skills/skill-a/.ai-instructions-licenses/$('b'*40)/source/LICENSE")) | Should Be 'New revision grant'
     }
 }

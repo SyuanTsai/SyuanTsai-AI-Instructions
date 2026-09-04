@@ -5,9 +5,10 @@
 | 安裝產物 | 授權文件位置 | Ownership／完整性證據 |
 | --- | --- | --- |
 | Codex Home runtime | `hooks/ai-instructions-runtime/licenses/` | `runtime-bundle.json` v2 inventory |
-| Codex Instructions | `.codex/ai-instructions-licenses/` | `.codex/ai-instructions.manifest.json` v2 |
-| Copilot Instructions | `.github/ai-instructions-licenses/` | 同一份 managed manifest v2 |
-| 選取的外部 Skill | `.agents/skills/<id>/.ai-instructions-licenses/` | Repository manifest v2 或 user Skills manifest v1 |
+| Codex Instructions | `.codex/ai-instructions-licenses/<commit>/` | `.codex/ai-instructions.manifest.json` v2 |
+| Copilot Instructions | `.github/ai-instructions-licenses/<commit>/` | 同一份 managed manifest v2 |
+| Repository 中選取的外部 Skill | `.agents/skills/<id>/.ai-instructions-licenses/<commit>/` | Repository manifest v2 |
+| 使用者層級的外部 Skill | `.agents/skills/<id>/.ai-instructions-licenses/` | User Skills manifest v1 |
 
 每個目錄包含 `source/<原始 Repository-relative path>` 與 `delivery.json`。只選取一個 Skill 時，仍會包含該 Skill 的來源根目錄與祖先目錄授權，以及選取內容之下適用的 local notices，不會安裝其他 Skill。
 
@@ -32,5 +33,7 @@ Repository managed manifest 的 Skill `sourcePath` 沿用既有 flat composition
 授權檔案沿用所屬 runtime 或 Skill 的 transaction、backup、rollback 與檔案 ownership。Repository 的授權目錄也納入精確 local ignore、reserved artifact remediation 與 cleanup；不擴大到專案根目錄授權文件。
 
 Repository manifest 會保留 customized／unmanaged 檔案並列出略過路徑；user Skills updater 遇到受管內容修改時沿用既有拒絕更新與明確重裝流程。收據描述封裝時的來源，實際本機內容仍須對照 managed manifest 與檔案 hash；收到 customized 警告時，不應宣稱本機已完整符合新來源收據。
+
+Repository Instructions 與 Skill 的授權副本依完整來源 commit 分目錄保存。若仍有同一 Instructions family 或 Skill 的舊版受管檔案，保留其舊版授權與收據；包括來源已移除、但本機仍保留自訂內容的檔案。最後一個舊版檔案退場後，才依既有 ownership 規則清除未修改的舊授權副本。Runtime 採整包替換；user Skills updater 遇到受管檔案修改會拒絕整次更新，因此這兩種安裝沿用單一授權目錄，授權與所屬內容在同一交易中更新。
 
 不提升既有 runtime bundle v2、Repository manifest v2 或 user manifest v1 的 schema，也不強迫舊 bundle 具有新目錄。新 installer 會把實際遞送檔案加入 inventory；舊來源聲明缺失的問題仍須在對應 source Repository 完成來源審查、授權與 pin 更新。本功能不修改 production Catalog／Lock pins，也不解決既有八個 `NOASSERTION` 歷史檔案的權利確認。

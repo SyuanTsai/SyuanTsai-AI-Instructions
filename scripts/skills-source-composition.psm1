@@ -149,6 +149,7 @@ function New-ComposedBootstrapSource {
         }
 
         $targetSkillRoot = Join-Path $skillsRoot $skillId
+        if (Test-Path -LiteralPath (Join-Path $skillRoot '.ai-instructions-licenses')) { throw "Skill source already owns the license delivery namespace: $skillId" }
         $sourceRoot = [IO.Path]::GetFullPath([string]$skill.sourceRootPath).TrimEnd([char[]]@('\','/'))
         $artifactPaths = @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force | ForEach-Object {
             $_.FullName.Substring($sourceRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
@@ -156,7 +157,7 @@ function New-ComposedBootstrapSource {
         $licenses = New-LicenseDeliveryPackage -SourceRoot $sourceRoot -ArtifactPaths $artifactPaths `
             -SourceRepository $skill.sourceRepository -SourceCommit $skill.sourceCommit -ArtifactId $skillId
         Copy-Item -LiteralPath $skillRoot -Destination $targetSkillRoot -Recurse -Force
-        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot (Join-Path $targetSkillRoot '.ai-instructions-licenses')
+        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot (Join-Path $targetSkillRoot ".ai-instructions-licenses/$($skill.sourceCommit)")
     }
 
     return [pscustomobject][ordered]@{

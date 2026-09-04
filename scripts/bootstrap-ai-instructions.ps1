@@ -2743,7 +2743,7 @@ try {
         foreach ($licenseFile in @($licenses.Files)) {
             $desiredEntries.Add([pscustomobject]@{
                 FamilyName = $family.Name; SourcePath = $licenseFile.sourcePath
-                TargetPath = "$licenseTargetPrefix/ai-instructions-licenses/$($licenseFile.relativePath)"
+                TargetPath = "$licenseTargetPrefix/ai-instructions-licenses/$($script:instructionProvenance.sourceCommit)/$($licenseFile.relativePath)"
                 SourceFullPath = (Join-Path $licenseRoot $licenseFile.relativePath); Sha256 = $licenseFile.sha256
             })
         }
@@ -2946,13 +2946,30 @@ try {
         $skippedPaths.Add($targetPath)
         }
 
-        foreach ($managedTargetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
+        # Reconcile payload removals first so retained customizations keep their original license version.
+        foreach ($managedTargetPath in @($manifestEntriesByTarget.Keys | Sort-Object @{Expression={ [int](Test-LicenseDeliveryTargetPath $_) }}, @{Expression={ $_ }})) {
         if ($desiredEntriesByTarget.ContainsKey($managedTargetPath)) {
             continue
         }
 
         $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
         $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', '\')
+        if (Test-LicenseDeliveryTargetPath $managedTargetPath) {
+            $owner = Get-LicenseDeliveryOwner $managedTargetPath
+            $referenced = @($nextManifestEntries | Where-Object {
+                -not (Test-LicenseDeliveryTargetPath $_.targetPath) -and
+                (Get-LicenseDeliveryOwner $_.targetPath) -ceq $owner -and
+                $_.sourceId -ceq $managedEntry.sourceId -and $_.sourceCommit -ceq $managedEntry.sourceCommit
+            }).Count -gt 0
+            if ($referenced) {
+                $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
+                if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
+                    (Get-ManagedContentHash -Path $targetFullPath -TargetPath $managedTargetPath) -cne $managedEntry.sha256) {
+                    $skippedPaths.Add($managedTargetPath)
+                }
+                continue
+            }
+        }
         if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $managedTargetPath) {
             $skippedPaths.Add($managedTargetPath)
             $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))

@@ -31,7 +31,7 @@ Describe 'Skills source composition' {
         $null = New-TestSkill $source 'two' 'unselected'
         $destination = Join-Path $TestDrive 'licensed-composed'
         New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @($skill) -DestinationRoot $destination | Out-Null
-        $delivery = Join-Path $destination '.agents/skills/one/.ai-instructions-licenses'
+        $delivery = Join-Path $destination ".agents/skills/one/.ai-instructions-licenses/$('a'*40)"
         (Get-Content -Raw -LiteralPath (Join-Path $delivery 'source/LICENSE')).Trim() | Should Be 'root license'
         (Get-Content -Raw -LiteralPath (Join-Path $delivery 'source/one/NOTICE')).Trim() | Should Be 'local attribution'
         (Get-Content -Raw -LiteralPath (Join-Path $delivery 'delivery.json') | ConvertFrom-Json).sourceCommit | Should Be ('a' * 40)

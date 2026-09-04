@@ -80,7 +80,8 @@ function Compress-TestSource {
 function New-TestProvenance {
     param(
         [Parameter(Mandatory = $true)][string] $ArchivePath,
-        [Parameter(Mandatory = $true)][string] $Path
+        [Parameter(Mandatory = $true)][string] $Path,
+        [string] $InstructionCommit = ('c' * 40)
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
@@ -115,9 +116,9 @@ function New-TestProvenance {
         instruction = [ordered]@{
             sourceId = 'ai-instructions'
             sourceRepository = 'https://example.com/ai-instructions.git'
-            sourceRef = ('c' * 40)
-            sourceCommit = ('c' * 40)
-            sourceVersion = 'test@cccccccc'
+            sourceRef = $InstructionCommit
+            sourceCommit = $InstructionCommit
+            sourceVersion = "test@$($InstructionCommit.Substring(0,8))"
         }
         skills = $skillSources
     }
@@ -176,10 +177,12 @@ function Invoke-BootstrapScript {
 
         [string] $WorkingDirectory,
 
-        [switch] $UseCurrentRepositoryRoot
+        [switch] $UseCurrentRepositoryRoot,
+
+        [string] $InstructionCommit = ('c' * 40)
     )
 
-    New-TestProvenance -ArchivePath $SourceArchivePath -Path $script:TestProvenancePath
+    New-TestProvenance -ArchivePath $SourceArchivePath -Path $script:TestProvenancePath -InstructionCommit $InstructionCommit
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
@@ -238,11 +241,11 @@ Describe 'bootstrap-ai-instructions' {
         Set-TestText -Path (Join-Path $sourceRoot 'NOTICE') -Value 'source attribution'
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
-        $licensePath = Join-Path $targetRoot '.codex/ai-instructions-licenses/source/LICENSE'
+        $licensePath = Join-Path $targetRoot ".codex/ai-instructions-licenses/$('c'*40)/source/LICENSE"
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($licensePath)) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $sourceRoot 'LICENSE'))))
         $manifest = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
         @($manifest.files | Where-Object targetPath -like '*/ai-instructions-licenses/*').Count | Should Be 6
-        $receipt = Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/delivery.json') | ConvertFrom-Json
+        $receipt = Get-Content -Raw -LiteralPath (Join-Path $targetRoot ".github/ai-instructions-licenses/$('c'*40)/delivery.json") | ConvertFrom-Json
         $receipt.sourceCommit | Should Be ('c' * 40)
         $again = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         ($again -join ' ') | Should Match 'up to date'
@@ -250,12 +253,34 @@ Describe 'bootstrap-ai-instructions' {
         Set-TestText -Path (Join-Path $sourceRoot 'LICENSE') -Value 'source license v2'
         Remove-Item -LiteralPath (Join-Path $sourceRoot 'NOTICE')
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
-        $updated = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+        $updated = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -InstructionCommit ('d'*40)
         (Get-Content -Raw -LiteralPath $licensePath).Trim() | Should Be 'customized license'
-        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/source/LICENSE')).Trim() | Should Be 'source license v2'
-        Test-Path -LiteralPath (Join-Path $targetRoot '.github/ai-instructions-licenses/source/NOTICE') | Should Be $false
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot ".github/ai-instructions-licenses/$('d'*40)/source/LICENSE")).Trim() | Should Be 'source license v2'
+        Test-Path -LiteralPath (Join-Path $targetRoot ".github/ai-instructions-licenses/$('c'*40)/source/NOTICE") | Should Be $false
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'LICENSE')).Trim() | Should Be 'product license'
         ($updated -join ' ') | Should Match 'customized'
+    }
+
+    # Scenario: A removed source rule remains customized while the other instructions advance to a new commit.
+    # Purpose: Retain the original grant until the last payload referencing it is retired, without retaining unrelated family grants.
+    It 'InterT04_retains_licenses_for_customized_historical_instructions_until_retirement' {
+        Set-TestText -Path (Join-Path $sourceRoot 'LICENSE') -Value 'original grant'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $rulePath = Join-Path $targetRoot '.codex/AI-Rules/Testing.en.md'
+        Set-TestText -Path $rulePath -Value 'customized historical rule'
+        Remove-Item -LiteralPath (Join-Path $sourceRoot '.codex/AI-Rules/Testing.en.md')
+        Set-TestText -Path (Join-Path $sourceRoot '.codex/AI-Rules/New.en.md') -Value 'new rule'
+        Set-TestText -Path (Join-Path $sourceRoot 'LICENSE') -Value 'new grant'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -InstructionCommit ('d'*40) | Out-Null
+        $originalLicense = Join-Path $targetRoot ".codex/ai-instructions-licenses/$('c'*40)/source/LICENSE"
+        (Get-Content -Raw -LiteralPath $originalLicense).Trim() | Should Be 'original grant'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot ".codex/ai-instructions-licenses/$('d'*40)/source/LICENSE")).Trim() | Should Be 'new grant'
+        Test-Path -LiteralPath (Join-Path $targetRoot ".github/ai-instructions-licenses/$('c'*40)/source/LICENSE") | Should Be $false
+        Remove-Item -LiteralPath $rulePath
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -InstructionCommit ('d'*40) | Out-Null
+        Test-Path -LiteralPath $originalLicense | Should Be $false
     }
 
     # Scenario: A clean product repository receives both instruction families for the first time.
