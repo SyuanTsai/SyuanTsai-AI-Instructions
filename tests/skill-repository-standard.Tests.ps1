@@ -684,6 +684,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $helper 'Candidate hash mismatch' 'Candidate bytes must match approved Simple JSON hashes.'
         Assert-Match $helper 'Candidate Requires-Python mismatch' 'Simple JSON and wheel METADATA Requires-Python must agree before pip sees a candidate.'
         Assert-Match $helper 'METADATA Requires-Python is incompatible' 'Root and dependency wheels must allow the current interpreter.'
+        Assert-Match $helper 'rejectedCandidates' 'Malformed Simple JSON candidates must have deterministic rejection evidence.'
+        Assert-Match $standard 'deterministic rejection evidence' 'Normative authority must preserve malformed-candidate rejection evidence.'
         Assert-Match $helper 'def verify_evidence' 'Candidate inventory, pip report, and selected closure identities must be recomputed across files.'
         Assert-Match $helper '"--no-index"' 'pip backtracking must use only the verified local pool.'
         Assert-Match $helper '"--only-binary=:all:"' 'Dependency resolution must reject source distributions.'
