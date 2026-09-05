@@ -6,7 +6,7 @@ This document is the normative companion to `docs/standards/skill-repository-sta
 
 ## Scope and compatibility
 
-This contract governs a managed consumer projection under `.agents/skills/<skill-id>/` and the user-scoped v1 managed manifest at `.agents/catalog-skills.manifest.json`. The runtime catalog/package manifest v2 contract remains defined by the existing central catalog contract. This SYP-194 slice preserves the existing v1 user manifest and the explicit `-MigrateLegacyCatalogSkills` and `-ForceReinstallManagedSkills` controls; changing Catalog or Lock pinning is outside this lifecycle contract.
+This contract governs a managed consumer projection under `.agents/skills/<skill-id>/` and the user-scoped v1 managed manifest at `.agents/catalog-skills.manifest.json`. The runtime catalog/package manifest v2 contract remains defined by the existing central catalog contract. This SYP-194 slice preserves the existing v1 user manifest and the explicit `-MigrateLegacyCatalogSkills` and `-ForceReinstallManagedSkills` controls; changing Catalog or Lock pinning is outside this lifecycle contract. A transaction recovery journal is a separate v1 evidence record with the shape defined by `schemas/managed-skill-lifecycle-v1.schema.json`.
 
 The contract applies to replacement, adoption, removal, rename, tombstone, rollback, crash recovery, and post-install verification. It applies equally to local, pre-push, CI, publish, and install paths when those paths mutate a managed consumer projection. The execution environment MAY differ, but pass/block meaning MUST NOT differ.
 
@@ -31,7 +31,7 @@ Every candidate path and every path considered for destructive change MUST have 
 3. The path is the legacy Skill definition path or a path in the desired managed inventory.
 4. No reparse point, special file, or unlisted file is present in the legacy directory.
 
-An active ID, rename, or alias is evidence only when the current Catalog lifecycle data proves the relationship. A removed or retired ID MUST NOT be guessed as a replacement for another Skill. A legacy directory containing any other file is `unmanaged-unknown` and MUST block the complete migration before mutation; the extra file MUST be preserved.
+An active ID, rename, or alias is evidence only when the current Catalog lifecycle data proves the relationship. A removed or retired ID MAY be cleaned up only as the exact tombstone named by the current Catalog and only when explicit legacy adoption is enabled; it MUST NOT be guessed as a replacement for another Skill. A legacy directory containing any other file is `unmanaged-unknown` and MUST block the complete migration before mutation; the extra file MUST be preserved.
 
 ### Unmanaged or unknown
 
@@ -65,7 +65,15 @@ The transaction-owned staged snapshot MUST be created from the preflight-verifie
 
 Replacement MUST be deterministic by stable Skill ID and target path. A rename MUST be represented by an explicit new ID plus a Catalog lifecycle alias/tombstone transition. The old path MUST be removed only when the current manifest or explicit known-legacy evidence proves ownership. An unknown owner, collision, local drift without force, reparse point, special file, or concurrent target change MUST block closed. No destructive action may be justified by directory name alone.
 
-Backup and recovery MUST be transaction-scoped. The recovery journal MUST describe the exact original and intended applied hashes. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries.
+Backup and recovery MUST be transaction-scoped. The recovery journal MUST bind a transaction ID, user root, backup root, phase, desired manifest hash, desired managed-inventory hash, and every original/applied target hash. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries. A hard crash after the journal is written MUST leave the journal and backup usable by `-Recover`; a successful recovery MUST re-verify every restored original hash before deleting the journal.
+
+### Retired managed-file cleanup
+
+Retired-file cleanup is not a directory sweep. A file is removable only when its exact path is present in the previous validated managed manifest or is an exact path in an explicitly adopted Catalog tombstone/alias inventory. The result MUST record `operation: remove` and the ownership evidence used. Unknown files, private Skills, empty user directories, and files under a retired directory that are not in the approved legacy inventory MUST remain untouched.
+
+### Manifest transition and post-install proof
+
+The desired manifest MUST be built from the same validated candidate inventory that supplies the transaction-owned bytes. Before mutation, the reconciler MUST reject any candidate/manifest path or hash mismatch. After mutation it MUST verify the manifest bytes, catalog commit, lock hash, exact managed path/hash inventory, removal of every planned retired path, and every installed file's raw SHA-256. A successful process exit or a manifest write alone is not post-install proof. Any failed verification MUST enter rollback/recovery handling and MUST be exposed in structured failure evidence.
 
 ## Failure and evidence contract
 
@@ -80,7 +88,7 @@ Blocked results MUST be machine-readable and MUST retain a human-actionable mess
 - expected and actual SHA-256 values when applicable; and
 - one or more remediation actions.
 
-The reconciler result MAY contain additional operational fields, but it MUST expose `failureDetails` and `ownership` without hiding the evidence in console-only text. Failure codes MUST distinguish at least staged integrity mismatch, unmanaged collision, legacy unmanaged content, and managed local drift. A generic error string without classification, evidence, and remediation is insufficient for a destructive-change decision.
+The reconciler result MAY contain additional operational fields, but it MUST expose `failureDetails` and `ownership` without hiding the evidence in console-only text. Ownership records MUST include an operation (`install`, `replace`, `remove`, `adopt`, `preserve`, or `observe`). Failure codes MUST distinguish at least staged integrity mismatch, unmanaged collision, legacy unmanaged content, managed local drift, post-install integrity failure, and recovery-required state. A generic error string without classification, evidence, and remediation is insufficient for a destructive-change decision.
 
 ## Adapter and lifecycle boundaries
 
