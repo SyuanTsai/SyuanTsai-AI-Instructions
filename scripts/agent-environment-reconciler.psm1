@@ -936,6 +936,7 @@ function Invoke-UserSkillsReconciliation {
             if ([string]$verified.lockSha256 -cne [string]$DesiredState.Manifest.lockSha256) { throw 'Final user Skills manifest verification failed.' }
             Assert-AgentEnvironmentManifestMatchesDesired -Manifest $verified -DesiredFiles ([object[]]$DesiredState.Files)
             if ((Get-AgentEnvironmentInventorySha256 -Files ([object[]]$verified.files)) -cne $desiredInventorySha) { throw 'Final user Skills managed inventory hash verification failed.' }
+            $failurePhase = 'mutation'
             $managedDirectories = @{}
             foreach ($path in @($deletes.Keys)) {
                 $directoryPath = [System.IO.Path]::GetDirectoryName((Get-AgentEnvironmentFullPath -Root $home -RelativePath $path))
