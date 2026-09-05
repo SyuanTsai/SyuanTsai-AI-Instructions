@@ -962,11 +962,27 @@ function Invoke-UserSkillsReconciliation {
                 try { Restore-AgentEnvironmentFileState -Root $home -State $state }
                 catch { $rollbackErrors.Add("$($state.relativePath): $($_.Exception.Message)") }
             }
-            $failureCode = if ($rollbackErrors.Count -eq 0) { 'post-install-integrity-failure' } else { 'recovery-required' }
+            $failureCode = if ($rollbackErrors.Count -gt 0) {
+                'recovery-required'
+            }
+            elseif ($failurePhase -eq 'post-install-verification') {
+                'post-install-integrity-failure'
+            }
+            else {
+                'mutation-failure'
+            }
             $rollbackState = if ($rollbackErrors.Count -eq 0) { 'completed' } else { 'recovery-required' }
             $evidence = "Transaction phase '$failurePhase' failed: $($applyError.Exception.Message)"
             if ($rollbackErrors.Count -gt 0) { $evidence += " Rollback errors: $($rollbackErrors -join ' | ')" }
-            $remediation = if ($rollbackErrors.Count -eq 0) { @('Review the failed transaction evidence and retry from the unchanged original state.') } else { @('Run -Recover after verifying the retained journal and backup.','Do not start another reconciliation while recovery is required.') }
+            $remediation = if ($rollbackErrors.Count -gt 0) {
+                @('Run -Recover after verifying the retained journal and backup.','Do not start another reconciliation while recovery is required.')
+            }
+            elseif ($failurePhase -eq 'post-install-verification') {
+                @('Review the failed post-install integrity evidence and retry from the unchanged original state.')
+            }
+            else {
+                @('Review the failed mutation evidence and retry from the unchanged original state.')
+            }
             $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code $failureCode -SkillId 'transaction' -Path $journalRelative -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence $evidence -DestructiveChangeAllowed $false -BackupCreated $true -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation $remediation))
             if ($rollbackErrors.Count -eq 0) { Remove-Item -LiteralPath $journalPath -Force -ErrorAction SilentlyContinue }
             $transactionFailures = @($failed.ToArray()) + @([string]$applyError.Exception.Message)

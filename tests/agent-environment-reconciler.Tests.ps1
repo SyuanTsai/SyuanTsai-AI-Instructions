@@ -286,7 +286,7 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
         $failed.outcome | Should Be 'failed'
         $failed.rollbackState | Should Be 'completed'
-        @($failed.failureDetails | Where-Object { $_.code -eq 'post-install-integrity-failure' }).Count | Should Be 1
+        @($failed.failureDetails | Where-Object { $_.code -eq 'mutation-failure' }).Count | Should Be 1
         [System.IO.File]::ReadAllText($target) | Should Be $before
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false
     }
