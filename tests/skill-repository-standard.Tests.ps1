@@ -8,6 +8,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
         $script:SourceInventorySchemaPath = Join-Path $script:StandardsRoot 'schemas\source-inventory-v2.schema.json'
         $script:OpenAiMetadataSchemaPath = Join-Path $script:StandardsRoot 'schemas\openai-agent-metadata.schema.json'
+        $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
+        $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
+        $script:UpstreamInteroperabilityPath = Join-Path $script:StandardsRoot 'upstream-interoperability.md'
+        $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
+        $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -314,6 +319,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-Path -LiteralPath $script:ResolverPath -PathType Leaf) 'Missing central validation tool resolver.'
         Assert-True (Test-Path -LiteralPath $script:PythonClosureHelperPath -PathType Leaf) 'Missing verified Python wheel closure helper.'
         Assert-True (Test-Path -LiteralPath $script:AuthorityGatePath -PathType Leaf) 'Missing shared Standard authority gate.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Missing canonical validation/security gate policy.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGateSchemaPath -PathType Leaf) 'Missing canonical validation/security gate schema.'
         Assert-True (Test-Path -LiteralPath $script:WorkflowPath -PathType Leaf) 'Missing Standards Conformance workflow.'
         Assert-True (Test-Path -LiteralPath $script:RequiredPowerShellWorkflowPath -PathType Leaf) 'Missing required PowerShell workflow authority bridge.'
 
@@ -321,6 +328,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $index 'skill-repository-standard\.md' 'Standards index must link the normative Standard.'
         Assert-Match $index 'skill-repository-review-matrix\.md' 'Standards index must link the review matrix.'
         Assert-Match $index 'validation-toolchain\.json' 'Standards index must link the toolchain policy.'
+        Assert-Match $index 'validation-security-gate\.json' 'Standards index must link the canonical validation/security gate policy.'
+        Assert-Match $index 'validation-security-gate-v1\.schema\.json' 'Standards index must link the canonical validation/security gate schema.'
         Assert-Match $index 'Resolve-StandardValidationTool\.ps1' 'Standards index must name the central validation tool resolver.'
     }
 
@@ -675,6 +684,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $helper 'Candidate hash mismatch' 'Candidate bytes must match approved Simple JSON hashes.'
         Assert-Match $helper 'Candidate Requires-Python mismatch' 'Simple JSON and wheel METADATA Requires-Python must agree before pip sees a candidate.'
         Assert-Match $helper 'METADATA Requires-Python is incompatible' 'Root and dependency wheels must allow the current interpreter.'
+        Assert-Match $helper 'rejectedCandidates' 'Malformed Simple JSON candidates must have deterministic rejection evidence.'
+        Assert-Match $standard 'deterministic rejection evidence' 'Normative authority must preserve malformed-candidate rejection evidence.'
         Assert-Match $helper 'def verify_evidence' 'Candidate inventory, pip report, and selected closure identities must be recomputed across files.'
         Assert-Match $helper '"--no-index"' 'pip backtracking must use only the verified local pool.'
         Assert-Match $helper '"--only-binary=:all:"' 'Dependency resolution must reject source distributions.'
@@ -1923,5 +1934,132 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'persist-credentials' 'Review matrix must record CI checkout credential isolation.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
+    }
+
+    # Scenario: The managed lifecycle contract or its machine-readable evidence schema is removed or detached from the central authority.
+    # Purpose: Bind SYP-194 ownership, migration, rollback, and post-install semantics to Standard v1 regression coverage.
+    It 'UnitT70_binds_managed_lifecycle_to_the_central_standard_authority' {
+        Assert-True (Test-Path -LiteralPath $script:LifecyclePath -PathType Leaf) 'Managed lifecycle contract is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:LifecycleSchemaPath -PathType Leaf) 'Managed lifecycle evidence schema is missing from the central standards directory.'
+        $lifecycle = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecyclePath
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecycleSchemaPath | ConvertFrom-Json
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+
+        Assert-Match $index 'managed-skill-lifecycle\.md' 'Standards index must expose the managed lifecycle contract.'
+        Assert-Match $index 'managed-skill-lifecycle-v1\.schema\.json' 'Standards index must expose the managed lifecycle evidence schema.'
+        Assert-Match $standard 'managed-skill-lifecycle\.md' 'Normative Standard must bind the detailed managed lifecycle contract.'
+        Assert-Match $matrix 'Managed lifecycle / legacy migration' 'Cross-repository matrix must record the SYP-194 lifecycle boundary.'
+        Assert-Match $lifecycle 'Managed drift' 'Lifecycle contract must distinguish managed drift from clean ownership.'
+        Assert-Match $lifecycle 'known-legacy' 'Lifecycle contract must define explicit known-legacy adoption.'
+        Assert-Match $lifecycle 'unmanaged-unknown' 'Lifecycle contract must preserve unknown ownership and block collisions.'
+        Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle contract must prevent mutable staging TOCTOU writes.'
+        Assert-Match $lifecycle 'post-install' 'Lifecycle contract must require post-install verification.'
+        Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema title must remain bound to v1.'
+        Assert-Equal @($schema.oneOf).Count 2 'Lifecycle evidence schema must distinguish ownership and failure records.'
+        Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
+        Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
+    }
+
+    # Scenario: An upstream Plugin or Agent Skills change is accepted without an explicit central boundary.
+    # Purpose: Keep the portable contract, adapter decisions, and SYP-specific governance in one reviewable authority record.
+    It 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' {
+        Assert-True (Test-Path -LiteralPath $script:UpstreamInteroperabilityPath -PathType Leaf) 'Upstream interoperability decision record is missing from the central standards directory.'
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamInteroperabilityPath
+
+        Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
+        Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
+        Assert-Match $matrix 'Upstream interoperability' 'Cross-repository matrix must record the SYP-193 upstream boundary.'
+        Assert-Match $upstream '69ef37e9424c0a7ea9dd2293b559e43ec8176379' 'Agent Skills evidence must bind an immutable upstream revision.'
+        Assert-Match $upstream '\.codex-plugin/plugin\.json' 'Plugin manifest adoption must be explicit.'
+        Assert-Match $upstream '\.mcp\.json' 'MCP package adoption must be explicit.'
+        Assert-Match $upstream 'Adopt' 'The upstream decision record must contain Adopt decisions.'
+        Assert-Match $upstream 'Partial Adopt' 'The upstream decision record must contain Partial Adopt decisions.'
+        Assert-Match $upstream 'Do Not Adopt' 'The upstream decision record must contain Do Not Adopt decisions.'
+        Assert-Match $upstream 'MUST NOT.*replace.*central Catalog/Lock' 'Upstream packaging must not replace central provenance and lifecycle authority.'
+        Assert-Match $upstream 'schema' 'Schema/pin limitations must be recorded instead of inferred from mutable documentation.'
+    }
+
+    # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.
+    # Purpose: Bind SYP-192's exact canonical sequence and fail-closed semantics to the central Standard and executable gate.
+    It 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' {
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Canonical validation/security gate policy is missing.'
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGateSchemaPath -PathType Leaf) 'Canonical validation/security gate schema is missing.'
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+
+        Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
+        Assert-Equal $policy.schemaVersion 1 'Canonical validation/security gate policy must remain v1.'
+        Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security gate policy identity changed.'
+        $expectedIds = @(
+            'controlled-acquisition',
+            'integrity-verification',
+            'package-validation',
+            'skillspector-static',
+            'repository-tests',
+            'conditional-semantic-scan',
+            'ai-review',
+            'human-approval',
+            'publish-or-install',
+            'post-install-verification'
+        )
+        $expectedNames = @(
+            'Controlled Acquisition',
+            'Integrity Verification',
+            'Package Validation',
+            'SkillSpector Static',
+            'Repository Tests',
+            'Conditional Semantic Scan',
+            'AI Review',
+            'Human Approval',
+            'Publish / Install',
+            'Post-install Verification'
+        )
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
+        Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.order }) (@(1..10 | ForEach-Object { [string]$_ })) 'Canonical validation/security stage order numbers must be contiguous.'
+        foreach ($stage in @($policy.stages)) {
+            Assert-Equal $stage.failureAction 'BLOCK' "Stage '$($stage.id)' must fail closed."
+            Assert-True (@($stage.evidence).Count -gt 0) "Stage '$($stage.id)' must declare evidence."
+        }
+        Assert-Equal $policy.security.scannerFailure 'BLOCK' 'Scanner failure must block.'
+        Assert-Equal $policy.security.analyzerIncomplete 'BLOCK' 'Analyzer incompleteness must block.'
+        Assert-Equal $policy.security.unparsableResult 'BLOCK' 'Unparsable results must block.'
+        Assert-Equal $policy.security.unknownSeverity 'BLOCK' 'Unknown severity must block.'
+        $severity = @($policy.security.severity)
+        Assert-Equal $severity.Count 5 'Canonical security severity mapping must contain five levels.'
+        foreach ($expected in @(
+            @{ level='critical'; action='BLOCK' },
+            @{ level='high'; action='BLOCK' },
+            @{ level='medium'; action='HUMAN_REVIEW_REQUIRED' },
+            @{ level='low'; action='RECORD_AND_TRACK' },
+            @{ level='informational'; action='RECORD_AND_TRACK' }
+        )) {
+            $actual = @($severity | Where-Object { [string]$_.level -ceq $expected.level })
+            Assert-Equal $actual.Count 1 "Severity '$($expected.level)' must have one mapping."
+            Assert-Equal $actual[0].action $expected.action "Severity '$($expected.level)' has the wrong action."
+        }
+        Assert-True ([bool]$policy.security.aiReviewCannotReplaceHumanApproval) 'AI Review must not replace Human Approval.'
+        Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
+
+        Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
+        Assert-Match $standard 'validation-security-gate\.json' 'Normative Standard must bind the canonical validation/security gate policy.'
+        Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
+        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
+        Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
+        $packageValidationIndex = $gate.IndexOf("Context 'skill-validator package validation'")
+        $skillSpectorStaticIndex = $gate.IndexOf("Context 'SkillSpector static scan'")
+        $repositoryTestsIndex = $gate.IndexOf("Context 'skill-tools combined check'")
+        Assert-True ($packageValidationIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
+        Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
 }

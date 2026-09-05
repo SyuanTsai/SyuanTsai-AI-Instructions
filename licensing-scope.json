@@ -268,6 +268,18 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/managed-skill-lifecycle.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/managed-skill-lifecycle-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/validation-security-gate-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/openai-agent-metadata.schema.json",
       "license": "Apache-2.0"
     },
@@ -281,6 +293,14 @@
     },
     {
       "path": "docs/standards/skill-repository-standard.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/upstream-interoperability.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/validation-security-gate.json",
       "license": "Apache-2.0"
     },
     {

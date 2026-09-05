@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Managed Skill lifecycle evidence v1",
+  "description": "The central Standard v1 machine-readable ownership and fail-closed evidence record for managed replacement and legacy migration.",
+  "oneOf": [
+    { "$ref": "#/$defs/ownershipEvidence" },
+    { "$ref": "#/$defs/failureDetail" }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*\\u0000)(?!.*[\\u0001-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.?(?:/|$)).+$"
+    },
+    "sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["managed", "known-legacy", "unmanaged-unknown", "managed-drift", "controlled-candidate"]
+    },
+    "ownershipEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "skillId",
+        "path",
+        "classification",
+        "owner",
+        "evidence",
+        "destructiveChangeAllowed"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "skillId": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/repositoryPath" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "owner": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "destructiveChangeAllowed": { "type": "boolean" }
+      }
+    },
+    "failureDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "skillId",
+        "path",
+        "classification",
+        "owner",
+        "evidence",
+        "destructiveChangeAllowed",
+        "backupCreated",
+        "expectedSha256",
+        "actualSha256",
+        "remediation"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "skillId": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/repositoryPath" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "owner": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string", "minLength": 1 },
+        "destructiveChangeAllowed": { "type": "boolean" },
+        "backupCreated": { "type": "boolean" },
+        "expectedSha256": { "$ref": "#/$defs/sha256" },
+        "actualSha256": { "$ref": "#/$defs/sha256" },
+        "remediation": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

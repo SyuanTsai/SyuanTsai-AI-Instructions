@@ -54,6 +54,10 @@ Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標�
 
 `Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference。若 reference implementation 與本標準衝突，**MUST** 修正 implementation，或先修改本標準並完成 review/tests；不得以 implementation 現況覆蓋 normative policy。
 
+### 3.5 Upstream interoperability boundary
+
+SYP-193 的上游採用與 adapter 邊界記錄於 [`upstream-interoperability.md`](upstream-interoperability.md)。Standard v1 **MUST** 採用其 pinned Agent Skills portable core；Plugin manifest、MCP/app mapping、marketplace、hooks 與上游 metadata 只能依該 decision record 作為 declared adapter/extension，**MUST NOT** 取代 central Catalog/Lock、provenance、canonical validation、security、approval 或 managed lifecycle authority。上游文件若沒有可重現的 immutable schema/revision，**MUST NOT** 以 mutable 文件變更靜默改寫 Standard v1。
+
 ## 4. Repository and Skill package contract
 
 ### 4.1 Canonical source layout
@@ -240,14 +244,17 @@ Standard v1 將「release candidate 核准」與「安裝已核准 release」明
 ```text
 Controlled Candidate Acquisition
 → Integrity Verification
-→ SkillSpector Static Security Scan
-→ Repository Validation
-→ Tests / Regression / Conformance
-→ Conditional SkillSpector Semantic Scan
+→ Package Validation
+→ SkillSpector Static
+→ Repository Tests
+→ Conditional Semantic Scan
 → AI Review
 → Human Release Approval
-→ Publish Approved Immutable Release
+→ Publish / Install
+→ Post-install Verification
 ```
+
+上述十個 stage 的唯一 machine-readable authority 是 `docs/standards/validation-security-gate.json`，其 schema 是 `docs/standards/schemas/validation-security-gate-v1.schema.json`。Canonical entry **MUST** 依該檔案的 exact order 執行；stage failure、缺少 required evidence 或不可解析結果 **MUST** 依該檔案的 failure action fail closed。
 
 Human approval 在這條 flow 核准的是**特定 immutable release candidate**，不是核准某一台電腦的每次安裝。
 
@@ -265,7 +272,9 @@ Select Human-Approved Immutable Release
 
 Host、企業政策或實際操作若涉及新的外部寫入、credential grant、elevated permission 或其他使用者授權，仍 **MAY / MUST** 依該操作自己的 authorization boundary 取得同意；這與 release approval 是不同概念。
 
-Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate 或另建不同 policy pipeline。
+Managed consumer replacement、known-legacy adoption、ownership evidence、transaction backup/rollback、crash recovery 與 exact post-install inventory verification 的詳細 normative contract 位於 `docs/standards/managed-skill-lifecycle.md`，其 machine-readable evidence shape 位於 `docs/standards/schemas/managed-skill-lifecycle-v1.schema.json`。所有 repository adapter **MUST** 實作相同的 classification、destructive-change proof、fail-closed collision/drift behavior、transaction-owned staging 與 verification semantics；不得在 repository-local 另建 lifecycle policy。
+
+Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相鄰 stage 內增加 stronger checks，例如 clean-HEAD、package binding、routing tests、credential E2E；不得跳過前置 gate、改變 severity action 或另建不同 policy pipeline。
 
 ## 8. Canonical validation entry and validation tool policy
 
@@ -310,7 +319,7 @@ Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA�
 - 只允許 `https://pypi.org/simple` 作為 Python dependency index，隔離 pip config、停用 cache、只接受 wheels，且 inherited `PIP_*` environment 採 deny-by-default；只有值已等於 approved index 的 `PIP_INDEX_URL` 可被接受；`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`SSL_CERT_FILE`、`SSL_CERT_DIR` 等可重定向 transport trust 的 inherited environment **MUST** 在任何 network request 前 fail closed；
 - 在任何 dependency network resolution 前拒絕 SkillSpector root wheel 的 direct URL / VCS / local-file dependency reference；approved-index acquisition **MUST** 由受版本與 SHA-256 綁定的 helper 直接讀取 `https://pypi.org/simple` 的 PEP 691 Simple JSON，依 PEP 440 版本與目前 interpreter wheel tag 明確排序，排除 yanked files，並在任何 candidate 進入 run-owned pool 前驗證 HTTPS endpoint／redirect、Simple JSON SHA-256、wheel filename／tag／`Requires-Python`、`METADATA` Name/Version、archive safe path 與所有 `Requires-Dist` direct references；pip **MUST NOT** 在線上探索 dependency metadata；
 - root 與每個 dependency wheel 的 `METADATA` **MAY** 省略 `Requires-Python`，但若存在必須恰有一個非空、有效的 `SpecifierSet` 且涵蓋目前 interpreter；對 approved Simple JSON candidate，index `requires-python` 與 wheel `METADATA` 值必須各自有效，並在 PEP 440 parser 正規化後形成相同的 specifier set（允許不影響解析結果的空白與順序差異）；index 缺值／`null` 只允許 wheel 同樣省略。任何重複、錯型、不相容或 normalized set 不一致都必須在 candidate 進入 pip local pool 前 fail closed；
-- candidate materialization **MUST** 採 lazy expansion：先只加入每個已知 project 的最高相容 candidate；若目前 local pool 無解，再為每個仍有候選的已知 project 加入下一個較舊 candidate，掃描其 metadata 並發現新 project，直到 pip 在 `--no-index --find-links=<verified-pool> --only-binary=:all:` 下完成 backtracking，或所有可用候選耗盡後 fail closed。不得把單一版本組合衍生的 transitive constraints 當成不可回溯的 top-level constraints；
+- candidate materialization **MUST** 採 lazy expansion：先只加入每個已知 project 的最高相容 candidate；若目前 local pool 無解，再為每個仍有候選的已知 project 加入下一個較舊 candidate，掃描其 metadata 並發現新 project，直到 pip 在 `--no-index --find-links=<verified-pool> --only-binary=:all:` 下完成 backtracking，或所有可用候選耗盡後 fail closed。不得把單一版本組合衍生的 transitive constraints 當成不可回溯的 top-level constraints。上游 Simple JSON candidate 若 metadata malformed，該 candidate **MUST** 被排除且以 deterministic rejection evidence 保存；若沒有可驗證 candidate 形成 closure，整個 run **MUST** fail closed；不得修補、降級或把 malformed metadata 當成可接受值；
 - 將 offline pip selection report 嚴格限制於 verified pool，核對每個 selected path／Name／Version／SHA-256，再只複製 selected wheels 到 final wheelhouse；wrapper **MUST** 重新讀取 candidate inventory、raw report 與 selected closure，跨檔重算並核對 stable identities；resolver receipt **MUST** 綁定 exact helper SHA-256、stable candidate inventory identity、normalized selection-plan identity、selected closure identity、pip version 與 resolution rounds。Raw pip report hash 屬 run-local evidence，不得冒充 reproducible package identity；
 - 在 run-owned isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，依 normalized distribution name 的 ordinal order 記錄每個 selected wheel SHA-256 與 deterministic closure identity，再以 `--no-index --require-hashes --no-deps` 從該 wheelhouse 安裝；`-Install` 產物只屬於同一 frozen validation run，由 central gate 控制 lifecycle，不得跨 run 當成一般 persistent install 重用；
 - installed metadata 與 entry-point path **MUST** 拒絕 reparse-backed content；resolved identity 與 machine-readable receipt **MUST** 綁定 `credentialIsolation=github-token-cleared-before-python`、`installedMetadataVerification=static-dist-info-metadata`、console entry point、helper／candidate／plan／selected-closure identity、pip version／resolution rounds／candidate count、dependency closure、executable 與 installed closure SHA-256；
@@ -361,10 +370,10 @@ Scheduled update job 與正式 validation 不需要兩套版本政策；下一�
 
 ### 8.3 Required tool-to-stage execution contract
 
-Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool；canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並實際執行：
+Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-security-gate.json` 定義 stage order 與 security action；`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool。Canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並依 `Package Validation → SkillSpector Static → Repository Tests` 的順序實際執行：
 
-- resolved SkillSpector executable：對 source inventory 中每個 active Skill 執行 Static Scan，並在第 11 節 trigger 成立時執行 Semantic Scan；
 - resolved `skill-validator` executable：對每個 active Skill package 執行完整 package/spec validation，至少涵蓋第 4.5 節 `SKILL.md` contract；
+- resolved SkillSpector executable：在 Package Validation 成功後，對 source inventory 中每個 active Skill 執行 stage 4 Static Scan；僅在 Repository Tests 完成且第 11 節 trigger 成立時，執行 stage 6 Conditional Semantic Scan；
 - resolved `skill-tools` executable：使用該次已解析、已驗證的 package 執行 `check`（不得由 `npx` 或其他 wrapper 再解析另一版本）於每個 active Skill package；
 - resolved Pester module：執行該 repository 的 Standard conformance、repository contract、security adapter 與適用的 domain regression suites。
 
@@ -378,7 +387,7 @@ Dedicated source repository **MUST** 以上述完整 active source inventory 作
 
 ### 9.1 Required stage
 
-所有 active Skill packages **MUST** 在 Repository Validation 之前通過 SkillSpector Static Security Scan。
+所有 active Skill packages **MUST** 在 Package Validation 成功後、Repository Tests 開始前通過 SkillSpector Static Security Scan。
 
 Catalog-driven repository **MUST** 自動從 source inventory discover 所有 active Skill；新增 Skill **MUST NOT** 能因忘記修改 CI hard-coded list 而繞過 scan。
 
@@ -406,10 +415,12 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 Repository **MUST** 使用 central severity semantics：
 
 - **Critical / High**：預設 BLOCK；只有正式 approved exception 才可放行。
-- **Medium**：需要 triage。若屬 exploit/security boundary violation 或 analyzer 明確定義為 blocking 類型，BLOCK；其餘需有 resolution/suppression evidence 才可 release。
-- **Low / Informational**：可不阻擋，但 **SHOULD** 保留 evidence 供 trend/review；不得藉由降級 severity 隱藏實質 High/Critical risk。
+- **Medium**：**MUST** 進入 Human Review；在 reviewer 記錄 disposition、scope、evidence 與 release decision 前，release/install **MUST** BLOCK。若屬 exploit/security boundary violation 或 analyzer 明確定義為 blocking 類型，仍 **MUST** BLOCK。
+- **Low / Informational**：**MUST** 記錄並追蹤；可不阻擋，但不得藉由降級 severity 隱藏實質 High/Critical risk。
 
 實際 scanner severity 名稱若不同，adapter **MUST** 做 deterministic mapping，mapping 必須受版本控制與 tests 保護。
+
+Scanner failure、analyzer incomplete、unparsable result 或 unknown severity **MUST** BLOCK。AI Review **MUST NOT** replace Human Approval；local、pre-push 與 CI **MUST** 使用相同的 pass/block semantics，差異只能是執行環境與 evidence destination。
 
 ### 9.5 Capability is not automatically vulnerability
 
@@ -462,11 +473,11 @@ Semantic Scan **MUST** 在下列任一情況觸發：
 
 Semantic Scan failure、timeout、unavailable 或 unparsable result，在已觸發的情況 **MUST** fail closed；不得退化成「略過但 pass」。
 
-## 12. Repository validation and tests
+## 12. Repository tests and validation
 
 ### 12.1 Repository validation
 
-Repository Validation **MUST** 驗證至少：
+Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static 成功後執行。其 Repository Validation portion **MUST** 驗證至少：
 
 - immutable authority snapshot revision/hash binding；
 - `catalog/source.json` schema v2、repository binding、ordinal unique inventory；
@@ -583,7 +594,7 @@ Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或
 除非先依第 19 節修改 normative authority，repository exception **MUST NOT** 豁免或降低下列 core requirements：
 
 - immutable authority/candidate acquisition、identity、provenance、integrity 與 post-install verification；
-- complete active package inventory discovery，以及 required Static Scan、Repository Validation、formal baseline tool execution、tests 與 triggered Semantic Scan；
+- complete active package inventory discovery，以及依 canonical order 執行 required Package Validation、Static Scan、Repository Tests、formal baseline tool execution 與 triggered Semantic Scan；
 - canonical gate 的 approved tool source/endpoint、latest-stable resolution、stable-release semantics、resolved identity 與 per-run freeze；第 8.2 節明確隔離的 non-canonical compatibility lane 仍依其 boundary 處理；
 - scanner/analyzer completeness、unparsable/missing/error fail-closed semantics；
 - single canonical validation entry 與 local/pre-push/CI 相同 pass/block policy；
@@ -614,7 +625,7 @@ Extension **MUST**：
 
 - 由 config/adapter/declared stage 表達；
 - 對 executable tool 使用上述 central trusted-source/version policy，並一律沿用 canonical severity/fail semantics；
-- 不得跳過 Static Security、Repository Validation、Tests 或 required Semantic Scan；
+- 不得跳過 Package Validation、Static Security、Repository Tests 或 required Semantic Scan；
 - local/CI/pre-push 使用同一判斷；
 - 不得把 temporary evidence 寫成 uncontrolled tracked state。
 

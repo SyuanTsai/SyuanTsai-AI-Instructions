@@ -46,6 +46,7 @@ MAX_WHEEL_BYTES = 512 * 1024 * 1024
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_SIMPLE_JSON_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+MAX_REJECTION_REASON_BYTES = 4096
 SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
 
 
@@ -140,9 +141,25 @@ def stable_entry_identity(entry: Mapping[str, object]) -> Mapping[str, object]:
     }
 
 
+def stable_rejected_candidate_identity(entry: Mapping[str, object]) -> Mapping[str, object]:
+    return {
+        "project": entry["project"],
+        "filename": entry["filename"],
+        "reason": entry["reason"],
+    }
+
+
 def canonical_hash(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def bounded_rejection_reason(error: ClosureError) -> str:
+    text = str(error)
+    if len(text.encode("utf-8")) <= MAX_REJECTION_REASON_BYTES:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"{text[:1024]}... [truncated-reason-sha256={digest}]"
 
 
 def file_sha256(path: Path) -> str:
@@ -349,6 +366,7 @@ class PyPISimpleCatalog:
             raise ClosureError(f"Unapproved Python Simple index: {index_url!r}")
         self.index_url = normalized
         self._cache: Dict[str, List[Descriptor]] = {}
+        self._rejected_candidates: List[Mapping[str, str]] = []
         self._tag_rank: Dict[Tag, int] = {tag: rank for rank, tag in enumerate(sys_tags())}
         self._python_version = Version(".".join(str(part) for part in sys.version_info[:3]))
         self._simple_opener = urllib.request.build_opener(
@@ -363,6 +381,12 @@ class PyPISimpleCatalog:
     @staticmethod
     def _validate_remote_url(url: str, allowed_hosts: Iterable[str]) -> str:
         return validate_https_url(url, allowed_hosts)
+
+    def rejected_candidates(self) -> List[Mapping[str, str]]:
+        return sorted(
+            self._rejected_candidates,
+            key=lambda entry: (entry["project"], entry["filename"], entry["reason"]),
+        )
 
     def descriptors(self, project: str) -> List[Descriptor]:
         project = canonicalize_name(project)
@@ -417,11 +441,24 @@ class PyPISimpleCatalog:
                 continue
             if simple_file_is_yanked(item, filename):
                 continue
-            requires_python = normalize_requires_python(
-                item.get("requires-python"),
-                f"Simple JSON wheel {filename!r}",
-            )
-            if not requires_python_allows(requires_python, self._python_version, f"Simple JSON wheel {filename!r}"):
+            try:
+                requires_python = normalize_requires_python(
+                    item.get("requires-python"),
+                    f"Simple JSON wheel {filename!r}",
+                )
+                if not requires_python_allows(
+                    requires_python,
+                    self._python_version,
+                    f"Simple JSON wheel {filename!r}",
+                ):
+                    continue
+            except ClosureError as error:
+                # A malformed candidate is never admitted to the verified pool. Keep
+                # deterministic rejection evidence so a different valid candidate may
+                # be selected without hiding the upstream metadata defect.
+                self._rejected_candidates.append(
+                    {"project": project, "filename": filename, "reason": bounded_rejection_reason(error)}
+                )
                 continue
             ranks = [self._tag_rank[tag] for tag in tags if tag in self._tag_rank]
             if not ranks:
@@ -508,6 +545,9 @@ class LocalCatalog:
 
     def descriptors(self, project: str) -> List[Descriptor]:
         return list(self._by_project.get(canonicalize_name(project), []))
+
+    def rejected_candidates(self) -> List[Mapping[str, str]]:
+        return []
 
     def materialize(self, descriptor: Descriptor, destination: Path) -> Path:
         if descriptor.source_path is None:
@@ -690,13 +730,20 @@ class LazyPoolResolver:
     def inventory(self) -> Mapping[str, object]:
         entries = sorted((entry.to_json() for entry in self.entries.values()), key=lambda item: (item["normalizedName"], item["version"], item["file"]))
         stable_entries = [stable_entry_identity(entry) for entry in entries]
+        rejected_candidates = [
+            stable_rejected_candidate_identity(entry)
+            for entry in self.catalog.rejected_candidates()
+        ]
         return {
             "schemaVersion": SCHEMA_VERSION,
             "index": APPROVED_INDEX,
             "pipVersion": pip.__version__,
             "yankedAllowed": False,
             "entries": entries,
-            "inventorySha256": canonical_hash(stable_entries),
+            "rejectedCandidates": rejected_candidates,
+            "inventorySha256": canonical_hash(
+                {"entries": stable_entries, "rejectedCandidates": rejected_candidates}
+            ),
         }
 
 
@@ -841,6 +888,34 @@ def validate_evidence_entry(value: object, context: str) -> Mapping[str, object]
     }
 
 
+def validate_rejected_candidate(value: object, context: str) -> Mapping[str, str]:
+    required = frozenset(("project", "filename", "reason"))
+    if not isinstance(value, dict) or frozenset(value) != required:
+        raise ClosureError(f"{context} has an invalid property set")
+    if any(not isinstance(value[name], str) for name in required):
+        raise ClosureError(f"{context} fields must be strings")
+    project = str(value["project"])
+    filename = safe_filename(str(value["filename"]))
+    reason = str(value["reason"])
+    if not project or canonicalize_name(project) != project:
+        raise ClosureError(f"{context} has an invalid project identity")
+    if not filename.endswith(".whl"):
+        raise ClosureError(f"{context} must identify a wheel filename")
+    try:
+        parsed_name, _, _, _ = parse_wheel_filename(filename)
+    except Exception as error:
+        raise ClosureError(f"{context} has an invalid wheel filename") from error
+    if canonicalize_name(parsed_name) != project:
+        raise ClosureError(f"{context} project does not match its wheel filename")
+    if (
+        not reason
+        or len(reason.encode("utf-8")) > MAX_REJECTION_REASON_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in reason)
+    ):
+        raise ClosureError(f"{context} has an empty or unsafe rejection reason")
+    return {"project": project, "filename": filename, "reason": reason}
+
+
 def verify_evidence(
     candidate_dir: Path,
     selected_dir: Path,
@@ -867,6 +942,7 @@ def verify_evidence(
         or type(inventory.get("yankedAllowed")) is not bool
         or inventory.get("yankedAllowed") is not False
         or not isinstance(inventory.get("entries"), list)
+        or not isinstance(inventory.get("rejectedCandidates"), list)
     ):
         raise ClosureError("Candidate inventory header is inconsistent with the closure result")
     if (
@@ -913,7 +989,22 @@ def verify_evidence(
         item.resolve(strict=True) for item in candidate_items
     } != set(candidate_by_path):
         raise ClosureError("Candidate pool contains an unlisted file or directory")
-    inventory_hash = canonical_hash([stable_entry_identity(entry) for entry in inventory_entries])
+    rejected_candidates = [
+        validate_rejected_candidate(item, f"Candidate rejected entry {index}")
+        for index, item in enumerate(inventory["rejectedCandidates"])
+    ]
+    rejected_candidates.sort(key=lambda item: (item["project"], item["filename"], item["reason"]))
+    if len(rejected_candidates) != len({
+        (entry["project"], entry["filename"], entry["reason"])
+        for entry in rejected_candidates
+    }):
+        raise ClosureError("Candidate rejected evidence contains a duplicate entry")
+    inventory_hash = canonical_hash(
+        {
+            "entries": [stable_entry_identity(entry) for entry in inventory_entries],
+            "rejectedCandidates": [stable_rejected_candidate_identity(entry) for entry in rejected_candidates],
+        }
+    )
     if inventory.get("inventorySha256") != inventory_hash or result.get("candidateInventorySha256") != inventory_hash:
         raise ClosureError("Candidate inventory identity does not match its entries")
 
@@ -1161,6 +1252,27 @@ def self_test_command(_: argparse.Namespace) -> None:
         )
         if verification["verified"] is not True:
             raise AssertionError("Cross-file evidence verification did not pass")
+        rejected = validate_rejected_candidate(
+            {
+                "project": "rejected-project",
+                "filename": "rejected_project-1.0-py3-none-any.whl",
+                "reason": "Simple JSON wheel 'rejected_project-1.0-py3-none-any.whl' has invalid Requires-Python",
+            },
+            "self-test rejected candidate",
+        )
+        if stable_rejected_candidate_identity(rejected)["project"] != "rejected-project":
+            raise AssertionError("Rejected candidate evidence was not normalized")
+        expect_closure_error(
+            lambda: validate_rejected_candidate(
+                {
+                    "project": "rejected-project",
+                    "filename": "other_project-1.0-py3-none-any.whl",
+                    "reason": "mismatched project",
+                },
+                "self-test invalid rejected candidate",
+            ),
+            "rejected candidate project/filename mismatch",
+        )
         unlisted_candidate = root / "candidate-pool" / "unlisted.whl"
         unlisted_candidate.write_bytes(b"unlisted candidate evidence")
         expect_closure_error(
