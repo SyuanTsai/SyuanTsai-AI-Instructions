@@ -1953,6 +1953,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($schemaReferences -ccontains '#/$defs/ownershipEvidence') 'Lifecycle evidence schema must expose ownership records.'
         Assert-True ($schemaReferences -ccontains '#/$defs/failureDetail') 'Lifecycle evidence schema must expose failure records.'
         Assert-True ($schemaReferences -ccontains '#/$defs/transactionJournal') 'Lifecycle evidence schema must expose transaction journals.'
+        Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredManifestSha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired manifest SHA-256.'
+        Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredInventorySha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired inventory SHA-256.'
+        Assert-Equal $schema.'$defs'.requiredSha256.type 'string' 'Required transaction SHA-256 values must reject null.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
     }
