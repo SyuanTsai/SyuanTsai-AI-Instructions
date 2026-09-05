@@ -179,7 +179,10 @@ Describe 'bootstrap-ai-instructions-multisource' {
         Set-TestUtf8Text $licensePath 'Source license v1'
         $manifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json'
         $manifestBefore=[IO.File]::ReadAllText($manifestPath)
-        Assert-ThrowsMessage { Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1 } 'failure'
+        $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
+        $failed.outcome | Should Be 'failed'
+        $failed.rollbackState | Should Be 'completed'
+        @($failed.failureDetails | Where-Object { $_.code -eq 'post-install-integrity-failure' }).Count | Should Be 1
         [IO.File]::ReadAllText($licensePath) | Should Be 'Source license v1'
         [IO.File]::ReadAllText($manifestPath) | Should Be $manifestBefore
         (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'

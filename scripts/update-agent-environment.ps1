@@ -91,6 +91,11 @@ function Write-AgentEnvironmentResult {
     if ($null -ne $Result.PSObject.Properties['licenseWarnings']) {
         foreach ($warning in @($Result.licenseWarnings)) { Write-Output "License warning: $warning" }
     }
+    if ($null -ne $Result.PSObject.Properties['failureDetails']) {
+        foreach ($detail in @($Result.failureDetails)) {
+            Write-Output ("Failure detail: {0} [{1}]" -f $detail.code, $detail.path)
+        }
+    }
 }
 
 $temporaryRoot = $null
@@ -140,7 +145,6 @@ try {
         $finalResult = Invoke-UserSkillsReconciliation -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
             -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills
         $finalResult | Add-Member -NotePropertyName runtimeCommit -NotePropertyValue ([string]$bundle.commit) -Force
-        if ([string]$finalResult.outcome -eq 'failed') { throw "Agent environment reconciliation failed: $(@($finalResult.failed) -join ' | ')" }
     }
 }
 finally {

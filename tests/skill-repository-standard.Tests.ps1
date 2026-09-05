@@ -1957,7 +1957,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle contract must prevent mutable staging TOCTOU writes.'
         Assert-Match $lifecycle 'post-install' 'Lifecycle contract must require post-install verification.'
         Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema title must remain bound to v1.'
-        Assert-Equal @($schema.oneOf).Count 2 'Lifecycle evidence schema must distinguish ownership and failure records.'
+        Assert-Equal @($schema.oneOf).Count 3 'Lifecycle evidence schema must distinguish ownership, failure, and transaction journal records.'
+        $schemaReferences = @($schema.oneOf | ForEach-Object { [string]$_.PSObject.Properties['$ref'].Value })
+        Assert-True ($schemaReferences -ccontains '#/$defs/ownershipEvidence') 'Lifecycle evidence schema must expose ownership records.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/failureDetail') 'Lifecycle evidence schema must expose failure records.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/transactionJournal') 'Lifecycle evidence schema must expose transaction journals.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
     }
