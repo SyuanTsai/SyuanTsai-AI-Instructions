@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "policy": "upstream-interoperability-adapter-v1",
+  "pluginManifestPath": ".codex-plugin/plugin.json",
+  "marketplacePath": ".agents/plugins/marketplace.json",
+  "mcpManifestPath": ".mcp.json",
+  "appManifestPath": ".app.json",
+  "hooksPolicy": "reject",
+  "rootRelativePathPrefix": "./",
+  "immutableGitShaPattern": "^[0-9a-f]{40}$",
+  "acceptedMarketplaceSource": "github",
+  "allowedRemoteMcpHosts": [],
+  "allowedPluginManifestFields": ["name", "description", "version", "skills", "mcpServers", "apps"],
+  "requiredPluginManifestFields": ["name"],
+  "allowedMarketplaceRootFields": ["plugins"],
+  "allowedMarketplaceEntryFields": ["name", "description", "source", "category", "interface", "policy"],
+  "allowedMarketplaceSourceFields": ["source", "repo", "path", "ref", "sha"],
+  "allowedMarketplacePolicyFields": ["installation", "authentication"],
+  "allowedMcpRootFields": ["mcpServers"],
+  "allowedMcpServerFields": ["command", "args", "url"],
+  "allowedAppRootFields": ["apps"],
+  "allowedAppFields": ["name", "mcpServer"]
+}

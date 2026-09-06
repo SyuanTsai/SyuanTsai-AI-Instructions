@@ -11,11 +11,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
         $script:UpstreamInteroperabilityPath = Join-Path $script:StandardsRoot 'upstream-interoperability.md'
+        $script:UpstreamAdapterPolicyPath = Join-Path $script:StandardsRoot 'upstream-adapter.json'
+        $script:UpstreamAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\upstream-adapter-v1.schema.json'
         $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
         $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
+        $script:UpstreamAdapterValidatorPath = Join-Path $script:RepositoryRoot 'scripts\Validate-UpstreamAdapter.ps1'
         $script:WorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $script:RequiredPowerShellWorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
 
@@ -1140,7 +1143,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
         Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$fixtureRoot)")) 'Shared gate must explicitly allow only the Standard-required agents metadata directory during skill-validator structure validation.'
-        Assert-Match $gate "mode='structure-json-allow-agents'" 'Authority evidence must record the exact skill-validator compatibility mode.'
+        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents'" 'Authority evidence must record the exact skill-validator compatibility mode.'
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
         Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$fixtureRoot' 'Shared gate must pass the frozen skill-tools entry point and check command without a wrapper re-resolution.'
         Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'
@@ -2125,6 +2128,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamInteroperabilityPath
 
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterPolicyPath -PathType Leaf) 'Upstream adapter policy is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterSchemaPath -PathType Leaf) 'Upstream adapter schema is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterValidatorPath -PathType Leaf) 'Upstream adapter validator is missing from the central scripts directory.'
+        $adapterPolicy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath | ConvertFrom-Json
+        $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterSchemaPath | ConvertFrom-Json
+        Assert-AuthoritySchemaInstance -Value $adapterPolicy -Schema $adapterSchema -SchemaPath $script:UpstreamAdapterSchemaPath -Expected $true -Message 'Upstream adapter policy must be schema-valid.'
+        Assert-Equal $adapterPolicy.schemaVersion 1 'Upstream adapter policy must remain v1.'
+        Assert-Equal $adapterPolicy.policy 'upstream-interoperability-adapter-v1' 'Upstream adapter policy identity changed.'
+        $validatorText = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterValidatorPath
+        Assert-Match $validatorText 'pluginManifestPath|marketplacePath|rootRelativePathPrefix' 'Upstream adapter validator must consume the central path/manifest policy.'
+        Assert-Match $validatorText 'Assert-AdapterNoReparsePath' 'Upstream adapter validator must reject reparse-point manifest paths before reading package metadata.'
+        Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
         Assert-Match $matrix 'Upstream interoperability' 'Cross-repository matrix must record the SYP-193 upstream boundary.'
@@ -2149,67 +2164,40 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $upstream 'Human Approval' 'Human approval responsibility must be explicit.'
         Assert-Match $upstream 'SYP-155' 'Reference implementation impact must be explicit.'
         Assert-Match $upstream 'SYP-156' 'Fan-out migration impact must be explicit.'
+    }
 
-        $negativeCases = @(
-            [pscustomobject][ordered]@{
-                id='package-missing-skill-md'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ skillMdPresent=$false }
-            }
-            [pscustomobject][ordered]@{
-                id='plugin-path-out-of-root'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ path='../outside/skills' }
-            }
-            [pscustomobject][ordered]@{
-                id='mcp-unapproved-endpoint'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ endpoint='https://unapproved.example.test/mcp'; approved=$false }
-            }
-            [pscustomobject][ordered]@{
-                id='marketplace-mutable-ref'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ ref='main'; sha=$null }
-            }
-            [pscustomobject][ordered]@{
-                id='marketplace-unknown-field'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ unknownField='trust' }
-            }
-            [pscustomobject][ordered]@{
-                id='marketplace-unapproved-endpoint'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ endpoint='https://unapproved.example.test/plugin.git'; approved=$false }
-            }
-            [pscustomobject][ordered]@{
-                id='plugin-hook-bypass'; expectedDecision='BLOCK'
-                input=[pscustomobject][ordered]@{ hookTrusted=$false; centralApproval=$false }
-            }
+    # Scenario: A Plugin or marketplace fixture bypasses the executable adapter and is treated as safe by test-only logic.
+    # Purpose: Route representative SYP-193 negative cases through the production validator entry point.
+    It 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' {
+        $fixtureRoot = Join-Path $TestDrive 'upstream-adapter-valid'
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.codex-plugin') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill') -Force)
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A valid adapter fixture Skill package.`n---`n`n# Fixture`n"
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","description":"A deterministic Plugin adapter fixture.","version":"1.0.0","skills":["./skills/fixture-skill"]}'
+        $validReportPath = Join-Path $fixtureRoot 'valid-report.json'
+        & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath $validReportPath | Out-Null
+        $validReport = Get-Content -Raw -Encoding UTF8 -LiteralPath $validReportPath | ConvertFrom-Json
+        Assert-Equal $validReport.status 'passed' 'A valid Plugin package must pass the executable upstream adapter.'
+
+        $cases = @(
+            @{ id='package-missing-skill-md'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root 'skills/fixture-skill/SKILL.md') -Force } },
+            @{ id='plugin-path-out-of-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["../outside"]}' } },
+            @{ id='plugin-path-backslash'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[".\\skills\\fixture-skill"]}' } },
+            @{ id='plugin-path-rooted-windows'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["C:/outside"]}' } },
+            @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
+            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text '{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","ref":"main"}}]}' } },
+            @{ id='marketplace-unknown-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"},"trust":"trusted"}]}') } },
+            @{ id='marketplace-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"http","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } }
         )
-        $expectedNegativeCaseIds = @(
-            'package-missing-skill-md',
-            'plugin-path-out-of-root',
-            'mcp-unapproved-endpoint',
-            'marketplace-mutable-ref',
-            'marketplace-unknown-field',
-            'marketplace-unapproved-endpoint',
-            'plugin-hook-bypass'
-        )
-        Assert-ExactStringSequence (@($negativeCases | ForEach-Object { $_.id })) $expectedNegativeCaseIds 'SYP-193 negative regression inventory changed.'
-        foreach ($case in $negativeCases) {
-            Assert-Equal $case.expectedDecision 'BLOCK' "SYP-193 case '$($case.id)' must be a blocking case."
-            $blocked = switch ($case.id) {
-                'package-missing-skill-md' { -not [bool]$case.input.skillMdPresent; break }
-                'plugin-path-out-of-root' {
-                    $path = [string]$case.input.path
-                    $safe = $path.StartsWith('./', [StringComparison]::Ordinal) -and
-                        -not [IO.Path]::IsPathRooted($path) -and
-                        $path -notmatch '(^|/)\.\.(?:/|$)'
-                    -not $safe
-                    break
-                }
-                'mcp-unapproved-endpoint' { -not [bool]$case.input.approved; break }
-                'marketplace-mutable-ref' { [string]$case.input.sha -notmatch '^[0-9a-f]{40}$'; break }
-                'marketplace-unknown-field' { -not [string]::IsNullOrWhiteSpace([string]$case.input.unknownField); break }
-                'marketplace-unapproved-endpoint' { -not [bool]$case.input.approved; break }
-                'plugin-hook-bypass' { -not [bool]$case.input.hookTrusted -or -not [bool]$case.input.centralApproval; break }
-                default { $false }
-            }
-            Assert-True ([bool]$blocked) "SYP-193 negative case '$($case.id)' must remain fail-closed."
+        foreach ($case in $cases) {
+            $caseRoot = Join-Path $TestDrive ([string]$case.id)
+            Copy-Item -LiteralPath $fixtureRoot -Destination $caseRoot -Recurse -Force
+            & $case.mutate $caseRoot
+            $errorMessage = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $caseRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
         }
     }
 
@@ -2257,7 +2245,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $expectedEvidence = @(
             ,@('candidateIdentity', 'authoritySnapshot', 'sourcePin')
             ,@('archiveSha256', 'contentSha256', 'provenance')
-            ,@('packageInventory', 'packageSchema', 'packageValidatorResult')
+            ,@('packageInventory', 'packageSchema', 'packageValidatorResult', 'adapterResult', 'skillToolsResult')
             ,@('scannerIdentity', 'analyzerCompleteness', 'staticReport')
             ,@('testInventory', 'testResult', 'domainAdapterResult')
             ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
@@ -2311,11 +2299,15 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
+        $upstreamAdapterIndex = $gate.IndexOf("Context 'upstream adapter validation'")
         $packageValidationIndex = $gate.IndexOf("Context 'skill-validator package validation'")
+        $skillToolsPackageIndex = $gate.IndexOf("Context 'skill-tools package validation'")
         $skillSpectorStaticIndex = $gate.IndexOf("Context 'SkillSpector static scan'")
-        $repositoryTestsIndex = $gate.IndexOf("Context 'skill-tools combined check'")
-        Assert-True ($packageValidationIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        $repositoryTestsIndex = $gate.IndexOf('Invoke-Pester -Path $authorityTestPaths')
+        Assert-True ($upstreamAdapterIndex -ge 0 -and $packageValidationIndex -ge 0 -and $skillToolsPackageIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        Assert-True ($upstreamAdapterIndex -lt $skillSpectorStaticIndex) 'Upstream adapter validation must execute before SkillSpector Static.'
         Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
+        Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
 }

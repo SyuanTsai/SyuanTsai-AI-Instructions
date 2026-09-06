@@ -134,20 +134,31 @@ Describe 'Agent Skill authority workflow contract' {
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $standardTestsPath = Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1'
+        $gatePath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
+        $adapterPolicyPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-adapter.json'
+        $adapterSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/upstream-adapter-v1.schema.json'
+        $adapterValidatorPath = Join-Path $script:RepositoryRoot 'scripts/Validate-UpstreamAdapter.ps1'
 
         Assert-True (Test-Path -LiteralPath $upstreamPath -PathType Leaf) 'Upstream interoperability authority document is missing.'
+        Assert-True (Test-Path -LiteralPath $adapterPolicyPath -PathType Leaf) 'Upstream adapter policy is missing.'
+        Assert-True (Test-Path -LiteralPath $adapterSchemaPath -PathType Leaf) 'Upstream adapter schema is missing.'
+        Assert-True (Test-Path -LiteralPath $adapterValidatorPath -PathType Leaf) 'Upstream adapter validator is missing.'
         $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $upstreamPath
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
         Assert-Match $standards "'docs/standards/\*\*'" 'Dedicated authority workflow must watch the upstream interoperability record.'
         foreach ($workflow in @($standards, $required)) {
             Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared gate for upstream changes.'
         }
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
+        Assert-Match $standardTests 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' 'The workflow gate must execute the executable adapter regression.'
         foreach ($caseId in @(
             'package-missing-skill-md',
             'plugin-path-out-of-root',
+            'plugin-path-backslash',
+            'plugin-path-rooted-windows',
             'mcp-unapproved-endpoint',
             'marketplace-mutable-ref',
             'marketplace-unknown-field',
@@ -157,6 +168,8 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Match $standardTests ([regex]::Escape($caseId)) "The upstream authority regression must retain negative case '$caseId'."
         }
         Assert-Match $upstream 'SYP-192 Gate 1' 'The upstream decision must bind Plugin conformance to Gate 1.'
+        Assert-Match $gate 'Validate-UpstreamAdapter\.ps1' 'The authority gate must execute the upstream adapter validator.'
+        Assert-Match $gate 'upstream-adapter\.json' 'The authority gate must load the upstream adapter policy.'
     }
 
     # Scenario: The canonical validation/security policy changes without reaching both authority workflows and its executable gate.

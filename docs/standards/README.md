@@ -43,6 +43,7 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 - SkillSpector Static / Semantic Security Gate；
 - canonical validation stage order、severity mapping 與 fail-closed semantics；
 - Agent Plugins / Agent Skills adapter conformance in SYP-192 deterministic Gate 1；
+- `upstream-adapter.json` and its executable adapter validator；
 - AI Review / Human Release Approval boundary；
 - approved immutable release installation semantics；
 - repository-specific extension / adapter / exception policy。

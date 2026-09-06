@@ -370,14 +370,14 @@ Scheduled update job 與正式 validation 不需要兩套版本政策；下一�
 
 ### 8.3 Required tool-to-stage execution contract
 
-Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-security-gate.json` 定義 stage order 與 security action；`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool。Canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並依 `Package Validation → SkillSpector Static → Repository Tests` 的順序實際執行：
+Resolver 的成功 receipt 只證明 acquisition/resolution，不代表 candidate 通過 validation。`validation-security-gate.json` 定義 stage order 與 security action；`validation-toolchain.json` `tools` 中沒有明確標為 optional/conditional 的每個 tool，都是 formal baseline tool。Canonical validation **MUST** 在 run 開始時一次解析及 freeze 完整 required toolset，並依 `Package Validation → SkillSpector Static → Repository Tests` 的順序實際執行；Gate 1 Package Validation 包含 conditional upstream adapter、`skill-validator` 與 `skill-tools check`，後兩者均為 required package checks，可平行執行：
 
 - resolved `skill-validator` executable：對每個 active Skill package 執行完整 package/spec validation，至少涵蓋第 4.5 節 `SKILL.md` contract；
 - resolved SkillSpector executable：在 Package Validation 成功後，對 source inventory 中每個 active Skill 執行 stage 4 Static Scan；僅在 Repository Tests 完成且第 11 節 trigger 成立時，執行 stage 6 Conditional Semantic Scan；
-- resolved `skill-tools` executable：使用該次已解析、已驗證的 package 執行 `check`（不得由 `npx` 或其他 wrapper 再解析另一版本）於每個 active Skill package；
+- resolved `skill-tools` executable：在 Gate 1 使用該次已解析、已驗證的 package 執行 `check`（不得由 `npx` 或其他 wrapper 再解析另一版本）於每個 active Skill package；
 - resolved Pester module：執行該 repository 的 Standard conformance、repository contract、security adapter 與適用的 domain regression suites。
 
-Dedicated source repository **MUST** 以上述完整 active source inventory 作 coverage authority；不得因 inventory empty、hard-coded list empty 或 discovery failure 而 vacuously pass。Authority repository 本身刻意不保存 active shared Skill source，因此其 authority gate **MUST** 改用 candidate-bound、version-controlled 的受控 Skill fixture inventory 實際執行 SkillSpector Static Scan、`skill-validator` 與 `skill-tools check`，並用 resolved Pester 執行 authority regressions；fixture 至少包含一個完整有效的 canonical Skill package，且 fixture identity/content hash/coverage 必須進入同一 run evidence。Authority active inventory 為空 **MUST NOT** 成為略過四個 formal tools 的理由。
+Dedicated source repository **MUST** 以上述完整 active source inventory 作 coverage authority；不得因 inventory empty、hard-coded list empty 或 discovery failure 而 vacuously pass。Authority repository 本身刻意不保存 active shared Skill source，因此其 authority gate **MUST** 改用 candidate-bound、version-controlled 的受控 Skill fixture inventory 實際執行 conditional upstream adapter、SkillSpector Static、`skill-validator` 與 `skill-tools check`，並用 resolved Pester 執行 authority regressions；fixture 至少包含一個完整有效的 canonical Skill package，且 fixture identity/content hash/coverage 必須進入同一 run evidence。Authority active inventory 為空 **MUST NOT** 成為略過四個 formal tools 的理由。
 
 每個 stage evidence **MUST** 綁定同一 run ID、candidate identity、frozen tool identity、exact package inventory、invocation mode、exit status 與 machine-readable result（provider 支援時）；provider 沒有 machine-readable output 時，central adapter **MUST** 產生 deterministic structured receipt，且不得把 unparsable console prose 當成 pass。漏執行 tool/package、只 install/resolve/print version、使用不同 tool identity、non-zero exit、timeout、crash 或缺少 required result，都 **MUST** fail closed。
 

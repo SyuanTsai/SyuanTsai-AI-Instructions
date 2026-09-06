@@ -47,11 +47,11 @@ Agent Plugins conformance is a conditional extension of SYP-192 **Gate 1 — Det
 
 - When no Plugin, marketplace, `.mcp.json` or `.app.json` surface is present, the normal Skill package gate still applies and no Plugin adapter is inferred.
 - When any such surface is present, the adapter MUST validate the exact manifest/component inventory, root-contained relative paths, marketplace property/policy shape and package-local MCP declaration in Gate 1, before SkillSpector Static or any Pester/repository/domain code can run.
-- `skill-validator` remains the complete Agent Skills package/spec validator, and `skill-tools check` remains mandatory for every active/bundled Skill. The Plugin adapter result is additional package evidence; it MUST NOT replace, reorder or weaken either tool.
+- `skill-validator` remains the complete Agent Skills package/spec validator, and `skill-tools check` remains mandatory for every active/bundled Skill. Both are Gate 1 package checks and may run in parallel; the Plugin adapter result is additional package evidence and MUST NOT replace, reorder or weaken either tool.
 - Endpoint authorization, tool capability and credential/permission semantics that require contextual analysis enter the conditional semantic/security stage after deterministic package validation. An unapproved endpoint is a block, not an advisory.
 - `catalog/source.json`, central Catalog/Lock, source pin, provenance, lifecycle ownership and Human Approval remain SYP authority. A valid Plugin or marketplace shape is never sufficient release evidence by itself.
 
-The canonical machine-readable order remains the SYP-192 policy's `package-validation` stage (order 3), followed by SkillSpector Static (order 4), Repository Tests (order 5), and conditional semantic scan (order 6).
+The canonical machine-readable order remains the SYP-192 policy's `package-validation` stage (order 3), containing the conditional adapter, `skill-validator` and `skill-tools check`, followed by SkillSpector Static (order 4), Repository Tests/Pester (order 5), and conditional semantic scan (order 6).
 
 ## 3. Portable contract versus SYP-specific governance
 
@@ -97,7 +97,7 @@ An adapter that exposes the upstream surfaces **MUST**:
 6. Emit provenance and integrity evidence that can be joined to the central release record.
 7. Re-enter the canonical lifecycle and post-install verification after package projection; an upstream installer cannot stop after copying files.
 
-For marketplace inputs, the adapter MUST also reject unknown policy/entry fields, non-root `source.path`, unapproved Git/HTTP endpoints, floating-only `ref` selectors and version-only/npm-registry evidence. For hooks, installation or host trust MUST NOT be treated as SYP Human Approval; the Standard v1 core does not adopt hooks as an authority or automatic execution mechanism.
+The machine-readable adapter contract is [`upstream-adapter.json`](upstream-adapter.json), executed by [`Validate-UpstreamAdapter.ps1`](../../scripts/Validate-UpstreamAdapter.ps1). For marketplace inputs, the adapter MUST also reject unknown policy/entry fields, non-root `source.path`, unapproved Git/HTTP endpoints, floating-only `ref` selectors and version-only/npm-registry evidence. For hooks, installation or host trust MUST NOT be treated as SYP Human Approval; the Standard v1 core does not adopt hooks as an authority or automatic execution mechanism.
 
 Source repositories **MUST NOT** add a local Plugin/marketplace policy to compensate for a missing central decision. A requested new upstream feature is an extension proposal: update this decision record, the normative Standard if semantics change, all affected authority regressions, and the applicable repository adapters in one reviewed change.
 
@@ -110,6 +110,7 @@ SYP-193 is complete only when the central authority proves:
 - the portable/governance boundary is stated and no source repository is instructed to maintain a second policy;
 - schema/pin limitations are fail-closed rather than inferred from a mutable upstream document;
 - authority workflow watches this document and runs all three authority regression suites;
-- representative negative cases have regression coverage before any fan-out migration: `package-missing-skill-md`, `plugin-path-out-of-root`, `mcp-unapproved-endpoint`, `marketplace-mutable-ref`, `marketplace-unknown-field`, `marketplace-unapproved-endpoint` and `plugin-hook-bypass`.
+- the versioned machine-readable adapter policy and executable validator are part of the same authority gate;
+- representative negative cases have regression coverage before any fan-out migration: `package-missing-skill-md`, `plugin-path-out-of-root`, `plugin-path-backslash`, `plugin-path-rooted-windows`, `mcp-unapproved-endpoint`, `marketplace-mutable-ref`, `marketplace-unknown-field`, `marketplace-unapproved-endpoint` and `plugin-hook-bypass`.
 
 The SYP-155 reference implementation and SYP-156～159 migrations may add adapter/domain tests, but they **MUST NOT** change the decisions above locally. Any finding affecting portability, security, ownership, provenance, integrity, rollback or compatibility is fixed in the current delivery or blocks the delivery; only clearly out-of-scope non-blocking work may be carried to a new Jira item with evidence.

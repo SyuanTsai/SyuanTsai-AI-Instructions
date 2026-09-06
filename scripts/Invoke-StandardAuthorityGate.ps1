@@ -185,7 +185,7 @@ function Assert-AuthorityValidationSecurityGate {
     $expectedStages = @(
         [ordered]@{ order=1; id='controlled-acquisition'; name='Controlled Acquisition'; condition='always'; evidence=@('candidateIdentity', 'authoritySnapshot', 'sourcePin') },
         [ordered]@{ order=2; id='integrity-verification'; name='Integrity Verification'; condition='always'; evidence=@('archiveSha256', 'contentSha256', 'provenance') },
-        [ordered]@{ order=3; id='package-validation'; name='Package Validation'; condition='always'; evidence=@('packageInventory', 'packageSchema', 'packageValidatorResult') },
+        [ordered]@{ order=3; id='package-validation'; name='Package Validation'; condition='always'; evidence=@('packageInventory', 'packageSchema', 'packageValidatorResult', 'adapterResult', 'skillToolsResult') },
         [ordered]@{ order=4; id='skillspector-static'; name='SkillSpector Static'; condition='always'; evidence=@('scannerIdentity', 'analyzerCompleteness', 'staticReport') },
         [ordered]@{ order=5; id='repository-tests'; name='Repository Tests'; condition='always'; evidence=@('testInventory', 'testResult', 'domainAdapterResult') },
         [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered'; evidence=@('triggerDecision', 'semanticReport', 'semanticCompleteness') },
@@ -802,12 +802,14 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoo
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'
 $pythonClosureHelperPath = Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.py'
 $validationSecurityGatePath = Join-Path $repositoryRoot 'docs/standards/validation-security-gate.json'
+$upstreamAdapterPolicyPath = Join-Path $repositoryRoot 'docs/standards/upstream-adapter.json'
+$upstreamAdapterValidatorPath = Join-Path $PSScriptRoot 'Validate-UpstreamAdapter.ps1'
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
 )
-foreach ($requiredPath in @($validationSecurityGatePath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
+foreach ($requiredPath in @($validationSecurityGatePath, $upstreamAdapterPolicyPath, $upstreamAdapterValidatorPath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Authority gate input is missing: $requiredPath"
     }
@@ -1038,7 +1040,27 @@ if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
     throw 'Pester receipt modulePath and executablePath must identify the same frozen module manifest.'
 }
 
-# Stage 3: Package Validation. No SkillSpector scan may run before this result is verified.
+# Stage 3: Package Validation. The optional upstream adapter and both package tools
+# must pass before any SkillSpector scan or repository test can run.
+# Context 'upstream adapter validation'
+$upstreamAdapterReportPath = Join-Path $runRoot 'upstream-adapter-report.json'
+try {
+    & $upstreamAdapterValidatorPath `
+        -PackageRoot $fixtureRoot `
+        -PolicyPath $upstreamAdapterPolicyPath `
+        -OutputPath $upstreamAdapterReportPath | Out-Null
+}
+catch {
+    throw "upstream adapter validation failed: $($_.Exception.Message)"
+}
+$upstreamAdapterReport = Read-AuthorityJson -Path $upstreamAdapterReportPath -Context 'upstream adapter validation'
+if ($upstreamAdapterReport.schemaVersion -isnot [int] -or [int]$upstreamAdapterReport.schemaVersion -ne 1 -or
+    $upstreamAdapterReport.policy -isnot [string] -or [string]$upstreamAdapterReport.policy -cne 'upstream-interoperability-adapter-v1' -or
+    $upstreamAdapterReport.status -isnot [string] -or [string]$upstreamAdapterReport.status -notin @('passed', 'not-applicable') -or
+    $upstreamAdapterReport.decision -isnot [string] -or [string]$upstreamAdapterReport.decision -notin @('PASS', 'NOT_APPLICABLE')) {
+    throw 'upstream adapter validation produced an invalid result.'
+}
+
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
     -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $fixtureRoot) `
@@ -1049,6 +1071,19 @@ $skillValidatorOutputPath = Join-Path $runRoot 'skill-validator-report.json'
 $skillValidatorReport = Read-AuthorityJson -Path $skillValidatorOutputPath -Context 'skill-validator package validation'
 Assert-AuthoritySkillValidatorReport `
     -Report $skillValidatorReport `
+    -ExpectedFixtureRoot $fixtureRoot `
+    -ExpectedInventoryPaths @($fixtureFiles.path)
+
+$skillToolsOutput = Invoke-AuthorityExternalCommand `
+    -Command $skillToolsNode `
+    -Arguments @($skillToolsEntryPoint, 'check', $fixtureRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
+    -Context 'skill-tools package validation' `
+    -DiagnosticRoot $runRoot
+$skillToolsOutputPath = Join-Path $runRoot 'skill-tools-report.sarif.json'
+[System.IO.File]::WriteAllText($skillToolsOutputPath, $skillToolsOutput + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+$skillToolsReport = Read-AuthorityJson -Path $skillToolsOutputPath -Context 'skill-tools package validation'
+Assert-AuthoritySkillToolsSarifReport `
+    -Report $skillToolsReport `
     -ExpectedFixtureRoot $fixtureRoot `
     -ExpectedInventoryPaths @($fixtureFiles.path)
 
@@ -1066,21 +1101,8 @@ Assert-AuthoritySkillSpectorReport `
     -ExpectedSkillId 'standard-validation-fixture' `
     -ExpectedInventoryPaths @($fixtureFiles.path)
 
-# Stage 5: Repository Tests. The remaining formal tools are executed only after the two
-# package/security gates above have passed.
-$skillToolsOutput = Invoke-AuthorityExternalCommand `
-    -Command $skillToolsNode `
-    -Arguments @($skillToolsEntryPoint, 'check', $fixtureRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
-    -Context 'skill-tools combined check' `
-    -DiagnosticRoot $runRoot
-$skillToolsOutputPath = Join-Path $runRoot 'skill-tools-report.sarif.json'
-[System.IO.File]::WriteAllText($skillToolsOutputPath, $skillToolsOutput + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-$skillToolsReport = Read-AuthorityJson -Path $skillToolsOutputPath -Context 'skill-tools combined check'
-Assert-AuthoritySkillToolsSarifReport `
-    -Report $skillToolsReport `
-    -ExpectedFixtureRoot $fixtureRoot `
-    -ExpectedInventoryPaths @($fixtureFiles.path)
-
+# Stage 5: Repository Tests. Only repository/authority tests remain after the
+# deterministic package and static security stages have passed.
 Import-Module $pesterModulePath -Force -ErrorAction Stop
 $pesterModuleRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $pesterModulePath))
 $loadedPester = Get-Module Pester | Where-Object {
@@ -1123,12 +1145,14 @@ $summary = [ordered]@{
     })
     stages = @(
         [ordered]@{
-            name='package-validation'; result='passed'; exitCode=0; mode='structure-json-allow-agents'; report='skill-validator-report.json'
+            name='package-validation'; result='passed'; exitCode=0; mode='upstream-adapter-skill-validator-skill-tools'
+            skillValidatorMode='structure-json-allow-agents'; skillToolsMode='sarif-check'
+            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-tools-report.sarif.json')
         },
         [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm'; report='skillspector-report.json' },
         [ordered]@{
-            name='repository-tests'; result='passed'; exitCode=0; mode='skill-tools-sarif-and-authority-pester'
-            reports=@('skill-tools-report.sarif.json'); total=[int]$authorityResult.TotalCount
+            name='repository-tests'; result='passed'; exitCode=0; mode='authority-pester'
+            reports=@(); total=[int]$authorityResult.TotalCount
             passed=[int]$authorityResult.PassedCount; failed=[int]$authorityResult.FailedCount
         }
     )
