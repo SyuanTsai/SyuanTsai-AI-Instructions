@@ -2380,6 +2380,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $exactEndpointRoot = Join-Path $TestDrive 'upstream-adapter-exact-endpoint'
         Copy-Item -LiteralPath $fixtureRoot -Destination $exactEndpointRoot -Recurse -Force
         Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"approved":{"url":"https://approved.example.test/mcp"}}}'
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"approved"}]}'
         & $script:UpstreamAdapterValidatorPath `
             -PackageRoot $exactEndpointRoot `
             -PolicyPath $exactEndpointPolicyPath `
