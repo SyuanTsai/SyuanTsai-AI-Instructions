@@ -65,7 +65,7 @@ The transaction-owned staged snapshot MUST be created from the preflight-verifie
 
 Replacement MUST be deterministic by stable Skill ID and target path. A rename MUST be represented by an explicit new ID plus a Catalog lifecycle alias/tombstone transition. The old path MUST be removed only when the current manifest or explicit known-legacy evidence proves ownership. An unknown owner, collision, local drift without force, reparse point, special file, or concurrent target change MUST block closed. No destructive action may be justified by directory name alone.
 
-Backup and recovery MUST be transaction-scoped. The recovery journal MUST bind a transaction ID, user root, backup root, phase, desired manifest hash, desired managed-inventory hash, and every original/applied target hash. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries. A hard crash after the journal is written MUST leave the journal and backup usable by `-Recover`; a successful recovery MUST re-verify every restored original hash before deleting the journal.
+Backup and recovery MUST be transaction-scoped. The recovery journal MUST bind a transaction ID, user root, backup root, phase, non-null lowercase desired manifest and managed-inventory SHA-256 values, and every original/applied target hash. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries. A hard crash after the journal is written MUST leave the journal and backup usable by `-Recover`; a successful recovery MUST re-verify every restored original hash before deleting the journal.
 
 ### Retired managed-file cleanup
 
@@ -88,7 +88,7 @@ Blocked results MUST be machine-readable and MUST retain a human-actionable mess
 - expected and actual SHA-256 values when applicable; and
 - one or more remediation actions.
 
-The reconciler result MAY contain additional operational fields, but it MUST expose `failureDetails` and `ownership` without hiding the evidence in console-only text. Ownership records MUST include an operation (`install`, `replace`, `remove`, `adopt`, `preserve`, or `observe`). Failure codes MUST distinguish at least staged integrity mismatch, unmanaged collision, legacy unmanaged content, managed local drift, post-install integrity failure, and recovery-required state. A generic error string without classification, evidence, and remediation is insufficient for a destructive-change decision.
+The reconciler result MAY contain additional operational fields, but it MUST expose `failureDetails` and `ownership` without hiding the evidence in console-only text. Ownership records MUST include an operation (`install`, `replace`, `remove`, `adopt`, `preserve`, or `observe`). Failure codes MUST distinguish at least staged integrity mismatch, unmanaged collision, legacy unmanaged content, managed local drift, mutation failure, post-install integrity failure, and recovery-required state. A generic error string without classification, evidence, and remediation is insufficient for a destructive-change decision.
 
 ## Adapter and lifecycle boundaries
 

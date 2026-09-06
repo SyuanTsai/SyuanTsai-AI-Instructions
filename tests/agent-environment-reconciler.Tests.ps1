@@ -277,7 +277,9 @@ Describe 'user-scoped Agent Skills reconciliation' {
         @(Get-ChildItem -LiteralPath (Join-Path $userHome '.agents\backups') -Directory).Count | Should Be $backupCount
     }
 
-    It 'rolls back when a mutation fails and leaves the prior manifest valid' {
+    # Scenario: A transaction mutation fails after a managed target is prepared.
+    # Purpose: Verify rollback restores the prior managed bytes, classifies the mutation failure, and removes the completed journal.
+    It 'InterT25_rolls_back_when_a_mutation_fails_and_leaves_the_prior_manifest_valid' {
         $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
         $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
@@ -286,7 +288,7 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
         $failed.outcome | Should Be 'failed'
         $failed.rollbackState | Should Be 'completed'
-        @($failed.failureDetails | Where-Object { $_.code -eq 'post-install-integrity-failure' }).Count | Should Be 1
+        @($failed.failureDetails | Where-Object { $_.code -eq 'mutation-failure' }).Count | Should Be 1
         [System.IO.File]::ReadAllText($target) | Should Be $before
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false
     }

@@ -23,6 +23,10 @@
       "type": ["string", "null"],
       "pattern": "^[0-9a-f]{64}$"
     },
+    "requiredSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "classification": {
       "type": "string",
       "enum": ["managed", "known-legacy", "unmanaged-unknown", "managed-drift", "controlled-candidate"]
@@ -106,8 +110,8 @@
         "userHome": { "type": "string", "minLength": 1 },
         "backupPath": { "type": "string", "minLength": 1 },
         "phase": { "enum": ["prepared", "mutating"] },
-        "desiredManifestSha256": { "$ref": "#/$defs/sha256" },
-        "desiredInventorySha256": { "$ref": "#/$defs/sha256" },
+        "desiredManifestSha256": { "$ref": "#/$defs/requiredSha256" },
+        "desiredInventorySha256": { "$ref": "#/$defs/requiredSha256" },
         "states": {
           "type": "array",
           "minItems": 1,

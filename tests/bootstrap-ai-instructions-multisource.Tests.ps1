@@ -182,7 +182,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
         $failed.outcome | Should Be 'failed'
         $failed.rollbackState | Should Be 'completed'
-        @($failed.failureDetails | Where-Object { $_.code -eq 'post-install-integrity-failure' }).Count | Should Be 1
+        @($failed.failureDetails | Where-Object { $_.code -eq 'mutation-failure' }).Count | Should Be 1
         [IO.File]::ReadAllText($licensePath) | Should Be 'Source license v1'
         [IO.File]::ReadAllText($manifestPath) | Should Be $manifestBefore
         (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
