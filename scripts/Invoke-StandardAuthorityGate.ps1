@@ -466,8 +466,8 @@ function Assert-AuthorityPolicyReceipt {
         -Context 'Validation policy sourceTrust enforcement'
     Assert-AuthorityExactString `
         -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'trustedGoRuntimeVersion' -Context 'Validation policy receipt') `
-        -Expected '1.26.8' `
-        -Context 'Validation policy receipt Go runtime'
+        -Expected 'latest-stable' `
+        -Context 'Validation policy receipt Go runtime rule'
     $failClosed = Get-AuthorityRequiredProperty -Object $sourceTrust -Name 'failClosedOnMismatch' -Context 'Validation policy sourceTrust'
     $recordIdentity = Get-AuthorityRequiredProperty -Object $Receipt -Name 'recordResolvedIdentityWhenAvailable' -Context 'Validation policy receipt'
     if ($failClosed -isnot [bool] -or -not [bool]$failClosed -or
@@ -1376,10 +1376,22 @@ foreach ($binding in @(
 }
 
 $skillValidatorReceipt = $receipts.'skill-validator'
+$skillValidatorRuntimeVersion = if ($skillValidatorReceipt.goRuntimeVersion -is [string]) {
+    [string]$skillValidatorReceipt.goRuntimeVersion
+}
+else {
+    ''
+}
+$skillValidatorRuntimeIdentityPattern = if ($skillValidatorRuntimeVersion -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    "*#goRuntime=$skillValidatorRuntimeVersion#*"
+}
+else {
+    ''
+}
 if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorReceipt.proxy -cne 'https://proxy.golang.org' -or
     $skillValidatorReceipt.checksumDatabase -isnot [string] -or [string]$skillValidatorReceipt.checksumDatabase -cne 'sum.golang.org' -or
-    $skillValidatorReceipt.goRuntimeVersion -isnot [string] -or [string]$skillValidatorReceipt.goRuntimeVersion -cne '1.26.8' -or
-    [string]$skillValidatorReceipt.resolvedIdentity -cnotlike '*#goRuntime=1.26.8#*' -or
+    $skillValidatorRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+    [string]$skillValidatorReceipt.resolvedIdentity -cnotlike $skillValidatorRuntimeIdentityPattern -or
     $skillValidatorReceipt.moduleCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.moduleCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.buildCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.buildCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.temporaryDirectoryIsolation -isnot [string] -or [string]$skillValidatorReceipt.temporaryDirectoryIsolation -cne 'temporary-empty' -or

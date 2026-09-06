@@ -29,7 +29,7 @@ $trustedRegistries = [ordered]@{
 
 $trustedPythonIndex = 'https://pypi.org/simple'
 $trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
-$trustedGoRuntimeVersion = '1.26.8'
+$trustedGoRuntimeVersionRule = 'latest-stable'
 
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
@@ -285,7 +285,7 @@ function Get-Policy {
         'source', 'channel', 'stableVersionRule', 'proxy', 'checksumDatabase', 'goRuntimeVersion', 'goEnvironment', 'goDistribution'
     ) -Context '$.tools.skill-validator'
     Assert-JsonString -Value $skillValidator.stableVersionRule -Expected 'release-semver-only' -Context '$.tools.skill-validator.stableVersionRule'
-    Assert-JsonString -Value $skillValidator.goRuntimeVersion -Expected $trustedGoRuntimeVersion -Context '$.tools.skill-validator.goRuntimeVersion'
+    Assert-JsonString -Value $skillValidator.goRuntimeVersion -Expected $trustedGoRuntimeVersionRule -Context '$.tools.skill-validator.goRuntimeVersion'
     if ($skillValidator.proxy -isnot [string] -or $skillValidator.checksumDatabase -isnot [string]) {
         throw 'skill-validator proxy and checksumDatabase must be strings.'
     }
@@ -2036,8 +2036,12 @@ function Invoke-WithApprovedGoEnvironment {
 function Get-ApprovedGoRuntimeVersion {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
-        [Parameter(Mandatory = $true)][string] $ExpectedVersion
+        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule
     )
+
+    if ($ExpectedVersionRule -cne $trustedGoRuntimeVersionRule) {
+        throw "Unsupported Go runtime version rule '$ExpectedVersionRule'. Expected '$trustedGoRuntimeVersionRule'."
+    }
 
     $lines = @($VersionOutput | ForEach-Object { [string]$_ })
     if ($lines.Count -ne 1) {
@@ -2048,8 +2052,8 @@ function Get-ApprovedGoRuntimeVersion {
         '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$'
     )
     $runtimeVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['version'].Value } else { $null }
-    if ([string]$runtimeVersion -cne $ExpectedVersion) {
-        throw "Unapproved Go runtime '$($lines[0])'. Expected exact version '$ExpectedVersion'."
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        throw "Unapproved Go runtime '$($lines[0])'. Expected a stable release matching '$trustedGoRuntimeVersionRule'."
     }
 
     return $runtimeVersion
@@ -2344,7 +2348,7 @@ function Resolve-SkillValidator {
 
             $goRuntimeVersion = Get-ApprovedGoRuntimeVersion `
                 -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
-                -ExpectedVersion ([string]$ToolPolicy.goRuntimeVersion)
+                -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion)
 
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
@@ -2697,7 +2701,7 @@ if ($ValidatePolicyOnly) {
         trustedRegistries = $trustedRegistries
         trustedPythonIndex = $trustedPythonIndex
         trustedPowerShellRepository = $trustedPowerShellRepository
-        trustedGoRuntimeVersion = $trustedGoRuntimeVersion
+        trustedGoRuntimeVersion = $trustedGoRuntimeVersionRule
         trustedGoEnvironment = $trustedGoEnvironment
         trustedGoDistribution = $trustedGoDistribution
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable

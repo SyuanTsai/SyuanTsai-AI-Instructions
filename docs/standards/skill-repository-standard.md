@@ -335,7 +335,7 @@ Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA�
 
 對 `skill-validator`，Go `@latest` 解析結果只有純 release SemVer（例如 `v1.6.1`）可視為 latest stable；prerelease（例如 `v1.7.0-rc1`）與 pseudo-version **MUST** fail closed，不得因 Go 能解析就當成 stable release。
 
-Canonical authority workflow **MUST** 在中央 resolver 前，以 full commit SHA 固定受信任的 Go setup action、停用 cross-run cache，並安裝 `validation-toolchain.json` `goRuntimeVersion` 指定的 exact security-patched Go runtime。Resolver **MUST** 在任何 `go list` / `go install` 前以 native `go version` 驗證 exact runtime version，並把它綁入 resolved identity 與 machine-readable receipt；不得以 runner 預裝版本、mutable action tag 或 `GOTOOLCHAIN=auto` 取代這項證據。
+Canonical authority workflow **MUST** 在中央 resolver 前，以 full commit SHA 固定受信任的 Go setup action、停用 cross-run cache，並以 `go-version: stable` 與 `check-latest: true` 取得 validation run 開始時的 latest stable Go runtime。Resolver **MUST** 在任何 `go list` / `go install` 前以 native `go version` 驗證該次 run 的 stable runtime evidence，並把實際解析版本綁入 resolved identity 與 machine-readable receipt；不得以 runner 預裝版本、mutable action tag 或 `GOTOOLCHAIN=auto` 取代這項證據。
 
 `skill-validator` 的 module resolution 與 installation **MUST** 使用該次 resolver invocation 專用、初始為空的暫存 `GOMODCACHE` 與 `GOCACHE`，並在 invocation 結束後移除。Resolver **MUST** 在任何 `go list` / `go install` 前拒絕 inherited `GOMODCACHE`、inherited `GOCACHE`、`GOROOT`、`GOTOOLDIR`、target/build selector 與非空 `GOFLAGS`：shared module cache 可能重用 caller-controlled 的下載/解壓縮內容，shared build cache 可能重用非本次 trusted resolution 產生的 compilation output，`GOROOT` / target selectors 可替換 compiler、stdlib 或產物目標，而 `GOFLAGS` 可注入改變 build behavior 的參數。鎖定 `GOPROXY` / `GOSUMDB` 不能取代這些 build-input 與 cache isolation controls。
 
