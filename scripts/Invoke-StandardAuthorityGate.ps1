@@ -168,6 +168,101 @@ function Read-AuthorityJson {
     }
 }
 
+function Assert-AuthorityValidationSecurityGate {
+    param([Parameter(Mandatory = $true)] $Policy)
+
+    Assert-AuthorityNonNegativeInteger `
+        -Value (Get-AuthorityRequiredProperty -Object $Policy -Name 'schemaVersion' -Context 'Validation/security gate policy') `
+        -Context 'Validation/security gate policy schemaVersion'
+    if ([int64]$Policy.schemaVersion -ne 1) {
+        throw 'Validation/security gate policy has an unsupported schemaVersion.'
+    }
+    Assert-AuthorityExactString `
+        -Value (Get-AuthorityRequiredProperty -Object $Policy -Name 'policy' -Context 'Validation/security gate policy') `
+        -Expected 'canonical-validation-security-gate-v1' `
+        -Context 'Validation/security gate policy identity'
+
+    $expectedStages = @(
+        [ordered]@{ order=1; id='controlled-acquisition'; name='Controlled Acquisition'; condition='always' },
+        [ordered]@{ order=2; id='integrity-verification'; name='Integrity Verification'; condition='always' },
+        [ordered]@{ order=3; id='package-validation'; name='Package Validation'; condition='always' },
+        [ordered]@{ order=4; id='skillspector-static'; name='SkillSpector Static'; condition='always' },
+        [ordered]@{ order=5; id='repository-tests'; name='Repository Tests'; condition='always' },
+        [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered' },
+        [ordered]@{ order=7; id='ai-review'; name='AI Review'; condition='always' },
+        [ordered]@{ order=8; id='human-approval'; name='Human Approval'; condition='always' },
+        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install' },
+        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install' }
+    )
+    $stages = Get-AuthorityRequiredProperty -Object $Policy -Name 'stages' -Context 'Validation/security gate policy'
+    if ($stages -isnot [array] -or @($stages).Count -ne $expectedStages.Count) {
+        throw 'Validation/security gate policy must contain exactly ten ordered stages.'
+    }
+    for ($index = 0; $index -lt $expectedStages.Count; $index++) {
+        $stage = $stages[$index]
+        $expected = $expectedStages[$index]
+        Assert-AuthorityNonNegativeInteger -Value (Get-AuthorityRequiredProperty -Object $stage -Name 'order' -Context "Validation/security gate stage $($index + 1)") -Context "Validation/security gate stage $($index + 1) order"
+        if ([int64]$stage.order -ne [int64]$expected.order) {
+            throw "Validation/security gate stage $($index + 1) has a non-canonical order."
+        }
+        foreach ($name in @('id', 'name', 'condition')) {
+            Assert-AuthorityExactString `
+                -Value (Get-AuthorityRequiredProperty -Object $stage -Name $name -Context "Validation/security gate stage $($index + 1)") `
+                -Expected ([string]$expected[$name]) `
+                -Context "Validation/security gate stage $($index + 1) $name"
+        }
+        Assert-AuthorityExactString `
+            -Value (Get-AuthorityRequiredProperty -Object $stage -Name 'failureAction' -Context "Validation/security gate stage $($index + 1)") `
+            -Expected 'BLOCK' `
+            -Context "Validation/security gate stage $($index + 1) failure action"
+        $evidence = Get-AuthorityRequiredProperty -Object $stage -Name 'evidence' -Context "Validation/security gate stage $($index + 1)"
+        if ($evidence -isnot [array] -or @($evidence).Count -le 0) {
+            throw "Validation/security gate stage $($index + 1) must declare evidence."
+        }
+    }
+
+    $security = Get-AuthorityRequiredProperty -Object $Policy -Name 'security' -Context 'Validation/security gate policy'
+    foreach ($name in @('scannerFailure', 'analyzerIncomplete', 'unparsableResult', 'unknownSeverity')) {
+        Assert-AuthorityExactString `
+            -Value (Get-AuthorityRequiredProperty -Object $security -Name $name -Context 'Validation/security gate security policy') `
+            -Expected 'BLOCK' `
+            -Context "Validation/security gate security policy $name"
+    }
+    $severity = Get-AuthorityRequiredProperty -Object $security -Name 'severity' -Context 'Validation/security gate security policy'
+    $expectedSeverity = [ordered]@{
+        critical = 'BLOCK'
+        high = 'BLOCK'
+        medium = 'HUMAN_REVIEW_REQUIRED'
+        low = 'RECORD_AND_TRACK'
+        informational = 'RECORD_AND_TRACK'
+    }
+    if ($severity -isnot [array] -or @($severity).Count -ne $expectedSeverity.Count) {
+        throw 'Validation/security gate severity mapping is incomplete.'
+    }
+    foreach ($entry in @($severity)) {
+        $level = Get-AuthorityRequiredProperty -Object $entry -Name 'level' -Context 'Validation/security gate severity mapping'
+        $action = Get-AuthorityRequiredProperty -Object $entry -Name 'action' -Context 'Validation/security gate severity mapping'
+        if ($level -isnot [string] -or -not $expectedSeverity.Contains([string]$level)) {
+            throw "Validation/security gate contains unknown severity '$level'."
+        }
+        Assert-AuthorityExactString -Value $action -Expected ([string]$expectedSeverity[[string]$level]) -Context "Validation/security gate severity '$level'"
+    }
+    $aiReplacement = Get-AuthorityRequiredProperty -Object $security -Name 'aiReviewCannotReplaceHumanApproval' -Context 'Validation/security gate security policy'
+    if ($aiReplacement -isnot [bool] -or -not [bool]$aiReplacement) {
+        throw 'AI Review must not replace Human Approval in the validation/security gate policy.'
+    }
+    $semantics = Get-AuthorityRequiredProperty -Object $security -Name 'samePassBlockSemantics' -Context 'Validation/security gate security policy'
+    if ($semantics -isnot [array] -or @($semantics).Count -ne 3) {
+        throw 'Validation/security gate must bind local, pre-push, and CI pass/block semantics.'
+    }
+    $expectedSemantics = @('local', 'pre-push', 'ci')
+    for ($index = 0; $index -lt $expectedSemantics.Count; $index++) {
+        Assert-AuthorityExactString -Value $semantics[$index] -Expected $expectedSemantics[$index] -Context "Validation/security gate pass/block semantics $($index + 1)"
+    }
+
+    return ,$Policy
+}
+
 function Invoke-AuthorityExternalCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -699,16 +794,21 @@ if ($DefineFunctionsOnly) { return }
 $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'
 $pythonClosureHelperPath = Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.py'
+$validationSecurityGatePath = Join-Path $repositoryRoot 'docs/standards/validation-security-gate.json'
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
 )
-foreach ($requiredPath in @($resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
+foreach ($requiredPath in @($validationSecurityGatePath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Authority gate input is missing: $requiredPath"
     }
 }
+
+$validationSecurityGate = Assert-AuthorityValidationSecurityGate `
+    -Policy (Read-AuthorityJson -Path $validationSecurityGatePath -Context 'Validation/security gate policy')
+$validationSecurityGatePolicySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $validationSecurityGatePath).Hash.ToLowerInvariant()
 
 $artifactsRootPath = [System.IO.Path]::GetFullPath($ArtifactsRoot)
 [void](New-Item -ItemType Directory -Path $artifactsRootPath -Force)
@@ -931,19 +1031,7 @@ if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
     throw 'Pester receipt modulePath and executablePath must identify the same frozen module manifest.'
 }
 
-$skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'
-[void](Invoke-AuthorityExternalCommand `
-    -Command $executablePaths.skillspector `
-    -Arguments @('scan', $fixtureRoot, '--no-llm', '--format', 'json', '--output', $skillSpectorReportPath) `
-    -Context 'SkillSpector static scan' `
-    -DiagnosticRoot $runRoot)
-$skillSpectorReport = Read-AuthorityJson -Path $skillSpectorReportPath -Context 'SkillSpector static scan'
-Assert-AuthoritySkillSpectorReport `
-    -Report $skillSpectorReport `
-    -ExpectedFixtureRoot $fixtureRoot `
-    -ExpectedSkillId 'standard-validation-fixture' `
-    -ExpectedInventoryPaths @($fixtureFiles.path)
-
+# Stage 3: Package Validation. No SkillSpector scan may run before this result is verified.
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
     -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $fixtureRoot) `
@@ -957,6 +1045,22 @@ Assert-AuthoritySkillValidatorReport `
     -ExpectedFixtureRoot $fixtureRoot `
     -ExpectedInventoryPaths @($fixtureFiles.path)
 
+# Stage 4: SkillSpector Static.
+$skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'
+[void](Invoke-AuthorityExternalCommand `
+    -Command $executablePaths.skillspector `
+    -Arguments @('scan', $fixtureRoot, '--no-llm', '--format', 'json', '--output', $skillSpectorReportPath) `
+    -Context 'SkillSpector static scan' `
+    -DiagnosticRoot $runRoot)
+$skillSpectorReport = Read-AuthorityJson -Path $skillSpectorReportPath -Context 'SkillSpector static scan'
+Assert-AuthoritySkillSpectorReport `
+    -Report $skillSpectorReport `
+    -ExpectedFixtureRoot $fixtureRoot `
+    -ExpectedSkillId 'standard-validation-fixture' `
+    -ExpectedInventoryPaths @($fixtureFiles.path)
+
+# Stage 5: Repository Tests. The remaining formal tools are executed only after the two
+# package/security gates above have passed.
 $skillToolsOutput = Invoke-AuthorityExternalCommand `
     -Command $skillToolsNode `
     -Arguments @($skillToolsEntryPoint, 'check', $fixtureRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
@@ -990,6 +1094,12 @@ $summary = [ordered]@{
     schemaVersion = 1
     runId = $runId
     candidateCommit = $candidateCommit
+    canonicalGate = [ordered]@{
+        policy = [string]$validationSecurityGate.policy
+        policyPath = 'docs/standards/validation-security-gate.json'
+        policySha256 = $validationSecurityGatePolicySha256
+        stageIds = @($validationSecurityGate.stages | ForEach-Object { [string]$_.id })
+    }
     fixture = [ordered]@{
         id = 'standard-validation-fixture'
         inventorySha256 = $fixtureInventorySha256
@@ -1005,11 +1115,13 @@ $summary = [ordered]@{
         }
     })
     stages = @(
-        [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm'; report='skillspector-report.json' },
-        [ordered]@{ name='skill-validator-package'; result='passed'; exitCode=0; mode='structure-json-allow-agents'; report='skill-validator-report.json' },
-        [ordered]@{ name='skill-tools-check'; result='passed'; exitCode=0; mode='sarif-error'; report='skill-tools-report.sarif.json' },
         [ordered]@{
-            name='pester-authority'; result='passed'; exitCode=0; mode='authority-inventory'; total=[int]$authorityResult.TotalCount
+            name='package-validation'; result='passed'; exitCode=0; mode='structure-json-allow-agents'; report='skill-validator-report.json'
+        },
+        [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm'; report='skillspector-report.json' },
+        [ordered]@{
+            name='repository-tests'; result='passed'; exitCode=0; mode='skill-tools-sarif-and-authority-pester'
+            reports=@('skill-tools-report.sarif.json'); total=[int]$authorityResult.TotalCount
             passed=[int]$authorityResult.PassedCount; failed=[int]$authorityResult.FailedCount
         }
     )

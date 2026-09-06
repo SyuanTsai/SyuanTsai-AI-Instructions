@@ -5,6 +5,8 @@ Describe 'Standard validation resolver hardening' {
         $script:ToolchainPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json'
         $script:LifecyclePath = Join-Path $script:RepositoryRoot 'docs/standards/managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/managed-skill-lifecycle-v1.schema.json'
+        $script:ValidationSecurityGatePath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
+        $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
 
         function Assert-True {
             param([bool] $Condition, [string] $Message)
@@ -303,5 +305,35 @@ Version: this line also belongs to the description body
         Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle policy must define transaction-owned candidate staging.'
         Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema must remain the v1 central contract.'
         Assert-NotMatch $resolver 'function (Resolve|Invoke)-ManagedSkillLifecycle' 'Validation tool resolver must not grow a repository-local lifecycle policy entry point.'
+    }
+
+    # Scenario: Plugin or marketplace support is added to the validation-tool resolver as an implicit policy path.
+    # Purpose: Keep upstream packaging and MCP discovery in the central adapter decision record rather than a second resolver policy.
+    It 'UnitT90_keeps_upstream_packaging_and_discovery_outside_the_validation_tool_resolver' {
+        $upstreamPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-interoperability.md'
+        Assert-True (Test-Path -LiteralPath $upstreamPath -PathType Leaf) 'Upstream interoperability policy must remain in the central standards directory.'
+        $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $upstreamPath
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+
+        Assert-Match $upstream 'adapter' 'Upstream packaging must be described as an explicit adapter boundary.'
+        Assert-Match $upstream 'dynamic.*discovery' 'Dynamic MCP discovery must be explicitly bounded.'
+        Assert-NotMatch $resolver '\.codex-plugin/plugin\.json|\.mcp\.json|marketplace\.json' 'Validation-tool resolution must not become an upstream packaging or marketplace policy engine.'
+    }
+
+    # Scenario: Canonical validation/security ordering is implemented as a second resolver policy.
+    # Purpose: Keep the stage/severity authority in the central gate policy and prevent provider resolution from inventing pass/block semantics.
+    It 'UnitT100_keeps_canonical_validation_security_policy_in_the_central_authority_gate' {
+        Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Canonical validation/security policy must remain in the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:AuthorityGatePath -PathType Leaf) 'Canonical authority gate must remain available.'
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+
+        Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
+        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must enforce the canonical validation/security policy.'
+        Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the canonical validation/security policy.'
+        Assert-Match $gate 'Package Validation' 'Authority gate must identify the Package Validation stage.'
+        Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
+        Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate' 'Validation-tool resolver must not become a stage/severity policy engine.'
     }
 }

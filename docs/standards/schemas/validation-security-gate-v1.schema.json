@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical validation and security gate v1",
+  "description": "Strict machine-readable stage order and fail-closed security semantics for Standard v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policy", "stages", "security"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "policy": {
+      "const": "canonical-validation-security-gate-v1"
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stage"
+      }
+    },
+    "security": {
+      "$ref": "#/$defs/security"
+    }
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "id", "name", "condition", "failureAction", "evidence"],
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "condition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "failureAction": {
+          "enum": ["BLOCK", "HUMAN_REVIEW_REQUIRED", "RECORD_AND_TRACK"]
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "severity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "action"],
+      "properties": {
+        "level": {
+          "enum": ["critical", "high", "medium", "low", "informational"]
+        },
+        "action": {
+          "enum": ["BLOCK", "HUMAN_REVIEW_REQUIRED", "RECORD_AND_TRACK"]
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scannerFailure",
+        "analyzerIncomplete",
+        "unparsableResult",
+        "unknownSeverity",
+        "severity",
+        "aiReviewCannotReplaceHumanApproval",
+        "samePassBlockSemantics"
+      ],
+      "properties": {
+        "scannerFailure": {
+          "const": "BLOCK"
+        },
+        "analyzerIncomplete": {
+          "const": "BLOCK"
+        },
+        "unparsableResult": {
+          "const": "BLOCK"
+        },
+        "unknownSeverity": {
+          "const": "BLOCK"
+        },
+        "severity": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/severity"
+          }
+        },
+        "aiReviewCannotReplaceHumanApproval": {
+          "const": true
+        },
+        "samePassBlockSemantics": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["local", "pre-push", "ci"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "policy": "canonical-validation-security-gate-v1",
+  "stages": [
+    {
+      "order": 1,
+      "id": "controlled-acquisition",
+      "name": "Controlled Acquisition",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["candidateIdentity", "authoritySnapshot", "sourcePin"]
+    },
+    {
+      "order": 2,
+      "id": "integrity-verification",
+      "name": "Integrity Verification",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["archiveSha256", "contentSha256", "provenance"]
+    },
+    {
+      "order": 3,
+      "id": "package-validation",
+      "name": "Package Validation",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["packageInventory", "packageSchema", "packageValidatorResult"]
+    },
+    {
+      "order": 4,
+      "id": "skillspector-static",
+      "name": "SkillSpector Static",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["scannerIdentity", "analyzerCompleteness", "staticReport"]
+    },
+    {
+      "order": 5,
+      "id": "repository-tests",
+      "name": "Repository Tests",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["testInventory", "testResult", "domainAdapterResult"]
+    },
+    {
+      "order": 6,
+      "id": "conditional-semantic-scan",
+      "name": "Conditional Semantic Scan",
+      "condition": "when-triggered",
+      "failureAction": "BLOCK",
+      "evidence": ["triggerDecision", "semanticReport", "semanticCompleteness"]
+    },
+    {
+      "order": 7,
+      "id": "ai-review",
+      "name": "AI Review",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["reviewFindings", "findingDisposition", "reviewedCandidate"]
+    },
+    {
+      "order": 8,
+      "id": "human-approval",
+      "name": "Human Approval",
+      "condition": "always",
+      "failureAction": "BLOCK",
+      "evidence": ["approver", "approvalTimestamp", "approvedCandidate"]
+    },
+    {
+      "order": 9,
+      "id": "publish-or-install",
+      "name": "Publish / Install",
+      "condition": "approved-release-or-authorized-install",
+      "failureAction": "BLOCK",
+      "evidence": ["releaseIdentity", "publishOrInstallResult", "authorization"]
+    },
+    {
+      "order": 10,
+      "id": "post-install-verification",
+      "name": "Post-install Verification",
+      "condition": "after-install",
+      "failureAction": "BLOCK",
+      "evidence": ["installedInventory", "installedManifest", "postInstallIntegrity"]
+    }
+  ],
+  "security": {
+    "scannerFailure": "BLOCK",
+    "analyzerIncomplete": "BLOCK",
+    "unparsableResult": "BLOCK",
+    "unknownSeverity": "BLOCK",
+    "severity": [
+      {
+        "level": "critical",
+        "action": "BLOCK"
+      },
+      {
+        "level": "high",
+        "action": "BLOCK"
+      },
+      {
+        "level": "medium",
+        "action": "HUMAN_REVIEW_REQUIRED"
+      },
+      {
+        "level": "low",
+        "action": "RECORD_AND_TRACK"
+      },
+      {
+        "level": "informational",
+        "action": "RECORD_AND_TRACK"
+      }
+    ],
+    "aiReviewCannotReplaceHumanApproval": true,
+    "samePassBlockSemantics": ["local", "pre-push", "ci"]
+  }
+}
