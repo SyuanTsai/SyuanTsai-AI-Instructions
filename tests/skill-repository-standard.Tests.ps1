@@ -2200,6 +2200,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'source\.path must be exactly' 'Marketplace source paths must be restricted to the reviewed package root.'
         Assert-Match $validatorText 'lstat|IsRegularFile' 'Upstream adapter validator must establish Unix regular-file type without opening special files.'
         Assert-Match $validatorText 'ReparsePoint|mkfifo|Mode' 'Upstream adapter validator and regression boundary must account for Windows reparse and Unix special-file inputs.'
+        Assert-NotMatch $validatorText 'ProcessArchitecture|Linux architecture|x86_64' 'Upstream adapter regular-file detection must not be restricted to one Unix ABI or architecture.'
+        Assert-Match $validatorText 'Assert-AdapterReservedSurfacePaths' 'Upstream adapter validator must reject case aliases of every reserved adapter surface before probing manifests.'
+        Assert-Match $validatorText 'Assert-AdapterDeclaredSkillPath' 'Upstream adapter validator must enforce the canonical declared Skill root.'
+        Assert-Match $validatorText 'must declare at least one Skill or MCP server capability' 'Upstream adapter validator must reject metadata-only Plugin packages.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
@@ -2258,8 +2262,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='plugin-path-rooted-windows'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["C:/outside"]}' } },
             @{ id='plugin-path-dot'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./."]}' } },
             @{ id='plugin-path-colon'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/a:b"]}' } },
+            @{ id='plugin-path-noncanonical-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./packages/fixture-skill"]}' } },
+            @{ id='plugin-path-nested'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill/references"]}' } },
             @{ id='plugin-duplicate-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","\u006eame":"other"}' } },
+            @{ id='plugin-empty-capability'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin"}' } },
+            @{ id='plugin-empty-skills'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[]}' } },
+            @{ id='plugin-empty-mcp'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","mcpServers":{}}' } },
             @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
+            @{ id='plugin-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.codex-plugin') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.Codex-Plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"]}' } },
+            @{ id='mcp-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.MCP.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}' } },
+            @{ id='app-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.APP.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}' } },
+            @{ id='marketplace-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.agents') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.AGENTS/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","ref":"main"}}]}') } },
             @{ id='marketplace-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}},{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('b' * 40) + '"}}]}') } },
             @{ id='marketplace-duplicate-nested-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","\u0073ha":"' + ('b' * 40) + '"}}]}') } },
@@ -2279,7 +2292,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $errorMessage = $null
             try { & $script:UpstreamAdapterValidatorPath -PackageRoot $caseRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null }
             catch { $errorMessage = $_.Exception.Message }
-            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL|duplicate|ref|portable|unsafe|regular' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
+            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL|duplicate|ref|portable|unsafe|regular|alias|canonical|capability' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
         }
 
         $duplicatePolicyPath = Join-Path $TestDrive 'upstream-adapter-duplicate-policy.json'

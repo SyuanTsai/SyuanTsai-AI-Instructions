@@ -105,77 +105,32 @@ function Assert-AdapterRegularFile {
         throw "$Context must not be a reparse point: $Path"
     }
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-        if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
-            throw "$Context regular-file type cannot be established on this Unix platform: $Path"
+        # PowerShell 7's FileSystem provider reports FIFOs as ordinary leaf
+        # files.  Use CoreCLR's non-following Unix lstat wrapper, which is
+        # ABI-independent across the Unix platforms supported by CoreCLR.
+        try {
+            $flags = [System.Reflection.BindingFlags]'Public,NonPublic,Instance,Static'
+            $coreAssembly = [System.IO.File].Assembly
+            $interopType = $coreAssembly.GetType('Interop+Sys', $false)
+            $statusType = $coreAssembly.GetType('Interop+Sys+FileStatus', $false)
+            if ($null -eq $interopType -or $null -eq $statusType) { throw 'CoreCLR Unix file status API is unavailable.' }
+            $lstat = @($interopType.GetMethods($flags) | Where-Object {
+                $_.Name -ceq 'LStat' -and $_.GetParameters().Count -eq 2 -and
+                $_.GetParameters()[0].ParameterType -eq [string]
+            } | Select-Object -First 1)[0]
+            $modeField = $statusType.GetField('Mode', $flags)
+            if ($null -eq $lstat -or $null -eq $modeField) { throw 'CoreCLR Unix file status contract is unavailable.' }
+            $arguments = [object[]]::new(2)
+            $arguments[0] = [string][System.IO.Path]::GetFullPath($item.FullName)
+            $arguments[1] = [Activator]::CreateInstance($statusType)
+            if ([int]$lstat.Invoke($null, $arguments) -ne 0) { throw 'Unix lstat failed.' }
+            $mode = [int64]$modeField.GetValue($arguments[1])
+            if (($mode -band 0xF000) -ne 0x8000) { throw "$Context must be a regular file: $Path" }
         }
-        if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
-            throw "$Context regular-file type cannot be established on this Linux architecture: $Path"
-        }
-
-        $nativeTypeName = 'Codex.UpstreamAdapterNative'
-        if ($null -eq ($nativeTypeName -as [type])) {
-            [void](Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-namespace Codex
-{
-    public static class UpstreamAdapterNative
-    {
-        private const uint S_IFMT = 0xF000;
-        private const uint S_IFREG = 0x8000;
-
-        // Linux x86_64 glibc struct stat. The adapter deliberately fails closed
-        // on other Unix ABIs instead of guessing a filesystem object type.
-        [StructLayout(LayoutKind.Sequential)]
-        private struct LinuxStat
-        {
-            public ulong st_dev;
-            public ulong st_ino;
-            public ulong st_nlink;
-            public uint st_mode;
-            public uint st_uid;
-            public uint st_gid;
-            public int pad0;
-            public ulong st_rdev;
-            public long st_size;
-            public long st_blksize;
-            public long st_blocks;
-            public long st_atime;
-            public long st_atime_nsec;
-            public long st_mtime;
-            public long st_mtime_nsec;
-            public long st_ctime;
-            public long st_ctime_nsec;
-            public long reserved0;
-            public long reserved1;
-            public long reserved2;
-        }
-
-        [DllImport("libc", EntryPoint = "lstat", CharSet = CharSet.Ansi, SetLastError = true)]
-        private static extern int lstat(string path, out LinuxStat stat);
-
-        public static bool IsRegularFile(string path)
-        {
-            LinuxStat stat;
-            if (lstat(path, out stat) != 0)
-            {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "lstat failed.");
-            }
-
-            return (stat.st_mode & S_IFMT) == S_IFREG;
-        }
-    }
-}
-'@)
-        }
-
-        try { $isRegularFile = [Codex.UpstreamAdapterNative]::IsRegularFile($item.FullName) }
         catch {
+            if ($_.Exception.Message -like "$Context must be a regular file:*") { throw }
             throw "$Context regular-file type could not be established: $($_.Exception.Message)"
         }
-        if (-not $isRegularFile) { throw "$Context must be a regular file: $Path" }
         return $item.FullName
     }
 
@@ -491,6 +446,46 @@ function Assert-AdapterNoReparsePath {
     return $fullPath
 }
 
+function Assert-AdapterReservedSurfacePaths {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)] $Policy
+    )
+
+    $reservedPaths = @(
+        [pscustomobject]@{ relative = 'hooks'; context = 'Plugin hooks path' },
+        [pscustomobject]@{ relative = [string]$Policy.pluginManifestPath; context = 'Plugin manifest path' },
+        [pscustomobject]@{ relative = [string]$Policy.mcpManifestPath; context = 'MCP manifest path' },
+        [pscustomobject]@{ relative = [string]$Policy.appManifestPath; context = 'App manifest path' },
+        [pscustomobject]@{ relative = [string]$Policy.marketplacePath; context = 'Marketplace manifest path' }
+    )
+
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    foreach ($reserved in $reservedPaths) {
+        $current = $rootFull
+        $parts = @(([string]$reserved.relative) -split '/')
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $expectedName = [string]$parts[$index]
+            $matches = @(Get-ChildItem -Force -LiteralPath $current -ErrorAction Stop | Where-Object {
+                [string]::Equals([string]$_.Name, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+            foreach ($match in $matches) {
+                $matchPath = [System.IO.Path]::GetFullPath($match.FullName)
+                [void](Assert-AdapterNoReparsePath -Path $matchPath -Root $rootFull -Context $reserved.context)
+                if ([string]$match.Name -cne $expectedName) {
+                    throw "BLOCK: $($reserved.context) contains noncanonical case alias '$($match.Name)' for '$expectedName'."
+                }
+            }
+            $exact = @($matches | Where-Object { [string]$_.Name -ceq $expectedName })
+            if ($exact.Count -eq 0) { break }
+            if ($index -lt ($parts.Count - 1)) {
+                if (-not $exact[0].PSIsContainer) { break }
+                $current = [System.IO.Path]::GetFullPath($exact[0].FullName)
+            }
+        }
+    }
+}
+
 function Assert-AdapterPortablePathSegment {
     param(
         [Parameter(Mandatory = $true)][string] $Segment,
@@ -620,6 +615,22 @@ function Resolve-AdapterRelativePath {
         if (Test-Path -LiteralPath $current) { Assert-AdapterNoReparsePoint -Path $current -Context $Context }
     }
     return $fullPath
+}
+
+function Assert-AdapterDeclaredSkillPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-AdapterString -Value $Value -Context $Context
+    if ([string]$Value -notmatch '^\./skills/[a-z0-9]+(?:-[a-z0-9]+)*$') {
+        throw "BLOCK: $Context must use the canonical ./skills/<stable-id> path."
+    }
+    $skillId = [string]$Value.Substring(9)
+    if ($skillId.Length -gt 64) {
+        throw "BLOCK: $Context stable Skill ID exceeds 64 characters."
+    }
 }
 
 function Assert-AdapterSafeName {
@@ -790,19 +801,18 @@ function Invoke-UpstreamAdapterValidation {
     $rootFull = [System.IO.Path]::GetFullPath($rootItem.FullName)
     $surfaces = [System.Collections.Generic.List[string]]::new()
     $bundledSkillInventories = [System.Collections.Generic.List[object]]::new()
+    $pluginManifestPresent = $false
+    $pluginHasCapability = $false
     $approvedMarketplaceRepositories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($repository in @($Policy.approvedMarketplaceRepositories)) {
         [void]$approvedMarketplaceRepositories.Add([string]$repository)
     }
 
-    foreach ($rootEntry in @(Get-ChildItem -Force -LiteralPath $rootFull -ErrorAction Stop)) {
-        if ([string]::Equals([string]$rootEntry.Name, 'hooks', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "BLOCK: Plugin hooks path '$($rootEntry.Name)' is not adopted by Standard v1."
-        }
-    }
+    Assert-AdapterReservedSurfacePaths -Root $rootFull -Policy $Policy
 
     $pluginPath = Join-Path $rootFull $Policy.pluginManifestPath
     if (Test-AdapterOptionalFile -Path $pluginPath) {
+        $pluginManifestPresent = $true
         $surfaces.Add('plugin')
         [void](Assert-AdapterNoReparsePath -Path $pluginPath -Root $rootFull -Context 'Plugin manifest')
         $plugin = Read-AdapterJson -Path $pluginPath -Context 'Plugin manifest'
@@ -818,11 +828,13 @@ function Invoke-UpstreamAdapterValidation {
         $skills = Get-AdapterProperty -Object $plugin -Name 'skills'
         if ($null -ne $skills) {
             Assert-AdapterStringArray -Value $skills -Context 'Plugin manifest skills' -Ordinal
+            if (@($skills).Count -gt 0) { $pluginHasCapability = $true }
             $packageNfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
             $packageAsciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
             $packageTargetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
             $declaredSkills = New-Object 'System.Collections.Generic.List[object]'
             foreach ($skillPathValue in @($skills)) {
+                Assert-AdapterDeclaredSkillPath -Value $skillPathValue -Context 'Plugin manifest skill path'
                 $skillPath = Resolve-AdapterRelativePath -Value $skillPathValue -Root $rootFull -Context 'Plugin manifest skill path'
                 if (-not (Test-Path -LiteralPath $skillPath -PathType Container)) { throw "Plugin manifest skill path is missing: $skillPathValue" }
                 $skillMdPath = Join-Path $skillPath 'SKILL.md'
@@ -860,7 +872,10 @@ function Invoke-UpstreamAdapterValidation {
             }
         }
         $pluginMcp = Get-AdapterProperty -Object $plugin -Name 'mcpServers'
-        if ($null -ne $pluginMcp) { Assert-AdapterMcpServers -Servers $pluginMcp -Policy $Policy -Root $rootFull -Context 'Plugin manifest MCP servers' }
+        if ($null -ne $pluginMcp) {
+            Assert-AdapterMcpServers -Servers $pluginMcp -Policy $Policy -Root $rootFull -Context 'Plugin manifest MCP servers'
+            if (@($pluginMcp.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
+        }
         $pluginApps = Get-AdapterProperty -Object $plugin -Name 'apps'
         if ($null -ne $pluginApps) { Assert-AdapterApps -Apps $pluginApps -Policy $Policy -Context 'Plugin manifest apps' }
     }
@@ -874,6 +889,7 @@ function Invoke-UpstreamAdapterValidation {
         $servers = Get-AdapterProperty -Object $mcp -Name 'mcpServers'
         if ($null -eq $servers) { throw 'MCP manifest is missing mcpServers.' }
         Assert-AdapterMcpServers -Servers $servers -Policy $Policy -Root $rootFull -Context 'MCP manifest'
+        if ($pluginManifestPresent -and @($servers.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
     }
 
     $appPath = Join-Path $rootFull $Policy.appManifestPath
@@ -937,6 +953,9 @@ function Invoke-UpstreamAdapterValidation {
         }
     }
 
+    if ($pluginManifestPresent -and -not $pluginHasCapability) {
+        throw 'BLOCK: Plugin package must declare at least one Skill or MCP server capability.'
+    }
     $status = if ($surfaces.Count -eq 0) { 'not-applicable' } else { 'passed' }
     return [ordered]@{
         schemaVersion = 1
