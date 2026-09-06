@@ -635,6 +635,12 @@ function New-AgentEnvironmentRecoveryConcurrentResult {
     }
 }
 
+function Remove-AgentEnvironmentRecoveryJournal {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $Path) { throw 'Agent environment recovery journal remained after cleanup.' }
+}
+
 function Get-AgentEnvironmentCatalogNames {
     param([object] $Catalog)
     $names = @{}
@@ -952,9 +958,30 @@ function Invoke-UserSkillsReconciliation {
             Write-AgentEnvironmentJson -Root $home -RelativePath $journalRelative -Document $journal
         }
         catch {
-            if (Test-Path -LiteralPath $journalPath) { Remove-Item -LiteralPath $journalPath -Force -ErrorAction SilentlyContinue }
-            if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue }
-            throw "Agent environment transaction preparation failed: $($_.Exception.Message)"
+            $preparationError = $_
+            $journalCleanupError = $null
+            $backupCleanupError = $null
+            if (Test-Path -LiteralPath $journalPath) {
+                try { Remove-AgentEnvironmentRecoveryJournal -Path $journalPath }
+                catch { $journalCleanupError = $_ }
+            }
+            if ($null -eq $journalCleanupError -and (Test-Path -LiteralPath $backupRoot)) {
+                try {
+                    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $backupRoot) { throw 'Agent environment transaction backup remained after cleanup.' }
+                }
+                catch { $backupCleanupError = $_ }
+            }
+            if ($null -ne $journalCleanupError) {
+                $evidence = "Transaction preparation failed: $($preparationError.Exception.Message) Recovery journal cleanup failed: $($journalCleanupError.Exception.Message)"
+                $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'recovery-required' -SkillId 'transaction' -Path $journalRelative -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence $evidence -DestructiveChangeAllowed $false -BackupCreated $true -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation @('Run -Recover after verifying the retained journal and backup.','Do not start another reconciliation while recovery is required.')))
+                $transactionFailures = @([string]$preparationError.Exception.Message,[string]$journalCleanupError.Exception.Message)
+                return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed $transactionFailures -RollbackState 'recovery-required' -BackupPath $backupRoot -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
+            }
+            if ($null -ne $backupCleanupError) {
+                throw "Agent environment transaction preparation failed: $($preparationError.Exception.Message) Backup cleanup failed: $($backupCleanupError.Exception.Message)"
+            }
+            throw "Agent environment transaction preparation failed: $($preparationError.Exception.Message)"
         }
         $mutationCount = 0
         $failurePhase = 'mutation'
@@ -1001,8 +1028,7 @@ function Invoke-UserSkillsReconciliation {
                 if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Managed Skill cleanup found a reparse point: $directoryPath" }
                 if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) { Remove-Item -LiteralPath $directoryPath -Force }
             }
-            Remove-Item -LiteralPath $journalPath -Force -ErrorAction Stop
-            if (Test-Path -LiteralPath $journalPath) { throw 'Agent environment recovery journal remained after cleanup.' }
+            Remove-AgentEnvironmentRecoveryJournal -Path $journalPath
             return New-AgentEnvironmentResult -Outcome 'applied' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath $backupRoot -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
         }
         catch {
@@ -1016,8 +1042,7 @@ function Invoke-UserSkillsReconciliation {
             }
             if ($rollbackErrors.Count -eq 0) {
                 try {
-                    Remove-Item -LiteralPath $journalPath -Force -ErrorAction Stop
-                    if (Test-Path -LiteralPath $journalPath) { throw 'Agent environment recovery journal remained after cleanup.' }
+                    Remove-AgentEnvironmentRecoveryJournal -Path $journalPath
                 }
                 catch { $rollbackErrors.Add("Recovery journal cleanup failed: $($_.Exception.Message)") }
             }
@@ -1071,15 +1096,21 @@ function Invoke-UserSkillsRecovery {
         try { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
         catch [System.IO.IOException] { return New-AgentEnvironmentRecoveryConcurrentResult }
         $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
-        Assert-AgentEnvironmentExactProperties -Object $journal -Required @('schemaVersion','transactionId','userHome','backupPath','phase','desiredManifestSha256','desiredInventorySha256','states') -Context 'Agent environment recovery journal'
+        $legacyJournalProperties = @('schemaVersion','userHome','backupPath','states')
+        $canonicalJournalProperties = @('schemaVersion','transactionId','userHome','backupPath','phase','desiredManifestSha256','desiredInventorySha256','states')
+        $actualJournalProperties = @($journal.PSObject.Properties.Name)
+        $isLegacyJournal = $actualJournalProperties.Count -eq $legacyJournalProperties.Count -and @($legacyJournalProperties | Where-Object { $actualJournalProperties -cnotcontains $_ }).Count -eq 0
+        $isCanonicalJournal = $actualJournalProperties.Count -eq $canonicalJournalProperties.Count -and @($canonicalJournalProperties | Where-Object { $actualJournalProperties -cnotcontains $_ }).Count -eq 0
+        if (-not $isLegacyJournal -and -not $isCanonicalJournal) { throw 'Agent environment recovery journal property set is invalid.' }
         if (($journal.schemaVersion -isnot [int] -and $journal.schemaVersion -isnot [long]) -or [long]$journal.schemaVersion -ne 1 -or
-            $journal.transactionId -isnot [string] -or [string]$journal.transactionId -cnotmatch '^[0-9a-f]{32}$' -or
             $journal.userHome -isnot [string] -or -not [string]::Equals([string]$journal.userHome,$home,[System.StringComparison]::Ordinal) -or
             $journal.backupPath -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$journal.backupPath) -or
-            $journal.phase -isnot [string] -or @('prepared','mutating') -cnotcontains [string]$journal.phase -or
-            $journal.desiredManifestSha256 -isnot [string] -or [string]$journal.desiredManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-            $journal.desiredInventorySha256 -isnot [string] -or [string]$journal.desiredInventorySha256 -cnotmatch '^[0-9a-f]{64}$' -or
-            $journal.states -isnot [System.Array] -or @($journal.states).Count -eq 0) {
+            $journal.states -isnot [System.Array] -or @($journal.states).Count -eq 0 -or
+            ($isCanonicalJournal -and (
+                $journal.transactionId -isnot [string] -or [string]$journal.transactionId -cnotmatch '^[0-9a-f]{32}$' -or
+                $journal.phase -isnot [string] -or @('prepared','mutating') -cnotcontains [string]$journal.phase -or
+                $journal.desiredManifestSha256 -isnot [string] -or [string]$journal.desiredManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $journal.desiredInventorySha256 -isnot [string] -or [string]$journal.desiredInventorySha256 -cnotmatch '^[0-9a-f]{64}$'))) {
             throw 'Agent environment recovery journal identity or type contract is invalid.'
         }
         $journalBackupRoot = Assert-AgentEnvironmentBackupDirectorySafe -Root $home -Path ([string]$journal.backupPath)
@@ -1089,7 +1120,13 @@ function Invoke-UserSkillsRecovery {
         $seenRelativePaths = New-Object 'System.Collections.Generic.HashSet[string]' $pathComparer
         $validatedStates = New-Object System.Collections.Generic.List[object]
         foreach ($state in @($journal.states)) {
-            Assert-AgentEnvironmentExactProperties -Object $state -Required @('relativePath','existed','backupPath','originalSha256','backupSha256','appliedSha256') -Context 'Agent environment recovery state'
+            $stateProperties = if ($isLegacyJournal) {
+                @('relativePath','existed','backupPath','originalSha256','appliedSha256')
+            }
+            else {
+                @('relativePath','existed','backupPath','originalSha256','backupSha256','appliedSha256')
+            }
+            Assert-AgentEnvironmentExactProperties -Object $state -Required $stateProperties -Context 'Agent environment recovery state'
             if ($state.relativePath -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$state.relativePath) -or
                 $state.existed -isnot [bool] -or -not $seenRelativePaths.Add([string]$state.relativePath)) {
                 throw 'Agent environment recovery state path or type contract is invalid.'
@@ -1107,7 +1144,7 @@ function Invoke-UserSkillsRecovery {
             if ([bool]$state.existed) {
                 if ($state.backupPath -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$state.backupPath) -or
                     $state.originalSha256 -isnot [string] -or [string]$state.originalSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                    $state.backupSha256 -isnot [string] -or [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                    (-not $isLegacyJournal -and ($state.backupSha256 -isnot [string] -or [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$'))) {
                     throw "Agent environment recovery state has invalid original backup metadata: $relative"
                 }
                 $stateBackupPath = Assert-AgentEnvironmentBackupFileSafe -Root $home -Path ([string]$state.backupPath)
@@ -1120,7 +1157,7 @@ function Invoke-UserSkillsRecovery {
                 if (-not [string]::Equals($validatedBackupSha256,[string]$state.originalSha256,[System.StringComparison]::Ordinal)) {
                     throw "Agent environment recovery state backup SHA-256 does not match its journaled original: $relative"
                 }
-                if (-not [string]::Equals($validatedBackupSha256,[string]$state.backupSha256,[System.StringComparison]::Ordinal)) {
+                if (-not $isLegacyJournal -and -not [string]::Equals($validatedBackupSha256,[string]$state.backupSha256,[System.StringComparison]::Ordinal)) {
                     throw "Agent environment recovery state backup SHA-256 does not match its journaled backup identity: $relative"
                 }
             }
@@ -1142,7 +1179,7 @@ function Invoke-UserSkillsRecovery {
             }
             Assert-AgentEnvironmentOriginalState -Root $home -State $validatedState.State
         }
-        Remove-Item -LiteralPath $journalPath -Force
+        Remove-AgentEnvironmentRecoveryJournal -Path $journalPath
         return [pscustomobject][ordered]@{ schemaVersion=1; outcome='recovered'; exitCode=0; rollbackState='completed'; backupPath=[string]$journal.backupPath }
     }
     catch {

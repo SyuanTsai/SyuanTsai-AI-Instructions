@@ -2005,11 +2005,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle contract must prevent mutable staging TOCTOU writes.'
         Assert-Match $lifecycle 'post-install' 'Lifecycle contract must require post-install verification.'
         Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema title must remain bound to v1.'
-        Assert-Equal @($schema.oneOf).Count 3 'Lifecycle evidence schema must distinguish ownership, failure, and transaction journal records.'
+        Assert-Equal @($schema.oneOf).Count 4 'Lifecycle evidence schema must distinguish ownership, failure, current transaction journal, and legacy transaction journal records.'
         $schemaReferences = @($schema.oneOf | ForEach-Object { [string]$_.PSObject.Properties['$ref'].Value })
         Assert-True ($schemaReferences -ccontains '#/$defs/ownershipEvidence') 'Lifecycle evidence schema must expose ownership records.'
         Assert-True ($schemaReferences -ccontains '#/$defs/failureDetail') 'Lifecycle evidence schema must expose failure records.'
         Assert-True ($schemaReferences -ccontains '#/$defs/transactionJournal') 'Lifecycle evidence schema must expose transaction journals.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/legacyTransactionJournal') 'Lifecycle evidence schema must expose the predecessor transaction journal shape for upgrade recovery.'
         Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredManifestSha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired manifest SHA-256.'
         Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredInventorySha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired inventory SHA-256.'
         Assert-Equal $schema.'$defs'.requiredSha256.type 'string' 'Required transaction SHA-256 values must reject null.'
@@ -2034,6 +2035,25 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             states=@($existingState)
         }
         Assert-AuthoritySchemaInstance -Value $journal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'A pre-existing target with complete backup metadata must validate.'
+
+        $legacyJournal = [pscustomobject][ordered]@{
+            schemaVersion=1; userHome='C:\Users\fixture'
+            backupPath='C:\Users\fixture\.agents\backups\tx'
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true
+                backupPath='C:\Users\fixture\.agents\backups\tx\.agents\skills\alpha\SKILL.md'
+                originalSha256=('c' * 64); appliedSha256=('d' * 64)
+            })
+        }
+        Assert-AuthoritySchemaInstance -Value $legacyJournal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'The predecessor v1 recovery journal shape must remain recoverable after runtime upgrade.'
+
+        $legacyOutsideScope = Copy-TestJsonObject $legacyJournal
+        $legacyOutsideScope.states[0].relativePath = 'outside/product.txt'
+        Assert-AuthoritySchemaInstance -Value $legacyOutsideScope -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A legacy transaction journal must reject a state outside the managed consumer scope.'
+
+        $outsideScope = Copy-TestJsonObject $journal
+        $outsideScope.states[0].relativePath = 'outside/product.txt'
+        Assert-AuthoritySchemaInstance -Value $outsideScope -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A current transaction journal must reject a state outside the managed consumer scope.'
 
         $journalWithWhitespaceBackupPath = Copy-TestJsonObject $journal
         $journalWithWhitespaceBackupPath.backupPath = '   '

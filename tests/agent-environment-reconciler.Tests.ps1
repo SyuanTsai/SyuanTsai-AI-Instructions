@@ -420,6 +420,66 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $journalPath | Should Be $false
     }
 
+    # Scenario: A runtime upgrade encounters a valid predecessor v1 recovery journal without current transaction metadata.
+    # Purpose: Preserve crash recovery across runtime upgrades while retaining the current managed-path and backup-integrity boundaries.
+    It 'InterT65_recovers_a_preupgrade_v1_journal_after_runtime_update' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backup = Join-Path $userHome '.agents\backups\recovery-legacy-v1\.agents\skills\alpha\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),(Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        [System.IO.File]::WriteAllText($backup,'original')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
+            backupPath=$backupRoot
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+                originalSha256=$originalSha; appliedSha256=$appliedSha
+            })
+        }
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+
+        $result.outcome | Should Be 'recovered'
+        [System.IO.File]::ReadAllText($target) | Should Be 'original'
+        Test-Path -LiteralPath $journalPath | Should Be $false
+    }
+
+    # Scenario: Recovery restores the target but cannot remove the predecessor or current recovery journal.
+    # Purpose: Verify recovery cleanup failures are structured as recovery-required instead of returning a false recovered success.
+    It 'InterT66_reports_recovery_required_when_recovery_journal_cleanup_fails' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backup = Join-Path $userHome '.agents\backups\recovery-cleanup-failure\.agents\skills\alpha\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),(Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        [System.IO.File]::WriteAllText($backup,'original')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+        })
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+        try {
+            Mock Remove-AgentEnvironmentRecoveryJournal { throw 'Injected recovery journal cleanup failure.' } -ModuleName agent-environment-reconciler
+
+            $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        }
+        finally {
+            Import-Module $script:ModulePath -Force
+        }
+
+        Assert-TestRecoveryFailureResult -Result $result
+        [System.IO.File]::ReadAllText($target) | Should Be 'original'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
+    }
+
     It 'rejects a tampered recovery backup without replacing the applied target or deleting the journal' {
         $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
         $backup = Join-Path $userHome '.agents\backups\recovery-tampered\.agents\skills\alpha\SKILL.md'
