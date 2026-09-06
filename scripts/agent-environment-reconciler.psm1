@@ -1001,7 +1001,8 @@ function Invoke-UserSkillsReconciliation {
                 if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Managed Skill cleanup found a reparse point: $directoryPath" }
                 if (@(Get-ChildItem -LiteralPath $directoryPath -Force).Count -eq 0) { Remove-Item -LiteralPath $directoryPath -Force }
             }
-            Remove-Item -LiteralPath $journalPath -Force
+            Remove-Item -LiteralPath $journalPath -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $journalPath) { throw 'Agent environment recovery journal remained after cleanup.' }
             return New-AgentEnvironmentResult -Outcome 'applied' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath $backupRoot -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
         }
         catch {
@@ -1012,6 +1013,13 @@ function Invoke-UserSkillsReconciliation {
             foreach ($state in $reverseStates) {
                 try { Restore-AgentEnvironmentFileState -Root $home -State $state }
                 catch { $rollbackErrors.Add("$($state.relativePath): $($_.Exception.Message)") }
+            }
+            if ($rollbackErrors.Count -eq 0) {
+                try {
+                    Remove-Item -LiteralPath $journalPath -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $journalPath) { throw 'Agent environment recovery journal remained after cleanup.' }
+                }
+                catch { $rollbackErrors.Add("Recovery journal cleanup failed: $($_.Exception.Message)") }
             }
             $failureCode = if ($rollbackErrors.Count -gt 0) {
                 'recovery-required'
@@ -1035,7 +1043,6 @@ function Invoke-UserSkillsReconciliation {
                 @('Review the failed mutation evidence and retry from the unchanged original state.')
             }
             $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code $failureCode -SkillId 'transaction' -Path $journalRelative -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence $evidence -DestructiveChangeAllowed $false -BackupCreated $true -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation $remediation))
-            if ($rollbackErrors.Count -eq 0) { Remove-Item -LiteralPath $journalPath -Force -ErrorAction SilentlyContinue }
             $transactionFailures = @($failed.ToArray()) + @([string]$applyError.Exception.Message)
             return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed $transactionFailures -RollbackState $rollbackState -BackupPath $backupRoot -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
         }

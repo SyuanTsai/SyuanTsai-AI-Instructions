@@ -341,6 +341,41 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false
     }
 
+    # Scenario: Rollback restores every transaction state, but the recovery journal cannot be deleted.
+    # Purpose: Verify the retained journal changes the result to recovery-required instead of falsely reporting completed rollback.
+    It 'InterT26_reports_recovery_required_when_rollback_journal_cleanup_fails' {
+        $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $global:AgentEnvironmentTestJournalCleanupPath = $journalPath
+        try {
+            Mock Remove-Item {
+                param([string[]] $Path, [string[]] $LiteralPath, [switch] $Recurse)
+                foreach ($requestedPath in @($LiteralPath) + @($Path)) {
+                    if ([string]::IsNullOrWhiteSpace([string]$requestedPath)) { continue }
+                    if ([string]::Equals([string]$requestedPath,[string]$global:AgentEnvironmentTestJournalCleanupPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Injected recovery journal cleanup failure.'
+                    }
+                    if ([System.IO.File]::Exists([string]$requestedPath)) { [System.IO.File]::Delete([string]$requestedPath) }
+                    elseif ([System.IO.Directory]::Exists([string]$requestedPath)) { [System.IO.Directory]::Delete([string]$requestedPath,[bool]$Recurse) }
+                }
+            } -ModuleName agent-environment-reconciler
+
+            $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
+        }
+        finally {
+            Remove-Variable -Name AgentEnvironmentTestJournalCleanupPath -Scope Global -ErrorAction SilentlyContinue
+            Import-Module $script:ModulePath -Force
+        }
+
+        $failed.outcome | Should Be 'failed'
+        $failed.rollbackState | Should Be 'recovery-required'
+        @($failed.failureDetails | Where-Object { $_.code -eq 'recovery-required' }).Count | Should Be 1
+        ($failed.failureDetails[0].evidence) | Should Match 'Recovery journal cleanup failed'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
+    }
+
     It 'reports drift in VerifyOnly and a plan in WhatIf without writing' {
         $desired = New-TestDesiredState -Root $staging
         (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode VerifyOnly).outcome | Should Be 'drift'
