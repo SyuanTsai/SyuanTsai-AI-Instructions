@@ -2031,6 +2031,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $existingWithoutBackup.states[0].backupPath = $null
         Assert-AuthoritySchemaInstance -Value $existingWithoutBackup -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target without backup metadata must fail closed.'
 
+        $existingWithWhitespaceBackupPath = Copy-TestJsonObject $journal
+        $existingWithWhitespaceBackupPath.states[0].backupPath = '   '
+        Assert-AuthoritySchemaInstance -Value $existingWithWhitespaceBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target with a whitespace-only backup path must fail closed.'
+
         $existingWithoutOriginalHash = Copy-TestJsonObject $journal
         $existingWithoutOriginalHash.states[0].originalSha256 = $null
         Assert-AuthoritySchemaInstance -Value $existingWithoutOriginalHash -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target without an original hash must fail closed.'

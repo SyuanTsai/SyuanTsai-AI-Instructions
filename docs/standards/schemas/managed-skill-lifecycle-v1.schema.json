@@ -148,7 +148,7 @@
           "then": {
             "type": "object",
             "properties": {
-              "backupPath": { "type": "string", "minLength": 1 },
+              "backupPath": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
               "originalSha256": { "$ref": "#/$defs/requiredSha256" },
               "backupSha256": { "$ref": "#/$defs/requiredSha256" }
             }
