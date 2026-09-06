@@ -95,6 +95,16 @@ function Assert-TestRecoveryFailureResult {
     @($Result.ownership)[0].operation | Should Be 'observe'
 }
 
+function Assert-TestRecoveryConcurrentResult {
+    param([Parameter(Mandatory = $true)][object] $Result)
+    $Result.outcome | Should Be 'concurrent'
+    [int]$Result.exitCode | Should Be 3
+    $Result.rollbackState | Should Be 'not-started'
+    @($Result.failed).Count | Should Be 1
+    @($Result.failureDetails).Count | Should Be 0
+    @($Result.ownership).Count | Should Be 0
+}
+
 Describe 'user-scoped Agent Skills reconciliation' {
     BeforeEach {
         $userHome = Join-Path $TestDrive ('home-' + [Guid]::NewGuid().ToString('N'))
@@ -497,6 +507,22 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Assert-TestRecoveryFailureResult -Result $result
         [System.IO.File]::ReadAllText($target) | Should Be 'applied'
         Test-Path -LiteralPath $journalPath | Should Be $true
+    }
+
+    It 'returns concurrent when the recovery global lock is already held' {
+        $backupRoot = Join-Path $userHome '.agents\backups\recovery-concurrent'
+        $agentsRoot = Join-Path $userHome '.agents'
+        New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        [System.IO.File]::WriteAllText($journalPath,'{}')
+        $lockPath = Join-Path $agentsRoot 'update-agent-environment.lock'
+        $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $result = Invoke-UserSkillsRecovery -UserHome $userHome
+            Assert-TestRecoveryConcurrentResult -Result $result
+        }
+        finally { $stream.Dispose() }
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
 }
 

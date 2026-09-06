@@ -626,6 +626,15 @@ function New-AgentEnvironmentRecoveryFailureResult {
     }
 }
 
+function New-AgentEnvironmentRecoveryConcurrentResult {
+    return [pscustomobject][ordered]@{
+        schemaVersion=1; outcome='concurrent'; exitCode=3; catalogCommit=$null; catalogLockSha256=$null
+        installed=@(); updated=@(); removed=@(); preserved=@(); failed=@('Another Agent environment update is already running.')
+        failureDetails=@(); ownership=@()
+        rollbackState='not-started'; backupPath=$null; licenseWarnings=@()
+    }
+}
+
 function Get-AgentEnvironmentCatalogNames {
     param([object] $Catalog)
     $names = @{}
@@ -1053,7 +1062,7 @@ function Invoke-UserSkillsRecovery {
             if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
         }
         try { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
-        catch [System.IO.IOException] { throw 'Another Agent environment update is already running.' }
+        catch [System.IO.IOException] { return New-AgentEnvironmentRecoveryConcurrentResult }
         $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
         Assert-AgentEnvironmentExactProperties -Object $journal -Required @('schemaVersion','transactionId','userHome','backupPath','phase','desiredManifestSha256','desiredInventorySha256','states') -Context 'Agent environment recovery journal'
         if (($journal.schemaVersion -isnot [int] -and $journal.schemaVersion -isnot [long]) -or [long]$journal.schemaVersion -ne 1 -or
