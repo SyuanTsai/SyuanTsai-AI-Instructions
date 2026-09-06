@@ -54,6 +54,25 @@ function Assert-AuthorityUpstreamAdapterReport {
         $decision -isnot [string] -or [string]$decision -notin @('PASS', 'NOT_APPLICABLE')) {
         throw 'upstream adapter validation produced an invalid result.'
     }
+    if ([string]$status -ceq 'passed') {
+        $surfaces = Get-AuthorityRequiredProperty -Object $Report -Name 'surfaces' -Context 'Upstream adapter report'
+        $bundledSkills = Get-AuthorityRequiredProperty -Object $Report -Name 'bundledSkills' -Context 'Upstream adapter report'
+        if ($surfaces -isnot [array] -or @($surfaces).Count -eq 0 -or
+            $bundledSkills -isnot [array] -or @($bundledSkills).Count -eq 0) {
+            throw 'A passed upstream adapter report must include surfaces and bundled Skill inventories.'
+        }
+        foreach ($bundledSkill in @($bundledSkills)) {
+            $bundledPath = Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'path' -Context 'Upstream adapter bundled Skill'
+            $inventory = Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'inventory' -Context 'Upstream adapter bundled Skill'
+            if ($bundledPath -isnot [string] -or [string]::IsNullOrWhiteSpace($bundledPath)) {
+                throw 'A passed upstream adapter report contains a malformed bundled Skill path.'
+            }
+            if ($inventory -isnot [array] -or @($inventory).Count -eq 0) {
+                throw "Upstream adapter bundled Skill '$bundledPath' must contain a non-empty inventory."
+            }
+            Assert-AuthorityExactPathInventory -Value $inventory -Expected @($inventory) -Context "Upstream adapter bundled Skill '$bundledPath'" | Out-Null
+        }
+    }
     return $true
 }
 
@@ -477,6 +496,29 @@ function Test-AuthorityPathEqual {
         [System.IO.Path]::GetFullPath($Right),
         $comparison
     )
+}
+
+function Assert-AuthorityExactPathInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $observed = @($Value)
+    if ($Value -isnot [array] -or $observed.Count -ne $Expected.Count) {
+        throw "$Context does not match the exact expected inventory."
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($path in $observed) {
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace($path) -or -not $seen.Add([string]$path)) {
+            throw "$Context contains a duplicate or malformed path."
+        }
+    }
+    foreach ($path in $Expected) {
+        if (-not $seen.Contains([string]$path)) { throw "$Context is missing '$path'." }
+    }
+    return $true
 }
 
 function Resolve-AuthorityReportedFilePath {
@@ -1062,11 +1104,17 @@ if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
 # no optional upstream metadata.
 $upstreamAdapterFixtureRoot = Join-Path $runRoot 'fixture/upstream-adapter-fixture'
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin') -Force)
-[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill') -Force)
+$upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill'
+[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'agents') -Force)
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins') -Force)
 [System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill/SKILL.md'),
+    (Join-Path $upstreamAdapterSkillRoot 'SKILL.md'),
     "---`nname: adapter-fixture-skill`ndescription: A deterministic upstream adapter fixture Skill.`n---`n`n# Adapter Fixture`n",
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml'),
+    "interface:`n  display_name: `"Adapter Fixture Skill`"`n  short_description: `"Validate one deterministic upstream adapter Skill.`"`n  default_prompt: `"Use `$adapter-fixture-skill to verify the upstream adapter.`"`n",
     (New-Object Text.UTF8Encoding($false))
 )
 [System.IO.File]::WriteAllText(
@@ -1094,6 +1142,12 @@ $upstreamAdapterFixtureRoot = Join-Path $runRoot 'fixture/upstream-adapter-fixtu
     ('{"plugins":[{"name":"adapter-fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}'),
     (New-Object Text.UTF8Encoding($false))
 )
+Assert-AuthorityFixtureContract -FixtureRoot $upstreamAdapterSkillRoot -ExpectedSkillId 'adapter-fixture-skill'
+$upstreamAdapterSkillFiles = @(
+    [pscustomobject][ordered]@{ path = 'SKILL.md'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'SKILL.md')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml')).Hash.ToLowerInvariant() }
+)
+$upstreamAdapterSkillInventoryPaths = @($upstreamAdapterSkillFiles | ForEach-Object { [string]$_.path })
 
 # Stage 3: Package Validation. The optional upstream adapter and both package tools
 # must pass before any SkillSpector scan or repository test can run.
@@ -1119,9 +1173,23 @@ foreach ($surface in @('plugin', 'mcp', 'app', 'marketplace')) {
     }
 }
 
+$bundledSkills = Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'bundledSkills' -Context 'upstream adapter validation'
+if ($bundledSkills -isnot [array] -or @($bundledSkills).Count -ne 1) {
+    throw 'upstream adapter validation must report exactly one declared bundled Skill for the controlled fixture.'
+}
+$bundledSkill = @($bundledSkills)[0]
+$bundledSkillPath = Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'path' -Context 'upstream adapter bundled Skill inventory'
+if ($bundledSkillPath -isnot [string] -or [string]$bundledSkillPath -cne './skills/adapter-fixture-skill') {
+    throw 'upstream adapter bundled Skill inventory is not bound to the controlled Plugin declaration.'
+}
+Assert-AuthorityExactPathInventory `
+    -Value (Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'inventory' -Context 'upstream adapter bundled Skill inventory') `
+    -Expected $upstreamAdapterSkillInventoryPaths `
+    -Context 'upstream adapter bundled Skill inventory' | Out-Null
+
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
-    -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $fixtureRoot) `
+    -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $upstreamAdapterSkillRoot) `
     -Context 'skill-validator package validation' `
     -DiagnosticRoot $runRoot
 $skillValidatorOutputPath = Join-Path $runRoot 'skill-validator-report.json'
@@ -1129,12 +1197,12 @@ $skillValidatorOutputPath = Join-Path $runRoot 'skill-validator-report.json'
 $skillValidatorReport = Read-AuthorityJson -Path $skillValidatorOutputPath -Context 'skill-validator package validation'
 Assert-AuthoritySkillValidatorReport `
     -Report $skillValidatorReport `
-    -ExpectedFixtureRoot $fixtureRoot `
-    -ExpectedInventoryPaths @($fixtureFiles.path)
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
 
 $skillToolsOutput = Invoke-AuthorityExternalCommand `
     -Command $skillToolsNode `
-    -Arguments @($skillToolsEntryPoint, 'check', $fixtureRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
+    -Arguments @($skillToolsEntryPoint, 'check', $upstreamAdapterSkillRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
     -Context 'skill-tools package validation' `
     -DiagnosticRoot $runRoot
 $skillToolsOutputPath = Join-Path $runRoot 'skill-tools-report.sarif.json'
@@ -1142,22 +1210,22 @@ $skillToolsOutputPath = Join-Path $runRoot 'skill-tools-report.sarif.json'
 $skillToolsReport = Read-AuthorityJson -Path $skillToolsOutputPath -Context 'skill-tools package validation'
 Assert-AuthoritySkillToolsSarifReport `
     -Report $skillToolsReport `
-    -ExpectedFixtureRoot $fixtureRoot `
-    -ExpectedInventoryPaths @($fixtureFiles.path)
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
 
 # Stage 4: SkillSpector Static.
 $skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'
 [void](Invoke-AuthorityExternalCommand `
     -Command $executablePaths.skillspector `
-    -Arguments @('scan', $fixtureRoot, '--no-llm', '--format', 'json', '--output', $skillSpectorReportPath) `
+    -Arguments @('scan', $upstreamAdapterSkillRoot, '--no-llm', '--format', 'json', '--output', $skillSpectorReportPath) `
     -Context 'SkillSpector static scan' `
     -DiagnosticRoot $runRoot)
 $skillSpectorReport = Read-AuthorityJson -Path $skillSpectorReportPath -Context 'SkillSpector static scan'
 Assert-AuthoritySkillSpectorReport `
     -Report $skillSpectorReport `
-    -ExpectedFixtureRoot $fixtureRoot `
-    -ExpectedSkillId 'standard-validation-fixture' `
-    -ExpectedInventoryPaths @($fixtureFiles.path)
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedSkillId 'adapter-fixture-skill' `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
 
 # Stage 5: Repository Tests. Only repository/authority tests remain after the
 # deterministic package and static security stages have passed.
@@ -1192,6 +1260,11 @@ $summary = [ordered]@{
         inventorySha256 = $fixtureInventorySha256
         files = $fixtureFiles
     }
+    upstreamAdapterFixture = [ordered]@{
+        id = 'adapter-fixture-skill'
+        rootRelativePath = 'skills/adapter-fixture-skill'
+        files = $upstreamAdapterSkillFiles
+    }
     tools = @($expectedSources.Keys | ForEach-Object {
         $receipt = $receipts[$_]
         [ordered]@{
@@ -1204,10 +1277,10 @@ $summary = [ordered]@{
     stages = @(
         [ordered]@{
             name='package-validation'; result='passed'; exitCode=0; mode='upstream-adapter-skill-validator-skill-tools'
-            skillValidatorMode='structure-json-allow-agents'; skillToolsMode='sarif-check'
+            skillValidatorMode='structure-json-allow-agents-bundled-skill'; skillToolsMode='sarif-check-bundled-skill'
             reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-tools-report.sarif.json')
         },
-        [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm'; report='skillspector-report.json' },
+        [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm-bundled-skill'; report='skillspector-report.json' },
         [ordered]@{
             name='repository-tests'; result='passed'; exitCode=0; mode='authority-pester'
             reports=@(); total=[int]$authorityResult.TotalCount

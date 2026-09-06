@@ -370,7 +370,7 @@ function Assert-AdapterPolicy {
     $expectedFields = @(
         'schemaVersion', 'policy', 'pluginManifestPath', 'marketplacePath', 'mcpManifestPath', 'appManifestPath',
         'hooksPolicy', 'rootRelativePathPrefix', 'immutableGitShaPattern', 'acceptedMarketplaceSource',
-        'allowedRemoteMcpEndpoints', 'allowedPluginManifestFields', 'requiredPluginManifestFields',
+        'approvedMarketplaceRepositories', 'allowedRemoteMcpEndpoints', 'allowedPluginManifestFields', 'requiredPluginManifestFields',
         'allowedMarketplaceRootFields', 'allowedMarketplaceEntryFields', 'allowedMarketplaceSourceFields',
         'allowedMarketplacePolicyFields', 'allowedMcpRootFields', 'allowedMcpServerFields',
         'allowedAppRootFields', 'allowedAppFields'
@@ -387,6 +387,17 @@ function Assert-AdapterPolicy {
     Assert-AdapterExactString -Value $Policy.rootRelativePathPrefix -Expected './' -Context 'Root-relative path prefix'
     Assert-AdapterExactString -Value $Policy.immutableGitShaPattern -Expected '^[0-9a-f]{40}$' -Context 'Immutable Git SHA pattern'
     Assert-AdapterExactString -Value $Policy.acceptedMarketplaceSource -Expected 'github' -Context 'Marketplace source policy'
+    $approvedRepositories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    if ($Policy.approvedMarketplaceRepositories -isnot [array] -or @($Policy.approvedMarketplaceRepositories).Count -eq 0) {
+        throw 'Approved marketplace repositories must be a non-empty array.'
+    }
+    foreach ($repository in @($Policy.approvedMarketplaceRepositories)) {
+        Assert-AdapterString -Value $repository -Context 'Approved marketplace repository'
+        if ([string]$repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
+            -not $approvedRepositories.Add([string]$repository)) {
+            throw "Approved marketplace repository is malformed or duplicated: $repository"
+        }
+    }
     Assert-AdapterStringArray -Value @($Policy.allowedRemoteMcpEndpoints) -Context 'Allowed remote MCP endpoints' -AllowEmpty
     foreach ($endpoint in @($Policy.allowedRemoteMcpEndpoints)) {
         $canonicalEndpoint = Get-AdapterCanonicalEndpoint -Value $endpoint -Context 'Allowed remote MCP endpoint'
@@ -539,6 +550,47 @@ function Get-AdapterCanonicalEndpoint {
     return ('https://{0}{1}' -f [string]$uri.Authority.ToLowerInvariant(), $path)
 }
 
+function Get-AdapterSkillResourceInventory {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillPath,
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $skillFull = [System.IO.Path]::GetFullPath($SkillPath)
+    $skillItem = Get-Item -Force -LiteralPath $skillFull -ErrorAction Stop
+    if (-not $skillItem.PSIsContainer) { throw "$Context must be a directory: $SkillPath" }
+    [void](Assert-AdapterNoReparsePath -Path $skillFull -Root $Root -Context $Context)
+
+    $inventory = New-Object 'System.Collections.Generic.List[string]'
+    $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
+    $pendingDirectories.Push($skillFull)
+    while ($pendingDirectories.Count -gt 0) {
+        $directory = $pendingDirectories.Pop()
+        foreach ($item in @(Get-ChildItem -Force -LiteralPath $directory -ErrorAction Stop)) {
+            $itemPath = [System.IO.Path]::GetFullPath($item.FullName)
+            # Validate the entry before deciding whether to recurse into it.
+            # This prevents an unchecked symlink/junction from redirecting enumeration.
+            [void](Assert-AdapterNoReparsePath -Path $itemPath -Root $Root -Context "$Context resource")
+            if ($item.PSIsContainer) {
+                $pendingDirectories.Push($itemPath)
+                continue
+            }
+            [void](Assert-AdapterRegularFile -Path $itemPath -Context "$Context resource")
+            $relative = $itemPath.Substring($skillFull.Length).TrimStart(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            )
+            if ([string]::IsNullOrWhiteSpace($relative)) { throw "$Context contains an invalid resource path." }
+            $inventory.Add($relative.Replace('\', '/'))
+        }
+    }
+    if ($inventory.Count -eq 0) { throw "$Context must contain at least one regular file." }
+    $sorted = $inventory.ToArray()
+    [System.Array]::Sort($sorted, [StringComparer]::Ordinal)
+    return ,$sorted
+}
+
 function Assert-AdapterMcpServers {
     param(
         [Parameter(Mandatory = $true)] $Servers,
@@ -608,6 +660,11 @@ function Invoke-UpstreamAdapterValidation {
     }
     $rootFull = [System.IO.Path]::GetFullPath($rootItem.FullName)
     $surfaces = [System.Collections.Generic.List[string]]::new()
+    $bundledSkillInventories = [System.Collections.Generic.List[object]]::new()
+    $approvedMarketplaceRepositories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($repository in @($Policy.approvedMarketplaceRepositories)) {
+        [void]$approvedMarketplaceRepositories.Add([string]$repository)
+    }
 
     $hooksPath = Join-Path $rootFull 'hooks'
     if (Test-Path -LiteralPath $hooksPath) { throw 'BLOCK: Plugin hooks are not adopted by Standard v1.' }
@@ -635,6 +692,14 @@ function Invoke-UpstreamAdapterValidation {
                 $skillMdPath = Join-Path $skillPath 'SKILL.md'
                 if (-not (Test-Path -LiteralPath $skillMdPath)) { throw "BLOCK: Plugin Skill is missing SKILL.md: $skillPathValue" }
                 [void](Assert-AdapterRegularFile -Path $skillMdPath -Context 'Plugin Skill SKILL.md')
+                $skillInventory = Get-AdapterSkillResourceInventory `
+                    -SkillPath $skillPath `
+                    -Root $rootFull `
+                    -Context "Plugin Skill '$skillPathValue'"
+                $bundledSkillInventories.Add([ordered]@{
+                    path = [string]$skillPathValue
+                    inventory = @($skillInventory)
+                })
             }
         }
         $pluginMcp = Get-AdapterProperty -Object $plugin -Name 'mcpServers'
@@ -684,6 +749,12 @@ function Invoke-UpstreamAdapterValidation {
             Assert-AdapterExactString -Value $source.source -Expected $Policy.acceptedMarketplaceSource -Context 'Marketplace source type'
             Assert-AdapterString -Value $source.repo -Context 'Marketplace Git repository'
             if ([string]$source.repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'Marketplace Git repository must be owner/name.' }
+            if (-not $approvedMarketplaceRepositories.Contains([string]$source.repo)) {
+                throw "BLOCK: Marketplace repository '$($source.repo)' is not an approved central provenance identity."
+            }
+            if ([string]$source.path -cne './') {
+                throw 'BLOCK: Marketplace source.path must be exactly the package root ./.'
+            }
             Resolve-AdapterRelativePath -Value $source.path -Root $rootFull -Context 'Marketplace source.path' -AllowRoot | Out-Null
             Assert-AdapterString -Value $source.sha -Context 'Marketplace source.sha'
             if ([string]$source.sha -cnotmatch $Policy.immutableGitShaPattern) { throw 'BLOCK: Marketplace source must bind an immutable Git SHA.' }
@@ -716,6 +787,7 @@ function Invoke-UpstreamAdapterValidation {
         status = $status
         packageRoot = $rootFull
         surfaces = @($surfaces)
+        bundledSkills = @($bundledSkillInventories.ToArray())
         decision = if ($status -eq 'passed') { 'PASS' } else { 'NOT_APPLICABLE' }
     }
 }

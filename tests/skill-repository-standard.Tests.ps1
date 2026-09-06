@@ -1142,10 +1142,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
-        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$fixtureRoot)")) 'Shared gate must explicitly allow only the Standard-required agents metadata directory during skill-validator structure validation.'
-        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents'" 'Authority evidence must record the exact skill-validator compatibility mode.'
+        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$upstreamAdapterSkillRoot)")) 'Shared gate must explicitly validate the declared bundled Skill with the Standard-required agents metadata directory.'
+        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents-bundled-skill'" 'Authority evidence must record the exact bundled-Skill validator compatibility mode.'
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
-        Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$fixtureRoot' 'Shared gate must pass the frozen skill-tools entry point and check command without a wrapper re-resolution.'
+        Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$upstreamAdapterSkillRoot' 'Shared gate must pass the frozen skill-tools entry point and check command against the declared bundled Skill without a wrapper re-resolution.'
+        Assert-Match $gate 'Assert-AuthorityExactPathInventory' 'Shared gate must bind package-tool reports to the exact adapter Skill inventory.'
+        Assert-Match $gate '-ExpectedFixtureRoot \$upstreamAdapterSkillRoot' 'Shared gate must bind package-tool reports to the same adapter Skill root.'
         Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'
         Assert-Match $gate 'credentialIsolation=github-token-cleared-before-python' 'Shared gate must verify that resolver-managed Python did not inherit GitHub credentials.'
         Assert-Match $gate 'installedMetadataVerification=static-dist-info-metadata' 'Shared gate must verify static installed metadata inspection.'
@@ -2140,8 +2142,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'pluginManifestPath|marketplacePath|rootRelativePathPrefix' 'Upstream adapter validator must consume the central path/manifest policy.'
         Assert-Match $validatorText 'Assert-AdapterNoReparsePath' 'Upstream adapter validator must reject reparse-point manifest paths before reading package metadata.'
         Assert-Match $validatorText 'Assert-AdapterRegularFile' 'Upstream adapter validator must reject non-regular files before reading or executing package-local inputs.'
+        Assert-Match $validatorText 'Get-AdapterSkillResourceInventory|bundledSkills' 'Upstream adapter validator must inventory every declared bundled Skill resource.'
         Assert-Match $validatorText 'duplicate object key' 'Upstream adapter validator must reject duplicate JSON object keys before deserialization.'
         Assert-Match $validatorText 'allowedRemoteMcpEndpoints' 'Upstream adapter policy must approve exact MCP endpoints rather than hostnames.'
+        Assert-Match $validatorText 'approvedMarketplaceRepositories' 'Upstream adapter policy must bind marketplace repositories to approved provenance identities.'
+        Assert-Match $validatorText 'source\.path must be exactly' 'Marketplace source paths must be restricted to the reviewed package root.'
         Assert-Match $validatorText 'lstat|IsRegularFile' 'Upstream adapter validator must establish Unix regular-file type without opening special files.'
         Assert-Match $validatorText 'ReparsePoint|mkfifo|Mode' 'Upstream adapter validator and regression boundary must account for Windows reparse and Unix special-file inputs.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
@@ -2177,18 +2182,23 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $fixtureRoot = Join-Path $TestDrive 'upstream-adapter-valid'
         [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.codex-plugin') -Force)
         [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill/references') -Force)
         [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.agents/plugins') -Force)
         Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A valid adapter fixture Skill package.`n---`n`n# Fixture`n"
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/references/nested.txt') -Text 'nested fixture resource'
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","description":"A deterministic Plugin adapter fixture.","version":"1.0.0","skills":["./skills/fixture-skill"]}'
         Write-TestUtf8File -Path (Join-Path $fixtureRoot 'adapter-command.ps1') -Text "Write-Output 'adapter fixture'`n"
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.mcp.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}'
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
-        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"}}]}')
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}')
         $validReportPath = Join-Path $fixtureRoot 'valid-report.json'
         & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath $validReportPath | Out-Null
         $validReport = Get-Content -Raw -Encoding UTF8 -LiteralPath $validReportPath | ConvertFrom-Json
         Assert-Equal $validReport.status 'passed' 'A valid Plugin package must pass the executable upstream adapter.'
         Assert-ExactStringSequence $validReport.surfaces @('plugin', 'mcp', 'app', 'marketplace') 'The positive adapter fixture must exercise every adopted upstream surface.'
+        Assert-Equal @($validReport.bundledSkills).Count 1 'The positive adapter fixture must report one declared bundled Skill.'
+        Assert-Equal $validReport.bundledSkills[0].path './skills/fixture-skill' 'The positive adapter fixture inventory must bind to the declared Skill path.'
+        Assert-ExactStringSequence $validReport.bundledSkills[0].inventory @('SKILL.md', 'references/nested.txt') 'The positive adapter fixture must report the complete nested Skill inventory.'
 
         $cases = @(
             @{ id='package-missing-skill-md'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root 'skills/fixture-skill/SKILL.md') -Force } },
@@ -2199,10 +2209,13 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='plugin-path-colon'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/a:b"]}' } },
             @{ id='plugin-duplicate-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","\u006eame":"other"}' } },
             @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
-            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '","ref":"main"}}]}') } },
-            @{ id='marketplace-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"}},{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('b' * 40) + '"}}]}') } },
-            @{ id='marketplace-duplicate-nested-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '","\u0073ha":"' + ('b' * 40) + '"}}]}') } },
-            @{ id='marketplace-unknown-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"},"trust":"trusted"}]}') } },
+            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","ref":"main"}}]}') } },
+            @{ id='marketplace-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}},{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('b' * 40) + '"}}]}') } },
+            @{ id='marketplace-duplicate-nested-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","\u0073ha":"' + ('b' * 40) + '"}}]}') } },
+            @{ id='marketplace-unknown-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"},"trust":"trusted"}]}') } },
+            @{ id='marketplace-source-subpath'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./unreviewed-or-missing-package","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-unapproved-repository'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"attacker/plugin","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-repository-case-variant'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"syuantsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='marketplace-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"http","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } }
         )
@@ -2269,6 +2282,34 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             try { & $script:UpstreamAdapterValidatorPath -PackageRoot $fifoRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
             catch { $fifoError = $_.Exception.Message }
             Assert-Match $fifoError 'regular file' 'A Unix FIFO must be blocked without opening or reading it.'
+        }
+
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $nestedReparseRoot = Join-Path $TestDrive 'upstream-adapter-nested-reparse'
+            $nestedReparseOutside = Join-Path $TestDrive 'upstream-adapter-nested-reparse-outside'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $nestedReparseRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path $nestedReparseOutside -Force)
+            Write-TestUtf8File -Path (Join-Path $nestedReparseOutside 'resource.txt') -Text 'outside nested resource'
+            [void](New-Item -ItemType Junction -Path (Join-Path $nestedReparseRoot 'skills/fixture-skill/assets') -Target $nestedReparseOutside)
+            $nestedReparseError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $nestedReparseRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $nestedReparseError = $_.Exception.Message }
+            Assert-Match $nestedReparseError 'reparse|regular' 'A Windows reparse-backed nested Skill resource must be blocked.'
+        }
+        else {
+            $nestedMkfifo = Get-Command mkfifo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $nestedMkfifo) {
+                $nestedFifoRoot = Join-Path $TestDrive 'upstream-adapter-nested-fifo'
+                Copy-Item -LiteralPath $fixtureRoot -Destination $nestedFifoRoot -Recurse -Force
+                $nestedFifoPath = Join-Path $nestedFifoRoot 'skills/fixture-skill/assets/resource.pipe'
+                [void](New-Item -ItemType Directory -Path (Split-Path -Parent $nestedFifoPath) -Force)
+                & $nestedMkfifo.Source $nestedFifoPath
+                if ($LASTEXITCODE -ne 0) { throw 'Could not create the nested upstream adapter FIFO fixture.' }
+                $nestedFifoError = $null
+                try { & $script:UpstreamAdapterValidatorPath -PackageRoot $nestedFifoRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+                catch { $nestedFifoError = $_.Exception.Message }
+                Assert-Match $nestedFifoError 'regular file' 'A Unix FIFO nested inside a declared Skill must be blocked.'
+            }
         }
     }
 
