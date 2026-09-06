@@ -1097,6 +1097,10 @@ function Invoke-UpstreamAdapterValidation {
             Resolve-AdapterRelativePath -Value $source.path -Root $rootFull -Context 'Marketplace source.path' -AllowRoot | Out-Null
             Assert-AdapterString -Value $source.sha -Context 'Marketplace source.sha'
             if ([string]$source.sha -cnotmatch $Policy.immutableGitShaPattern) { throw 'BLOCK: Marketplace source must bind an immutable Git SHA.' }
+            if (-not [string]::IsNullOrWhiteSpace($SourceRevision) -and
+                [string]$source.sha -cne [string]$SourceRevision) {
+                throw 'BLOCK: Marketplace source.sha must equal the adapter SourceRevision candidate identity.'
+            }
             $ref = Get-AdapterProperty -Object $source -Name 'ref'
             if ($null -ne $ref) {
                 Assert-AdapterString -Value $ref -Context 'Marketplace source.ref'

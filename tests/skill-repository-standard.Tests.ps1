@@ -2206,6 +2206,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'Assert-AdapterDeclaredSkillPath' 'Upstream adapter validator must enforce the canonical declared Skill root.'
         Assert-Match $validatorText 'must declare at least one Skill or MCP server capability' 'Upstream adapter validator must reject metadata-only Plugin packages.'
         Assert-Match $validatorText 'componentInventory|packageSha256|SourceRevision|ArchiveSha256' 'Upstream adapter evidence must bind candidate identity and hashed validated components.'
+        Assert-Match $validatorText 'source\.sha must equal.*SourceRevision' 'Marketplace selector evidence must bind to the adapter candidate revision.'
         Assert-Match $validatorText 'DeclaredServerNames|not a declared MCP server identity' 'Upstream adapter apps must bind to declared MCP server identities.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $authorityGate 'Assert-AuthorityComponentInventoryFiles' 'The authority gate must recheck adapter component hashes after validation.'
@@ -2288,9 +2289,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='plugin-path-noncanonical-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./packages/fixture-skill"]}' } },
             @{ id='plugin-path-nested'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill/references"]}' } },
             @{ id='plugin-duplicate-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","\u006eame":"other"}' } },
-            @{ id='plugin-empty-capability'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin"}' } },
-            @{ id='plugin-empty-skills'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[]}' } },
-            @{ id='plugin-empty-mcp'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","mcpServers":{}}' } },
+            @{ id='plugin-empty-capability'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin"}' } },
+            @{ id='plugin-empty-skills'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[]}' } },
+            @{ id='plugin-empty-mcp'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","mcpServers":{}}' } },
             @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
             @{ id='app-unknown-mcp-server'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"ghost"}]}' } },
             @{ id='plugin-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.codex-plugin') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.Codex-Plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"]}' } },
@@ -2309,14 +2310,54 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } },
             @{ id='plugin-hook-case-variant'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'Hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'Hooks/run.ps1') -Text 'Write-Output hook' } }
         )
+        $expectedErrorPatterns = @{
+            'package-missing-skill-md' = 'SKILL\.md|missing'
+            'plugin-path-out-of-root' = 'canonical'
+            'plugin-path-backslash' = 'canonical'
+            'plugin-path-rooted-windows' = 'canonical'
+            'plugin-path-dot' = 'canonical'
+            'plugin-path-colon' = 'canonical'
+            'plugin-path-noncanonical-root' = 'canonical'
+            'plugin-path-nested' = 'canonical'
+            'plugin-duplicate-field' = 'duplicate object key'
+            'plugin-empty-capability' = 'capability'
+            'plugin-empty-skills' = 'capability'
+            'plugin-empty-mcp' = 'capability'
+            'mcp-unapproved-endpoint' = 'endpoint'
+            'app-unknown-mcp-server' = 'not a declared MCP server identity'
+            'plugin-manifest-case-alias' = 'alias'
+            'mcp-manifest-case-alias' = 'alias'
+            'app-manifest-case-alias' = 'alias'
+            'marketplace-manifest-case-alias' = 'alias'
+            'marketplace-mutable-ref' = 'ref|immutable'
+            'marketplace-duplicate-name' = 'duplicate plugin identity'
+            'marketplace-duplicate-nested-field' = 'duplicate object key'
+            'marketplace-unknown-field' = 'unknown field'
+            'marketplace-source-subpath' = 'source\.path|root'
+            'marketplace-unapproved-repository' = 'approved central provenance'
+            'marketplace-repository-case-variant' = 'approved central provenance'
+            'marketplace-unapproved-endpoint' = 'source type|github'
+            'app-duplicate-name' = 'duplicate app identity'
+            'plugin-hook-bypass' = 'hook'
+            'plugin-hook-case-variant' = 'hook|alias'
+        }
         foreach ($case in $cases) {
             $caseRoot = Join-Path $TestDrive ([string]$case.id)
             Copy-Item -LiteralPath $fixtureRoot -Destination $caseRoot -Recurse -Force
             & $case.mutate $caseRoot
             $errorMessage = $null
-            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $caseRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null }
+            try {
+                & $script:UpstreamAdapterValidatorPath `
+                    -PackageRoot $caseRoot `
+                    -PolicyPath $script:UpstreamAdapterPolicyPath `
+                    -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                    -SourceRevision ('a' * 40) `
+                    -ArchiveSha256 ('b' * 64) `
+                    -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null
+            }
             catch { $errorMessage = $_.Exception.Message }
-            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL|duplicate|ref|portable|unsafe|regular|alias|canonical|capability' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
+            Assert-True ($expectedErrorPatterns.ContainsKey([string]$case.id)) "SYP-193 case '$($case.id)' must declare a case-specific failure pattern."
+            Assert-Match $errorMessage $expectedErrorPatterns[[string]$case.id] "SYP-193 case '$($case.id)' must be blocked by its intended executable-adapter validation."
         }
 
         $duplicatePolicyPath = Join-Path $TestDrive 'upstream-adapter-duplicate-policy.json'
