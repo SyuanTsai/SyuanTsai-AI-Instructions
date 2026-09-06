@@ -439,9 +439,9 @@ class PyPISimpleCatalog:
                 continue
             if canonicalize_name(parsed_name) != project:
                 continue
-            if simple_file_is_yanked(item, filename):
-                continue
             try:
+                if simple_file_is_yanked(item, filename):
+                    continue
                 requires_python = normalize_requires_python(
                     item.get("requires-python"),
                     f"Simple JSON wheel {filename!r}",
@@ -452,39 +452,46 @@ class PyPISimpleCatalog:
                     f"Simple JSON wheel {filename!r}",
                 ):
                     continue
+                ranks = [self._tag_rank[tag] for tag in tags if tag in self._tag_rank]
+                if not ranks:
+                    continue
+                hashes = item.get("hashes")
+                sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+                if not isinstance(sha256, str) or not SHA256_RE.fullmatch(sha256):
+                    raise ClosureError(f"Simple JSON wheel {filename!r} is missing an exact SHA-256 hash")
+                artifact_url_value = item.get("url")
+                if not isinstance(artifact_url_value, str) or not artifact_url_value:
+                    raise ClosureError(f"Simple JSON wheel {filename!r} is missing a string artifact URL")
+                try:
+                    artifact_url = urllib.parse.urljoin(final_url, artifact_url_value)
+                except ValueError as error:
+                    raise ClosureError(
+                        f"Simple JSON wheel {filename!r} has an invalid artifact URL"
+                    ) from error
+                self._validate_remote_url(artifact_url, APPROVED_ARTIFACT_HOSTS)
+                build_key = build if build else (-1, "")
+                descriptor = Descriptor(
+                    project=project,
+                    version=version,
+                    filename=filename,
+                    url=artifact_url,
+                    sha256=sha256,
+                    tag_rank=min(ranks),
+                    build=build_key,
+                    simple_requires_python=requires_python,
+                    enforce_simple_requires_python=True,
+                )
+                per_version.setdefault(version, []).append(descriptor)
             except ClosureError as error:
                 # A malformed candidate is never admitted to the verified pool. Keep
                 # deterministic rejection evidence so a different valid candidate may
-                # be selected without hiding the upstream metadata defect.
+                # be selected without hiding the upstream metadata defect. Keep every
+                # per-candidate metadata check in this rejection boundary, including
+                # yanked state, hashes, and artifact URL validation.
                 self._rejected_candidates.append(
                     {"project": project, "filename": filename, "reason": bounded_rejection_reason(error)}
                 )
                 continue
-            ranks = [self._tag_rank[tag] for tag in tags if tag in self._tag_rank]
-            if not ranks:
-                continue
-            hashes = item.get("hashes")
-            sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
-            if not isinstance(sha256, str) or not SHA256_RE.fullmatch(sha256):
-                raise ClosureError(f"Simple JSON wheel {filename!r} is missing an exact SHA-256 hash")
-            artifact_url_value = item.get("url")
-            if not isinstance(artifact_url_value, str) or not artifact_url_value:
-                raise ClosureError(f"Simple JSON wheel {filename!r} is missing a string artifact URL")
-            artifact_url = urllib.parse.urljoin(final_url, artifact_url_value)
-            self._validate_remote_url(artifact_url, APPROVED_ARTIFACT_HOSTS)
-            build_key = build if build else (-1, "")
-            descriptor = Descriptor(
-                project=project,
-                version=version,
-                filename=filename,
-                url=artifact_url,
-                sha256=sha256,
-                tag_rank=min(ranks),
-                build=build_key,
-                simple_requires_python=requires_python,
-                enforce_simple_requires_python=True,
-            )
-            per_version.setdefault(version, []).append(descriptor)
 
         selected: List[Descriptor] = []
         for version, candidates in per_version.items():
@@ -1338,6 +1345,97 @@ def self_test_command(_: argparse.Namespace) -> None:
             ]
             if any(handler.proxies for handler in proxy_handlers):
                 raise AssertionError("Approved-index acquisition must ignore inherited proxy configuration")
+
+        class _SelfTestHeaders:
+            def get_content_type(self) -> str:
+                return SIMPLE_JSON_MEDIA_TYPE
+
+            def get(self, name: str, default: Optional[str] = None) -> Optional[str]:
+                return default
+
+        class _SelfTestResponse:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self.headers = _SelfTestHeaders()
+
+            def __enter__(self) -> "_SelfTestResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def geturl(self) -> str:
+                return "https://pypi.org/simple/fallback-project/"
+
+            def read(self, _limit: int = -1) -> bytes:
+                return self._payload
+
+        class _SelfTestSimpleOpener:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+
+            def open(self, _request: object, timeout: int) -> _SelfTestResponse:
+                if timeout != 60:
+                    raise AssertionError("Simple JSON discovery must use the bounded self-test timeout")
+                return _SelfTestResponse(self._payload)
+
+        fallback_filename = "fallback_project-1.0-py3-none-any.whl"
+        discovery_payload = {
+            "meta": {"api-version": "1.0"},
+            "name": "fallback-project",
+            "files": [
+                {
+                    "filename": "fallback_project-2.0-py3-none-any.whl",
+                    "yanked": 0,
+                    "hashes": {"sha256": "a" * 64},
+                    "url": "https://files.pythonhosted.org/packages/fallback_project-2.0.whl",
+                },
+                {
+                    "filename": "fallback_project-1.5-py3-none-any.whl",
+                    "yanked": False,
+                    "hashes": {"sha256": "not-a-sha256"},
+                    "url": "https://files.pythonhosted.org/packages/fallback_project-1.5.whl",
+                },
+                {
+                    "filename": "fallback_project-1.25-py3-none-any.whl",
+                    "yanked": False,
+                    "hashes": {"sha256": "b" * 64},
+                    "url": "http://example.invalid/fallback_project-1.25.whl",
+                },
+                {
+                    "filename": "fallback_project-1.125-py3-none-any.whl",
+                    "yanked": False,
+                    "hashes": {"sha256": "d" * 64},
+                    "url": "https://[invalid",
+                },
+                {
+                    "filename": fallback_filename,
+                    "yanked": False,
+                    "hashes": {"sha256": "c" * 64},
+                    "url": "https://files.pythonhosted.org/packages/fallback_project-1.0.whl",
+                },
+            ],
+        }
+        discovery_catalog = PyPISimpleCatalog(APPROVED_INDEX)
+        discovery_catalog._simple_opener = _SelfTestSimpleOpener(
+            json.dumps(discovery_payload).encode("utf-8")
+        )
+        discovered = discovery_catalog.descriptors("fallback-project")
+        if [descriptor.filename for descriptor in discovered] != [fallback_filename]:
+            raise AssertionError("Malformed Simple JSON candidates must be rejected while preserving a valid fallback")
+        rejected_filenames = {entry["filename"] for entry in discovery_catalog.rejected_candidates()}
+        expected_rejected = {
+            "fallback_project-2.0-py3-none-any.whl",
+            "fallback_project-1.5-py3-none-any.whl",
+            "fallback_project-1.25-py3-none-any.whl",
+            "fallback_project-1.125-py3-none-any.whl",
+        }
+        if rejected_filenames != expected_rejected:
+            raise AssertionError(
+                f"Malformed Simple JSON candidates must have deterministic rejection evidence: {rejected_filenames}"
+            )
+        if not any("invalid yanked value" in entry["reason"] for entry in discovery_catalog.rejected_candidates()):
+            raise AssertionError("Malformed yanked metadata must be recorded as candidate rejection evidence")
         if simple_file_is_yanked({}, "missing.whl") or simple_file_is_yanked({"yanked": False}, "false.whl"):
             raise AssertionError("Missing/native-false yanked metadata must remain eligible")
         if not simple_file_is_yanked({"yanked": True}, "true.whl") or not simple_file_is_yanked(

@@ -13,6 +13,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:agentEnvironmentRuntimeReadLock = $null
+$script:agentEnvironmentRecoveryStarted = $false
+
+function New-AgentEnvironmentStableRecoveryFailureResult {
+    param([Parameter(Mandatory = $true)][string] $Message)
+    $journalPath = '.agents/update-agent-environment.recovery.json'
+    $evidence = "Recovery validation failed; the retained journal '$journalPath' was not removed: $Message"
+    return [pscustomobject][ordered]@{
+        schemaVersion=1; outcome='failed'; exitCode=1; runtimeCommit=$null; catalogCommit=$null; catalogLockSha256=$null
+        installed=@(); updated=@(); removed=@(); preserved=@(); failed=@($Message)
+        failureDetails=@([pscustomobject][ordered]@{
+            schemaVersion=1; code='recovery-required'; skillId='transaction'; path=$journalPath
+            classification='controlled-candidate'; owner='transaction-journal'; evidence=$evidence
+            destructiveChangeAllowed=$false; backupCreated=$false; expectedSha256=$null; actualSha256=$null
+            remediation=@(
+                'Inspect the retained recovery journal and transaction backup before retrying -Recover.',
+                'Repair or restore valid recovery metadata; do not delete the journal or start another reconciliation while recovery is required.'
+            )
+        })
+        ownership=@([pscustomobject][ordered]@{
+            schemaVersion=1; skillId='transaction'; path=$journalPath; classification='controlled-candidate'
+            owner='transaction-journal'; evidence='The retained recovery journal is the authoritative transaction record; recovery validation did not complete.'
+            destructiveChangeAllowed=$false; operation='observe'
+        })
+        rollbackState='recovery-required'; backupPath=$null
+    }
+}
 
 trap {
     $message = [string]$_.Exception.Message
@@ -21,17 +47,28 @@ trap {
         catch { }
         $script:agentEnvironmentRuntimeReadLock = $null
     }
-    if ($OutputFormat -eq 'Json') {
+    $failureResult = if ($Recover -and $script:agentEnvironmentRecoveryStarted) {
+        New-AgentEnvironmentStableRecoveryFailureResult -Message $message
+    }
+    else {
         [pscustomobject][ordered]@{
             schemaVersion=1; outcome='failed'; exitCode=1; runtimeCommit=$null; catalogCommit=$null
             installed=@(); updated=@(); removed=@(); preserved=@(); failed=@($message)
             rollbackState='not-started'; backupPath=$null
-        } | ConvertTo-Json -Depth 20 -Compress | Write-Output
+        }
+    }
+    if ($OutputFormat -eq 'Json') {
+        $failureResult | ConvertTo-Json -Depth 20 -Compress | Write-Output
     }
     else {
-        Write-Output 'Agent environment outcome: failed'
-        Write-Output 'exitCode: 1'
+        Write-Output "Agent environment outcome: $($failureResult.outcome)"
+        Write-Output "exitCode: $($failureResult.exitCode)"
         Write-Output "failed: $message"
+        if ($Recover -and $script:agentEnvironmentRecoveryStarted) {
+            foreach ($detail in @($failureResult.failureDetails)) {
+                Write-Output ("Failure detail: {0} [{1}]" -f $detail.code, $detail.path)
+            }
+        }
     }
     exit 1
 }
@@ -91,6 +128,11 @@ function Write-AgentEnvironmentResult {
     if ($null -ne $Result.PSObject.Properties['licenseWarnings']) {
         foreach ($warning in @($Result.licenseWarnings)) { Write-Output "License warning: $warning" }
     }
+    if ($null -ne $Result.PSObject.Properties['failureDetails']) {
+        foreach ($detail in @($Result.failureDetails)) {
+            Write-Output ("Failure detail: {0} [{1}]" -f $detail.code, $detail.path)
+        }
+    }
 }
 
 $temporaryRoot = $null
@@ -120,6 +162,7 @@ try {
     Import-Module $reconcilerPath -Force
 
     if ($Recover) {
+        $script:agentEnvironmentRecoveryStarted = $true
         $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath
     }
     else {
@@ -140,7 +183,6 @@ try {
         $finalResult = Invoke-UserSkillsReconciliation -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
             -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills
         $finalResult | Add-Member -NotePropertyName runtimeCommit -NotePropertyValue ([string]$bundle.commit) -Force
-        if ([string]$finalResult.outcome -eq 'failed') { throw "Agent environment reconciliation failed: $(@($finalResult.failed) -join ' | ')" }
     }
 }
 finally {

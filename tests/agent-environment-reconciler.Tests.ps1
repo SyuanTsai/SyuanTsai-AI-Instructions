@@ -55,6 +55,56 @@ function New-TestDesiredState {
     }
 }
 
+function New-TestRecoveryJournal {
+    param(
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [Parameter(Mandatory = $true)][string] $BackupRoot,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $States,
+        [string] $Phase = 'mutating',
+        [string] $TransactionId = ([Guid]::NewGuid().ToString('N')),
+        [string] $DesiredManifestSha256 = ('a' * 64),
+        [string] $DesiredInventorySha256 = ('b' * 64)
+    )
+    return [pscustomobject][ordered]@{
+        schemaVersion=1
+        transactionId=$TransactionId
+        userHome=[System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
+        backupPath=$BackupRoot
+        phase=$Phase
+        desiredManifestSha256=$DesiredManifestSha256
+        desiredInventorySha256=$DesiredInventorySha256
+        states=$States
+    }
+}
+
+function Assert-TestRecoveryFailureResult {
+    param([Parameter(Mandatory = $true)][object] $Result)
+    $Result.outcome | Should Be 'failed'
+    [int]$Result.exitCode | Should Be 1
+    $Result.rollbackState | Should Be 'recovery-required'
+    @($Result.failed).Count | Should Be 1
+    @($Result.failureDetails).Count | Should Be 1
+    $detail = @($Result.failureDetails)[0]
+    $detail.code | Should Be 'recovery-required'
+    $detail.path | Should Be '.agents/update-agent-environment.recovery.json'
+    $detail.owner | Should Be 'transaction-journal'
+    $detail.destructiveChangeAllowed | Should Be $false
+    @($detail.remediation).Count | Should BeGreaterThan 0
+    @($Result.ownership).Count | Should Be 1
+    @($Result.ownership)[0].path | Should Be '.agents/update-agent-environment.recovery.json'
+    @($Result.ownership)[0].operation | Should Be 'observe'
+}
+
+function Assert-TestRecoveryConcurrentResult {
+    param([Parameter(Mandatory = $true)][object] $Result)
+    $Result.outcome | Should Be 'concurrent'
+    [int]$Result.exitCode | Should Be 3
+    $Result.rollbackState | Should Be 'not-started'
+    @($Result.failed).Count | Should Be 1
+    @($Result.failureDetails).Count | Should Be 0
+    @($Result.ownership).Count | Should Be 0
+}
+
 Describe 'user-scoped Agent Skills reconciliation' {
     BeforeEach {
         $userHome = Join-Path $TestDrive ('home-' + [Guid]::NewGuid().ToString('N'))
@@ -136,6 +186,26 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $legacyEvidence[0].owner | Should Be 'catalog-lifecycle'
         $legacyEvidence[0].destructiveChangeAllowed | Should Be $true
         $legacyEvidence[0].evidence | Should Match 'lifecycle-alias'
+    }
+
+    # Scenario: A controlled candidate exposes an absolute target path before user-environment mutation.
+    # Purpose: Keep structured unsafe-path evidence schema-valid while preserving the raw rejected input for diagnosis.
+    It 'InterT50_reports_a_schema_safe_path_for_an_unsafe_candidate' {
+        $unsafePath = 'C:\outside\SKILL.md'
+        $desired = New-TestDesiredState -Root $staging
+        $desired.Files[0].targetPath = $unsafePath
+        $desired.Manifest.files[0].targetPath = $unsafePath
+
+        $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails).Count | Should Be 1
+        $detail = @($result.failureDetails)[0]
+        $detail.code | Should Be 'unsafe-target-path'
+        $detail.path | Should Be '.agents/skills/<rejected-target-path>'
+        $detail.evidence | Should Match 'C:\\outside\\SKILL\.md'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\backups') | Should Be $false
     }
 
     # Scenario: The immutable candidate changes at its original staging path after reconciliation preflight has completed.
@@ -255,15 +325,55 @@ Describe 'user-scoped Agent Skills reconciliation' {
         @(Get-ChildItem -LiteralPath (Join-Path $userHome '.agents\backups') -Directory).Count | Should Be $backupCount
     }
 
-    It 'rolls back when a mutation fails and leaves the prior manifest valid' {
+    # Scenario: A transaction mutation fails after a managed target is prepared.
+    # Purpose: Verify rollback restores the prior managed bytes, classifies the mutation failure, and removes the completed journal.
+    It 'InterT25_rolls_back_when_a_mutation_fails_and_leaves_the_prior_manifest_valid' {
         $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
         $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
         $before = [System.IO.File]::ReadAllText($target)
         $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
-        { Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1 } | Should Throw
+        $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
+        $failed.outcome | Should Be 'failed'
+        $failed.rollbackState | Should Be 'completed'
+        @($failed.failureDetails | Where-Object { $_.code -eq 'mutation-failure' }).Count | Should Be 1
         [System.IO.File]::ReadAllText($target) | Should Be $before
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false
+    }
+
+    # Scenario: Rollback restores every transaction state, but the recovery journal cannot be deleted.
+    # Purpose: Verify the retained journal changes the result to recovery-required instead of falsely reporting completed rollback.
+    It 'InterT26_reports_recovery_required_when_rollback_journal_cleanup_fails' {
+        $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $global:AgentEnvironmentTestJournalCleanupPath = $journalPath
+        try {
+            Mock Remove-Item {
+                param([string[]] $Path, [string[]] $LiteralPath, [switch] $Recurse)
+                foreach ($requestedPath in @($LiteralPath) + @($Path)) {
+                    if ([string]::IsNullOrWhiteSpace([string]$requestedPath)) { continue }
+                    if ([string]::Equals([string]$requestedPath,[string]$global:AgentEnvironmentTestJournalCleanupPath,[System.StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Injected recovery journal cleanup failure.'
+                    }
+                    if ([System.IO.File]::Exists([string]$requestedPath)) { [System.IO.File]::Delete([string]$requestedPath) }
+                    elseif ([System.IO.Directory]::Exists([string]$requestedPath)) { [System.IO.Directory]::Delete([string]$requestedPath,[bool]$Recurse) }
+                }
+            } -ModuleName agent-environment-reconciler
+
+            $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
+        }
+        finally {
+            Remove-Variable -Name AgentEnvironmentTestJournalCleanupPath -Scope Global -ErrorAction SilentlyContinue
+            Import-Module $script:ModulePath -Force
+        }
+
+        $failed.outcome | Should Be 'failed'
+        $failed.rollbackState | Should Be 'recovery-required'
+        @($failed.failureDetails | Where-Object { $_.code -eq 'recovery-required' }).Count | Should Be 1
+        ($failed.failureDetails[0].evidence) | Should Match 'Recovery journal cleanup failed'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
 
     It 'reports drift in VerifyOnly and a plan in WhatIf without writing' {
@@ -297,9 +407,33 @@ Describe 'user-scoped Agent Skills reconciliation' {
         [System.IO.File]::WriteAllText($backup,'original')
         $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
         $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+        })
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        $result.outcome | Should Be 'recovered'
+        [System.IO.File]::ReadAllText($target) | Should Be 'original'
+        Test-Path -LiteralPath $journalPath | Should Be $false
+    }
+
+    # Scenario: A runtime upgrade encounters a valid predecessor v1 recovery journal without current transaction metadata.
+    # Purpose: Preserve crash recovery across runtime upgrades while retaining the current managed-path and backup-integrity boundaries.
+    It 'InterT65_recovers_a_preupgrade_v1_journal_after_runtime_update' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backup = Join-Path $userHome '.agents\backups\recovery-legacy-v1\.agents\skills\alpha\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),(Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        [System.IO.File]::WriteAllText($backup,'original')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
         $journal = [pscustomobject][ordered]@{
             schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
-            backupPath=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup))))
+            backupPath=$backupRoot
             states=@([pscustomobject][ordered]@{
                 relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
                 originalSha256=$originalSha; appliedSha256=$appliedSha
@@ -307,10 +441,69 @@ Describe 'user-scoped Agent Skills reconciliation' {
         }
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+
         $result = Invoke-UserSkillsRecovery -UserHome $userHome
+
         $result.outcome | Should Be 'recovered'
         [System.IO.File]::ReadAllText($target) | Should Be 'original'
         Test-Path -LiteralPath $journalPath | Should Be $false
+    }
+
+    # Scenario: A runtime upgrade encounters a valid predecessor v1 recovery journal for a target that did not exist before mutation.
+    # Purpose: Remove an interrupted first-install target without reading the absent legacy backupSha256 property under StrictMode.
+    It 'InterT65b_recovers_a_preupgrade_v1_journal_for_an_absent_target' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backupRoot = Join-Path $userHome '.agents\backups\recovery-legacy-absent'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),$backupRoot | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
+            backupPath=$backupRoot
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$false; backupPath=$null
+                originalSha256=$null; appliedSha256=$appliedSha
+            })
+        }
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+
+        $result.outcome | Should Be 'recovered'
+        Test-Path -LiteralPath $target | Should Be $false
+        Test-Path -LiteralPath $journalPath | Should Be $false
+    }
+
+    # Scenario: Recovery restores the target but cannot remove the predecessor or current recovery journal.
+    # Purpose: Verify recovery cleanup failures are structured as recovery-required instead of returning a false recovered success.
+    It 'InterT66_reports_recovery_required_when_recovery_journal_cleanup_fails' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backup = Join-Path $userHome '.agents\backups\recovery-cleanup-failure\.agents\skills\alpha\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),(Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        [System.IO.File]::WriteAllText($backup,'original')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+        })
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+        try {
+            Mock Remove-AgentEnvironmentRecoveryJournal { throw 'Injected recovery journal cleanup failure.' } -ModuleName agent-environment-reconciler
+
+            $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        }
+        finally {
+            Import-Module $script:ModulePath -Force
+        }
+
+        Assert-TestRecoveryFailureResult -Result $result
+        [System.IO.File]::ReadAllText($target) | Should Be 'original'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
 
     It 'rejects a tampered recovery backup without replacing the applied target or deleting the journal' {
@@ -322,18 +515,16 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
         $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
         [System.IO.File]::WriteAllText($backup,'tampered')
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
-            backupPath=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup))))
-            states=@([pscustomobject][ordered]@{
-                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
-                originalSha256=$originalSha; appliedSha256=$appliedSha
-            })
-        }
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+        })
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
 
-        { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        Assert-TestRecoveryFailureResult -Result $result
         [System.IO.File]::ReadAllText($target) | Should Be 'applied'
         Test-Path -LiteralPath $journalPath | Should Be $true
     }
@@ -345,18 +536,16 @@ Describe 'user-scoped Agent Skills reconciliation' {
         [System.IO.File]::WriteAllText($target,'applied')
         [System.IO.File]::WriteAllText($backup,'original')
         $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
-            backupPath=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup))))
-            states=@([pscustomobject][ordered]@{
-                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
-                originalSha256='not-a-sha256'; appliedSha256=$appliedSha
-            })
-        }
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256='not-a-sha256'; backupSha256='not-a-sha256'; appliedSha256=$appliedSha
+        })
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
 
-        { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        Assert-TestRecoveryFailureResult -Result $result
         [System.IO.File]::ReadAllText($target) | Should Be 'applied'
         Test-Path -LiteralPath $journalPath | Should Be $true
     }
@@ -376,16 +565,14 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $invalidBooleans.Add([object[]]@($true))
 
         foreach ($invalidBoolean in $invalidBooleans) {
-            $journal = [pscustomobject][ordered]@{
-                schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/')); backupPath=$backupRoot
-                states=@([pscustomobject][ordered]@{
-                    relativePath='.agents/skills/alpha/SKILL.md'; existed=$invalidBoolean; backupPath=$backup
-                    originalSha256=$originalSha; appliedSha256=$appliedSha
-                })
-            }
+            $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$invalidBoolean; backupPath=$backup
+                originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+            })
             $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
 
-            { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+            $result = Invoke-UserSkillsRecovery -UserHome $userHome
+            Assert-TestRecoveryFailureResult -Result $result
             [System.IO.File]::ReadAllText($target) | Should Be 'applied'
             Test-Path -LiteralPath $journalPath | Should Be $true
         }
@@ -394,16 +581,12 @@ Describe 'user-scoped Agent Skills reconciliation' {
     It 'rejects an empty recovery state array and preserves the journal' {
         $backupRoot = Join-Path $userHome '.agents\backups\recovery-empty'
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion=1
-            userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
-            backupPath=$backupRoot
-            states=[object[]]@()
-        }
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @()
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
 
-        { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        Assert-TestRecoveryFailureResult -Result $result
         Test-Path -LiteralPath $journalPath | Should Be $true
     }
 
@@ -414,17 +597,15 @@ Describe 'user-scoped Agent Skills reconciliation' {
         [System.IO.File]::WriteAllText($target,'concurrent')
         [System.IO.File]::WriteAllText($backup,'original')
         $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
-            backupPath=(Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup))))
-            states=@([pscustomobject][ordered]@{
-                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
-                originalSha256=$originalSha; appliedSha256=('2' * 64)
-            })
-        }
+        $backupRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=('2' * 64)
+        })
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
-        { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        Assert-TestRecoveryFailureResult -Result $result
         [System.IO.File]::ReadAllText($target) | Should Be 'concurrent'
         Test-Path -LiteralPath $journalPath | Should Be $true
     }
@@ -437,18 +618,34 @@ Describe 'user-scoped Agent Skills reconciliation' {
         [System.IO.File]::WriteAllText($outsideBackup,'original')
         $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
         $originalSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $outsideBackup).Hash.ToLowerInvariant()
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/')); backupPath=$userHome
-            states=@([pscustomobject][ordered]@{
-                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$outsideBackup
-                originalSha256=$originalSha; appliedSha256=$appliedSha
-            })
-        }
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $userHome -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$outsideBackup
+            originalSha256=$originalSha; backupSha256=$originalSha; appliedSha256=$appliedSha
+        })
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
-        { Invoke-UserSkillsRecovery -UserHome $userHome } | Should Throw
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+        Assert-TestRecoveryFailureResult -Result $result
         [System.IO.File]::ReadAllText($target) | Should Be 'applied'
         Test-Path -LiteralPath $journalPath | Should Be $true
+    }
+
+    # Scenario: An invalid recovery journal is present while the user-scope recovery lock is already held.
+    # Purpose: Verify ordinary lock contention returns the documented concurrent result without interpreting or replacing the preserved journal.
+    It 'InterT55_returns_concurrent_when_the_recovery_global_lock_is_already_held' {
+        $backupRoot = Join-Path $userHome '.agents\backups\recovery-concurrent'
+        $agentsRoot = Join-Path $userHome '.agents'
+        New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        [System.IO.File]::WriteAllText($journalPath,'{}')
+        $lockPath = Join-Path $agentsRoot 'update-agent-environment.lock'
+        $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try {
+            $result = Invoke-UserSkillsRecovery -UserHome $userHome
+            Assert-TestRecoveryConcurrentResult -Result $result
+        }
+        finally { $stream.Dispose() }
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
 }
 
@@ -479,5 +676,50 @@ Describe 'Agent environment stable entry point' {
         $result.outcome | Should Be 'failed'
         [int]$result.exitCode | Should Be 1
         @($result.failed).Count | Should Be 1
+    }
+
+    # Scenario: The stable entry point receives a malformed recovery journal while recovery is explicitly requested.
+    # Purpose: Verify the child process returns machine-readable recovery-required evidence and preserves the journal for operator remediation.
+    It 'InterT60_returns_structured_recovery_evidence_and_preserves_an_invalid_recovery_journal' {
+        $entry = Join-Path $script:RepositoryRoot 'scripts\update-agent-environment.ps1'
+        $codexHome = Join-Path $TestDrive ('recovery-codex-' + [Guid]::NewGuid().ToString('N'))
+        $userHome = Join-Path $TestDrive ('recovery-user-' + [Guid]::NewGuid().ToString('N'))
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $userHome '.agents\backups\invalid') | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'), @'
+[CmdletBinding()]
+param([switch]$ValidateOnly)
+if (-not $ValidateOnly) { throw 'Validation switch required.' }
+'@)
+        Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
+
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion=1; transactionId=('a' * 32)
+            userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
+            backupPath=(Join-Path $userHome '.agents\backups\invalid'); phase='mutating'
+            desiredManifestSha256=('a' * 64); desiredInventorySha256=('b' * 64)
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true
+                backupPath=(Join-Path $userHome '.agents\backups\invalid\alpha')
+                originalSha256='invalid'; backupSha256='invalid'; appliedSha256=('c' * 64)
+            })
+        }
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+
+        $output = @(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry `
+            -CodexHome $codexHome -UserHome $userHome -Recover -OutputFormat Json)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Be 1
+        $output.Count | Should Be 1
+        $result = $output[0] | ConvertFrom-Json
+        $result.outcome | Should Be 'failed'
+        $result.rollbackState | Should Be 'recovery-required'
+        $result.failureDetails[0].code | Should Be 'recovery-required'
+        $result.failureDetails[0].path | Should Be '.agents/update-agent-environment.recovery.json'
+        $result.ownership[0].owner | Should Be 'transaction-journal'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
 }

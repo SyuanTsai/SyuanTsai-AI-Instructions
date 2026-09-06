@@ -1,10 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Managed Skill lifecycle evidence v1",
-  "description": "The central Standard v1 machine-readable ownership and fail-closed evidence record for managed replacement and legacy migration.",
+  "description": "The central Standard v1 machine-readable ownership, failure, and transaction evidence records for managed replacement and legacy migration.",
   "oneOf": [
     { "$ref": "#/$defs/ownershipEvidence" },
-    { "$ref": "#/$defs/failureDetail" }
+    { "$ref": "#/$defs/failureDetail" },
+    { "$ref": "#/$defs/transactionJournal" },
+    { "$ref": "#/$defs/legacyTransactionJournal" }
   ],
   "$defs": {
     "stableId": {
@@ -22,6 +24,21 @@
       "type": ["string", "null"],
       "pattern": "^[0-9a-f]{64}$"
     },
+    "requiredSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "managedConsumerPath": {
+      "allOf": [
+        { "$ref": "#/$defs/repositoryPath" },
+        {
+          "oneOf": [
+            { "const": ".agents/catalog-skills.manifest.json" },
+            { "type": "string", "pattern": "^\\.agents/skills/.+$" }
+          ]
+        }
+      ]
+    },
     "classification": {
       "type": "string",
       "enum": ["managed", "known-legacy", "unmanaged-unknown", "managed-drift", "controlled-candidate"]
@@ -36,7 +53,8 @@
         "classification",
         "owner",
         "evidence",
-        "destructiveChangeAllowed"
+        "destructiveChangeAllowed",
+        "operation"
       ],
       "properties": {
         "schemaVersion": { "const": 1 },
@@ -45,7 +63,8 @@
         "classification": { "$ref": "#/$defs/classification" },
         "owner": { "type": "string", "minLength": 1 },
         "evidence": { "type": "string", "minLength": 1 },
-        "destructiveChangeAllowed": { "type": "boolean" }
+        "destructiveChangeAllowed": { "type": "boolean" },
+        "operation": { "enum": ["observe", "install", "replace", "remove", "adopt", "preserve"] }
       }
     },
     "failureDetail": {
@@ -83,6 +102,129 @@
           "items": { "type": "string", "minLength": 1 }
         }
       }
+    },
+    "transactionJournal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "transactionId",
+        "userHome",
+        "backupPath",
+        "phase",
+        "desiredManifestSha256",
+        "desiredInventorySha256",
+        "states"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "transactionId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "userHome": { "type": "string", "minLength": 1 },
+        "backupPath": { "type": "string", "minLength": 1, "pattern": "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])[\\s\\S]+$" },
+        "phase": { "enum": ["prepared", "mutating"] },
+        "desiredManifestSha256": { "$ref": "#/$defs/requiredSha256" },
+        "desiredInventorySha256": { "$ref": "#/$defs/requiredSha256" },
+        "states": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/transactionState" }
+        }
+      }
+    },
+    "legacyTransactionJournal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "userHome", "backupPath", "states"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "userHome": { "type": "string", "minLength": 1 },
+        "backupPath": { "type": "string", "minLength": 1, "pattern": "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])[\\s\\S]+$" },
+        "states": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/legacyTransactionState" }
+        }
+      }
+    },
+    "legacyTransactionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "existed", "backupPath", "originalSha256", "appliedSha256"],
+      "properties": {
+        "relativePath": { "$ref": "#/$defs/managedConsumerPath" },
+        "existed": { "type": "boolean" },
+        "backupPath": { "type": ["string", "null"] },
+        "originalSha256": { "$ref": "#/$defs/sha256" },
+        "appliedSha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": { "existed": { "const": true } },
+            "required": ["existed"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "type": "string", "minLength": 1, "pattern": "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])[\\s\\S]+$" },
+              "originalSha256": { "$ref": "#/$defs/requiredSha256" }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "const": null },
+              "originalSha256": { "const": null }
+            }
+          }
+        }
+      ]
+    },
+    "transactionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relativePath",
+        "existed",
+        "backupPath",
+        "originalSha256",
+        "backupSha256",
+        "appliedSha256"
+      ],
+      "properties": {
+        "relativePath": { "$ref": "#/$defs/managedConsumerPath" },
+        "existed": { "type": "boolean" },
+        "backupPath": { "type": ["string", "null"] },
+        "originalSha256": { "$ref": "#/$defs/sha256" },
+        "backupSha256": { "$ref": "#/$defs/sha256" },
+        "appliedSha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": { "existed": { "const": true } },
+            "required": ["existed"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "type": "string", "minLength": 1, "pattern": "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])[\\s\\S]+$" },
+              "originalSha256": { "$ref": "#/$defs/requiredSha256" },
+              "backupSha256": { "$ref": "#/$defs/requiredSha256" }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "const": null },
+              "originalSha256": { "const": null },
+              "backupSha256": { "const": null }
+            }
+          }
+        }
+      ]
     }
   }
 }

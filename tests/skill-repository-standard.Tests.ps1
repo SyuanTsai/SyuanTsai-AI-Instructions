@@ -96,15 +96,63 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 return Test-AuthorityJsonSchemaValue -Value $Value -Schema $resolved -RootSchema $RootSchema
             }
 
+            $oneOfProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'oneOf'
+            if ($null -ne $oneOfProperty) {
+                $schemaMatchCount = 0
+                foreach ($candidateSchema in @($oneOfProperty.Value)) {
+                    if (Test-AuthorityJsonSchemaValue -Value $Value -Schema $candidateSchema -RootSchema $RootSchema) {
+                        $schemaMatchCount++
+                    }
+                }
+                if ($schemaMatchCount -ne 1) { return $false }
+            }
+
+            $allOfProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'allOf'
+            if ($null -ne $allOfProperty) {
+                foreach ($candidateSchema in @($allOfProperty.Value)) {
+                    if (-not (Test-AuthorityJsonSchemaValue -Value $Value -Schema $candidateSchema -RootSchema $RootSchema)) {
+                        return $false
+                    }
+                }
+            }
+
+            $ifProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'if'
+            if ($null -ne $ifProperty) {
+                $conditionMatches = Test-AuthorityJsonSchemaValue -Value $Value -Schema $ifProperty.Value -RootSchema $RootSchema
+                if ($conditionMatches) {
+                    $thenProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'then'
+                    if ($null -ne $thenProperty -and
+                        -not (Test-AuthorityJsonSchemaValue -Value $Value -Schema $thenProperty.Value -RootSchema $RootSchema)) {
+                        return $false
+                    }
+                }
+                else {
+                    $elseProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'else'
+                    if ($null -ne $elseProperty -and
+                        -not (Test-AuthorityJsonSchemaValue -Value $Value -Schema $elseProperty.Value -RootSchema $RootSchema)) {
+                        return $false
+                    }
+                }
+            }
+
             $constProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'const'
             if ($null -ne $constProperty) {
                 $expected = $constProperty.Value
-                if ($expected -is [string]) {
+                if ($null -eq $expected) {
+                    if ($null -ne $Value) { return $false }
+                }
+                elseif ($expected -is [string]) {
                     if ($Value -isnot [string] -or [string]$Value -cne [string]$expected) { return $false }
                 }
                 elseif (($expected -is [int] -or $expected -is [long] -or $expected -is [double] -or $expected -is [decimal]) -and
                     ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal])) {
                     if ([decimal]$Value -ne [decimal]$expected) { return $false }
+                }
+                elseif ($expected -is [array]) {
+                    if ($Value -isnot [array] -or
+                        ($Value | ConvertTo-Json -Depth 50 -Compress) -cne ($expected | ConvertTo-Json -Depth 50 -Compress)) {
+                        return $false
+                    }
                 }
                 elseif ($null -eq $Value -or $Value.GetType() -ne $expected.GetType() -or $Value -ne $expected) {
                     return $false
@@ -1957,9 +2005,115 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $lifecycle 'transaction-owned staged snapshot' 'Lifecycle contract must prevent mutable staging TOCTOU writes.'
         Assert-Match $lifecycle 'post-install' 'Lifecycle contract must require post-install verification.'
         Assert-Equal $schema.title 'Managed Skill lifecycle evidence v1' 'Lifecycle evidence schema title must remain bound to v1.'
-        Assert-Equal @($schema.oneOf).Count 2 'Lifecycle evidence schema must distinguish ownership and failure records.'
+        Assert-Equal @($schema.oneOf).Count 4 'Lifecycle evidence schema must distinguish ownership, failure, current transaction journal, and legacy transaction journal records.'
+        $schemaReferences = @($schema.oneOf | ForEach-Object { [string]$_.PSObject.Properties['$ref'].Value })
+        Assert-True ($schemaReferences -ccontains '#/$defs/ownershipEvidence') 'Lifecycle evidence schema must expose ownership records.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/failureDetail') 'Lifecycle evidence schema must expose failure records.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/transactionJournal') 'Lifecycle evidence schema must expose transaction journals.'
+        Assert-True ($schemaReferences -ccontains '#/$defs/legacyTransactionJournal') 'Lifecycle evidence schema must expose the predecessor transaction journal shape for upgrade recovery.'
+        Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredManifestSha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired manifest SHA-256.'
+        Assert-Equal $schema.'$defs'.transactionJournal.properties.desiredInventorySha256.'$ref' '#/$defs/requiredSha256' 'Transaction journals must require a non-null desired inventory SHA-256.'
+        Assert-Equal $schema.'$defs'.requiredSha256.type 'string' 'Required transaction SHA-256 values must reject null.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'remediation') 'Failure evidence must require remediation.'
         Assert-True (@($schema.'$defs'.failureDetail.required) -ccontains 'destructiveChangeAllowed') 'Failure evidence must require destructive-change authorization state.'
+    }
+
+    # Scenario: Transaction state and rejected-candidate evidence must be accepted by the central schema exactly when runtime invariants hold.
+    # Purpose: Prevent adapters from accepting recovery metadata or failure paths that the reference reconciler rejects.
+    It 'UnitT75_enforces_lifecycle_transaction_state_and_failure_path_contract' {
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:LifecycleSchemaPath | ConvertFrom-Json
+        $schemaPath = $script:LifecycleSchemaPath
+        $existingState = [pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true
+            backupPath='C:\Users\fixture\.agents\backups\tx\.agents\skills\alpha\SKILL.md'
+            originalSha256=('c' * 64); backupSha256=('c' * 64); appliedSha256=('d' * 64)
+        }
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion=1; transactionId=('a' * 32); userHome='C:\Users\fixture'
+            backupPath='C:\Users\fixture\.agents\backups\tx'; phase='mutating'
+            desiredManifestSha256=('a' * 64); desiredInventorySha256=('b' * 64)
+            states=@($existingState)
+        }
+        Assert-AuthoritySchemaInstance -Value $journal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'A pre-existing target with complete backup metadata must validate.'
+
+        $legacyJournal = [pscustomobject][ordered]@{
+            schemaVersion=1; userHome='C:\Users\fixture'
+            backupPath='C:\Users\fixture\.agents\backups\tx'
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$true
+                backupPath='C:\Users\fixture\.agents\backups\tx\.agents\skills\alpha\SKILL.md'
+                originalSha256=('c' * 64); appliedSha256=('d' * 64)
+            })
+        }
+        Assert-AuthoritySchemaInstance -Value $legacyJournal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'The predecessor v1 recovery journal shape must remain recoverable after runtime upgrade.'
+
+        $legacyOutsideScope = Copy-TestJsonObject $legacyJournal
+        $legacyOutsideScope.states[0].relativePath = 'outside/product.txt'
+        Assert-AuthoritySchemaInstance -Value $legacyOutsideScope -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A legacy transaction journal must reject a state outside the managed consumer scope.'
+
+        $outsideScope = Copy-TestJsonObject $journal
+        $outsideScope.states[0].relativePath = 'outside/product.txt'
+        Assert-AuthoritySchemaInstance -Value $outsideScope -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A current transaction journal must reject a state outside the managed consumer scope.'
+
+        $journalWithWhitespaceBackupPath = Copy-TestJsonObject $journal
+        $journalWithWhitespaceBackupPath.backupPath = '   '
+        Assert-AuthoritySchemaInstance -Value $journalWithWhitespaceBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A transaction journal with a whitespace-only backup path must fail closed.'
+
+        $journalWithNextLineBackupPath = Copy-TestJsonObject $journal
+        $journalWithNextLineBackupPath.backupPath = [string][char]0x0085
+        Assert-AuthoritySchemaInstance -Value $journalWithNextLineBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A transaction journal with a U+0085 whitespace-only backup path must fail closed.'
+
+        $absentJournal = Copy-TestJsonObject $journal
+        $absentJournal.states = @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/beta/SKILL.md'; existed=$false
+            backupPath=$null; originalSha256=$null; backupSha256=$null; appliedSha256=('d' * 64)
+        })
+        Assert-AuthoritySchemaInstance -Value $absentJournal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'A previously absent target with null backup metadata must validate.'
+
+        $existingWithoutBackup = Copy-TestJsonObject $journal
+        $existingWithoutBackup.states[0].backupPath = $null
+        Assert-AuthoritySchemaInstance -Value $existingWithoutBackup -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target without backup metadata must fail closed.'
+
+        $existingWithWhitespaceBackupPath = Copy-TestJsonObject $journal
+        $existingWithWhitespaceBackupPath.states[0].backupPath = '   '
+        Assert-AuthoritySchemaInstance -Value $existingWithWhitespaceBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target with a whitespace-only backup path must fail closed.'
+
+        $existingWithNextLineBackupPath = Copy-TestJsonObject $journal
+        $existingWithNextLineBackupPath.states[0].backupPath = [string][char]0x0085
+        Assert-AuthoritySchemaInstance -Value $existingWithNextLineBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target with a U+0085 whitespace-only backup path must fail closed.'
+
+        $existingWithoutOriginalHash = Copy-TestJsonObject $journal
+        $existingWithoutOriginalHash.states[0].originalSha256 = $null
+        Assert-AuthoritySchemaInstance -Value $existingWithoutOriginalHash -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target without an original hash must fail closed.'
+
+        $existingWithoutBackupHash = Copy-TestJsonObject $journal
+        $existingWithoutBackupHash.states[0].backupSha256 = $null
+        Assert-AuthoritySchemaInstance -Value $existingWithoutBackupHash -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An existing target without a backup hash must fail closed.'
+
+        $absentWithBackup = Copy-TestJsonObject $absentJournal
+        $absentWithBackup.states[0].backupPath = 'C:\Users\fixture\.agents\backups\tx\unexpected'
+        Assert-AuthoritySchemaInstance -Value $absentWithBackup -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An absent target with backup metadata must fail closed.'
+
+        $absentWithOriginalHash = Copy-TestJsonObject $absentJournal
+        $absentWithOriginalHash.states[0].originalSha256 = ('c' * 64)
+        Assert-AuthoritySchemaInstance -Value $absentWithOriginalHash -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An absent target with an original hash must fail closed.'
+
+        $absentWithBackupHash = Copy-TestJsonObject $absentJournal
+        $absentWithBackupHash.states[0].backupSha256 = ('c' * 64)
+        Assert-AuthoritySchemaInstance -Value $absentWithBackupHash -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'An absent target with a backup hash must fail closed.'
+
+        $failureDetail = [pscustomobject][ordered]@{
+            schemaVersion=1; code='unsafe-target-path'; skillId='alpha'
+            path='.agents/skills/<rejected-target-path>'; classification='controlled-candidate'
+            owner='desired-state-staged-inventory'; evidence="Rejected target path 'C:\outside\SKILL.md'."
+            destructiveChangeAllowed=$false; backupCreated=$false
+            expectedSha256=('e' * 64); actualSha256=$null; remediation=@('Rebuild desired state.')
+        }
+        Assert-AuthoritySchemaInstance -Value $failureDetail -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'Unsafe candidate evidence must use a schema-valid sentinel path.'
+
+        $unsafeFailureDetail = Copy-TestJsonObject $failureDetail
+        $unsafeFailureDetail.path = 'C:\outside\SKILL.md'
+        Assert-AuthoritySchemaInstance -Value $unsafeFailureDetail -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A raw unsafe candidate path must not satisfy repositoryPath.'
     }
 
     # Scenario: An upstream Plugin or Agent Skills change is accepted without an explicit central boundary.
@@ -1995,8 +2149,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
+        Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
         Assert-Equal $policy.schemaVersion 1 'Canonical validation/security gate policy must remain v1.'
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security gate policy identity changed.'
         $expectedIds = @(
@@ -2023,12 +2179,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             'Publish / Install',
             'Post-install Verification'
         )
+        $expectedEvidence = @(
+            ,@('candidateIdentity', 'authoritySnapshot', 'sourcePin')
+            ,@('archiveSha256', 'contentSha256', 'provenance')
+            ,@('packageInventory', 'packageSchema', 'packageValidatorResult')
+            ,@('scannerIdentity', 'analyzerCompleteness', 'staticReport')
+            ,@('testInventory', 'testResult', 'domainAdapterResult')
+            ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
+            ,@('reviewFindings', 'findingDisposition', 'reviewedCandidate')
+            ,@('approver', 'approvalTimestamp', 'approvedCandidate')
+            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization')
+            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity')
+        )
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.order }) (@(1..10 | ForEach-Object { [string]$_ })) 'Canonical validation/security stage order numbers must be contiguous.'
         foreach ($stage in @($policy.stages)) {
+            $stageIndex = [int]$stage.order - 1
             Assert-Equal $stage.failureAction 'BLOCK' "Stage '$($stage.id)' must fail closed."
-            Assert-True (@($stage.evidence).Count -gt 0) "Stage '$($stage.id)' must declare evidence."
+            Assert-ExactStringSequence $stage.evidence $expectedEvidence[$stageIndex] "Stage '$($stage.id)' must declare the exact canonical evidence sequence."
+        }
+        foreach ($mutation in @(
+            @{ Name='placeholder'; Mutate={ param($item) $item.stages[0].evidence=@('placeholder') } },
+            @{ Name='reordered'; Mutate={ param($item) $item.stages[0].evidence=@('authoritySnapshot', 'candidateIdentity', 'sourcePin') } }
+        )) {
+            $weakened = Copy-TestJsonObject -Value $policy
+            & $mutation.Mutate $weakened
+            Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message "Weakened evidence '$($mutation.Name)' must fail schema validation."
+            $errorMessage = $null
+            try { Assert-AuthorityValidationSecurityGate -Policy $weakened | Out-Null }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'exact canonical evidence set|evidence 1' "Weakened evidence '$($mutation.Name)' must fail the executable authority gate."
         }
         Assert-Equal $policy.security.scannerFailure 'BLOCK' 'Scanner failure must block.'
         Assert-Equal $policy.security.analyzerIncomplete 'BLOCK' 'Analyzer incompleteness must block.'
