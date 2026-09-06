@@ -647,6 +647,75 @@ function Get-AuthoritySkillValidatorCoveragePaths {
     return ,$coveragePaths.ToArray()
 }
 
+function Assert-AuthoritySkillToolsCoverageEnvelope {
+    param(
+        [Parameter(Mandatory = $true)] $Envelope,
+        [Parameter(Mandatory = $true)][string] $ExpectedFixtureRoot,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+    )
+
+    if ($null -eq $Envelope -or $null -eq $Envelope.PSObject) {
+        throw 'skill-tools coverage envelope is missing.'
+    }
+    $propertyNames = @($Envelope.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    $expectedPropertyNames = @('schemaVersion', 'toolName', 'coverageMode', 'root', 'files')
+    if ($propertyNames.Count -ne $expectedPropertyNames.Count) {
+        throw 'skill-tools coverage envelope has an unexpected property set.'
+    }
+    foreach ($name in $expectedPropertyNames) {
+        if ($propertyNames -cnotcontains $name) {
+            throw "skill-tools coverage envelope is missing '$name'."
+        }
+    }
+
+    $schemaVersion = Get-AuthorityRequiredProperty -Object $Envelope -Name 'schemaVersion' -Context 'skill-tools coverage envelope'
+    $toolName = Get-AuthorityRequiredProperty -Object $Envelope -Name 'toolName' -Context 'skill-tools coverage envelope'
+    $coverageMode = Get-AuthorityRequiredProperty -Object $Envelope -Name 'coverageMode' -Context 'skill-tools coverage envelope'
+    $root = Get-AuthorityRequiredProperty -Object $Envelope -Name 'root' -Context 'skill-tools coverage envelope'
+    $files = Get-AuthorityRequiredProperty -Object $Envelope -Name 'files' -Context 'skill-tools coverage envelope'
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        $toolName -isnot [string] -or [string]$toolName -cne 'skill-tools' -or
+        $coverageMode -isnot [string] -or [string]$coverageMode -cne 'authority-input-inventory' -or
+        $root -isnot [string] -or -not (Test-AuthorityPathEqual -Left $root -Right $ExpectedFixtureRoot) -or
+        $files -isnot [array] -or @($files).Count -le 0) {
+        throw 'skill-tools coverage envelope is not bound to the expected tool and fixture root.'
+    }
+
+    $observedPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($entry in @($files)) {
+        if ($entry -isnot [pscustomobject]) {
+            throw 'skill-tools coverage envelope file entries must be structured objects.'
+        }
+        $path = Get-AuthorityRequiredProperty -Object $entry -Name 'path' -Context 'skill-tools coverage envelope file'
+        $sha256 = Get-AuthorityRequiredProperty -Object $entry -Name 'sha256' -Context 'skill-tools coverage envelope file'
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) {
+            throw 'skill-tools coverage envelope file path must be a non-empty string.'
+        }
+        Assert-AuthoritySha256 -Value $sha256 -Context 'skill-tools coverage envelope file hash'
+        $reportedPath = Get-AuthorityReportedInventoryPath `
+            -Value $path `
+            -FixtureRoot $ExpectedFixtureRoot `
+            -ExpectedInventoryPaths $ExpectedInventoryPaths `
+            -Context 'skill-tools coverage envelope file path'
+        if (-not $observedPaths.Contains($reportedPath)) {
+            [void]$observedPaths.Add($reportedPath)
+        }
+        else {
+            throw "skill-tools coverage envelope contains duplicate file '$reportedPath'."
+        }
+        $actualPath = Join-Path $ExpectedFixtureRoot $reportedPath
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $actualPath).Hash.ToLowerInvariant()
+        if ($actualHash -cne [string]$sha256) {
+            throw "skill-tools coverage envelope file '$reportedPath' changed after the tool run."
+        }
+    }
+    Assert-AuthorityExactPathInventory `
+        -Value $observedPaths.ToArray() `
+        -Expected $ExpectedInventoryPaths `
+        -Context 'skill-tools coverage envelope' | Out-Null
+    return $true
+}
+
 function Assert-AuthoritySkillSpectorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -787,8 +856,14 @@ function Assert-AuthoritySkillToolsSarifReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
         [Parameter(Mandatory = $true)][string] $ExpectedFixtureRoot,
-        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)] $CoverageEnvelope
     )
+
+    Assert-AuthoritySkillToolsCoverageEnvelope `
+        -Envelope $CoverageEnvelope `
+        -ExpectedFixtureRoot $ExpectedFixtureRoot `
+        -ExpectedInventoryPaths $ExpectedInventoryPaths | Out-Null
 
     $version = Get-AuthorityProperty -Object $Report -Name 'version'
     $runs = Get-AuthorityProperty -Object $Report -Name 'runs'
@@ -864,10 +939,9 @@ function Assert-AuthoritySkillToolsSarifReport {
             }
         }
     }
-    Assert-AuthorityExactPathInventory `
-        -Value $reportedPaths.ToArray() `
-        -Expected $ExpectedInventoryPaths `
-        -Context 'skill-tools SARIF reported inventory' | Out-Null
+    if ($reportedPaths.Count -le 0) {
+        throw 'skill-tools SARIF report did not contain a controlled fixture diagnostic location.'
+    }
 }
 
 function Get-AuthorityCandidateCommit {
@@ -1316,6 +1390,24 @@ Assert-AuthoritySkillValidatorReport `
     -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
     -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
 
+# skill-tools v0.4.1 SARIF carries diagnostic locations, not a complete file
+# inventory.  Keep a run-owned input snapshot in memory so the diagnostic
+# report is bound to the same exact adapter inventory without mistaking
+# findings for coverage.  It is re-hashed after the tool exits and persisted
+# only after that post-run identity check succeeds.
+$skillToolsCoveragePath = Join-Path $runRoot 'skill-tools-coverage.json'
+$skillToolsCoverageEnvelope = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    toolName = 'skill-tools'
+    coverageMode = 'authority-input-inventory'
+    root = $upstreamAdapterSkillRoot
+    files = @($upstreamAdapterSkillFiles)
+}
+Assert-AuthoritySkillToolsCoverageEnvelope `
+    -Envelope $skillToolsCoverageEnvelope `
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
+
 $skillToolsOutput = Invoke-AuthorityExternalCommand `
     -Command $skillToolsNode `
     -Arguments @($skillToolsEntryPoint, 'check', $upstreamAdapterSkillRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
@@ -1327,7 +1419,10 @@ $skillToolsReport = Read-AuthorityJson -Path $skillToolsOutputPath -Context 'ski
 Assert-AuthoritySkillToolsSarifReport `
     -Report $skillToolsReport `
     -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths `
+    -CoverageEnvelope $skillToolsCoverageEnvelope
+$skillToolsCoverageJson = $skillToolsCoverageEnvelope | ConvertTo-Json -Depth 20
+[System.IO.File]::WriteAllText($skillToolsCoveragePath, $skillToolsCoverageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 
 # Stage 4: SkillSpector Static.
 $skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'
@@ -1394,7 +1489,7 @@ $summary = [ordered]@{
         [ordered]@{
             name='package-validation'; result='passed'; exitCode=0; mode='upstream-adapter-skill-validator-skill-tools'
             skillValidatorMode='structure-json-allow-agents-bundled-skill'; skillToolsMode='sarif-check-bundled-skill'
-            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-tools-report.sarif.json')
+            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-tools-report.sarif.json', 'skill-tools-coverage.json')
         },
         [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm-bundled-skill'; report='skillspector-report.json' },
         [ordered]@{

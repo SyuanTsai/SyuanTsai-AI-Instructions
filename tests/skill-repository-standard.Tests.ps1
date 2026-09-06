@@ -1147,6 +1147,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
         Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$upstreamAdapterSkillRoot' 'Shared gate must pass the frozen skill-tools entry point and check command against the declared bundled Skill without a wrapper re-resolution.'
         Assert-Match $gate 'Assert-AuthorityExactPathInventory' 'Shared gate must bind package-tool reports to the exact adapter Skill inventory.'
+        Assert-Match $gate 'Assert-AuthoritySkillToolsCoverageEnvelope' 'Shared gate must validate a separate exact skill-tools input coverage envelope instead of treating SARIF findings as complete inventory.'
+        Assert-Match $gate 'skill-tools-coverage\.json' 'Authority evidence must persist the skill-tools exact input coverage envelope.'
         Assert-Match $gate '-ExpectedFixtureRoot \$upstreamAdapterSkillRoot' 'Shared gate must bind package-tool reports to the same adapter Skill root.'
         Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'
         Assert-Match $gate 'credentialIsolation=github-token-cleared-before-python' 'Shared gate must verify that resolver-managed Python did not inherit GitHub credentials.'
@@ -1246,6 +1248,16 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         $skillPath = Join-Path $reportFixture.Root 'SKILL.md'
         $metadataPath = Join-Path $reportFixture.Root 'agents/openai.yaml'
+        $skillToolsCoverageBaseline = [pscustomobject][ordered]@{
+            schemaVersion=1
+            toolName='skill-tools'
+            coverageMode='authority-input-inventory'
+            root=$reportFixture.Root
+            files=@(
+                [pscustomobject][ordered]@{ path='SKILL.md'; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $skillPath).Hash.ToLowerInvariant() }
+                [pscustomobject][ordered]@{ path='agents/openai.yaml'; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $metadataPath).Hash.ToLowerInvariant() }
+            )
+        }
         $sarifBaseline = [pscustomobject][ordered]@{
             version='2.1.0'
             runs=@([pscustomobject]@{
@@ -1262,14 +1274,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 })
             })
         }
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
         $sarifExplicitLevelWithoutRuleDefault = Copy-TestJsonObject $sarifBaseline
         $sarifExplicitLevelWithoutRuleDefault.runs[0].tool.driver.rules[0].PSObject.Properties.Remove('defaultConfiguration')
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifExplicitLevelWithoutRuleDefault -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifExplicitLevelWithoutRuleDefault -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
         $sarifDefaultLevelBaseline = Copy-TestJsonObject $sarifBaseline
         $sarifDefaultLevelBaseline.runs[0].results[0].PSObject.Properties.Remove('level')
         $sarifDefaultLevelBaseline.runs[0].tool.driver.rules[0].defaultConfiguration.level = 'note'
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifDefaultLevelBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifDefaultLevelBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
 
         $sarifCases = @(
             @{ Mutate={ param($r) $r.version=2.1 } },
@@ -1294,9 +1306,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $report = Copy-TestJsonObject $sarifBaseline
             & $case.Mutate $report
             $errorMessage = $null
-            try { Assert-AuthoritySkillToolsSarifReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory }
+            try { Assert-AuthoritySkillToolsSarifReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage 'skill-tools' 'SARIF rule binding, effective severity, result shape, and fixture location must fail closed on drift.'
+        }
+
+        $skillToolsCoverageCases = @(
+            @{ Mutate={ param($e) $e.PSObject.Properties.Remove('files') } },
+            @{ Mutate={ param($e) $e.files=@($e.files[0]) } },
+            @{ Mutate={ param($e) $e.files[1].path='other.yaml' } },
+            @{ Mutate={ param($e) $e.files[0].sha256='0' * 64 } },
+            @{ Mutate={ param($e) $e.coverageMode='sarif-result-locations' } },
+            @{ Mutate={ param($e) $e.root=(Split-Path -Parent $reportFixture.Root) } },
+            @{ Mutate={ param($e) $e.files += [pscustomobject][ordered]@{ path='SKILL.md'; sha256=$e.files[0].sha256 } } }
+        )
+        foreach ($case in $skillToolsCoverageCases) {
+            $coverage = Copy-TestJsonObject $skillToolsCoverageBaseline
+            & $case.Mutate $coverage
+            $errorMessage = $null
+            try { Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $coverage }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'skill-tools coverage envelope' 'skill-tools coverage envelope identity, exact inventory, and current file hashes must fail closed on drift.'
         }
     }
 
