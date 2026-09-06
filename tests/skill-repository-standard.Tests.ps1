@@ -2386,11 +2386,76 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
             -SourceRevision ('a' * 40) `
             -ArchiveSha256 ('b' * 64) | Out-Null
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"trailing":{"url":"https://approved.example.test/mcp/"}}}'
+        $trailingEndpointError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $exactEndpointRoot `
+                -PolicyPath $exactEndpointPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $trailingEndpointError = $_.Exception.Message }
+        Assert-Match $trailingEndpointError 'canonical' 'An MCP endpoint with a trailing slash must not be silently canonicalized to the allowlisted path.'
         Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://approved.example.test/other"}}}'
         $endpointError = $null
         try { & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null }
         catch { $endpointError = $_.Exception.Message }
         Assert-Match $endpointError 'endpoint' 'An endpoint with an unapproved path must fail exact endpoint authorization.'
+
+        $crossSurfaceAppRoot = Join-Path $TestDrive 'upstream-adapter-cross-surface-app'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $crossSurfaceAppRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $crossSurfaceAppRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"],"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
+        $crossSurfaceAppError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $crossSurfaceAppRoot `
+                -PolicyPath $script:UpstreamAdapterPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $crossSurfaceAppError = $_.Exception.Message }
+        Assert-Match $crossSurfaceAppError 'duplicate app identity' 'The same app identity must be rejected across Plugin and standalone app surfaces.'
+
+        $mcpCommandCollisionRoot = Join-Path $TestDrive 'upstream-adapter-mcp-command-collision'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $mcpCommandCollisionRoot -Recurse -Force
+        [void](New-Item -ItemType Directory -Path (Join-Path $mcpCommandCollisionRoot 'scripts') -Force)
+        Write-TestUtf8File -Path (Join-Path $mcpCommandCollisionRoot 'scripts/A.ps1') -Text 'Write-Output command'
+        Write-TestUtf8File -Path (Join-Path $mcpCommandCollisionRoot '.mcp.json') -Text '{"mcpServers":{"upper":{"command":"./scripts/A.ps1"},"lower":{"command":"./scripts/a.ps1"}}}'
+        $mcpCommandCollisionError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $mcpCommandCollisionRoot `
+                -PolicyPath $script:UpstreamAdapterPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $mcpCommandCollisionError = $_.Exception.Message }
+        Assert-Match $mcpCommandCollisionError 'collision' 'MCP command paths that collide under portable case rules must be blocked before component hashing.'
+
+        $marketplaceRepositoryPolicyPath = Join-Path $TestDrive 'upstream-adapter-marketplace-repository-policy.json'
+        $marketplaceRepositoryPolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"approvedMarketplaceRepositories": ["SyuanTsai/SyuanTsai-AI-Instructions"],',
+            '"approvedMarketplaceRepositories": ["SyuanTsai/SyuanTsai-AI-Instructions","Other/approved"],'
+        )
+        Write-TestUtf8File -Path $marketplaceRepositoryPolicyPath -Text $marketplaceRepositoryPolicyText
+        $marketplaceRepositoryRoot = Join-Path $TestDrive 'upstream-adapter-marketplace-repository'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $marketplaceRepositoryRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $marketplaceRepositoryRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"Other/approved","path":"./","sha":"' + ('a' * 40) + '"}}]}')
+        $marketplaceRepositoryError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $marketplaceRepositoryRoot `
+                -PolicyPath $marketplaceRepositoryPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $marketplaceRepositoryError = $_.Exception.Message }
+        Assert-Match $marketplaceRepositoryError 'must match adapter source repository' 'A marketplace repository must match the immutable adapter SourceRepository candidate.'
 
         if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
             $reparseRoot = Join-Path $TestDrive 'upstream-adapter-reparse'

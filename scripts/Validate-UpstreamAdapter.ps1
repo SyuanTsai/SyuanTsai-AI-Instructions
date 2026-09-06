@@ -774,7 +774,39 @@ function Get-AdapterCanonicalEndpoint {
     $path = [string]$uri.AbsolutePath
     if ([string]::IsNullOrEmpty($path)) { $path = '/' }
     if ($path.Length -gt 1) { $path = $path.TrimEnd('/') }
-    return ('https://{0}{1}' -f [string]$uri.Authority.ToLowerInvariant(), $path)
+    $canonical = 'https://{0}{1}' -f [string]$uri.Authority.ToLowerInvariant(), $path
+    if ([string]$Value -cne $canonical) {
+        throw "$Context must use the exact canonical endpoint '$canonical'."
+    }
+    return $canonical
+}
+
+function Get-AdapterCanonicalGitRepository {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-AdapterString -Value $Value -Context $Context
+    $uri = $null
+    if (-not [Uri]::TryCreate([string]$Value, [UriKind]::Absolute, [ref]$uri) -or
+        [string]$uri.Scheme -cne 'https' -or
+        [string]$uri.Host -cne 'github.com' -or
+        -not [string]::IsNullOrEmpty([string]$uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Query) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Fragment) -or
+        [string]$uri.AbsolutePath -notmatch '^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+        throw "$Context must be a canonical GitHub HTTPS owner/repository URL."
+    }
+    $parts = @(([string]$uri.AbsolutePath).Trim('/').Split('/'))
+    $repository = [string]$parts[1]
+    if ($repository.EndsWith('.git', [System.StringComparison]::Ordinal)) {
+        $repository = $repository.Substring(0, $repository.Length - 4)
+    }
+    if ([string]::IsNullOrWhiteSpace($repository)) {
+        throw "$Context must contain a non-empty GitHub repository name."
+    }
+    return '{0}/{1}' -f [string]$parts[0], $repository
 }
 
 function Get-AdapterSkillResourceInventory {
@@ -858,7 +890,10 @@ function Assert-AdapterMcpServers {
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Context,
         [Parameter(Mandatory = $true)] $DeclaredServerNames,
-        [Parameter(Mandatory = $true)] $ComponentPaths
+        [Parameter(Mandatory = $true)] $ComponentPaths,
+        [Parameter(Mandatory = $true)] $NfcPaths,
+        [Parameter(Mandatory = $true)] $AsciiFoldPaths,
+        [Parameter(Mandatory = $true)] $TargetPathCasings
     )
 
     if ($null -eq $Servers -or $Servers -is [string] -or $Servers -is [array] -or $null -eq $Servers.PSObject) {
@@ -878,6 +913,13 @@ function Assert-AdapterMcpServers {
         }
         if ($hasCommand) {
             $commandPath = Resolve-AdapterRelativePath -Value $server.command -Root $Root -Context "$Context server '$($serverProperty.Name)' command"
+            $commandRelativePath = ([string]$server.command).Substring(2)
+            Assert-AdapterPortableInventoryPath `
+                -RelativePath $commandRelativePath `
+                -NfcPaths $NfcPaths `
+                -AsciiFoldPaths $AsciiFoldPaths `
+                -TargetPathCasings $TargetPathCasings `
+                -Context "$Context server '$($serverProperty.Name)' command"
             [void](Assert-AdapterRegularFile -Path $commandPath -Context "$Context server '$($serverProperty.Name)' command")
             [void](Add-AdapterComponentPath `
                 -Components $ComponentPaths `
@@ -901,15 +943,15 @@ function Assert-AdapterApps {
         [Parameter(Mandatory = $true)] $Apps,
         [Parameter(Mandatory = $true)] $Policy,
         [Parameter(Mandatory = $true)][string] $Context,
-        [Parameter(Mandatory = $true)] $DeclaredServerNames
+        [Parameter(Mandatory = $true)] $DeclaredServerNames,
+        [Parameter(Mandatory = $true)] $SeenNames
     )
 
     if ($Apps -isnot [array]) { throw "$Context must be an array." }
-    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($app in @($Apps)) {
         Assert-AdapterPropertySet -Object $app -Expected @($Policy.allowedAppFields) -Context "$Context entry"
         Assert-AdapterSafeName -Value $app.name -Context "$Context name"
-        if (-not $seenNames.Add([string]$app.name)) {
+        if (-not $SeenNames.Add([string]$app.name)) {
             throw "$Context contains duplicate app identity '$($app.name)'."
         }
         Assert-AdapterSafeName -Value $app.mcpServer -Context "$Context mcpServer"
@@ -929,7 +971,10 @@ function Test-AdapterOptionalFile {
 function Invoke-UpstreamAdapterValidation {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
-        [Parameter(Mandatory = $true)] $Policy
+        [Parameter(Mandatory = $true)] $Policy,
+        [string] $SourceRepository,
+        [string] $SourceRevision,
+        [string] $ArchiveSha256
     )
 
     $rootItem = Get-Item -Force -LiteralPath $Root -ErrorAction Stop
@@ -941,6 +986,10 @@ function Invoke-UpstreamAdapterValidation {
     $bundledSkillInventories = [System.Collections.Generic.List[object]]::new()
     $componentPaths = [System.Collections.Generic.List[object]]::new()
     $declaredMcpServerNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $declaredAppNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $packageNfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $packageAsciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $packageTargetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $pluginManifestPresent = $false
     $pluginHasCapability = $false
     $pluginApps = $null
@@ -971,9 +1020,6 @@ function Invoke-UpstreamAdapterValidation {
         if ($null -ne $skills) {
             Assert-AdapterStringArray -Value $skills -Context 'Plugin manifest skills' -Ordinal
             if (@($skills).Count -gt 0) { $pluginHasCapability = $true }
-            $packageNfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-            $packageAsciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-            $packageTargetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
             $declaredSkills = New-Object 'System.Collections.Generic.List[object]'
             foreach ($skillPathValue in @($skills)) {
                 Assert-AdapterDeclaredSkillPath -Value $skillPathValue -Context 'Plugin manifest skill path'
@@ -1022,7 +1068,10 @@ function Invoke-UpstreamAdapterValidation {
                 -Root $rootFull `
                 -Context 'Plugin manifest MCP servers' `
                 -DeclaredServerNames $declaredMcpServerNames `
-                -ComponentPaths $componentPaths
+                -ComponentPaths $componentPaths `
+                -NfcPaths $packageNfcPaths `
+                -AsciiFoldPaths $packageAsciiFoldPaths `
+                -TargetPathCasings $packageTargetPathCasings
             if (@($pluginMcp.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
         }
         $pluginApps = Get-AdapterProperty -Object $plugin -Name 'apps'
@@ -1043,7 +1092,10 @@ function Invoke-UpstreamAdapterValidation {
             -Root $rootFull `
             -Context 'MCP manifest' `
             -DeclaredServerNames $declaredMcpServerNames `
-            -ComponentPaths $componentPaths
+            -ComponentPaths $componentPaths `
+            -NfcPaths $packageNfcPaths `
+            -AsciiFoldPaths $packageAsciiFoldPaths `
+            -TargetPathCasings $packageTargetPathCasings
         if ($pluginManifestPresent -and @($servers.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
     }
 
@@ -1052,7 +1104,8 @@ function Invoke-UpstreamAdapterValidation {
             -Apps $pluginApps `
             -Policy $Policy `
             -Context 'Plugin manifest apps' `
-            -DeclaredServerNames $declaredMcpServerNames
+            -DeclaredServerNames $declaredMcpServerNames `
+            -SeenNames $declaredAppNames
     }
 
     $appPath = Join-Path $rootFull $Policy.appManifestPath
@@ -1068,7 +1121,8 @@ function Invoke-UpstreamAdapterValidation {
             -Apps $apps `
             -Policy $Policy `
             -Context 'App manifest' `
-            -DeclaredServerNames $declaredMcpServerNames
+            -DeclaredServerNames $declaredMcpServerNames `
+            -SeenNames $declaredAppNames
     }
 
     $marketplacePath = Join-Path $rootFull $Policy.marketplacePath
@@ -1080,6 +1134,12 @@ function Invoke-UpstreamAdapterValidation {
         Assert-AdapterPropertySet -Object $marketplace -Expected @($Policy.allowedMarketplaceRootFields) -Context 'Marketplace manifest'
         $plugins = Get-AdapterProperty -Object $marketplace -Name 'plugins'
         if ($plugins -isnot [array] -or @($plugins).Count -eq 0) { throw 'Marketplace manifest plugins must be a non-empty array.' }
+        if ([string]::IsNullOrWhiteSpace($SourceRepository)) {
+            throw 'BLOCK: Marketplace validation requires an immutable adapter source repository candidate.'
+        }
+        $expectedMarketplaceRepository = Get-AdapterCanonicalGitRepository `
+            -Value $SourceRepository `
+            -Context 'Adapter source repository'
         $seenMarketplaceNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         foreach ($entry in @($plugins)) {
             Assert-AdapterPropertySet -Object $entry -Expected @($Policy.allowedMarketplaceEntryFields) -Context 'Marketplace entry'
@@ -1093,6 +1153,9 @@ function Invoke-UpstreamAdapterValidation {
             if ([string]$source.repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'Marketplace Git repository must be owner/name.' }
             if (-not $approvedMarketplaceRepositories.Contains([string]$source.repo)) {
                 throw "BLOCK: Marketplace repository '$($source.repo)' is not an approved central provenance identity."
+            }
+            if ([string]$source.repo -cne [string]$expectedMarketplaceRepository) {
+                throw "BLOCK: Marketplace repository '$($source.repo)' must match adapter source repository candidate '$expectedMarketplaceRepository'."
             }
             if ([string]$source.path -cne './') {
                 throw 'BLOCK: Marketplace source.path must be exactly the package root ./.'
@@ -1167,7 +1230,12 @@ function Invoke-UpstreamAdapterValidation {
 try {
     $policy = Read-AdapterJson -Path ([System.IO.Path]::GetFullPath($PolicyPath)) -Context 'Upstream adapter policy'
     Assert-AdapterPolicy -Policy $policy
-    $result = Invoke-UpstreamAdapterValidation -Root ([System.IO.Path]::GetFullPath($PackageRoot)) -Policy $policy
+    $result = Invoke-UpstreamAdapterValidation `
+        -Root ([System.IO.Path]::GetFullPath($PackageRoot)) `
+        -Policy $policy `
+        -SourceRepository $SourceRepository `
+        -SourceRevision $SourceRevision `
+        -ArchiveSha256 $ArchiveSha256
     $json = $result | ConvertTo-Json -Depth 20
     if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
         $parent = Split-Path -Parent $OutputPath
