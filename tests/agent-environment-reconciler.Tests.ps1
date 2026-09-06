@@ -449,6 +449,32 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $journalPath | Should Be $false
     }
 
+    # Scenario: A runtime upgrade encounters a valid predecessor v1 recovery journal for a target that did not exist before mutation.
+    # Purpose: Remove an interrupted first-install target without reading the absent legacy backupSha256 property under StrictMode.
+    It 'InterT65b_recovers_a_preupgrade_v1_journal_for_an_absent_target' {
+        $target = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backupRoot = Join-Path $userHome '.agents\backups\recovery-legacy-absent'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),$backupRoot | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied')
+        $appliedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion=1; userHome=[System.IO.Path]::GetFullPath($userHome).TrimEnd([char[]]@('\','/'))
+            backupPath=$backupRoot
+            states=@([pscustomobject][ordered]@{
+                relativePath='.agents/skills/alpha/SKILL.md'; existed=$false; backupPath=$null
+                originalSha256=$null; appliedSha256=$appliedSha
+            })
+        }
+        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+
+        $result = Invoke-UserSkillsRecovery -UserHome $userHome
+
+        $result.outcome | Should Be 'recovered'
+        Test-Path -LiteralPath $target | Should Be $false
+        Test-Path -LiteralPath $journalPath | Should Be $false
+    }
+
     # Scenario: Recovery restores the target but cannot remove the predecessor or current recovery journal.
     # Purpose: Verify recovery cleanup failures are structured as recovery-required instead of returning a false recovered success.
     It 'InterT66_reports_recovery_required_when_recovery_journal_cleanup_fails' {

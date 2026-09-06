@@ -1161,7 +1161,7 @@ function Invoke-UserSkillsRecovery {
                     throw "Agent environment recovery state backup SHA-256 does not match its journaled backup identity: $relative"
                 }
             }
-            elseif ($null -ne $state.backupPath -or $null -ne $state.originalSha256 -or $null -ne $state.backupSha256) {
+            elseif ($null -ne $state.backupPath -or $null -ne $state.originalSha256 -or (-not $isLegacyJournal -and $null -ne $state.backupSha256)) {
                 throw "Agent environment recovery state for a previously absent target must not declare original backup metadata: $relative"
             }
             $validatedStates.Add([pscustomobject][ordered]@{
