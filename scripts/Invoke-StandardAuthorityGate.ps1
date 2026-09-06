@@ -41,6 +41,22 @@ function Get-AuthorityRequiredProperty {
     return ,$property.Value
 }
 
+function Assert-AuthorityUpstreamAdapterReport {
+    param([Parameter(Mandatory = $true)] $Report)
+
+    $schemaVersion = Get-AuthorityRequiredProperty -Object $Report -Name 'schemaVersion' -Context 'Upstream adapter report'
+    $policy = Get-AuthorityRequiredProperty -Object $Report -Name 'policy' -Context 'Upstream adapter report'
+    $status = Get-AuthorityRequiredProperty -Object $Report -Name 'status' -Context 'Upstream adapter report'
+    $decision = Get-AuthorityRequiredProperty -Object $Report -Name 'decision' -Context 'Upstream adapter report'
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        $policy -isnot [string] -or [string]$policy -cne 'upstream-interoperability-adapter-v1' -or
+        $status -isnot [string] -or [string]$status -notin @('passed', 'not-applicable') -or
+        $decision -isnot [string] -or [string]$decision -notin @('PASS', 'NOT_APPLICABLE')) {
+        throw 'upstream adapter validation produced an invalid result.'
+    }
+    return $true
+}
+
 function Assert-AuthorityExactString {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -1054,12 +1070,7 @@ catch {
     throw "upstream adapter validation failed: $($_.Exception.Message)"
 }
 $upstreamAdapterReport = Read-AuthorityJson -Path $upstreamAdapterReportPath -Context 'upstream adapter validation'
-if ($upstreamAdapterReport.schemaVersion -isnot [int] -or [int]$upstreamAdapterReport.schemaVersion -ne 1 -or
-    $upstreamAdapterReport.policy -isnot [string] -or [string]$upstreamAdapterReport.policy -cne 'upstream-interoperability-adapter-v1' -or
-    $upstreamAdapterReport.status -isnot [string] -or [string]$upstreamAdapterReport.status -notin @('passed', 'not-applicable') -or
-    $upstreamAdapterReport.decision -isnot [string] -or [string]$upstreamAdapterReport.decision -notin @('PASS', 'NOT_APPLICABLE')) {
-    throw 'upstream adapter validation produced an invalid result.'
-}
+Assert-AuthorityUpstreamAdapterReport -Report $upstreamAdapterReport | Out-Null
 
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `

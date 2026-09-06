@@ -2310,4 +2310,24 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
+
+    # Scenario: PowerShell returns JSON integers as Int64 on some Linux/runtime combinations.
+    # Purpose: Keep the upstream adapter report contract cross-platform without accepting coercive strings.
+    It 'UnitT91_accepts_Int64_upstream_adapter_report_schema_version' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $report = [pscustomobject][ordered]@{
+            schemaVersion = [int64]1
+            policy = 'upstream-interoperability-adapter-v1'
+            status = 'not-applicable'
+            decision = 'NOT_APPLICABLE'
+        }
+        Assert-True (Assert-AuthorityUpstreamAdapterReport -Report $report) 'An Int64 schemaVersion=1 adapter report must pass validation.'
+
+        $report.schemaVersion = '1'
+        $errorMessage = $null
+        try { Assert-AuthorityUpstreamAdapterReport -Report $report | Out-Null }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'invalid result' 'A string schemaVersion must remain fail-closed.'
+    }
 }
