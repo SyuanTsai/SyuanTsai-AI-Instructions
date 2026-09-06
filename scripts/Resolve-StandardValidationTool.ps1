@@ -11,6 +11,8 @@ param(
 
     [string] $InstallRoot,
 
+    [string] $ExpectedGoRuntimeVersion,
+
     [string] $OutputPath
 )
 
@@ -2036,11 +2038,16 @@ function Invoke-WithApprovedGoEnvironment {
 function Get-ApprovedGoRuntimeVersion {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
-        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule
+        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion
     )
 
     if ($ExpectedVersionRule -cne $trustedGoRuntimeVersionRule) {
         throw "Unsupported Go runtime version rule '$ExpectedVersionRule'. Expected '$trustedGoRuntimeVersionRule'."
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeVersion) -or
+        $ExpectedRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+        throw "The run-resolved latest stable Go runtime version is required and must be a stable semver string. Expected='$ExpectedRuntimeVersion'."
     }
 
     $lines = @($VersionOutput | ForEach-Object { [string]$_ })
@@ -2054,6 +2061,9 @@ function Get-ApprovedGoRuntimeVersion {
     $runtimeVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['version'].Value } else { $null }
     if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
         throw "Unapproved Go runtime '$($lines[0])'. Expected a stable release matching '$trustedGoRuntimeVersionRule'."
+    }
+    if ($runtimeVersion -cne $ExpectedRuntimeVersion) {
+        throw "Go runtime '$runtimeVersion' does not match the run-resolved latest stable Go runtime '$ExpectedRuntimeVersion'."
     }
 
     return $runtimeVersion
@@ -2324,7 +2334,8 @@ function Resolve-SkillValidator {
     param(
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)] $ToolPolicy,
-        [string] $RequestedInstallRoot
+        [string] $RequestedInstallRoot,
+        [string] $ExpectedGoRuntimeVersion
     )
 
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
@@ -2348,7 +2359,8 @@ function Resolve-SkillValidator {
 
             $goRuntimeVersion = Get-ApprovedGoRuntimeVersion `
                 -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
-                -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion)
+                -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion) `
+                -ExpectedRuntimeVersion $ExpectedGoRuntimeVersion
 
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
@@ -2720,7 +2732,11 @@ else {
             Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) -DistributionPolicy $policy.tools.'skill-tools'.npmDistribution -RequestedInstallRoot $InstallRoot
         }
         'skill-validator' {
-            Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' -RequestedInstallRoot $InstallRoot
+            Resolve-SkillValidator `
+                -ShouldInstall ([bool]$Install) `
+                -ToolPolicy $policy.tools.'skill-validator' `
+                -RequestedInstallRoot $InstallRoot `
+                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion
         }
         'skillspector' {
             Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot

@@ -74,7 +74,10 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-NotMatch $workflow "go-version:\s*'[0-9]+\.[0-9]+\.[0-9]+'" 'Authority workflows must not pin a Go patch version.'
             Assert-Match $workflow 'cache:\s*false' 'Authority Go setup must not restore a cross-run module or build cache.'
             Assert-NotMatch $workflow 'actions/setup-go@v[0-9]+' 'Authority workflows must not use a mutable setup-go tag.'
-            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The approved Go runtime must be provisioned before the authority gate starts.'
+            Assert-Match $workflow 'STANDARD_GO_RUNTIME_VERSION=\$\(\$Matches\.version\)' 'Authority workflows must capture the exact Go runtime resolved by setup-go.'
+            Assert-Match $workflow '& ./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION' 'Authority workflows must pass the setup-go resolved runtime into the shared gate.'
+            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=')) 'The approved Go runtime must be provisioned before its version is captured.'
+            Assert-True ($workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The resolved Go runtime must be captured before the authority gate starts.'
         }
 
         foreach ($workflowName in $script:AuthorityWorkflowDependencies) {
@@ -87,6 +90,9 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Equal ([regex]::Matches($standards, [regex]::Escape($testName))).Count 2 "Dedicated authority workflow must watch '$testName' for push and pull request events."
             Assert-Equal ([regex]::Matches($gate, [regex]::Escape($testName))).Count 1 "Shared authority gate must execute '$testName'."
         }
+        Assert-Match $gate 'ExpectedGoRuntimeVersion = \$env:STANDARD_GO_RUNTIME_VERSION' 'The shared authority gate must require the setup-go resolved runtime when invoked directly.'
+        Assert-Match $gate '-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion' 'The shared authority gate must pass the resolved runtime into the resolver.'
+        Assert-Match $gate 'skill-validator receipt Go runtime.*does not match the setup-go run-resolved latest stable runtime' 'The shared authority gate must bind the resolver receipt to setup-go evidence.'
     }
 
     # Scenario: A main push or pull request is checked against a fixed branch range that can be empty or incomplete.

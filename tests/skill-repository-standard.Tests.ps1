@@ -1111,7 +1111,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
-        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP\s*$' 'Standards workflow must execute the shared authority gate.'
+        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
         Assert-Match $workflow "'scripts/Resolve-PythonWheelClosure\.py'" 'Python helper changes must trigger the standalone authority workflow.'
         Assert-NotMatch $workflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Standards workflow must not maintain a divergent inline resolver sequence.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
@@ -1119,7 +1119,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
         Assert-Match $requiredWorkflow '(?ms)^permissions:\r?\n  contents: read\r?\n\r?\njobs:' 'Required workflow token permissions must be explicitly read-only.'
         Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
-        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP\s*$' 'Required context must execute the same shared authority gate.'
+        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
         Assert-NotMatch $requiredWorkflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Required context must not maintain a divergent inline resolver sequence.'
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
@@ -1138,7 +1138,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate '\$skillValidatorRuntimeVersion' 'Shared gate must validate the stable Go runtime selected for the run.'
         Assert-Match $gate 'skillValidatorRuntimeIdentityPattern' 'Shared gate must require the selected Go runtime in the resolved identity.'
         Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
-        Assert-Match $gate '(?m)^\s*& \$resolverPath -ToolName \$entry\.Key -Install -InstallRoot \$installRoot -OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver.'
+        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with setup-go runtime evidence.'
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
@@ -1771,21 +1771,24 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")) 'The resolver must verify the native Go runtime before module resolution.'
             Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('clean', '-cache', '-modcache')")) 'Run-owned Go caches must be cleaned through Go before their temporary root is removed.'
             Assert-Match $resolver '\$result\.goRuntimeVersion = \[string\]\$resolved\.goRuntimeVersion' 'The receipt must project the verified Go runtime version.'
+            Assert-Match $resolver 'ExpectedRuntimeVersion \$ExpectedGoRuntimeVersion' 'The resolver must compare native Go to the run-resolved latest stable runtime.'
             $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
             $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
             Assert-True ($versionProbeIndex -ge 0 -and $moduleLookupIndex -gt $versionProbeIndex) 'Go runtime verification must fail closed before module resolution can start.'
 
             $stableGoVersion = '1.99.7'
             $stableGoOutput = "go version go$stableGoVersion linux/amd64"
-            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable') $stableGoVersion 'A stable Go runtime selected for the run must be accepted.'
+            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion $stableGoVersion) $stableGoVersion 'A stable Go runtime selected for the run must be accepted.'
             foreach ($case in @(
-                @{ Output=@(); Pattern='ambiguous runtime-version evidence' },
-                @{ Output=@($stableGoOutput, 'unexpected second line'); Pattern='ambiguous runtime-version evidence' },
-                @{ Output=@("go version devel go$stableGoVersion linux/amd64"); Pattern='Unapproved Go runtime' },
-                @{ Output=@("go version go$stableGoVersion`rc1 linux/amd64"); Pattern='Unapproved Go runtime' }
+                @{ Output=@(); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
+                @{ Output=@($stableGoOutput, 'unexpected second line'); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
+                @{ Output=@("go version devel go$stableGoVersion linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
+                @{ Output=@("go version go$stableGoVersion`rc1 linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
+                @{ Output=@('go version go1.99.6 linux/amd64'); Expected=$stableGoVersion; Pattern='does not match the run-resolved latest stable Go runtime' },
+                @{ Output=@($stableGoOutput); Expected=''; Pattern='run-resolved latest stable Go runtime version is required' }
             )) {
                 $runtimeError = $null
-                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' | Out-Null }
+                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion ([string]$case.Expected) | Out-Null }
                 catch { $runtimeError = $_.Exception.Message }
                 Assert-Match $runtimeError ([string]$case.Pattern) 'Untrusted Go runtime evidence must fail closed.'
             }

@@ -5,6 +5,8 @@ param(
         else { [System.IO.Path]::GetTempPath() }
     ),
 
+    [string] $ExpectedGoRuntimeVersion = $env:STANDARD_GO_RUNTIME_VERSION,
+
     [switch] $DefineFunctionsOnly
 )
 
@@ -1178,6 +1180,11 @@ $pythonClosureHelperPath = Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.p
 $validationSecurityGatePath = Join-Path $repositoryRoot 'docs/standards/validation-security-gate.json'
 $upstreamAdapterPolicyPath = Join-Path $repositoryRoot 'docs/standards/upstream-adapter.json'
 $upstreamAdapterValidatorPath = Join-Path $PSScriptRoot 'Validate-UpstreamAdapter.ps1'
+$expectedGoRuntimeVersion = [string]$ExpectedGoRuntimeVersion
+if ([string]::IsNullOrWhiteSpace($expectedGoRuntimeVersion) -or
+    $expectedGoRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw 'The authority gate requires STANDARD_GO_RUNTIME_VERSION from the setup-go run-resolved latest stable runtime.'
+}
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
@@ -1276,7 +1283,12 @@ $executablePaths = [ordered]@{}
 # Freeze the complete formal toolset before any validator executes.
 foreach ($entry in $expectedSources.GetEnumerator()) {
     $receiptPath = Join-Path $runRoot ("receipt-{0}.json" -f $entry.Key)
-    & $resolverPath -ToolName $entry.Key -Install -InstallRoot $installRoot -OutputPath $receiptPath | Out-Host
+    & $resolverPath `
+        -ToolName $entry.Key `
+        -Install `
+        -InstallRoot $installRoot `
+        -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
+        -OutputPath $receiptPath | Out-Host
     $receipt = Read-AuthorityJson -Path $receiptPath -Context "$($entry.Key) resolver"
     $executablePaths[$entry.Key] = Assert-InstalledAuthorityToolReceipt `
         -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot
@@ -1397,6 +1409,9 @@ if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorRece
     $skillValidatorReceipt.temporaryDirectoryIsolation -isnot [string] -or [string]$skillValidatorReceipt.temporaryDirectoryIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.binaryInstallIsolation -isnot [string] -or [string]$skillValidatorReceipt.binaryInstallIsolation -cne 'run-owned') {
     throw 'skill-validator receipt does not bind the approved Go distribution isolation.'
+}
+if ($skillValidatorRuntimeVersion -cne $expectedGoRuntimeVersion) {
+    throw "skill-validator receipt Go runtime '$skillValidatorRuntimeVersion' does not match the setup-go run-resolved latest stable runtime '$expectedGoRuntimeVersion'."
 }
 
 $skillToolsReceipt = $receipts.'skill-tools'
@@ -1659,6 +1674,7 @@ $summary = [ordered]@{
     schemaVersion = 1
     runId = $runId
     candidateCommit = $candidateCommit
+    goRuntimeVersion = $expectedGoRuntimeVersion
     canonicalGate = [ordered]@{
         policy = [string]$validationSecurityGate.policy
         policyPath = 'docs/standards/validation-security-gate.json'
