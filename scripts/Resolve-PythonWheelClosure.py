@@ -462,7 +462,12 @@ class PyPISimpleCatalog:
                 artifact_url_value = item.get("url")
                 if not isinstance(artifact_url_value, str) or not artifact_url_value:
                     raise ClosureError(f"Simple JSON wheel {filename!r} is missing a string artifact URL")
-                artifact_url = urllib.parse.urljoin(final_url, artifact_url_value)
+                try:
+                    artifact_url = urllib.parse.urljoin(final_url, artifact_url_value)
+                except ValueError as error:
+                    raise ClosureError(
+                        f"Simple JSON wheel {filename!r} has an invalid artifact URL"
+                    ) from error
                 self._validate_remote_url(artifact_url, APPROVED_ARTIFACT_HOSTS)
                 build_key = build if build else (-1, "")
                 descriptor = Descriptor(
@@ -1398,6 +1403,12 @@ def self_test_command(_: argparse.Namespace) -> None:
                     "url": "http://example.invalid/fallback_project-1.25.whl",
                 },
                 {
+                    "filename": "fallback_project-1.125-py3-none-any.whl",
+                    "yanked": False,
+                    "hashes": {"sha256": "d" * 64},
+                    "url": "https://[invalid",
+                },
+                {
                     "filename": fallback_filename,
                     "yanked": False,
                     "hashes": {"sha256": "c" * 64},
@@ -1417,6 +1428,7 @@ def self_test_command(_: argparse.Namespace) -> None:
             "fallback_project-2.0-py3-none-any.whl",
             "fallback_project-1.5-py3-none-any.whl",
             "fallback_project-1.25-py3-none-any.whl",
+            "fallback_project-1.125-py3-none-any.whl",
         }
         if rejected_filenames != expected_rejected:
             raise AssertionError(
