@@ -264,7 +264,15 @@
       "license": "NOASSERTION"
     },
     {
+      "path": "docs/standards/managed-skill-lifecycle.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/managed-skill-lifecycle-v1.schema.json",
       "license": "Apache-2.0"
     },
     {

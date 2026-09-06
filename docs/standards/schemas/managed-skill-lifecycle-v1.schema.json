@@ -137,7 +137,32 @@
         "originalSha256": { "$ref": "#/$defs/sha256" },
         "backupSha256": { "$ref": "#/$defs/sha256" },
         "appliedSha256": { "$ref": "#/$defs/sha256" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": { "existed": { "const": true } },
+            "required": ["existed"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "type": "string", "minLength": 1 },
+              "originalSha256": { "$ref": "#/$defs/requiredSha256" },
+              "backupSha256": { "$ref": "#/$defs/requiredSha256" }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "backupPath": { "const": null },
+              "originalSha256": { "const": null },
+              "backupSha256": { "const": null }
+            }
+          }
+        }
+      ]
     }
   }
 }

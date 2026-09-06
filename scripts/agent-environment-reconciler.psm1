@@ -641,8 +641,9 @@ function Invoke-UserSkillsReconciliation {
             Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $targetPath | Out-Null
         }
         catch {
+            $failureEvidence = "Rejected target path '$targetPath'. $($_.Exception.Message)"
             $failed.Add("Controlled candidate target path is unsafe: $targetPath")
-            $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'unsafe-target-path' -SkillId ([string]$file.skillId) -Path $targetPath -Classification 'controlled-candidate' -Owner 'desired-state-staged-inventory' -Evidence ([string]$_.Exception.Message) -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 ([string]$file.sha256) -ActualSha256 $null -Remediation @('Rebuild the desired state with a repository-relative .agents/skills path.','Do not apply a candidate containing an absolute, traversal, or reparse-backed target path.')))
+            $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'unsafe-target-path' -SkillId ([string]$file.skillId) -Path '.agents/skills/<rejected-target-path>' -Classification 'controlled-candidate' -Owner 'desired-state-staged-inventory' -Evidence $failureEvidence -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 ([string]$file.sha256) -ActualSha256 $null -Remediation @('Rebuild the desired state with a repository-relative .agents/skills path.','Do not apply a candidate containing an absolute, traversal, or reparse-backed target path.')))
             continue
         }
         $snapshot = Get-AgentEnvironmentStagedFileSnapshot -File $file

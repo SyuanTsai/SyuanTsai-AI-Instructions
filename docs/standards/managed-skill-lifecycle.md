@@ -65,7 +65,7 @@ The transaction-owned staged snapshot MUST be created from the preflight-verifie
 
 Replacement MUST be deterministic by stable Skill ID and target path. A rename MUST be represented by an explicit new ID plus a Catalog lifecycle alias/tombstone transition. The old path MUST be removed only when the current manifest or explicit known-legacy evidence proves ownership. An unknown owner, collision, local drift without force, reparse point, special file, or concurrent target change MUST block closed. No destructive action may be justified by directory name alone.
 
-Backup and recovery MUST be transaction-scoped. The recovery journal MUST bind a transaction ID, user root, backup root, phase, non-null lowercase desired manifest and managed-inventory SHA-256 values, and every original/applied target hash. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries. A hard crash after the journal is written MUST leave the journal and backup usable by `-Recover`; a successful recovery MUST re-verify every restored original hash before deleting the journal.
+Backup and recovery MUST be transaction-scoped. The recovery journal MUST bind a transaction ID, user root, backup root, phase, non-null lowercase desired manifest and managed-inventory SHA-256 values, and every original/applied target hash. For each transaction state, `existed: true` MUST carry a non-empty `backupPath` plus non-null original and backup SHA-256 values; `existed: false` MUST carry `null` for all three backup metadata fields. On mutation failure, the implementation MUST restore the original state or leave a recovery journal that can be validated and resumed. Recovery MUST refuse tampered backups, malformed hashes, unsafe paths, missing files, concurrent edits, and non-regular/reparse entries. A hard crash after the journal is written MUST leave the journal and backup usable by `-Recover`; a successful recovery MUST re-verify every restored original hash before deleting the journal.
 
 ### Retired managed-file cleanup
 
@@ -80,7 +80,7 @@ The desired manifest MUST be built from the same validated candidate inventory t
 Blocked results MUST be machine-readable and MUST retain a human-actionable message plus structured failure details. Each failure detail MUST include:
 
 - a stable `code`;
-- Skill ID and repository-relative target `path`;
+- Skill ID and a schema-valid repository-relative target `path`; when a rejected candidate path is unsafe, use the sentinel `.agents/skills/<rejected-target-path>` and retain the raw candidate path in `evidence`;
 - `classification` and `owner`;
 - the exact ownership/integrity `evidence` used;
 - `destructiveChangeAllowed`, which MUST be false for the blocked action;
