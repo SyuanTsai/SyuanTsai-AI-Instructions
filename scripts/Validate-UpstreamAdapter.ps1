@@ -92,6 +92,81 @@ function Assert-AdapterRegularFile {
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "$Context must not be a reparse point: $Path"
     }
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+            throw "$Context regular-file type cannot be established on this Unix platform: $Path"
+        }
+        if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+            throw "$Context regular-file type cannot be established on this Linux architecture: $Path"
+        }
+
+        $nativeTypeName = 'Codex.UpstreamAdapterNative'
+        if ($null -eq ($nativeTypeName -as [type])) {
+            [void](Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace Codex
+{
+    public static class UpstreamAdapterNative
+    {
+        private const uint S_IFMT = 0xF000;
+        private const uint S_IFREG = 0x8000;
+
+        // Linux x86_64 glibc struct stat. The adapter deliberately fails closed
+        // on other Unix ABIs instead of guessing a filesystem object type.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LinuxStat
+        {
+            public ulong st_dev;
+            public ulong st_ino;
+            public ulong st_nlink;
+            public uint st_mode;
+            public uint st_uid;
+            public uint st_gid;
+            public int pad0;
+            public ulong st_rdev;
+            public long st_size;
+            public long st_blksize;
+            public long st_blocks;
+            public long st_atime;
+            public long st_atime_nsec;
+            public long st_mtime;
+            public long st_mtime_nsec;
+            public long st_ctime;
+            public long st_ctime_nsec;
+            public long reserved0;
+            public long reserved1;
+            public long reserved2;
+        }
+
+        [DllImport("libc", EntryPoint = "lstat", CharSet = CharSet.Ansi, SetLastError = true)]
+        private static extern int lstat(string path, out LinuxStat stat);
+
+        public static bool IsRegularFile(string path)
+        {
+            LinuxStat stat;
+            if (lstat(path, out stat) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "lstat failed.");
+            }
+
+            return (stat.st_mode & S_IFMT) == S_IFREG;
+        }
+    }
+}
+'@)
+        }
+
+        try { $isRegularFile = [Codex.UpstreamAdapterNative]::IsRegularFile($item.FullName) }
+        catch {
+            throw "$Context regular-file type could not be established: $($_.Exception.Message)"
+        }
+        if (-not $isRegularFile) { throw "$Context must be a regular file: $Path" }
+        return $item.FullName
+    }
+
     # PowerShell exposes the first Mode character as '-' for regular files and
     # a different type marker for directories, FIFOs, sockets and devices.
     $mode = [string]$item.Mode

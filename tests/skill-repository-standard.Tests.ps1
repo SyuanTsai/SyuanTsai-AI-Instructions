@@ -2142,6 +2142,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'Assert-AdapterRegularFile' 'Upstream adapter validator must reject non-regular files before reading or executing package-local inputs.'
         Assert-Match $validatorText 'duplicate object key' 'Upstream adapter validator must reject duplicate JSON object keys before deserialization.'
         Assert-Match $validatorText 'allowedRemoteMcpEndpoints' 'Upstream adapter policy must approve exact MCP endpoints rather than hostnames.'
+        Assert-Match $validatorText 'lstat|IsRegularFile' 'Upstream adapter validator must establish Unix regular-file type without opening special files.'
         Assert-Match $validatorText 'ReparsePoint|mkfifo|Mode' 'Upstream adapter validator and regression boundary must account for Windows reparse and Unix special-file inputs.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
