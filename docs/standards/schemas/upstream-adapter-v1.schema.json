@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Upstream interoperability adapter v1",
+  "description": "Strict machine-readable boundary for optional Agent Plugin, marketplace, MCP and app package surfaces.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "policy",
+    "pluginManifestPath",
+    "marketplacePath",
+    "mcpManifestPath",
+    "appManifestPath",
+    "hooksPolicy",
+    "rootRelativePathPrefix",
+    "immutableGitShaPattern",
+    "acceptedMarketplaceSource",
+    "approvedMarketplaceRepositories",
+    "allowedRemoteMcpEndpoints",
+    "allowedPluginManifestFields",
+    "requiredPluginManifestFields",
+    "allowedMarketplaceRootFields",
+    "allowedMarketplaceEntryFields",
+    "allowedMarketplaceSourceFields",
+    "allowedMarketplacePolicyFields",
+    "allowedMcpRootFields",
+    "allowedMcpServerFields",
+    "allowedAppRootFields",
+    "allowedAppFields"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policy": { "const": "upstream-interoperability-adapter-v1" },
+    "pluginManifestPath": { "const": ".codex-plugin/plugin.json" },
+    "marketplacePath": { "const": ".agents/plugins/marketplace.json" },
+    "mcpManifestPath": { "const": ".mcp.json" },
+    "appManifestPath": { "const": ".app.json" },
+    "hooksPolicy": { "const": "reject" },
+    "rootRelativePathPrefix": { "const": "./" },
+    "immutableGitShaPattern": { "const": "^[0-9a-f]{40}$" },
+    "acceptedMarketplaceSource": { "const": "github" },
+    "approvedMarketplaceRepositories": { "$ref": "#/$defs/repositoryArray" },
+    "allowedRemoteMcpEndpoints": { "$ref": "#/$defs/stringArray" },
+    "allowedPluginManifestFields": { "const": ["name", "description", "version", "skills", "mcpServers", "apps"] },
+    "requiredPluginManifestFields": { "const": ["name"] },
+    "allowedMarketplaceRootFields": { "const": ["plugins"] },
+    "allowedMarketplaceEntryFields": { "const": ["name", "description", "source", "category", "interface", "policy"] },
+    "allowedMarketplaceSourceFields": { "const": ["source", "repo", "path", "ref", "sha"] },
+    "allowedMarketplacePolicyFields": { "const": ["installation", "authentication"] },
+    "allowedMcpRootFields": { "const": ["mcpServers"] },
+    "allowedMcpServerFields": { "const": ["command", "args", "url"] },
+    "allowedAppRootFields": { "const": ["apps"] },
+    "allowedAppFields": { "const": ["name", "mcpServer"] }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "repositoryArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+      }
+    }
+  }
+}

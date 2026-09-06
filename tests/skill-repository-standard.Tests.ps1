@@ -11,11 +11,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:LifecyclePath = Join-Path $script:StandardsRoot 'managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:StandardsRoot 'schemas\managed-skill-lifecycle-v1.schema.json'
         $script:UpstreamInteroperabilityPath = Join-Path $script:StandardsRoot 'upstream-interoperability.md'
+        $script:UpstreamAdapterPolicyPath = Join-Path $script:StandardsRoot 'upstream-adapter.json'
+        $script:UpstreamAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\upstream-adapter-v1.schema.json'
         $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
         $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
+        $script:UpstreamAdapterValidatorPath = Join-Path $script:RepositoryRoot 'scripts\Validate-UpstreamAdapter.ps1'
         $script:WorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $script:RequiredPowerShellWorkflowPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
 
@@ -1139,10 +1142,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
-        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$fixtureRoot)")) 'Shared gate must explicitly allow only the Standard-required agents metadata directory during skill-validator structure validation.'
-        Assert-Match $gate "mode='structure-json-allow-agents'" 'Authority evidence must record the exact skill-validator compatibility mode.'
+        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$upstreamAdapterSkillRoot)")) 'Shared gate must explicitly validate the declared bundled Skill with the Standard-required agents metadata directory.'
+        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents-bundled-skill'" 'Authority evidence must record the exact bundled-Skill validator compatibility mode.'
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
-        Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$fixtureRoot' 'Shared gate must pass the frozen skill-tools entry point and check command without a wrapper re-resolution.'
+        Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$upstreamAdapterSkillRoot' 'Shared gate must pass the frozen skill-tools entry point and check command against the declared bundled Skill without a wrapper re-resolution.'
+        Assert-Match $gate 'Assert-AuthorityExactPathInventory' 'Shared gate must bind package-tool reports to the exact adapter Skill inventory.'
+        Assert-Match $gate 'Assert-AuthoritySkillToolsCoverageEnvelope' 'Shared gate must validate a separate exact skill-tools input coverage envelope instead of treating SARIF findings as complete inventory.'
+        Assert-Match $gate 'skill-tools-coverage\.json' 'Authority evidence must persist the skill-tools exact input coverage envelope.'
+        Assert-Match $gate '-ExpectedFixtureRoot \$upstreamAdapterSkillRoot' 'Shared gate must bind package-tool reports to the same adapter Skill root.'
         Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'
         Assert-Match $gate 'credentialIsolation=github-token-cleared-before-python' 'Shared gate must verify that resolver-managed Python did not inherit GitHub credentials.'
         Assert-Match $gate 'installedMetadataVerification=static-dist-info-metadata' 'Shared gate must verify static installed metadata inspection.'
@@ -1197,8 +1204,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             skill_dir=$reportFixture.Root; passed=$true; errors=0; warnings=0
             results=@(
                 [pscustomobject]@{ level='pass'; category='structure'; message='SKILL.md structure is valid.'; file='SKILL.md'; line=1 },
-                [pscustomobject]@{ level='info'; category='metadata'; message='Optional metadata was inspected.'; file='agents/openai.yaml' }
+                [pscustomobject]@{ level='info'; category='metadata'; message='Optional metadata was inspected.'; file='agents/openai.yaml' },
+                [pscustomobject]@{ level='pass'; category='overall'; message='Package validation completed.' }
             )
+            token_counts=[pscustomobject]@{
+                files=@([pscustomobject]@{ file='SKILL.md body'; tokens=1 })
+                total=1
+            }
+            other_token_counts=[pscustomobject]@{
+                files=@([pscustomobject]@{ file='agents/openai.yaml'; tokens=1 })
+                total=1
+            }
         }
         Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
         $skillValidatorCases = @(
@@ -1215,7 +1231,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.results[0].category=$true } },
             @{ Mutate={ param($r) $r.results[0].message='' } },
             @{ Mutate={ param($r) $r.results[0].file='../outside.md' } },
-            @{ Mutate={ param($r) $r.results[0].line='1' } }
+            @{ Mutate={ param($r) $r.results[0].line='1' } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.PSObject.Properties.Remove('token_counts') } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.other_token_counts.files=@([pscustomobject]@{ file='other.md'; tokens=1 }); $r.other_token_counts.total=1 } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.other_token_counts.total=2 } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.token_counts.files[0].tokens='1' } }
         )
         foreach ($case in $skillValidatorCases) {
             $report = Copy-TestJsonObject $skillValidatorBaseline
@@ -1227,6 +1247,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
 
         $skillPath = Join-Path $reportFixture.Root 'SKILL.md'
+        $metadataPath = Join-Path $reportFixture.Root 'agents/openai.yaml'
+        $skillToolsCoverageBaseline = [pscustomobject][ordered]@{
+            schemaVersion=1
+            toolName='skill-tools'
+            coverageMode='authority-input-inventory'
+            root=$reportFixture.Root
+            files=@(
+                [pscustomobject][ordered]@{ path='SKILL.md'; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $skillPath).Hash.ToLowerInvariant() }
+                [pscustomobject][ordered]@{ path='agents/openai.yaml'; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $metadataPath).Hash.ToLowerInvariant() }
+            )
+        }
         $sarifBaseline = [pscustomobject][ordered]@{
             version='2.1.0'
             runs=@([pscustomobject]@{
@@ -1236,18 +1267,21 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 } }
                 results=@([pscustomobject]@{
                     ruleId='fixture-rule'; level='warning'; message=[pscustomobject]@{ text='Controlled fixture advisory.' }
-                    locations=@([pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$skillPath } } })
+                    locations=@(
+                        [pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$skillPath } } },
+                        [pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$metadataPath } } }
+                    )
                 })
             })
         }
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
         $sarifExplicitLevelWithoutRuleDefault = Copy-TestJsonObject $sarifBaseline
         $sarifExplicitLevelWithoutRuleDefault.runs[0].tool.driver.rules[0].PSObject.Properties.Remove('defaultConfiguration')
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifExplicitLevelWithoutRuleDefault -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifExplicitLevelWithoutRuleDefault -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
         $sarifDefaultLevelBaseline = Copy-TestJsonObject $sarifBaseline
         $sarifDefaultLevelBaseline.runs[0].results[0].PSObject.Properties.Remove('level')
         $sarifDefaultLevelBaseline.runs[0].tool.driver.rules[0].defaultConfiguration.level = 'note'
-        Assert-AuthoritySkillToolsSarifReport -Report $sarifDefaultLevelBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifDefaultLevelBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
 
         $sarifCases = @(
             @{ Mutate={ param($r) $r.version=2.1 } },
@@ -1271,9 +1305,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $report = Copy-TestJsonObject $sarifBaseline
             & $case.Mutate $report
             $errorMessage = $null
-            try { Assert-AuthoritySkillToolsSarifReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory }
+            try { Assert-AuthoritySkillToolsSarifReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage 'skill-tools' 'SARIF rule binding, effective severity, result shape, and fixture location must fail closed on drift.'
+        }
+
+        $sarifPartialLocations = Copy-TestJsonObject $sarifBaseline
+        $sarifPartialLocations.runs[0].results[0].locations=@($sarifPartialLocations.runs[0].results[0].locations[0])
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifPartialLocations -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
+
+        $skillToolsCoverageCases = @(
+            @{ Mutate={ param($e) $e.PSObject.Properties.Remove('files') } },
+            @{ Mutate={ param($e) $e.files=@($e.files[0]) } },
+            @{ Mutate={ param($e) $e.files[1].path='other.yaml' } },
+            @{ Mutate={ param($e) $e.files[0].sha256='0' * 64 } },
+            @{ Mutate={ param($e) $e.coverageMode='sarif-result-locations' } },
+            @{ Mutate={ param($e) $e.root=(Split-Path -Parent $reportFixture.Root) } },
+            @{ Mutate={ param($e) $e.files += [pscustomobject][ordered]@{ path='SKILL.md'; sha256=$e.files[0].sha256 } } }
+        )
+        foreach ($case in $skillToolsCoverageCases) {
+            $coverage = Copy-TestJsonObject $skillToolsCoverageBaseline
+            & $case.Mutate $coverage
+            $errorMessage = $null
+            try { Assert-AuthoritySkillToolsSarifReport -Report $sarifBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $coverage }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'skill-tools coverage envelope' 'skill-tools coverage envelope identity, exact inventory, and current file hashes must fail closed on drift.'
         }
     }
 
@@ -2124,7 +2180,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamInteroperabilityPath
+        $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
 
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterPolicyPath -PathType Leaf) 'Upstream adapter policy is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterSchemaPath -PathType Leaf) 'Upstream adapter schema is missing from the central standards directory.'
+        Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterValidatorPath -PathType Leaf) 'Upstream adapter validator is missing from the central scripts directory.'
+        $adapterPolicy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath | ConvertFrom-Json
+        $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterSchemaPath | ConvertFrom-Json
+        Assert-AuthoritySchemaInstance -Value $adapterPolicy -Schema $adapterSchema -SchemaPath $script:UpstreamAdapterSchemaPath -Expected $true -Message 'Upstream adapter policy must be schema-valid.'
+        Assert-Equal $adapterPolicy.schemaVersion 1 'Upstream adapter policy must remain v1.'
+        Assert-Equal $adapterPolicy.policy 'upstream-interoperability-adapter-v1' 'Upstream adapter policy identity changed.'
+        $validatorText = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterValidatorPath
+        Assert-Match $validatorText 'pluginManifestPath|marketplacePath|rootRelativePathPrefix' 'Upstream adapter validator must consume the central path/manifest policy.'
+        Assert-Match $validatorText 'Assert-AdapterNoReparsePath' 'Upstream adapter validator must reject reparse-point manifest paths before reading package metadata.'
+        Assert-Match $validatorText 'Assert-AdapterRegularFile' 'Upstream adapter validator must reject non-regular files before reading or executing package-local inputs.'
+        Assert-Match $validatorText 'Get-AdapterSkillResourceInventory|bundledSkills' 'Upstream adapter validator must inventory every declared bundled Skill resource.'
+        Assert-Match $validatorText 'duplicate object key' 'Upstream adapter validator must reject duplicate JSON object keys before deserialization.'
+        Assert-Match $validatorText 'allowedRemoteMcpEndpoints' 'Upstream adapter policy must approve exact MCP endpoints rather than hostnames.'
+        Assert-Match $validatorText 'approvedMarketplaceRepositories' 'Upstream adapter policy must bind marketplace repositories to approved provenance identities.'
+        Assert-Match $validatorText 'source\.path must be exactly' 'Marketplace source paths must be restricted to the reviewed package root.'
+        Assert-Match $validatorText 'lstat|IsRegularFile' 'Upstream adapter validator must establish Unix regular-file type without opening special files.'
+        Assert-Match $validatorText 'ReparsePoint|mkfifo|Mode' 'Upstream adapter validator and regression boundary must account for Windows reparse and Unix special-file inputs.'
+        Assert-NotMatch $validatorText 'ProcessArchitecture|Linux architecture|x86_64' 'Upstream adapter regular-file detection must not be restricted to one Unix ABI or architecture.'
+        Assert-Match $validatorText 'Assert-AdapterReservedSurfacePaths' 'Upstream adapter validator must reject case aliases of every reserved adapter surface before probing manifests.'
+        Assert-Match $validatorText 'Assert-AdapterDeclaredSkillPath' 'Upstream adapter validator must enforce the canonical declared Skill root.'
+        Assert-Match $validatorText 'must declare at least one Skill or MCP server capability' 'Upstream adapter validator must reject metadata-only Plugin packages.'
+        Assert-Match $validatorText 'componentInventory|packageSha256|SourceRevision|ArchiveSha256' 'Upstream adapter evidence must bind candidate identity and hashed validated components.'
+        Assert-Match $validatorText 'source\.sha must equal.*SourceRevision' 'Marketplace selector evidence must bind to the adapter candidate revision.'
+        Assert-Match $validatorText 'DeclaredServerNames|not a declared MCP server identity' 'Upstream adapter apps must bind to declared MCP server identities.'
+        Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
+        Assert-Match $authorityGate 'Assert-AuthorityComponentInventoryFiles' 'The authority gate must recheck adapter component hashes after validation.'
+        Assert-Match $authorityGate 'replay check|mutation' 'The authority gate must regress report replay after component mutation.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
         Assert-Match $matrix 'Upstream interoperability' 'Cross-repository matrix must record the SYP-193 upstream boundary.'
@@ -2136,6 +2222,347 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $upstream 'Do Not Adopt' 'The upstream decision record must contain Do Not Adopt decisions.'
         Assert-Match $upstream 'MUST NOT.*replace.*central Catalog/Lock' 'Upstream packaging must not replace central provenance and lifecycle authority.'
         Assert-Match $upstream 'schema' 'Schema/pin limitations must be recorded instead of inferred from mutable documentation.'
+        Assert-Match $upstream 'SYP-192 Gate 1' 'Plugin conformance must be bound to the deterministic package-validation gate.'
+        Assert-Match $upstream 'skill-validator' 'The upstream decision must preserve skill-validator as a Gate 1 requirement.'
+        Assert-Match $upstream 'skill-tools check' 'The upstream decision must preserve skill-tools check as a Gate 1 requirement.'
+        Assert-Match $upstream 'marketplace\.json' 'Marketplace install-surface responsibility must be explicit.'
+        Assert-Match $upstream 'source\.path' 'Marketplace source-path responsibility must be explicit.'
+        Assert-Match $upstream 'ref.*sha' 'Marketplace selector integrity responsibility must be explicit.'
+        Assert-Match $upstream 'agents/openai\.yaml' 'Host metadata responsibility must be explicit.'
+        Assert-Match $upstream 'catalog/source\.json' 'Central source inventory responsibility must be explicit.'
+        Assert-Match $upstream 'SkillSpector' 'Security validation responsibility must be explicit.'
+        Assert-Match $upstream 'AI Review' 'AI review responsibility must be explicit.'
+        Assert-Match $upstream 'Human Approval' 'Human approval responsibility must be explicit.'
+        Assert-Match $upstream 'SYP-155' 'Reference implementation impact must be explicit.'
+        Assert-Match $upstream 'SYP-156' 'Fan-out migration impact must be explicit.'
+    }
+
+    # Scenario: A Plugin or marketplace fixture bypasses the executable adapter and is treated as safe by test-only logic.
+    # Purpose: Route representative SYP-193 negative cases through the production validator entry point.
+    It 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' {
+        $fixtureRoot = Join-Path $TestDrive 'upstream-adapter-valid'
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.codex-plugin') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill/references') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.agents/plugins') -Force)
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A valid adapter fixture Skill package.`n---`n`n# Fixture`n"
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/references/nested.txt') -Text 'nested fixture resource'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","description":"A deterministic Plugin adapter fixture.","version":"1.0.0","skills":["./skills/fixture-skill"]}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'adapter-command.ps1') -Text "Write-Output 'adapter fixture'`n"
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.mcp.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}')
+        $validReportPath = Join-Path $fixtureRoot 'valid-report.json'
+        & $script:UpstreamAdapterValidatorPath `
+            -PackageRoot $fixtureRoot `
+            -PolicyPath $script:UpstreamAdapterPolicyPath `
+            -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceRevision ('a' * 40) `
+            -ArchiveSha256 ('b' * 64) `
+            -OutputPath $validReportPath | Out-Null
+        $validReport = Get-Content -Raw -Encoding UTF8 -LiteralPath $validReportPath | ConvertFrom-Json
+        Assert-Equal $validReport.status 'passed' 'A valid Plugin package must pass the executable upstream adapter.'
+        Assert-ExactStringSequence $validReport.surfaces @('plugin', 'mcp', 'app', 'marketplace') 'The positive adapter fixture must exercise every adopted upstream surface.'
+        Assert-Equal @($validReport.bundledSkills).Count 1 'The positive adapter fixture must report one declared bundled Skill.'
+        Assert-Equal $validReport.bundledSkills[0].path './skills/fixture-skill' 'The positive adapter fixture inventory must bind to the declared Skill path.'
+        Assert-ExactStringSequence $validReport.bundledSkills[0].inventory @('SKILL.md', 'references/nested.txt') 'The positive adapter fixture must report the complete nested Skill inventory.'
+        Assert-Equal $validReport.adapterVersion 'upstream-interoperability-adapter-v1' 'The positive adapter report must identify the adapter version.'
+        Assert-Equal $validReport.candidateIdentity.sourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' 'The positive adapter report must bind the source repository.'
+        Assert-Equal $validReport.candidateIdentity.sourceRevision ('a' * 40) 'The positive adapter report must bind the immutable source revision.'
+        Assert-Equal $validReport.candidateIdentity.archiveSha256 ('b' * 64) 'The positive adapter report must bind the archive hash.'
+        Assert-Match $validReport.candidateIdentity.packageSha256 '^[0-9a-f]{64}$' 'The positive adapter report must bind the validated package hash.'
+        Assert-Match $validReport.componentInventorySha256 '^[0-9a-f]{64}$' 'The positive adapter report must bind the deterministic component inventory hash.'
+        Assert-Equal $validReport.candidateIdentity.packageSha256 $validReport.componentInventorySha256 'Candidate package identity must equal the component inventory identity.'
+        Assert-Equal @($validReport.componentInventory).Count 7 'The positive adapter report must hash every validated manifest, command and Skill resource.'
+        foreach ($component in @($validReport.componentInventory)) {
+            Assert-Match $component.path '^[^/]+(?:/[^/]+)*$' 'Component inventory paths must be canonical relative paths.'
+            Assert-Match $component.sha256 '^[0-9a-f]{64}$' 'Component inventory entries must contain lowercase SHA-256 values.'
+        }
+
+        $cases = @(
+            @{ id='package-missing-skill-md'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root 'skills/fixture-skill/SKILL.md') -Force } },
+            @{ id='plugin-path-out-of-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["../outside"]}' } },
+            @{ id='plugin-path-backslash'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[".\\skills\\fixture-skill"]}' } },
+            @{ id='plugin-path-rooted-windows'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["C:/outside"]}' } },
+            @{ id='plugin-path-dot'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./."]}' } },
+            @{ id='plugin-path-colon'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/a:b"]}' } },
+            @{ id='plugin-path-noncanonical-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./packages/fixture-skill"]}' } },
+            @{ id='plugin-path-nested'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill/references"]}' } },
+            @{ id='plugin-duplicate-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","\u006eame":"other"}' } },
+            @{ id='plugin-empty-capability'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin"}' } },
+            @{ id='plugin-empty-skills'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[]}' } },
+            @{ id='plugin-empty-mcp'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","mcpServers":{}}' } },
+            @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
+            @{ id='app-unknown-mcp-server'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"ghost"}]}' } },
+            @{ id='plugin-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.codex-plugin') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.Codex-Plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"]}' } },
+            @{ id='mcp-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.MCP.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}' } },
+            @{ id='app-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.APP.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}' } },
+            @{ id='marketplace-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.agents') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.AGENTS/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","ref":"main"}}]}') } },
+            @{ id='marketplace-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}},{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('b' * 40) + '"}}]}') } },
+            @{ id='marketplace-duplicate-nested-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '","\u0073ha":"' + ('b' * 40) + '"}}]}') } },
+            @{ id='marketplace-unknown-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"},"trust":"trusted"}]}') } },
+            @{ id='marketplace-source-subpath'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./unreviewed-or-missing-package","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-unapproved-repository'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"attacker/plugin","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-repository-case-variant'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"syuantsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='marketplace-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"http","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
+            @{ id='app-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"},{"name":"fixture-app","mcpServer":"local"}]}' } },
+            @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } },
+            @{ id='plugin-hook-case-variant'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'Hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'Hooks/run.ps1') -Text 'Write-Output hook' } }
+        )
+        $expectedErrorPatterns = @{
+            'package-missing-skill-md' = 'SKILL\.md|missing'
+            'plugin-path-out-of-root' = 'canonical'
+            'plugin-path-backslash' = 'canonical'
+            'plugin-path-rooted-windows' = 'canonical'
+            'plugin-path-dot' = 'canonical'
+            'plugin-path-colon' = 'canonical'
+            'plugin-path-noncanonical-root' = 'canonical'
+            'plugin-path-nested' = 'canonical'
+            'plugin-duplicate-field' = 'duplicate object key'
+            'plugin-empty-capability' = 'capability'
+            'plugin-empty-skills' = 'capability'
+            'plugin-empty-mcp' = 'capability'
+            'mcp-unapproved-endpoint' = 'endpoint'
+            'app-unknown-mcp-server' = 'not a declared MCP server identity'
+            'plugin-manifest-case-alias' = 'alias'
+            'mcp-manifest-case-alias' = 'alias'
+            'app-manifest-case-alias' = 'alias'
+            'marketplace-manifest-case-alias' = 'alias'
+            'marketplace-mutable-ref' = 'ref|immutable'
+            'marketplace-duplicate-name' = 'duplicate plugin identity'
+            'marketplace-duplicate-nested-field' = 'duplicate object key'
+            'marketplace-unknown-field' = 'unknown field'
+            'marketplace-source-subpath' = 'source\.path|root'
+            'marketplace-unapproved-repository' = 'approved central provenance'
+            'marketplace-repository-case-variant' = 'approved central provenance'
+            'marketplace-unapproved-endpoint' = 'source type|github'
+            'app-duplicate-name' = 'duplicate app identity'
+            'plugin-hook-bypass' = 'hook'
+            'plugin-hook-case-variant' = 'hook|alias'
+        }
+        foreach ($case in $cases) {
+            $caseRoot = Join-Path $TestDrive ([string]$case.id)
+            Copy-Item -LiteralPath $fixtureRoot -Destination $caseRoot -Recurse -Force
+            & $case.mutate $caseRoot
+            $errorMessage = $null
+            try {
+                & $script:UpstreamAdapterValidatorPath `
+                    -PackageRoot $caseRoot `
+                    -PolicyPath $script:UpstreamAdapterPolicyPath `
+                    -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                    -SourceRevision ('a' * 40) `
+                    -ArchiveSha256 ('b' * 64) `
+                    -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null
+            }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-True ($expectedErrorPatterns.ContainsKey([string]$case.id)) "SYP-193 case '$($case.id)' must declare a case-specific failure pattern."
+            Assert-Match $errorMessage $expectedErrorPatterns[[string]$case.id] "SYP-193 case '$($case.id)' must be blocked by its intended executable-adapter validation."
+        }
+
+        $duplicatePolicyPath = Join-Path $TestDrive 'upstream-adapter-duplicate-policy.json'
+        $duplicatePolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"allowedRemoteMcpEndpoints": [],',
+            '"allowedRemoteMcpEndpoints": [],"allowedRemoteMcpEndpoints": [],'
+        )
+        Write-TestUtf8File -Path $duplicatePolicyPath -Text $duplicatePolicyText
+        $duplicatePolicyError = $null
+        try { & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $duplicatePolicyPath | Out-Null }
+        catch { $duplicatePolicyError = $_.Exception.Message }
+        Assert-Match $duplicatePolicyError 'duplicate object key' 'Duplicate keys in the adapter policy must be rejected before ConvertFrom-Json deserialization.'
+
+        $exactEndpointPolicyPath = Join-Path $TestDrive 'upstream-adapter-exact-endpoint-policy.json'
+        $exactEndpointPolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"allowedRemoteMcpEndpoints": [],',
+            '"allowedRemoteMcpEndpoints": ["https://approved.example.test/mcp"],'
+        )
+        Write-TestUtf8File -Path $exactEndpointPolicyPath -Text $exactEndpointPolicyText
+        $exactEndpointRoot = Join-Path $TestDrive 'upstream-adapter-exact-endpoint'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $exactEndpointRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"approved":{"url":"https://approved.example.test/mcp"}}}'
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"approved"}]}'
+        & $script:UpstreamAdapterValidatorPath `
+            -PackageRoot $exactEndpointRoot `
+            -PolicyPath $exactEndpointPolicyPath `
+            -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceRevision ('a' * 40) `
+            -ArchiveSha256 ('b' * 64) | Out-Null
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"trailing":{"url":"https://approved.example.test/mcp/"}}}'
+        $trailingEndpointError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $exactEndpointRoot `
+                -PolicyPath $exactEndpointPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $trailingEndpointError = $_.Exception.Message }
+        Assert-Match $trailingEndpointError 'canonical' 'An MCP endpoint with a trailing slash must not be silently canonicalized to the allowlisted path.'
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://approved.example.test/other"}}}'
+        $endpointError = $null
+        try { & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null }
+        catch { $endpointError = $_.Exception.Message }
+        Assert-Match $endpointError 'endpoint' 'An endpoint with an unapproved path must fail exact endpoint authorization.'
+
+        $crossSurfaceAppRoot = Join-Path $TestDrive 'upstream-adapter-cross-surface-app'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $crossSurfaceAppRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $crossSurfaceAppRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"],"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
+        $crossSurfaceAppError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $crossSurfaceAppRoot `
+                -PolicyPath $script:UpstreamAdapterPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $crossSurfaceAppError = $_.Exception.Message }
+        Assert-Match $crossSurfaceAppError 'duplicate app identity' 'The same app identity must be rejected across Plugin and standalone app surfaces.'
+
+        $mcpCommandCollisionRoot = Join-Path $TestDrive 'upstream-adapter-mcp-command-collision'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $mcpCommandCollisionRoot -Recurse -Force
+        [void](New-Item -ItemType Directory -Path (Join-Path $mcpCommandCollisionRoot 'scripts') -Force)
+        Write-TestUtf8File -Path (Join-Path $mcpCommandCollisionRoot 'scripts/A.ps1') -Text 'Write-Output command'
+        Write-TestUtf8File -Path (Join-Path $mcpCommandCollisionRoot '.mcp.json') -Text '{"mcpServers":{"upper":{"command":"./scripts/A.ps1"},"lower":{"command":"./scripts/a.ps1"}}}'
+        $mcpCommandCollisionError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $mcpCommandCollisionRoot `
+                -PolicyPath $script:UpstreamAdapterPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $mcpCommandCollisionError = $_.Exception.Message }
+        Assert-Match $mcpCommandCollisionError 'collision' 'MCP command paths that collide under portable case rules must be blocked before component hashing.'
+
+        $marketplaceRepositoryPolicyPath = Join-Path $TestDrive 'upstream-adapter-marketplace-repository-policy.json'
+        $marketplaceRepositoryPolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"approvedMarketplaceRepositories": ["SyuanTsai/SyuanTsai-AI-Instructions"],',
+            '"approvedMarketplaceRepositories": ["SyuanTsai/SyuanTsai-AI-Instructions","Other/approved"],'
+        )
+        Write-TestUtf8File -Path $marketplaceRepositoryPolicyPath -Text $marketplaceRepositoryPolicyText
+        $marketplaceRepositoryRoot = Join-Path $TestDrive 'upstream-adapter-marketplace-repository'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $marketplaceRepositoryRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $marketplaceRepositoryRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"Other/approved","path":"./","sha":"' + ('a' * 40) + '"}}]}')
+        $marketplaceRepositoryError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath `
+                -PackageRoot $marketplaceRepositoryRoot `
+                -PolicyPath $marketplaceRepositoryPolicyPath `
+                -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveSha256 ('b' * 64) | Out-Null
+        }
+        catch { $marketplaceRepositoryError = $_.Exception.Message }
+        Assert-Match $marketplaceRepositoryError 'must match adapter source repository' 'A marketplace repository must match the immutable adapter SourceRepository candidate.'
+
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $reparseRoot = Join-Path $TestDrive 'upstream-adapter-reparse'
+            $reparseOutside = Join-Path $TestDrive 'upstream-adapter-reparse-outside'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $reparseRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path $reparseOutside -Force)
+            Write-TestUtf8File -Path (Join-Path $reparseOutside 'adapter-command.ps1') -Text "Write-Output 'outside'`n"
+            [void](New-Item -ItemType Junction -Path (Join-Path $reparseRoot 'linked') -Target $reparseOutside)
+            Write-TestUtf8File -Path (Join-Path $reparseRoot '.mcp.json') -Text '{"mcpServers":{"linked":{"command":"./linked/adapter-command.ps1"}}}'
+            $reparseError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $reparseRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $reparseError = $_.Exception.Message }
+            Assert-Match $reparseError 'reparse|regular' 'A Windows reparse-backed package-local command must be blocked before reading the target.'
+        }
+        else {
+            $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $mkfifo) { Set-TestInconclusive 'mkfifo is unavailable on this Unix host.'; return }
+            $fifoRoot = Join-Path $TestDrive 'upstream-adapter-fifo'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $fifoRoot -Recurse -Force
+            $fifoPath = Join-Path $fifoRoot 'adapter-command.pipe'
+            & $mkfifo.Source $fifoPath
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the upstream adapter FIFO fixture.' }
+            Write-TestUtf8File -Path (Join-Path $fifoRoot '.mcp.json') -Text '{"mcpServers":{"fifo":{"command":"./adapter-command.pipe"}}}'
+            $fifoError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $fifoRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $fifoError = $_.Exception.Message }
+            Assert-Match $fifoError 'regular file' 'A Unix FIFO must be blocked without opening or reading it.'
+        }
+
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $nestedReparseRoot = Join-Path $TestDrive 'upstream-adapter-nested-reparse'
+            $nestedReparseOutside = Join-Path $TestDrive 'upstream-adapter-nested-reparse-outside'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $nestedReparseRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path $nestedReparseOutside -Force)
+            Write-TestUtf8File -Path (Join-Path $nestedReparseOutside 'resource.txt') -Text 'outside nested resource'
+            [void](New-Item -ItemType Junction -Path (Join-Path $nestedReparseRoot 'skills/fixture-skill/assets') -Target $nestedReparseOutside)
+            $nestedReparseError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $nestedReparseRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $nestedReparseError = $_.Exception.Message }
+            Assert-Match $nestedReparseError 'reparse|regular' 'A Windows reparse-backed nested Skill resource must be blocked.'
+        }
+        else {
+            $nestedMkfifo = Get-Command mkfifo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $nestedMkfifo) {
+                $nestedFifoRoot = Join-Path $TestDrive 'upstream-adapter-nested-fifo'
+                Copy-Item -LiteralPath $fixtureRoot -Destination $nestedFifoRoot -Recurse -Force
+                $nestedFifoPath = Join-Path $nestedFifoRoot 'skills/fixture-skill/assets/resource.pipe'
+                [void](New-Item -ItemType Directory -Path (Split-Path -Parent $nestedFifoPath) -Force)
+                & $nestedMkfifo.Source $nestedFifoPath
+                if ($LASTEXITCODE -ne 0) { throw 'Could not create the nested upstream adapter FIFO fixture.' }
+                $nestedFifoError = $null
+                try { & $script:UpstreamAdapterValidatorPath -PackageRoot $nestedFifoRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+                catch { $nestedFifoError = $_.Exception.Message }
+                Assert-Match $nestedFifoError 'regular file' 'A Unix FIFO nested inside a declared Skill must be blocked.'
+            }
+        }
+
+        if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+            $portableResourceRoot = Join-Path $TestDrive 'upstream-adapter-portable-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $portableResourceRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $portableResourceRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $portableResourceRoot 'skills/fixture-skill/assets/CON.txt') -Text 'device alias'
+            $portableResourceError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $portableResourceRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $portableResourceError = $_.Exception.Message }
+            Assert-Match $portableResourceError 'portable|device' 'A Windows-invalid or device-name nested Skill resource must be blocked on Unix.'
+
+            $wildcardRoot = Join-Path $TestDrive 'upstream-adapter-wildcard-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $wildcardRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $wildcardRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $wildcardRoot 'skills/fixture-skill/assets/bad*name.txt') -Text 'invalid wildcard'
+            $wildcardError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $wildcardRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $wildcardError = $_.Exception.Message }
+            Assert-Match $wildcardError 'portable' 'A Windows-invalid wildcard nested Skill resource must be blocked on Unix.'
+
+            $collisionRoot = Join-Path $TestDrive 'upstream-adapter-resource-collision'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $collisionRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/A.txt') -Text 'upper'
+            Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/a.txt') -Text 'lower'
+            $collisionError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $collisionError = $_.Exception.Message }
+            Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
+
+            $deviceAliasRoot = Join-Path $TestDrive 'upstream-adapter-device-alias-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $deviceAliasRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $deviceAliasRoot 'skills/fixture-skill/assets') -Force)
+            $deviceAliasName = 'COM' + [char]0x00B9 + '.txt'
+            Write-TestUtf8File -Path (Join-Path $deviceAliasRoot ('skills/fixture-skill/assets/' + $deviceAliasName)) -Text 'superscript device alias'
+            $deviceAliasError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $deviceAliasRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $deviceAliasError = $_.Exception.Message }
+            Assert-Match $deviceAliasError 'device' 'Windows superscript device-name aliases must be blocked on Unix.'
+
+            $skillRootCollisionRoot = Join-Path $TestDrive 'upstream-adapter-skill-root-collision'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $skillRootCollisionRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $skillRootCollisionRoot 'skills/Fixture-Skill') -Force)
+            Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot 'skills/Fixture-Skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A second case-colliding Skill root.`n---`n`n# Fixture`n"
+            Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill","./skills/Fixture-Skill"]}'
+            $skillRootCollisionError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $skillRootCollisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $skillRootCollisionError = $_.Exception.Message }
+            Assert-Match $skillRootCollisionError 'collision' 'Declared Skill roots that collide under portable case rules must be blocked.'
+        }
     }
 
     # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.
@@ -2182,7 +2609,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $expectedEvidence = @(
             ,@('candidateIdentity', 'authoritySnapshot', 'sourcePin')
             ,@('archiveSha256', 'contentSha256', 'provenance')
-            ,@('packageInventory', 'packageSchema', 'packageValidatorResult')
+            ,@('packageInventory', 'packageSchema', 'packageValidatorResult', 'adapterResult', 'skillToolsResult')
             ,@('scannerIdentity', 'analyzerCompleteness', 'staticReport')
             ,@('testInventory', 'testResult', 'domainAdapterResult')
             ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
@@ -2236,11 +2663,36 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
+        $upstreamAdapterIndex = $gate.IndexOf("Context 'upstream adapter validation'")
         $packageValidationIndex = $gate.IndexOf("Context 'skill-validator package validation'")
+        $skillToolsPackageIndex = $gate.IndexOf("Context 'skill-tools package validation'")
         $skillSpectorStaticIndex = $gate.IndexOf("Context 'SkillSpector static scan'")
-        $repositoryTestsIndex = $gate.IndexOf("Context 'skill-tools combined check'")
-        Assert-True ($packageValidationIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        $repositoryTestsIndex = $gate.IndexOf('Invoke-Pester -Path $authorityTestPaths')
+        Assert-True ($upstreamAdapterIndex -ge 0 -and $packageValidationIndex -ge 0 -and $skillToolsPackageIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
+        Assert-True ($upstreamAdapterIndex -lt $skillSpectorStaticIndex) 'Upstream adapter validation must execute before SkillSpector Static.'
         Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
+        Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
+    }
+
+    # Scenario: PowerShell returns JSON integers as Int64 on some Linux/runtime combinations.
+    # Purpose: Keep the upstream adapter report contract cross-platform without accepting coercive strings.
+    It 'UnitT91_accepts_Int64_upstream_adapter_report_schema_version' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $report = [pscustomobject][ordered]@{
+            schemaVersion = [int64]1
+            policy = 'upstream-interoperability-adapter-v1'
+            adapterVersion = 'upstream-interoperability-adapter-v1'
+            status = 'not-applicable'
+            decision = 'NOT_APPLICABLE'
+        }
+        Assert-True (Assert-AuthorityUpstreamAdapterReport -Report $report) 'An Int64 schemaVersion=1 adapter report must pass validation.'
+
+        $report.schemaVersion = '1'
+        $errorMessage = $null
+        try { Assert-AuthorityUpstreamAdapterReport -Report $report | Out-Null }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'invalid result' 'A string schemaVersion must remain fail-closed.'
     }
 }

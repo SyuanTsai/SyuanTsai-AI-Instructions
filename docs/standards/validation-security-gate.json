@@ -24,7 +24,7 @@
       "name": "Package Validation",
       "condition": "always",
       "failureAction": "BLOCK",
-      "evidence": ["packageInventory", "packageSchema", "packageValidatorResult"]
+      "evidence": ["packageInventory", "packageSchema", "packageValidatorResult", "adapterResult", "skillToolsResult"]
     },
     {
       "order": 4,

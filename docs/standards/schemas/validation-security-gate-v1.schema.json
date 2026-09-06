@@ -82,7 +82,7 @@
               "type": "object",
               "properties": {
                 "id": { "const": "package-validation" },
-                "evidence": { "const": ["packageInventory", "packageSchema", "packageValidatorResult"] }
+                "evidence": { "const": ["packageInventory", "packageSchema", "packageValidatorResult", "adapterResult", "skillToolsResult"] }
               }
             },
             {

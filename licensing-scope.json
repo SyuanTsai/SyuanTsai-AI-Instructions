@@ -288,6 +288,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/upstream-adapter-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/skill-repository-review-matrix.md",
       "license": "Apache-2.0"
     },
@@ -297,6 +301,10 @@
     },
     {
       "path": "docs/standards/upstream-interoperability.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/upstream-adapter.json",
       "license": "Apache-2.0"
     },
     {
@@ -337,6 +345,10 @@
     },
     {
       "path": "scripts/Resolve-StandardValidationTool.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Validate-UpstreamAdapter.ps1",
       "license": "Apache-2.0"
     },
     {
