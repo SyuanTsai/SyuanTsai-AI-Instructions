@@ -108,7 +108,7 @@
         "schemaVersion": { "const": 1 },
         "transactionId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
         "userHome": { "type": "string", "minLength": 1 },
-        "backupPath": { "type": "string", "minLength": 1 },
+        "backupPath": { "type": "string", "minLength": 1, "pattern": "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])[\\s\\S]+$" },
         "phase": { "enum": ["prepared", "mutating"] },
         "desiredManifestSha256": { "$ref": "#/$defs/requiredSha256" },
         "desiredInventorySha256": { "$ref": "#/$defs/requiredSha256" },

@@ -2035,6 +2035,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
         Assert-AuthoritySchemaInstance -Value $journal -Schema $schema -SchemaPath $schemaPath -Expected $true -Message 'A pre-existing target with complete backup metadata must validate.'
 
+        $journalWithWhitespaceBackupPath = Copy-TestJsonObject $journal
+        $journalWithWhitespaceBackupPath.backupPath = '   '
+        Assert-AuthoritySchemaInstance -Value $journalWithWhitespaceBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A transaction journal with a whitespace-only backup path must fail closed.'
+
+        $journalWithNextLineBackupPath = Copy-TestJsonObject $journal
+        $journalWithNextLineBackupPath.backupPath = [string][char]0x0085
+        Assert-AuthoritySchemaInstance -Value $journalWithNextLineBackupPath -Schema $schema -SchemaPath $schemaPath -Expected $false -Message 'A transaction journal with a U+0085 whitespace-only backup path must fail closed.'
+
         $absentJournal = Copy-TestJsonObject $journal
         $absentJournal.states = @([pscustomobject][ordered]@{
             relativePath='.agents/skills/beta/SKILL.md'; existed=$false
