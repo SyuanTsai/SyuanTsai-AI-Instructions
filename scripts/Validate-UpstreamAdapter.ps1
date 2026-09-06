@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory = $true)][string] $PackageRoot,
     [string] $PolicyPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/upstream-adapter.json'),
-    [string] $OutputPath
+    [string] $OutputPath,
+    [string] $SourceRepository,
+    [string] $SourceRevision,
+    [string] $ArchiveSha256
 )
 
 Set-StrictMode -Version Latest
@@ -446,6 +449,116 @@ function Assert-AdapterNoReparsePath {
     return $fullPath
 }
 
+function Add-AdapterComponentPath {
+    param(
+        [Parameter(Mandatory = $true)] $Components,
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = Assert-AdapterPathWithinRoot -Path $Path -Root $Root -Context $Context
+    [void](Assert-AdapterRegularFile -Path $fullPath -Context $Context)
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $relative = $fullPath.Substring($rootFull.Length).TrimStart(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ).Replace('\', '/')
+    if ([string]::IsNullOrWhiteSpace($relative)) { throw "$Context must identify a package component file." }
+    foreach ($component in @($Components)) {
+        if ([string]$component.path -ceq $relative) { return $fullPath }
+    }
+    $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $fullPath).Hash.ToLowerInvariant()
+    $Components.Add([ordered]@{
+        path = $relative
+        sha256 = $sha256
+    })
+    return $fullPath
+}
+
+function Get-AdapterComponentInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Components,
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [switch] $VerifySnapshot
+    )
+
+    $paths = @($Components | ForEach-Object { [string]$_.path })
+    if ($paths.Count -eq 0) { return ,@() }
+    [System.Array]::Sort($paths, [StringComparer]::Ordinal)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $inventory = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($relative in $paths) {
+        if ([string]::IsNullOrWhiteSpace($relative) -or -not $seen.Add($relative)) {
+            throw "$Context contains a duplicate or malformed component path."
+        }
+        $snapshot = @($Components | Where-Object { [string]$_.path -ceq $relative })[0]
+        $fullPath = Join-Path $Root ($relative -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        [void](Assert-AdapterRegularFile -Path $fullPath -Context "$Context '$relative'")
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fullPath).Hash.ToLowerInvariant()
+        if ($VerifySnapshot -and [string]$actualHash -cne [string]$snapshot.sha256) {
+            throw "BLOCK: $Context component '$relative' changed after validation."
+        }
+        $inventory.Add([ordered]@{
+            path = $relative
+            sha256 = $actualHash
+        })
+    }
+    return ,$inventory.ToArray()
+}
+
+function Get-AdapterInventorySha256 {
+    param([Parameter(Mandatory = $true)] $Inventory)
+
+    $canonical = (@($Inventory | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function New-AdapterCandidateIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Revision,
+        [Parameter(Mandatory = $true)][string] $ArchiveHash,
+        [Parameter(Mandatory = $true)][string] $PackageHash
+    )
+
+    Assert-AdapterString -Value $Repository -Context 'Adapter source repository'
+    $uri = $null
+    if (-not [Uri]::TryCreate($Repository, [UriKind]::Absolute, [ref]$uri) -or
+        [string]$uri.Scheme -cne 'https' -or
+        [string]::IsNullOrEmpty([string]$uri.Host) -or
+        -not [string]::IsNullOrEmpty([string]$uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Query) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Fragment) -or
+        [string]$uri.AbsolutePath -notmatch '^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+        throw 'BLOCK: Adapter source repository must be a canonical https owner/repository URL.'
+    }
+    Assert-AdapterString -Value $Revision -Context 'Adapter source revision'
+    Assert-AdapterString -Value $ArchiveHash -Context 'Adapter archive SHA-256'
+    Assert-AdapterString -Value $PackageHash -Context 'Adapter package SHA-256'
+    if ($Revision -cnotmatch '^[0-9a-f]{40}$') { throw 'BLOCK: Adapter source revision must be a lowercase immutable Git SHA.' }
+    if ($ArchiveHash -cnotmatch '^[0-9a-f]{64}$') { throw 'BLOCK: Adapter archive SHA-256 must be lowercase.' }
+    if ($PackageHash -cnotmatch '^[0-9a-f]{64}$') { throw 'BLOCK: Adapter package SHA-256 must be lowercase.' }
+    return [ordered]@{
+        sourceRepository = $Repository
+        sourceRevision = $Revision
+        archiveSha256 = $ArchiveHash
+        packageSha256 = $PackageHash
+    }
+}
+
 function Assert-AdapterReservedSurfacePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -667,6 +780,7 @@ function Get-AdapterSkillResourceInventory {
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Context,
         [string] $PackageRelativePrefix = '',
+        $ComponentPaths,
         $NfcPaths,
         $AsciiFoldPaths,
         $TargetPathCasings
@@ -718,6 +832,13 @@ function Get-AdapterSkillResourceInventory {
             }
             [void](Assert-AdapterRegularFile -Path $itemPath -Context "$Context resource")
             if ([string]::IsNullOrWhiteSpace($relative)) { throw "$Context contains an invalid resource path." }
+            if ($null -ne $ComponentPaths) {
+                [void](Add-AdapterComponentPath `
+                    -Components $ComponentPaths `
+                    -Root $Root `
+                    -Path $itemPath `
+                    -Context "$Context resource")
+            }
             $inventory.Add($relative)
         }
     }
@@ -732,7 +853,9 @@ function Assert-AdapterMcpServers {
         [Parameter(Mandatory = $true)] $Servers,
         [Parameter(Mandatory = $true)] $Policy,
         [Parameter(Mandatory = $true)][string] $Root,
-        [Parameter(Mandatory = $true)][string] $Context
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)] $DeclaredServerNames,
+        [Parameter(Mandatory = $true)] $ComponentPaths
     )
 
     if ($null -eq $Servers -or $Servers -is [string] -or $Servers -is [array] -or $null -eq $Servers.PSObject) {
@@ -740,6 +863,9 @@ function Assert-AdapterMcpServers {
     }
     foreach ($serverProperty in @($Servers.PSObject.Properties)) {
         Assert-AdapterSafeName -Value $serverProperty.Name -Context "$Context server name"
+        if (-not $DeclaredServerNames.Add([string]$serverProperty.Name)) {
+            throw "BLOCK: $Context contains duplicate MCP server identity '$($serverProperty.Name)'."
+        }
         $server = $serverProperty.Value
         Assert-AdapterPropertySet -Object $server -Expected @($Policy.allowedMcpServerFields) -Context "$Context server '$($serverProperty.Name)'"
         $hasCommand = $null -ne (Get-AdapterProperty -Object $server -Name 'command')
@@ -750,6 +876,11 @@ function Assert-AdapterMcpServers {
         if ($hasCommand) {
             $commandPath = Resolve-AdapterRelativePath -Value $server.command -Root $Root -Context "$Context server '$($serverProperty.Name)' command"
             [void](Assert-AdapterRegularFile -Path $commandPath -Context "$Context server '$($serverProperty.Name)' command")
+            [void](Add-AdapterComponentPath `
+                -Components $ComponentPaths `
+                -Root $Root `
+                -Path $commandPath `
+                -Context "$Context server '$($serverProperty.Name)' command")
         }
         if ($hasUrl) {
             $canonicalEndpoint = Get-AdapterCanonicalEndpoint -Value $server.url -Context "$Context server '$($serverProperty.Name)' url"
@@ -766,7 +897,8 @@ function Assert-AdapterApps {
     param(
         [Parameter(Mandatory = $true)] $Apps,
         [Parameter(Mandatory = $true)] $Policy,
-        [Parameter(Mandatory = $true)][string] $Context
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)] $DeclaredServerNames
     )
 
     if ($Apps -isnot [array]) { throw "$Context must be an array." }
@@ -778,6 +910,9 @@ function Assert-AdapterApps {
             throw "$Context contains duplicate app identity '$($app.name)'."
         }
         Assert-AdapterSafeName -Value $app.mcpServer -Context "$Context mcpServer"
+        if (-not $DeclaredServerNames.Contains([string]$app.mcpServer)) {
+            throw "BLOCK: $Context mcpServer '$($app.mcpServer)' is not a declared MCP server identity."
+        }
     }
 }
 
@@ -801,8 +936,11 @@ function Invoke-UpstreamAdapterValidation {
     $rootFull = [System.IO.Path]::GetFullPath($rootItem.FullName)
     $surfaces = [System.Collections.Generic.List[string]]::new()
     $bundledSkillInventories = [System.Collections.Generic.List[object]]::new()
+    $componentPaths = [System.Collections.Generic.List[object]]::new()
+    $declaredMcpServerNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $pluginManifestPresent = $false
     $pluginHasCapability = $false
+    $pluginApps = $null
     $approvedMarketplaceRepositories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($repository in @($Policy.approvedMarketplaceRepositories)) {
         [void]$approvedMarketplaceRepositories.Add([string]$repository)
@@ -815,6 +953,7 @@ function Invoke-UpstreamAdapterValidation {
         $pluginManifestPresent = $true
         $surfaces.Add('plugin')
         [void](Assert-AdapterNoReparsePath -Path $pluginPath -Root $rootFull -Context 'Plugin manifest')
+        [void](Add-AdapterComponentPath -Components $componentPaths -Root $rootFull -Path $pluginPath -Context 'Plugin manifest')
         $plugin = Read-AdapterJson -Path $pluginPath -Context 'Plugin manifest'
         Assert-AdapterPropertySet -Object $plugin -Expected @($Policy.allowedPluginManifestFields) -Context 'Plugin manifest'
         foreach ($name in @($Policy.requiredPluginManifestFields)) {
@@ -862,6 +1001,7 @@ function Invoke-UpstreamAdapterValidation {
                     -Root $rootFull `
                     -Context "Plugin Skill '$($declaredSkill.value)'" `
                     -PackageRelativePrefix $declaredSkill.packageRelativePath `
+                    -ComponentPaths $componentPaths `
                     -NfcPaths $packageNfcPaths `
                     -AsciiFoldPaths $packageAsciiFoldPaths `
                     -TargetPathCasings $packageTargetPathCasings
@@ -873,40 +1013,66 @@ function Invoke-UpstreamAdapterValidation {
         }
         $pluginMcp = Get-AdapterProperty -Object $plugin -Name 'mcpServers'
         if ($null -ne $pluginMcp) {
-            Assert-AdapterMcpServers -Servers $pluginMcp -Policy $Policy -Root $rootFull -Context 'Plugin manifest MCP servers'
+            Assert-AdapterMcpServers `
+                -Servers $pluginMcp `
+                -Policy $Policy `
+                -Root $rootFull `
+                -Context 'Plugin manifest MCP servers' `
+                -DeclaredServerNames $declaredMcpServerNames `
+                -ComponentPaths $componentPaths
             if (@($pluginMcp.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
         }
         $pluginApps = Get-AdapterProperty -Object $plugin -Name 'apps'
-        if ($null -ne $pluginApps) { Assert-AdapterApps -Apps $pluginApps -Policy $Policy -Context 'Plugin manifest apps' }
     }
 
     $mcpPath = Join-Path $rootFull $Policy.mcpManifestPath
     if (Test-AdapterOptionalFile -Path $mcpPath) {
         $surfaces.Add('mcp')
         [void](Assert-AdapterNoReparsePath -Path $mcpPath -Root $rootFull -Context 'MCP manifest')
+        [void](Add-AdapterComponentPath -Components $componentPaths -Root $rootFull -Path $mcpPath -Context 'MCP manifest')
         $mcp = Read-AdapterJson -Path $mcpPath -Context 'MCP manifest'
         Assert-AdapterPropertySet -Object $mcp -Expected @($Policy.allowedMcpRootFields) -Context 'MCP manifest'
         $servers = Get-AdapterProperty -Object $mcp -Name 'mcpServers'
         if ($null -eq $servers) { throw 'MCP manifest is missing mcpServers.' }
-        Assert-AdapterMcpServers -Servers $servers -Policy $Policy -Root $rootFull -Context 'MCP manifest'
+        Assert-AdapterMcpServers `
+            -Servers $servers `
+            -Policy $Policy `
+            -Root $rootFull `
+            -Context 'MCP manifest' `
+            -DeclaredServerNames $declaredMcpServerNames `
+            -ComponentPaths $componentPaths
         if ($pluginManifestPresent -and @($servers.PSObject.Properties).Count -gt 0) { $pluginHasCapability = $true }
+    }
+
+    if ($null -ne $pluginApps) {
+        Assert-AdapterApps `
+            -Apps $pluginApps `
+            -Policy $Policy `
+            -Context 'Plugin manifest apps' `
+            -DeclaredServerNames $declaredMcpServerNames
     }
 
     $appPath = Join-Path $rootFull $Policy.appManifestPath
     if (Test-AdapterOptionalFile -Path $appPath) {
         $surfaces.Add('app')
         [void](Assert-AdapterNoReparsePath -Path $appPath -Root $rootFull -Context 'App manifest')
+        [void](Add-AdapterComponentPath -Components $componentPaths -Root $rootFull -Path $appPath -Context 'App manifest')
         $app = Read-AdapterJson -Path $appPath -Context 'App manifest'
         Assert-AdapterPropertySet -Object $app -Expected @($Policy.allowedAppRootFields) -Context 'App manifest'
         $apps = Get-AdapterProperty -Object $app -Name 'apps'
         if ($null -eq $apps) { throw 'App manifest is missing apps.' }
-        Assert-AdapterApps -Apps $apps -Policy $Policy -Context 'App manifest'
+        Assert-AdapterApps `
+            -Apps $apps `
+            -Policy $Policy `
+            -Context 'App manifest' `
+            -DeclaredServerNames $declaredMcpServerNames
     }
 
     $marketplacePath = Join-Path $rootFull $Policy.marketplacePath
     if (Test-AdapterOptionalFile -Path $marketplacePath) {
         $surfaces.Add('marketplace')
         [void](Assert-AdapterNoReparsePath -Path $marketplacePath -Root $rootFull -Context 'Marketplace manifest')
+        [void](Add-AdapterComponentPath -Components $componentPaths -Root $rootFull -Path $marketplacePath -Context 'Marketplace manifest')
         $marketplace = Read-AdapterJson -Path $marketplacePath -Context 'Marketplace manifest'
         Assert-AdapterPropertySet -Object $marketplace -Expected @($Policy.allowedMarketplaceRootFields) -Context 'Marketplace manifest'
         $plugins = Get-AdapterProperty -Object $marketplace -Name 'plugins'
@@ -957,13 +1123,36 @@ function Invoke-UpstreamAdapterValidation {
         throw 'BLOCK: Plugin package must declare at least one Skill or MCP server capability.'
     }
     $status = if ($surfaces.Count -eq 0) { 'not-applicable' } else { 'passed' }
+    $componentInventory = Get-AdapterComponentInventory `
+        -Components $componentPaths `
+        -Root $rootFull `
+        -Context 'Adapter component inventory' `
+        -VerifySnapshot
+    $componentInventorySha256 = Get-AdapterInventorySha256 -Inventory $componentInventory
+    $candidateIdentity = $null
+    if ($status -eq 'passed') {
+        if ([string]::IsNullOrWhiteSpace($SourceRepository) -or
+            [string]::IsNullOrWhiteSpace($SourceRevision) -or
+            [string]::IsNullOrWhiteSpace($ArchiveSha256)) {
+            throw 'BLOCK: Adapter PASS requires immutable source repository, source revision and archive SHA-256 inputs.'
+        }
+        $candidateIdentity = New-AdapterCandidateIdentity `
+            -Repository $SourceRepository `
+            -Revision $SourceRevision `
+            -ArchiveHash $ArchiveSha256 `
+            -PackageHash $componentInventorySha256
+    }
     return [ordered]@{
         schemaVersion = 1
         policy = [string]$Policy.policy
+        adapterVersion = [string]$Policy.policy
         status = $status
         packageRoot = $rootFull
         surfaces = @($surfaces)
         bundledSkills = @($bundledSkillInventories.ToArray())
+        candidateIdentity = $candidateIdentity
+        componentInventory = @($componentInventory)
+        componentInventorySha256 = $componentInventorySha256
         decision = if ($status -eq 'passed') { 'PASS' } else { 'NOT_APPLICABLE' }
     }
 }

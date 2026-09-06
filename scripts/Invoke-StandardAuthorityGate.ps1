@@ -46,10 +46,12 @@ function Assert-AuthorityUpstreamAdapterReport {
 
     $schemaVersion = Get-AuthorityRequiredProperty -Object $Report -Name 'schemaVersion' -Context 'Upstream adapter report'
     $policy = Get-AuthorityRequiredProperty -Object $Report -Name 'policy' -Context 'Upstream adapter report'
+    $adapterVersion = Get-AuthorityRequiredProperty -Object $Report -Name 'adapterVersion' -Context 'Upstream adapter report'
     $status = Get-AuthorityRequiredProperty -Object $Report -Name 'status' -Context 'Upstream adapter report'
     $decision = Get-AuthorityRequiredProperty -Object $Report -Name 'decision' -Context 'Upstream adapter report'
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
         $policy -isnot [string] -or [string]$policy -cne 'upstream-interoperability-adapter-v1' -or
+        $adapterVersion -isnot [string] -or [string]$adapterVersion -cne 'upstream-interoperability-adapter-v1' -or
         $status -isnot [string] -or [string]$status -notin @('passed', 'not-applicable') -or
         $decision -isnot [string] -or [string]$decision -notin @('PASS', 'NOT_APPLICABLE')) {
         throw 'upstream adapter validation produced an invalid result.'
@@ -57,9 +59,62 @@ function Assert-AuthorityUpstreamAdapterReport {
     if ([string]$status -ceq 'passed') {
         $surfaces = Get-AuthorityRequiredProperty -Object $Report -Name 'surfaces' -Context 'Upstream adapter report'
         $bundledSkills = Get-AuthorityRequiredProperty -Object $Report -Name 'bundledSkills' -Context 'Upstream adapter report'
+        $candidateIdentity = Get-AuthorityRequiredProperty -Object $Report -Name 'candidateIdentity' -Context 'Upstream adapter report'
+        $componentInventory = Get-AuthorityRequiredProperty -Object $Report -Name 'componentInventory' -Context 'Upstream adapter report'
+        $componentInventorySha256 = Get-AuthorityRequiredProperty -Object $Report -Name 'componentInventorySha256' -Context 'Upstream adapter report'
         if ($surfaces -isnot [array] -or @($surfaces).Count -eq 0 -or
-            $bundledSkills -isnot [array] -or @($bundledSkills).Count -eq 0) {
-            throw 'A passed upstream adapter report must include surfaces and bundled Skill inventories.'
+            $bundledSkills -isnot [array] -or
+            $componentInventory -isnot [array] -or @($componentInventory).Count -eq 0) {
+            throw 'A passed upstream adapter report must include surfaces, component inventory and any bundled Skill inventories.'
+        }
+        $candidateProperties = if ($null -eq $candidateIdentity -or $null -eq $candidateIdentity.PSObject) {
+            @()
+        }
+        else {
+            @($candidateIdentity.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        }
+        if ($null -eq $candidateIdentity -or $candidateProperties.Count -ne 4 -or
+            @('sourceRepository', 'sourceRevision', 'archiveSha256', 'packageSha256' | Where-Object { $candidateProperties -cnotcontains $_ }).Count -ne 0) {
+            throw 'A passed upstream adapter report must include the exact immutable candidate identity fields.'
+        }
+        if ([string]$candidateIdentity.sourceRepository -notmatch '^https://[^/?#]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$' -or
+            [string]$candidateIdentity.sourceRevision -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'A passed upstream adapter report contains a malformed immutable source identity.'
+        }
+        Assert-AuthoritySha256 -Value $candidateIdentity.archiveSha256 -Context 'Upstream adapter candidate archive SHA-256'
+        Assert-AuthoritySha256 -Value $candidateIdentity.packageSha256 -Context 'Upstream adapter candidate package SHA-256'
+        Assert-AuthoritySha256 -Value $componentInventorySha256 -Context 'Upstream adapter component inventory SHA-256'
+        $observedComponentPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $orderedComponentPaths = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($component in @($componentInventory)) {
+            $componentProperties = if ($null -eq $component -or $null -eq $component.PSObject) {
+                @()
+            }
+            else {
+                @($component.PSObject.Properties | ForEach-Object { [string]$_.Name })
+            }
+            if ($null -eq $component -or $componentProperties.Count -ne 2 -or
+                @('path', 'sha256' | Where-Object { $componentProperties -cnotcontains $_ }).Count -ne 0) {
+                throw 'A passed upstream adapter report contains a malformed component inventory entry.'
+            }
+            if ($component.path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$component.path) -or
+                -not $observedComponentPaths.Add([string]$component.path)) {
+                throw 'A passed upstream adapter report contains a duplicate or malformed component path.'
+            }
+            Assert-AuthoritySha256 -Value $component.sha256 -Context "Upstream adapter component '$($component.path)'"
+            [void]$orderedComponentPaths.Add([string]$component.path)
+        }
+        $sortedComponentPaths = @($orderedComponentPaths.ToArray())
+        [System.Array]::Sort($sortedComponentPaths, [StringComparer]::Ordinal)
+        for ($index = 0; $index -lt $sortedComponentPaths.Count; $index++) {
+            if ([string]$sortedComponentPaths[$index] -cne [string]$orderedComponentPaths[$index]) {
+                throw 'A passed upstream adapter report must emit component inventory in ordinal path order.'
+            }
+        }
+        $computedComponentInventorySha256 = Get-AuthorityComponentInventorySha256 -Inventory $componentInventory
+        if ([string]$componentInventorySha256 -cne $computedComponentInventorySha256 -or
+            [string]$candidateIdentity.packageSha256 -cne $computedComponentInventorySha256) {
+            throw 'A passed upstream adapter report has an unbound component/package identity.'
         }
         foreach ($bundledSkill in @($bundledSkills)) {
             $bundledPath = Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'path' -Context 'Upstream adapter bundled Skill'
@@ -521,6 +576,62 @@ function Assert-AuthorityExactPathInventory {
     return $true
 }
 
+function Assert-AuthorityExactComponentInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $observed = @($Value)
+    $expectedEntries = @($Expected)
+    if ($Value -isnot [array] -or $observed.Count -ne $expectedEntries.Count) {
+        throw "$Context does not match the exact expected component inventory."
+    }
+    $observedByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($component in $observed) {
+        if ($null -eq $component -or $null -eq $component.PSObject -or
+            $component.path -isnot [string] -or $component.sha256 -isnot [string] -or
+            $observedByPath.ContainsKey([string]$component.path)) {
+            throw "$Context contains a duplicate or malformed component entry."
+        }
+        $observedByPath.Add([string]$component.path, [string]$component.sha256)
+        Assert-AuthoritySha256 -Value $component.sha256 -Context "$Context '$($component.path)'"
+    }
+    foreach ($expectedComponent in $expectedEntries) {
+        $expectedPath = [string]$expectedComponent.path
+        $expectedHash = [string]$expectedComponent.sha256
+        if (-not $observedByPath.ContainsKey($expectedPath) -or
+            [string]$observedByPath[$expectedPath] -cne $expectedHash) {
+            throw "$Context does not contain expected identity for '$expectedPath'."
+        }
+    }
+    return $true
+}
+
+function Assert-AuthorityComponentInventoryFiles {
+    param(
+        [Parameter(Mandatory = $true)] $Inventory,
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    foreach ($component in @($Inventory)) {
+        $relative = [string](Get-AuthorityRequiredProperty -Object $component -Name 'path' -Context $Context)
+        $expectedHash = [string](Get-AuthorityRequiredProperty -Object $component -Name 'sha256' -Context "$Context '$relative'")
+        $fullPath = Join-Path $Root ($relative -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        [void](Assert-AuthorityPathWithinRoot -Path $fullPath -Root $Root -Context "$Context '$relative'")
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "$Context component '$relative' is missing."
+        }
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fullPath).Hash.ToLowerInvariant()
+        if ([string]$actualHash -cne $expectedHash) {
+            throw "$Context component '$relative' changed after adapter validation."
+        }
+    }
+    return $true
+}
+
 function Resolve-AuthorityReportedFilePath {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -944,6 +1055,21 @@ function Assert-AuthoritySkillToolsSarifReport {
     }
 }
 
+function Get-AuthorityComponentInventorySha256 {
+    param([Parameter(Mandatory = $true)] $Inventory)
+
+    $canonical = (@($Inventory | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Get-AuthorityCandidateCommit {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -1293,6 +1419,9 @@ if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
 # stages are allowed to run; the ordinary validation fixture intentionally has
 # no optional upstream metadata.
 $upstreamAdapterFixtureRoot = Join-Path $runRoot 'fixture/upstream-adapter-fixture'
+$upstreamAdapterSourceRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+$upstreamAdapterSourceRevision = ('a' * 40)
+$upstreamAdapterArchiveSha256 = ('b' * 64)
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin') -Force)
 $upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill'
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'agents') -Force)
@@ -1329,7 +1458,7 @@ $upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapte
 )
 [System.IO.File]::WriteAllText(
     (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins/marketplace.json'),
-    ('{"plugins":[{"name":"adapter-fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}'),
+    ('{"plugins":[{"name":"adapter-fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + $upstreamAdapterSourceRevision + '"}}]}'),
     (New-Object Text.UTF8Encoding($false))
 )
 Assert-AuthorityFixtureContract -FixtureRoot $upstreamAdapterSkillRoot -ExpectedSkillId 'adapter-fixture-skill'
@@ -1338,6 +1467,16 @@ $upstreamAdapterSkillFiles = @(
     [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml')).Hash.ToLowerInvariant() }
 )
 $upstreamAdapterSkillInventoryPaths = @($upstreamAdapterSkillFiles | ForEach-Object { [string]$_.path })
+$upstreamAdapterComponentFiles = @(
+    [pscustomobject][ordered]@{ path = '.agents/plugins/marketplace.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins/marketplace.json')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = '.app.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.app.json')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = '.codex-plugin/plugin.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin/plugin.json')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = '.mcp.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.mcp.json')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = 'adapter-command.ps1'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot 'adapter-command.ps1')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/SKILL.md'; sha256 = [string]$upstreamAdapterSkillFiles[0].sha256 },
+    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/agents/openai.yaml'; sha256 = [string]$upstreamAdapterSkillFiles[1].sha256 }
+)
+$upstreamAdapterComponentInventorySha256 = Get-AuthorityComponentInventorySha256 -Inventory $upstreamAdapterComponentFiles
 
 # Stage 3: Package Validation. The optional upstream adapter and both package tools
 # must pass before any SkillSpector scan or repository test can run.
@@ -1347,6 +1486,9 @@ try {
     & $upstreamAdapterValidatorPath `
         -PackageRoot $upstreamAdapterFixtureRoot `
         -PolicyPath $upstreamAdapterPolicyPath `
+        -SourceRepository $upstreamAdapterSourceRepository `
+        -SourceRevision $upstreamAdapterSourceRevision `
+        -ArchiveSha256 $upstreamAdapterArchiveSha256 `
         -OutputPath $upstreamAdapterReportPath | Out-Null
 }
 catch {
@@ -1376,6 +1518,47 @@ Assert-AuthorityExactPathInventory `
     -Value (Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'inventory' -Context 'upstream adapter bundled Skill inventory') `
     -Expected $upstreamAdapterSkillInventoryPaths `
     -Context 'upstream adapter bundled Skill inventory' | Out-Null
+Assert-AuthorityExactComponentInventory `
+    -Value (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
+    -Expected $upstreamAdapterComponentFiles `
+    -Context 'upstream adapter component inventory' | Out-Null
+if ([string]$upstreamAdapterReport.adapterVersion -cne 'upstream-interoperability-adapter-v1' -or
+    [string]$upstreamAdapterReport.candidateIdentity.sourceRepository -cne $upstreamAdapterSourceRepository -or
+    [string]$upstreamAdapterReport.candidateIdentity.sourceRevision -cne $upstreamAdapterSourceRevision -or
+    [string]$upstreamAdapterReport.candidateIdentity.archiveSha256 -cne $upstreamAdapterArchiveSha256 -or
+    [string]$upstreamAdapterReport.candidateIdentity.packageSha256 -cne $upstreamAdapterComponentInventorySha256 -or
+    [string]$upstreamAdapterReport.componentInventorySha256 -cne $upstreamAdapterComponentInventorySha256) {
+    throw 'upstream adapter report does not bind the controlled fixture identity and component inventory.'
+}
+Assert-AuthorityComponentInventoryFiles `
+    -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
+    -Root $upstreamAdapterFixtureRoot `
+    -Context 'upstream adapter component identity' | Out-Null
+
+# Prove that a report cannot be replayed after one validated component changes.
+$mutatedAdapterComponentPath = Join-Path $upstreamAdapterFixtureRoot '.app.json'
+$originalMutatedAdapterComponentBytes = [System.IO.File]::ReadAllBytes($mutatedAdapterComponentPath)
+try {
+    [System.IO.File]::WriteAllText(
+        $mutatedAdapterComponentPath,
+        '{"apps":[{"name":"adapter-fixture-app","mcpServer":"local"},{"name":"unexpected","mcpServer":"local"}]}',
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $mutationDetected = $false
+    try {
+        Assert-AuthorityComponentInventoryFiles `
+            -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
+            -Root $upstreamAdapterFixtureRoot `
+            -Context 'upstream adapter replay check' | Out-Null
+    }
+    catch {
+        $mutationDetected = $true
+    }
+    if (-not $mutationDetected) { throw 'upstream adapter replay check failed to detect component mutation.' }
+}
+finally {
+    [System.IO.File]::WriteAllBytes($mutatedAdapterComponentPath, $originalMutatedAdapterComponentBytes)
+}
 
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
@@ -1423,6 +1606,10 @@ Assert-AuthoritySkillToolsSarifReport `
     -CoverageEnvelope $skillToolsCoverageEnvelope
 $skillToolsCoverageJson = $skillToolsCoverageEnvelope | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText($skillToolsCoveragePath, $skillToolsCoverageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+Assert-AuthorityComponentInventoryFiles `
+    -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
+    -Root $upstreamAdapterFixtureRoot `
+    -Context 'upstream adapter post-package-validation identity' | Out-Null
 
 # Stage 4: SkillSpector Static.
 $skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'

@@ -2180,6 +2180,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamInteroperabilityPath
+        $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
 
         Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterPolicyPath -PathType Leaf) 'Upstream adapter policy is missing from the central standards directory.'
         Assert-True (Test-Path -LiteralPath $script:UpstreamAdapterSchemaPath -PathType Leaf) 'Upstream adapter schema is missing from the central standards directory.'
@@ -2204,7 +2205,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'Assert-AdapterReservedSurfacePaths' 'Upstream adapter validator must reject case aliases of every reserved adapter surface before probing manifests.'
         Assert-Match $validatorText 'Assert-AdapterDeclaredSkillPath' 'Upstream adapter validator must enforce the canonical declared Skill root.'
         Assert-Match $validatorText 'must declare at least one Skill or MCP server capability' 'Upstream adapter validator must reject metadata-only Plugin packages.'
+        Assert-Match $validatorText 'componentInventory|packageSha256|SourceRevision|ArchiveSha256' 'Upstream adapter evidence must bind candidate identity and hashed validated components.'
+        Assert-Match $validatorText 'DeclaredServerNames|not a declared MCP server identity' 'Upstream adapter apps must bind to declared MCP server identities.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
+        Assert-Match $authorityGate 'Assert-AuthorityComponentInventoryFiles' 'The authority gate must recheck adapter component hashes after validation.'
+        Assert-Match $authorityGate 'replay check|mutation' 'The authority gate must regress report replay after component mutation.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
         Assert-Match $matrix 'Upstream interoperability' 'Cross-repository matrix must record the SYP-193 upstream boundary.'
@@ -2247,13 +2252,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}')
         $validReportPath = Join-Path $fixtureRoot 'valid-report.json'
-        & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath $validReportPath | Out-Null
+        & $script:UpstreamAdapterValidatorPath `
+            -PackageRoot $fixtureRoot `
+            -PolicyPath $script:UpstreamAdapterPolicyPath `
+            -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceRevision ('a' * 40) `
+            -ArchiveSha256 ('b' * 64) `
+            -OutputPath $validReportPath | Out-Null
         $validReport = Get-Content -Raw -Encoding UTF8 -LiteralPath $validReportPath | ConvertFrom-Json
         Assert-Equal $validReport.status 'passed' 'A valid Plugin package must pass the executable upstream adapter.'
         Assert-ExactStringSequence $validReport.surfaces @('plugin', 'mcp', 'app', 'marketplace') 'The positive adapter fixture must exercise every adopted upstream surface.'
         Assert-Equal @($validReport.bundledSkills).Count 1 'The positive adapter fixture must report one declared bundled Skill.'
         Assert-Equal $validReport.bundledSkills[0].path './skills/fixture-skill' 'The positive adapter fixture inventory must bind to the declared Skill path.'
         Assert-ExactStringSequence $validReport.bundledSkills[0].inventory @('SKILL.md', 'references/nested.txt') 'The positive adapter fixture must report the complete nested Skill inventory.'
+        Assert-Equal $validReport.adapterVersion 'upstream-interoperability-adapter-v1' 'The positive adapter report must identify the adapter version.'
+        Assert-Equal $validReport.candidateIdentity.sourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' 'The positive adapter report must bind the source repository.'
+        Assert-Equal $validReport.candidateIdentity.sourceRevision ('a' * 40) 'The positive adapter report must bind the immutable source revision.'
+        Assert-Equal $validReport.candidateIdentity.archiveSha256 ('b' * 64) 'The positive adapter report must bind the archive hash.'
+        Assert-Match $validReport.candidateIdentity.packageSha256 '^[0-9a-f]{64}$' 'The positive adapter report must bind the validated package hash.'
+        Assert-Match $validReport.componentInventorySha256 '^[0-9a-f]{64}$' 'The positive adapter report must bind the deterministic component inventory hash.'
+        Assert-Equal $validReport.candidateIdentity.packageSha256 $validReport.componentInventorySha256 'Candidate package identity must equal the component inventory identity.'
+        Assert-Equal @($validReport.componentInventory).Count 7 'The positive adapter report must hash every validated manifest, command and Skill resource.'
+        foreach ($component in @($validReport.componentInventory)) {
+            Assert-Match $component.path '^[^/]+(?:/[^/]+)*$' 'Component inventory paths must be canonical relative paths.'
+            Assert-Match $component.sha256 '^[0-9a-f]{64}$' 'Component inventory entries must contain lowercase SHA-256 values.'
+        }
 
         $cases = @(
             @{ id='package-missing-skill-md'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root 'skills/fixture-skill/SKILL.md') -Force } },
@@ -2269,6 +2292,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='plugin-empty-skills'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[]}' } },
             @{ id='plugin-empty-mcp'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","mcpServers":{}}' } },
             @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
+            @{ id='app-unknown-mcp-server'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"ghost"}]}' } },
             @{ id='plugin-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.codex-plugin') -Recurse -Force; Write-TestUtf8File -Path (Join-Path $root '.Codex-Plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill"]}' } },
             @{ id='mcp-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.mcp.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.MCP.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}' } },
             @{ id='app-manifest-case-alias'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root '.app.json') -Force; Write-TestUtf8File -Path (Join-Path $root '.APP.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}' } },
@@ -2315,7 +2339,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $exactEndpointRoot = Join-Path $TestDrive 'upstream-adapter-exact-endpoint'
         Copy-Item -LiteralPath $fixtureRoot -Destination $exactEndpointRoot -Recurse -Force
         Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"approved":{"url":"https://approved.example.test/mcp"}}}'
-        & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null
+        & $script:UpstreamAdapterValidatorPath `
+            -PackageRoot $exactEndpointRoot `
+            -PolicyPath $exactEndpointPolicyPath `
+            -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceRevision ('a' * 40) `
+            -ArchiveSha256 ('b' * 64) | Out-Null
         Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://approved.example.test/other"}}}'
         $endpointError = $null
         try { & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null }
