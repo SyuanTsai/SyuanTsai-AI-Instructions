@@ -159,8 +159,13 @@ Describe 'Agent Skill authority workflow contract' {
             'plugin-path-out-of-root',
             'plugin-path-backslash',
             'plugin-path-rooted-windows',
+            'plugin-path-dot',
+            'plugin-path-colon',
+            'plugin-duplicate-field',
             'mcp-unapproved-endpoint',
             'marketplace-mutable-ref',
+            'marketplace-duplicate-name',
+            'marketplace-duplicate-nested-field',
             'marketplace-unknown-field',
             'marketplace-unapproved-endpoint',
             'plugin-hook-bypass'

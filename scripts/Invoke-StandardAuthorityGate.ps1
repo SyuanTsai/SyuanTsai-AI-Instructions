@@ -1056,13 +1056,52 @@ if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
     throw 'Pester receipt modulePath and executablePath must identify the same frozen module manifest.'
 }
 
+# Keep a run-owned fixture with every adopted upstream surface present.  The
+# adapter must prove that it can validate a real surface before later security
+# stages are allowed to run; the ordinary validation fixture intentionally has
+# no optional upstream metadata.
+$upstreamAdapterFixtureRoot = Join-Path $runRoot 'fixture/upstream-adapter-fixture'
+[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin') -Force)
+[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill') -Force)
+[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins') -Force)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill/SKILL.md'),
+    "---`nname: adapter-fixture-skill`ndescription: A deterministic upstream adapter fixture Skill.`n---`n`n# Adapter Fixture`n",
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin/plugin.json'),
+    '{"name":"adapter-fixture-plugin","description":"A deterministic upstream adapter fixture.","version":"1.0.0","skills":["./skills/adapter-fixture-skill"]}',
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot 'adapter-command.ps1'),
+    "Write-Output 'adapter fixture'`n",
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot '.mcp.json'),
+    '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}',
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot '.app.json'),
+    '{"apps":[{"name":"adapter-fixture-app","mcpServer":"local"}]}',
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins/marketplace.json'),
+    ('{"plugins":[{"name":"adapter-fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}'),
+    (New-Object Text.UTF8Encoding($false))
+)
+
 # Stage 3: Package Validation. The optional upstream adapter and both package tools
 # must pass before any SkillSpector scan or repository test can run.
 # Context 'upstream adapter validation'
 $upstreamAdapterReportPath = Join-Path $runRoot 'upstream-adapter-report.json'
 try {
     & $upstreamAdapterValidatorPath `
-        -PackageRoot $fixtureRoot `
+        -PackageRoot $upstreamAdapterFixtureRoot `
         -PolicyPath $upstreamAdapterPolicyPath `
         -OutputPath $upstreamAdapterReportPath | Out-Null
 }
@@ -1071,6 +1110,14 @@ catch {
 }
 $upstreamAdapterReport = Read-AuthorityJson -Path $upstreamAdapterReportPath -Context 'upstream adapter validation'
 Assert-AuthorityUpstreamAdapterReport -Report $upstreamAdapterReport | Out-Null
+if ([string]$upstreamAdapterReport.status -cne 'passed' -or [string]$upstreamAdapterReport.decision -cne 'PASS') {
+    throw 'upstream adapter validation must pass a fixture with adopted surfaces before Stage 4.'
+}
+foreach ($surface in @('plugin', 'mcp', 'app', 'marketplace')) {
+    if (@($upstreamAdapterReport.surfaces) -cnotcontains $surface) {
+        throw "upstream adapter validation did not exercise required surface '$surface'."
+    }
+}
 
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `

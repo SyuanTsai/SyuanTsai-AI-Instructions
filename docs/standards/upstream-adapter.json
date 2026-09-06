@@ -9,7 +9,7 @@
   "rootRelativePathPrefix": "./",
   "immutableGitShaPattern": "^[0-9a-f]{40}$",
   "acceptedMarketplaceSource": "github",
-  "allowedRemoteMcpHosts": [],
+  "allowedRemoteMcpEndpoints": [],
   "allowedPluginManifestFields": ["name", "description", "version", "skills", "mcpServers", "apps"],
   "requiredPluginManifestFields": ["name"],
   "allowedMarketplaceRootFields": ["plugins"],

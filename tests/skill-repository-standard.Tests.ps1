@@ -2139,6 +2139,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $validatorText = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterValidatorPath
         Assert-Match $validatorText 'pluginManifestPath|marketplacePath|rootRelativePathPrefix' 'Upstream adapter validator must consume the central path/manifest policy.'
         Assert-Match $validatorText 'Assert-AdapterNoReparsePath' 'Upstream adapter validator must reject reparse-point manifest paths before reading package metadata.'
+        Assert-Match $validatorText 'Assert-AdapterRegularFile' 'Upstream adapter validator must reject non-regular files before reading or executing package-local inputs.'
+        Assert-Match $validatorText 'duplicate object key' 'Upstream adapter validator must reject duplicate JSON object keys before deserialization.'
+        Assert-Match $validatorText 'allowedRemoteMcpEndpoints' 'Upstream adapter policy must approve exact MCP endpoints rather than hostnames.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
@@ -2172,20 +2175,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $fixtureRoot = Join-Path $TestDrive 'upstream-adapter-valid'
         [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.codex-plugin') -Force)
         [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'skills/fixture-skill') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot '.agents/plugins') -Force)
         Write-TestUtf8File -Path (Join-Path $fixtureRoot 'skills/fixture-skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A valid adapter fixture Skill package.`n---`n`n# Fixture`n"
         Write-TestUtf8File -Path (Join-Path $fixtureRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","description":"A deterministic Plugin adapter fixture.","version":"1.0.0","skills":["./skills/fixture-skill"]}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot 'adapter-command.ps1') -Text "Write-Output 'adapter fixture'`n"
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.mcp.json') -Text '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"}]}'
+        Write-TestUtf8File -Path (Join-Path $fixtureRoot '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-marketplace-entry","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"}}]}')
         $validReportPath = Join-Path $fixtureRoot 'valid-report.json'
         & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath $validReportPath | Out-Null
         $validReport = Get-Content -Raw -Encoding UTF8 -LiteralPath $validReportPath | ConvertFrom-Json
         Assert-Equal $validReport.status 'passed' 'A valid Plugin package must pass the executable upstream adapter.'
+        Assert-ExactStringSequence $validReport.surfaces @('plugin', 'mcp', 'app', 'marketplace') 'The positive adapter fixture must exercise every adopted upstream surface.'
 
         $cases = @(
             @{ id='package-missing-skill-md'; mutate={ param($root) Remove-Item -LiteralPath (Join-Path $root 'skills/fixture-skill/SKILL.md') -Force } },
             @{ id='plugin-path-out-of-root'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["../outside"]}' } },
             @{ id='plugin-path-backslash'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":[".\\skills\\fixture-skill"]}' } },
             @{ id='plugin-path-rooted-windows'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["C:/outside"]}' } },
+            @{ id='plugin-path-dot'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./."]}' } },
+            @{ id='plugin-path-colon'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/a:b"]}' } },
+            @{ id='plugin-duplicate-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","\u006eame":"other"}' } },
             @{ id='mcp-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://unapproved.example.test/mcp"}}}' } },
-            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text '{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","ref":"main"}}]}' } },
+            @{ id='marketplace-mutable-ref'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '","ref":"main"}}]}') } },
+            @{ id='marketplace-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"}},{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('b' * 40) + '"}}]}') } },
+            @{ id='marketplace-duplicate-nested-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '","\u0073ha":"' + ('b' * 40) + '"}}]}') } },
             @{ id='marketplace-unknown-field'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"owner/repo","path":"./","sha":"' + ('a' * 40) + '"},"trust":"trusted"}]}') } },
             @{ id='marketplace-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"http","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } }
@@ -2197,8 +2211,35 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $errorMessage = $null
             try { & $script:UpstreamAdapterValidatorPath -PackageRoot $caseRoot -PolicyPath $script:UpstreamAdapterPolicyPath -OutputPath (Join-Path $caseRoot 'report.json') | Out-Null }
             catch { $errorMessage = $_.Exception.Message }
-            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
+            Assert-Match $errorMessage 'BLOCK|missing|outside|root|endpoint|immutable|unknown|hook|SKILL|duplicate|ref|portable|unsafe|regular' "SYP-193 case '$($case.id)' must be blocked by the executable adapter."
         }
+
+        $duplicatePolicyPath = Join-Path $TestDrive 'upstream-adapter-duplicate-policy.json'
+        $duplicatePolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"allowedRemoteMcpEndpoints": [],',
+            '"allowedRemoteMcpEndpoints": [],"allowedRemoteMcpEndpoints": [],'
+        )
+        Write-TestUtf8File -Path $duplicatePolicyPath -Text $duplicatePolicyText
+        $duplicatePolicyError = $null
+        try { & $script:UpstreamAdapterValidatorPath -PackageRoot $fixtureRoot -PolicyPath $duplicatePolicyPath | Out-Null }
+        catch { $duplicatePolicyError = $_.Exception.Message }
+        Assert-Match $duplicatePolicyError 'duplicate object key' 'Duplicate keys in the adapter policy must be rejected before ConvertFrom-Json deserialization.'
+
+        $exactEndpointPolicyPath = Join-Path $TestDrive 'upstream-adapter-exact-endpoint-policy.json'
+        $exactEndpointPolicyText = (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UpstreamAdapterPolicyPath).Replace(
+            '"allowedRemoteMcpEndpoints": [],',
+            '"allowedRemoteMcpEndpoints": ["https://approved.example.test/mcp"],'
+        )
+        Write-TestUtf8File -Path $exactEndpointPolicyPath -Text $exactEndpointPolicyText
+        $exactEndpointRoot = Join-Path $TestDrive 'upstream-adapter-exact-endpoint'
+        Copy-Item -LiteralPath $fixtureRoot -Destination $exactEndpointRoot -Recurse -Force
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"approved":{"url":"https://approved.example.test/mcp"}}}'
+        & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null
+        Write-TestUtf8File -Path (Join-Path $exactEndpointRoot '.mcp.json') -Text '{"mcpServers":{"unapproved":{"url":"https://approved.example.test/other"}}}'
+        $endpointError = $null
+        try { & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null }
+        catch { $endpointError = $_.Exception.Message }
+        Assert-Match $endpointError 'endpoint' 'An endpoint with an unapproved path must fail exact endpoint authorization.'
     }
 
     # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.

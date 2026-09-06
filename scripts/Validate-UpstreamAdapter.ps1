@@ -81,15 +81,208 @@ function Assert-AdapterStringArray {
     }
 }
 
+function Assert-AdapterRegularFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSIsContainer) { throw "$Context must be a regular file: $Path" }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Context must not be a reparse point: $Path"
+    }
+    # PowerShell exposes the first Mode character as '-' for regular files and
+    # a different type marker for directories, FIFOs, sockets and devices.
+    $mode = [string]$item.Mode
+    if ([string]::IsNullOrEmpty($mode) -or $mode[0] -cne '-') {
+        throw "$Context must be a regular file: $Path"
+    }
+    return $item.FullName
+}
+
+function Skip-AdapterJsonWhitespace {
+    param([Parameter(Mandatory = $true)] $State)
+
+    while ($State.Index -lt $State.Text.Length) {
+        $code = [int][char]$State.Text[$State.Index]
+        if ($code -notin @(0x20, 0x09, 0x0A, 0x0D)) { break }
+        $State.Index++
+    }
+}
+
+function Add-AdapterJsonSemanticToken {
+    param([Parameter(Mandatory = $true)] $State)
+
+    $State.TokenCount++
+    if ($State.TokenCount -gt $State.MaxTokens) {
+        throw "JSON exceeds the maximum semantic token count of $($State.MaxTokens)."
+    }
+}
+
+function Read-AdapterJsonStringValue {
+    param([Parameter(Mandatory = $true)] $State)
+
+    if ($State.Index -ge $State.Text.Length -or [int][char]$State.Text[$State.Index] -ne 0x22) {
+        throw "JSON expected a string at offset $($State.Index)."
+    }
+    $State.Index++
+    $builder = New-Object System.Text.StringBuilder
+    while ($State.Index -lt $State.Text.Length) {
+        $code = [int][char]$State.Text[$State.Index]
+        $State.Index++
+        if ($code -eq 0x22) { return $builder.ToString() }
+        if ($code -lt 0x20) { throw "JSON string contains an unescaped control character at offset $($State.Index - 1)." }
+        if ($code -ne 0x5C) {
+            if ($code -ge 0xD800 -and $code -le 0xDBFF) {
+                if ($State.Index -ge $State.Text.Length) { throw 'JSON string contains an unpaired raw high surrogate.' }
+                $lowCode = [int][char]$State.Text[$State.Index]
+                if ($lowCode -lt 0xDC00 -or $lowCode -gt 0xDFFF) { throw 'JSON string contains an unpaired raw high surrogate.' }
+                [void]$builder.Append([char]$code)
+                [void]$builder.Append([char]$lowCode)
+                $State.Index++
+                continue
+            }
+            if ($code -ge 0xDC00 -and $code -le 0xDFFF) { throw 'JSON string contains an unpaired raw low surrogate.' }
+            [void]$builder.Append([char]$code)
+            continue
+        }
+        if ($State.Index -ge $State.Text.Length) { throw 'JSON string ends with an incomplete escape.' }
+        $escape = [int][char]$State.Text[$State.Index]
+        $State.Index++
+        if ($escape -eq 0x22) { [void]$builder.Append([char]0x22); continue }
+        if ($escape -eq 0x5C) { [void]$builder.Append([char]0x5C); continue }
+        if ($escape -eq 0x2F) { [void]$builder.Append([char]0x2F); continue }
+        if ($escape -eq 0x62) { [void]$builder.Append([char]0x08); continue }
+        if ($escape -eq 0x66) { [void]$builder.Append([char]0x0C); continue }
+        if ($escape -eq 0x6E) { [void]$builder.Append([char]0x0A); continue }
+        if ($escape -eq 0x72) { [void]$builder.Append([char]0x0D); continue }
+        if ($escape -eq 0x74) { [void]$builder.Append([char]0x09); continue }
+        if ($escape -ne 0x75 -or ($State.Index + 4) -gt $State.Text.Length) {
+            throw "JSON string contains an invalid escape at offset $($State.Index - 1)."
+        }
+        $hex = $State.Text.Substring($State.Index, 4)
+        if ($hex -cnotmatch '^[0-9A-Fa-f]{4}$') { throw "JSON string contains an invalid Unicode escape at offset $($State.Index)." }
+        $unit = [Convert]::ToInt32($hex, 16)
+        $State.Index += 4
+        if ($unit -ge 0xD800 -and $unit -le 0xDBFF) {
+            if (($State.Index + 6) -gt $State.Text.Length -or
+                [int][char]$State.Text[$State.Index] -ne 0x5C -or
+                [int][char]$State.Text[$State.Index + 1] -ne 0x75) {
+                throw 'JSON string contains an unpaired high-surrogate escape.'
+            }
+            $lowHex = $State.Text.Substring($State.Index + 2, 4)
+            if ($lowHex -cnotmatch '^[0-9A-Fa-f]{4}$') { throw 'JSON string contains an invalid low-surrogate escape.' }
+            $lowUnit = [Convert]::ToInt32($lowHex, 16)
+            if ($lowUnit -lt 0xDC00 -or $lowUnit -gt 0xDFFF) { throw 'JSON string contains an unpaired high-surrogate escape.' }
+            $State.Index += 6
+            $scalar = 0x10000 + (($unit - 0xD800) * 0x400) + ($lowUnit - 0xDC00)
+            [void]$builder.Append([char]::ConvertFromUtf32($scalar))
+            continue
+        }
+        if ($unit -ge 0xDC00 -and $unit -le 0xDFFF) { throw 'JSON string contains an unpaired low-surrogate escape.' }
+        [void]$builder.Append([char]$unit)
+    }
+    throw 'JSON string is unterminated.'
+}
+
+function Read-AdapterJsonValue {
+    param(
+        [Parameter(Mandatory = $true)] $State,
+        [Parameter(Mandatory = $true)][int] $Depth
+    )
+
+    if ($Depth -gt 128) { throw 'JSON exceeds the maximum nesting depth.' }
+    Skip-AdapterJsonWhitespace -State $State
+    Add-AdapterJsonSemanticToken -State $State
+    if ($State.Index -ge $State.Text.Length) { throw 'JSON ends before a value.' }
+    $code = [int][char]$State.Text[$State.Index]
+
+    if ($code -eq 0x7B) {
+        $State.Index++
+        $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        Skip-AdapterJsonWhitespace -State $State
+        if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -eq 0x7D) {
+            $State.Index++
+            return
+        }
+        while ($true) {
+            $keyOffset = $State.Index
+            Add-AdapterJsonSemanticToken -State $State
+            $key = Read-AdapterJsonStringValue -State $State
+            if (-not $keys.Add($key)) { throw "JSON contains a duplicate object key at offset $keyOffset." }
+            Skip-AdapterJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length -or [int][char]$State.Text[$State.Index] -ne 0x3A) {
+                throw "JSON expected ':' after an object key at offset $keyOffset."
+            }
+            $State.Index++
+            Read-AdapterJsonValue -State $State -Depth ($Depth + 1)
+            Skip-AdapterJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length) { throw 'JSON object is unterminated.' }
+            $delimiter = [int][char]$State.Text[$State.Index]
+            $State.Index++
+            if ($delimiter -eq 0x7D) { return }
+            if ($delimiter -ne 0x2C) { throw 'JSON object expected a comma or closing brace.' }
+            Skip-AdapterJsonWhitespace -State $State
+        }
+    }
+
+    if ($code -eq 0x5B) {
+        $State.Index++
+        Skip-AdapterJsonWhitespace -State $State
+        if ($State.Index -lt $State.Text.Length -and [int][char]$State.Text[$State.Index] -eq 0x5D) {
+            $State.Index++
+            return
+        }
+        while ($true) {
+            Read-AdapterJsonValue -State $State -Depth ($Depth + 1)
+            Skip-AdapterJsonWhitespace -State $State
+            if ($State.Index -ge $State.Text.Length) { throw 'JSON array is unterminated.' }
+            $delimiter = [int][char]$State.Text[$State.Index]
+            $State.Index++
+            if ($delimiter -eq 0x5D) { return }
+            if ($delimiter -ne 0x2C) { throw 'JSON array expected a comma or closing bracket.' }
+            Skip-AdapterJsonWhitespace -State $State
+        }
+    }
+
+    if ($code -eq 0x22) { [void](Read-AdapterJsonStringValue -State $State); return }
+    $start = $State.Index
+    while ($State.Index -lt $State.Text.Length) {
+        $next = [int][char]$State.Text[$State.Index]
+        if ($next -in @(0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x5D, 0x7D)) { break }
+        $State.Index++
+    }
+    if ($State.Index -eq $start) { throw "JSON contains an unexpected token at offset $start." }
+}
+
+function Assert-AdapterJsonUniqueKeys {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $state = [pscustomobject]@{ Text = $Text; Index = 0; TokenCount = 0; MaxTokens = 50000 }
+    Read-AdapterJsonValue -State $state -Depth 0
+    Skip-AdapterJsonWhitespace -State $state
+    if ($state.Index -ne $state.Text.Length) { throw "JSON contains trailing content at offset $($state.Index)." }
+}
+
 function Read-AdapterJson {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Context is missing: $Path" }
+    if (-not (Test-Path -LiteralPath $Path)) { throw "$Context is missing: $Path" }
     try {
-        return Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
+        $fullPath = Assert-AdapterRegularFile -Path $Path -Context $Context
+        $item = Get-Item -Force -LiteralPath $fullPath -ErrorAction Stop
+        if ($item.Length -gt 4MB) { throw "$Context exceeds the 4 MiB limit." }
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $text = [System.IO.File]::ReadAllText($fullPath, $utf8)
+        Assert-AdapterJsonUniqueKeys -Text $text -Context $Context
+        return ConvertFrom-Json -InputObject $text
     }
     catch {
         throw "$Context is not valid JSON: $($_.Exception.Message)"
@@ -102,7 +295,7 @@ function Assert-AdapterPolicy {
     $expectedFields = @(
         'schemaVersion', 'policy', 'pluginManifestPath', 'marketplacePath', 'mcpManifestPath', 'appManifestPath',
         'hooksPolicy', 'rootRelativePathPrefix', 'immutableGitShaPattern', 'acceptedMarketplaceSource',
-        'allowedRemoteMcpHosts', 'allowedPluginManifestFields', 'requiredPluginManifestFields',
+        'allowedRemoteMcpEndpoints', 'allowedPluginManifestFields', 'requiredPluginManifestFields',
         'allowedMarketplaceRootFields', 'allowedMarketplaceEntryFields', 'allowedMarketplaceSourceFields',
         'allowedMarketplacePolicyFields', 'allowedMcpRootFields', 'allowedMcpServerFields',
         'allowedAppRootFields', 'allowedAppFields'
@@ -119,7 +312,13 @@ function Assert-AdapterPolicy {
     Assert-AdapterExactString -Value $Policy.rootRelativePathPrefix -Expected './' -Context 'Root-relative path prefix'
     Assert-AdapterExactString -Value $Policy.immutableGitShaPattern -Expected '^[0-9a-f]{40}$' -Context 'Immutable Git SHA pattern'
     Assert-AdapterExactString -Value $Policy.acceptedMarketplaceSource -Expected 'github' -Context 'Marketplace source policy'
-    Assert-AdapterStringArray -Value @($Policy.allowedRemoteMcpHosts) -Context 'Allowed remote MCP hosts' -AllowEmpty
+    Assert-AdapterStringArray -Value @($Policy.allowedRemoteMcpEndpoints) -Context 'Allowed remote MCP endpoints' -AllowEmpty
+    foreach ($endpoint in @($Policy.allowedRemoteMcpEndpoints)) {
+        $canonicalEndpoint = Get-AdapterCanonicalEndpoint -Value $endpoint -Context 'Allowed remote MCP endpoint'
+        if ([string]$endpoint -cne $canonicalEndpoint) {
+            throw 'Allowed remote MCP endpoints must use canonical https URL form.'
+        }
+    }
     Assert-AdapterStringArray -Value @($Policy.allowedPluginManifestFields) -Context 'Plugin manifest fields'
     Assert-AdapterStringArray -Value @($Policy.requiredPluginManifestFields) -Context 'Required Plugin manifest fields'
     Assert-AdapterStringArray -Value @($Policy.allowedMarketplaceRootFields) -Context 'Marketplace root fields'
@@ -208,9 +407,17 @@ function Resolve-AdapterRelativePath {
     if ($Value -match '(^|/)\.\.(?:/|$)') { throw "$Context contains path traversal." }
     $relative = $Value.Substring(2)
     if ([string]::IsNullOrWhiteSpace($relative) -and -not $AllowRoot) { throw "$Context must name a package-relative path." }
+    if ($AllowRoot -and [string]::IsNullOrEmpty($relative)) {
+        $rootPath = [System.IO.Path]::GetFullPath($Root)
+        Assert-AdapterNoReparsePoint -Path $rootPath -Context 'Package root'
+        return $rootPath
+    }
     $relativeParts = @($relative -split '/')
     foreach ($part in $relativeParts) {
-        if ($part -match '[\x00-\x1F\x7F]' -or $part -ceq '') { throw "$Context contains an unsafe path segment." }
+        if ($part -match '[\x00-\x1F\x7F]' -or $part -ceq '' -or $part -ceq '.' -or $part -ceq '..' -or
+            $part.Contains(':') -or $part.EndsWith('.') -or $part.EndsWith(' ')) {
+            throw "$Context contains a non-portable or unsafe path segment."
+        }
     }
     $candidate = if ([string]::IsNullOrWhiteSpace($relative)) {
         [System.IO.Path]::GetFullPath($Root)
@@ -235,6 +442,28 @@ function Assert-AdapterSafeName {
     if ([string]$Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "$Context contains an unsafe identity." }
 }
 
+function Get-AdapterCanonicalEndpoint {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-AdapterString -Value $Value -Context $Context
+    $uri = $null
+    if (-not [Uri]::TryCreate([string]$Value, [UriKind]::Absolute, [ref]$uri) -or
+        [string]$uri.Scheme -cne 'https' -or
+        [string]::IsNullOrEmpty([string]$uri.Host) -or
+        -not [string]::IsNullOrEmpty([string]$uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Query) -or
+        -not [string]::IsNullOrEmpty([string]$uri.Fragment)) {
+        throw "$Context must be an exact canonical https endpoint without userinfo, query, or fragment."
+    }
+    $path = [string]$uri.AbsolutePath
+    if ([string]::IsNullOrEmpty($path)) { $path = '/' }
+    if ($path.Length -gt 1) { $path = $path.TrimEnd('/') }
+    return ('https://{0}{1}' -f [string]$uri.Authority.ToLowerInvariant(), $path)
+}
+
 function Assert-AdapterMcpServers {
     param(
         [Parameter(Mandatory = $true)] $Servers,
@@ -257,14 +486,11 @@ function Assert-AdapterMcpServers {
         }
         if ($hasCommand) {
             $commandPath = Resolve-AdapterRelativePath -Value $server.command -Root $Root -Context "$Context server '$($serverProperty.Name)' command"
-            if (-not (Test-Path -LiteralPath $commandPath -PathType Leaf)) { throw "$Context server '$($serverProperty.Name)' command must identify a package-local file." }
+            [void](Assert-AdapterRegularFile -Path $commandPath -Context "$Context server '$($serverProperty.Name)' command")
         }
         if ($hasUrl) {
-            Assert-AdapterString -Value $server.url -Context "$Context server '$($serverProperty.Name)' url"
-            $uri = $null
-            if (-not [Uri]::TryCreate([string]$server.url, [UriKind]::Absolute, [ref]$uri) -or
-                [string]$uri.Scheme -cne 'https' -or
-                @($Policy.allowedRemoteMcpHosts) -cnotcontains [string]$uri.Host) {
+            $canonicalEndpoint = Get-AdapterCanonicalEndpoint -Value $server.url -Context "$Context server '$($serverProperty.Name)' url"
+            if (@($Policy.allowedRemoteMcpEndpoints) -cnotcontains $canonicalEndpoint) {
                 throw "BLOCK: $Context server '$($serverProperty.Name)' uses an unapproved endpoint."
             }
         }
@@ -290,7 +516,9 @@ function Assert-AdapterApps {
 
 function Test-AdapterOptionalFile {
     param([Parameter(Mandatory = $true)][string] $Path)
-    return Test-Path -LiteralPath $Path -PathType Leaf
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    [void](Assert-AdapterRegularFile -Path $Path -Context 'Optional adapter manifest')
+    return $true
 }
 
 function Invoke-UpstreamAdapterValidation {
@@ -330,8 +558,8 @@ function Invoke-UpstreamAdapterValidation {
                 $skillPath = Resolve-AdapterRelativePath -Value $skillPathValue -Root $rootFull -Context 'Plugin manifest skill path'
                 if (-not (Test-Path -LiteralPath $skillPath -PathType Container)) { throw "Plugin manifest skill path is missing: $skillPathValue" }
                 $skillMdPath = Join-Path $skillPath 'SKILL.md'
-                if (-not (Test-Path -LiteralPath $skillMdPath -PathType Leaf)) { throw "BLOCK: Plugin Skill is missing SKILL.md: $skillPathValue" }
-                Assert-AdapterNoReparsePoint -Path $skillMdPath -Context 'Plugin Skill SKILL.md'
+                if (-not (Test-Path -LiteralPath $skillMdPath)) { throw "BLOCK: Plugin Skill is missing SKILL.md: $skillPathValue" }
+                [void](Assert-AdapterRegularFile -Path $skillMdPath -Context 'Plugin Skill SKILL.md')
             }
         }
         $pluginMcp = Get-AdapterProperty -Object $plugin -Name 'mcpServers'
@@ -370,9 +598,11 @@ function Invoke-UpstreamAdapterValidation {
         Assert-AdapterPropertySet -Object $marketplace -Expected @($Policy.allowedMarketplaceRootFields) -Context 'Marketplace manifest'
         $plugins = Get-AdapterProperty -Object $marketplace -Name 'plugins'
         if ($plugins -isnot [array] -or @($plugins).Count -eq 0) { throw 'Marketplace manifest plugins must be a non-empty array.' }
+        $seenMarketplaceNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         foreach ($entry in @($plugins)) {
             Assert-AdapterPropertySet -Object $entry -Expected @($Policy.allowedMarketplaceEntryFields) -Context 'Marketplace entry'
             Assert-AdapterSafeName -Value $entry.name -Context 'Marketplace entry name'
+            if (-not $seenMarketplaceNames.Add([string]$entry.name)) { throw "Marketplace manifest contains duplicate plugin identity '$($entry.name)'." }
             $source = Get-AdapterProperty -Object $entry -Name 'source'
             if ($null -eq $source) { throw 'Marketplace entry is missing source.' }
             Assert-AdapterPropertySet -Object $source -Expected @($Policy.allowedMarketplaceSourceFields) -Context 'Marketplace source'
@@ -383,7 +613,12 @@ function Invoke-UpstreamAdapterValidation {
             Assert-AdapterString -Value $source.sha -Context 'Marketplace source.sha'
             if ([string]$source.sha -cnotmatch $Policy.immutableGitShaPattern) { throw 'BLOCK: Marketplace source must bind an immutable Git SHA.' }
             $ref = Get-AdapterProperty -Object $source -Name 'ref'
-            if ($null -ne $ref) { Assert-AdapterString -Value $ref -Context 'Marketplace source.ref' }
+            if ($null -ne $ref) {
+                Assert-AdapterString -Value $ref -Context 'Marketplace source.ref'
+                if ([string]$ref -cne [string]$source.sha) {
+                    throw 'BLOCK: Marketplace source.ref must be omitted or equal the immutable Git SHA.'
+                }
+            }
             foreach ($name in @('description', 'category', 'interface')) {
                 $value = Get-AdapterProperty -Object $entry -Name $name
                 if ($null -ne $value) { Assert-AdapterString -Value $value -Context "Marketplace entry $name" }
