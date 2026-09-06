@@ -586,6 +586,46 @@ function New-AgentEnvironmentResult {
     }
 }
 
+function New-AgentEnvironmentRecoveryFailureResult {
+    param(
+        [Parameter(Mandatory = $true)][string] $Message,
+        [Parameter(Mandatory = $true)][string] $JournalRelative,
+        [AllowNull()][object] $BackupPath
+    )
+    $safeBackupPath = if ($null -eq $BackupPath -or [string]::IsNullOrWhiteSpace([string]$BackupPath)) { $null } else { [string]$BackupPath }
+    $backupCreated = $null -ne $safeBackupPath
+    $evidence = "Recovery validation failed; the retained journal '$JournalRelative' was not removed: $Message"
+    $failureDetail = New-AgentEnvironmentFailureDetail `
+        -Code 'recovery-required' `
+        -SkillId 'transaction' `
+        -Path $JournalRelative `
+        -Classification 'controlled-candidate' `
+        -Owner 'transaction-journal' `
+        -Evidence $evidence `
+        -DestructiveChangeAllowed $false `
+        -BackupCreated $backupCreated `
+        -ExpectedSha256 $null `
+        -ActualSha256 $null `
+        -Remediation @(
+            'Inspect the retained recovery journal and transaction backup before retrying -Recover.',
+            'Repair or restore valid recovery metadata; do not delete the journal or start another reconciliation while recovery is required.'
+        )
+    $ownership = New-AgentEnvironmentOwnershipEvidence `
+        -SkillId 'transaction' `
+        -Path $JournalRelative `
+        -Classification 'controlled-candidate' `
+        -Owner 'transaction-journal' `
+        -Evidence 'The retained recovery journal is the authoritative transaction record; recovery validation did not complete.' `
+        -DestructiveChangeAllowed $false `
+        -Operation 'observe'
+    return [pscustomobject][ordered]@{
+        schemaVersion=1; outcome='failed'; exitCode=1; catalogCommit=$null; catalogLockSha256=$null
+        installed=@(); updated=@(); removed=@(); preserved=@(); failed=@($Message)
+        failureDetails=@($failureDetail); ownership=@($ownership)
+        rollbackState='recovery-required'; backupPath=$safeBackupPath; licenseWarnings=@()
+    }
+}
+
 function Get-AgentEnvironmentCatalogNames {
     param([object] $Catalog)
     $names = @{}
@@ -1002,15 +1042,16 @@ function Invoke-UserSkillsRecovery {
     $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
     $lockPath = Join-Path $agentsRoot 'update-agent-environment.lock'
     $journalRelative = '.agents/update-agent-environment.recovery.json'
-    if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
-    Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
-    if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
-    if (Test-Path -LiteralPath $lockPath) {
-        $lockItem = Get-Item -Force -LiteralPath $lockPath
-        if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
-    }
     $lockStream = $null
+    $recoveryBackupPath = $null
     try {
+        if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
+        Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
+        if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
+        if (Test-Path -LiteralPath $lockPath) {
+            $lockItem = Get-Item -Force -LiteralPath $lockPath
+            if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
+        }
         try { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
         catch [System.IO.IOException] { throw 'Another Agent environment update is already running.' }
         $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
@@ -1026,6 +1067,7 @@ function Invoke-UserSkillsRecovery {
             throw 'Agent environment recovery journal identity or type contract is invalid.'
         }
         $journalBackupRoot = Assert-AgentEnvironmentBackupDirectorySafe -Root $home -Path ([string]$journal.backupPath)
+        $recoveryBackupPath = $journalBackupRoot
         $pathComparison = Get-AgentEnvironmentPathComparison
         $pathComparer = if ($pathComparison -eq [System.StringComparison]::OrdinalIgnoreCase) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
         $seenRelativePaths = New-Object 'System.Collections.Generic.HashSet[string]' $pathComparer
@@ -1086,6 +1128,9 @@ function Invoke-UserSkillsRecovery {
         }
         Remove-Item -LiteralPath $journalPath -Force
         return [pscustomobject][ordered]@{ schemaVersion=1; outcome='recovered'; exitCode=0; rollbackState='completed'; backupPath=[string]$journal.backupPath }
+    }
+    catch {
+        return New-AgentEnvironmentRecoveryFailureResult -Message ([string]$_.Exception.Message) -JournalRelative $journalRelative -BackupPath $recoveryBackupPath
     }
     finally { if ($null -ne $lockStream) { $lockStream.Dispose() } }
 }
