@@ -556,6 +556,27 @@ function Resolve-AuthorityReportedFilePath {
     throw "$Context does not identify a file in the controlled fixture inventory: $fullPath"
 }
 
+function Get-AuthorityReportedInventoryPath {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $FixtureRoot,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = Resolve-AuthorityReportedFilePath `
+        -Value $Value `
+        -FixtureRoot $FixtureRoot `
+        -ExpectedInventoryPaths $ExpectedInventoryPaths `
+        -Context $Context
+    foreach ($relativePath in $ExpectedInventoryPaths) {
+        if (Test-AuthorityPathEqual -Left $fullPath -Right (Join-Path $FixtureRoot $relativePath)) {
+            return [string]$relativePath
+        }
+    }
+    throw "$Context does not identify a file in the controlled fixture inventory."
+}
+
 function Assert-AuthoritySkillSpectorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -652,6 +673,7 @@ function Assert-AuthoritySkillValidatorReport {
         $results -isnot [array] -or @($results).Count -le 0) {
         throw 'skill-validator did not produce a clean, non-empty package validation report.'
     }
+    $reportedPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($result in @($results)) {
         if ($result -isnot [pscustomobject]) {
             throw 'skill-validator result entries must be structured validation objects.'
@@ -666,15 +688,25 @@ function Assert-AuthoritySkillValidatorReport {
             throw 'skill-validator result entries do not describe a clean controlled fixture.'
         }
         $fileProperty = $result.PSObject.Properties['file']
-        if ($null -ne $fileProperty) {
-            [void](Resolve-AuthorityReportedFilePath -Value $fileProperty.Value -FixtureRoot $ExpectedFixtureRoot -ExpectedInventoryPaths $ExpectedInventoryPaths -Context 'skill-validator result file')
+        if ($null -eq $fileProperty -or $null -eq $fileProperty.Value) {
+            throw 'skill-validator result must identify every file in the controlled fixture inventory.'
         }
+        $reportedPath = Get-AuthorityReportedInventoryPath `
+            -Value $fileProperty.Value `
+            -FixtureRoot $ExpectedFixtureRoot `
+            -ExpectedInventoryPaths $ExpectedInventoryPaths `
+            -Context 'skill-validator result file'
+        if (-not $reportedPaths.Contains($reportedPath)) { [void]$reportedPaths.Add($reportedPath) }
         $lineProperty = $result.PSObject.Properties['line']
         if ($null -ne $lineProperty -and
             (($lineProperty.Value -isnot [int] -and $lineProperty.Value -isnot [long]) -or [int64]$lineProperty.Value -le 0)) {
             throw 'skill-validator result line must be a positive integer when present.'
         }
     }
+    Assert-AuthorityExactPathInventory `
+        -Value $reportedPaths.ToArray() `
+        -Expected $ExpectedInventoryPaths `
+        -Context 'skill-validator reported inventory' | Out-Null
 }
 
 function Assert-AuthoritySkillToolsSarifReport {
@@ -690,6 +722,7 @@ function Assert-AuthoritySkillToolsSarifReport {
         $runs -isnot [array] -or @($runs).Count -ne 1) {
         throw 'skill-tools did not produce a non-empty SARIF 2.1.0 report.'
     }
+    $reportedPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($run in @($runs)) {
         $tool = Get-AuthorityProperty -Object $run -Name 'tool'
         $driver = Get-AuthorityProperty -Object $tool -Name 'driver'
@@ -748,10 +781,19 @@ function Assert-AuthoritySkillToolsSarifReport {
                 $physicalLocation = Get-AuthorityProperty -Object $location -Name 'physicalLocation'
                 $artifactLocation = Get-AuthorityProperty -Object $physicalLocation -Name 'artifactLocation'
                 $uri = Get-AuthorityProperty -Object $artifactLocation -Name 'uri'
-                [void](Resolve-AuthorityReportedFilePath -Value $uri -FixtureRoot $ExpectedFixtureRoot -ExpectedInventoryPaths $ExpectedInventoryPaths -Context 'skill-tools SARIF artifact location')
+                $reportedPath = Get-AuthorityReportedInventoryPath `
+                    -Value $uri `
+                    -FixtureRoot $ExpectedFixtureRoot `
+                    -ExpectedInventoryPaths $ExpectedInventoryPaths `
+                    -Context 'skill-tools SARIF artifact location'
+                if (-not $reportedPaths.Contains($reportedPath)) { [void]$reportedPaths.Add($reportedPath) }
             }
         }
     }
+    Assert-AuthorityExactPathInventory `
+        -Value $reportedPaths.ToArray() `
+        -Expected $ExpectedInventoryPaths `
+        -Context 'skill-tools SARIF reported inventory' | Out-Null
 }
 
 function Get-AuthorityCandidateCommit {

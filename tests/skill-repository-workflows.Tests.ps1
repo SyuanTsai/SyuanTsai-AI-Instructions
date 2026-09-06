@@ -151,6 +151,7 @@ Describe 'Agent Skill authority workflow contract' {
         Assert-Match $standards "'docs/standards/\*\*'" 'Dedicated authority workflow must watch the upstream interoperability record.'
         foreach ($workflow in @($standards, $required)) {
             Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared gate for upstream changes.'
+            Assert-Match $workflow 'scripts/Validate-UpstreamAdapter\.ps1' 'Every authority workflow must trigger when the upstream adapter validator changes.'
         }
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
         Assert-Match $standardTests 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' 'The workflow gate must execute the executable adapter regression.'
@@ -167,6 +168,9 @@ Describe 'Agent Skill authority workflow contract' {
             'marketplace-duplicate-name',
             'marketplace-duplicate-nested-field',
             'marketplace-unknown-field',
+            'marketplace-source-subpath',
+            'marketplace-unapproved-repository',
+            'marketplace-repository-case-variant',
             'marketplace-unapproved-endpoint',
             'plugin-hook-bypass'
         )) {

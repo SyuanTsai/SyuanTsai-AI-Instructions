@@ -479,6 +479,97 @@ function Assert-AdapterNoReparsePath {
     return $fullPath
 }
 
+function Assert-AdapterPortablePathSegment {
+    param(
+        [Parameter(Mandatory = $true)][string] $Segment,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Segment) -or
+        $Segment -ceq '.' -or
+        $Segment -ceq '..' -or
+        $Segment.EndsWith('.', [System.StringComparison]::Ordinal) -or
+        $Segment.EndsWith(' ', [System.StringComparison]::Ordinal) -or
+        $Segment -match '[\x00-\x1F\x7F<>:"|?*]') {
+        throw "$Context contains a non-portable or unsafe path segment '$Segment'."
+    }
+
+    $deviceName = $Segment.Split([char]'.')[0]
+    if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw "$Context contains a Windows device-name path segment '$Segment'."
+    }
+}
+
+function ConvertTo-AdapterAsciiFoldPath {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $codePoint = [int]$character
+        if ($codePoint -ge [int][char]'A' -and $codePoint -le [int][char]'Z') {
+            [void]$builder.Append([char]($codePoint + 32))
+        }
+        else {
+            [void]$builder.Append($character)
+        }
+    }
+    return $builder.ToString()
+}
+
+function Assert-AdapterPortableInventoryPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)] $NfcPaths,
+        [Parameter(Mandatory = $true)] $AsciiFoldPaths,
+        [Parameter(Mandatory = $true)] $TargetPathCasings,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        $RelativePath.StartsWith('/', [System.StringComparison]::Ordinal) -or
+        $RelativePath.EndsWith('/', [System.StringComparison]::Ordinal) -or
+        $RelativePath.Contains('\') -or
+        $RelativePath.Contains(':') -or
+        $RelativePath -match '[\x00-\x1F\x7F]') {
+        throw "$Context contains an unsafe portable path '$RelativePath'."
+    }
+
+    $prefixParts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($segment in @($RelativePath.Split('/'))) {
+        Assert-AdapterPortablePathSegment -Segment $segment -Context $Context
+        [void]$prefixParts.Add($segment)
+        $prefix = [string]::Join('/', $prefixParts.ToArray())
+        $nfcPrefix = $prefix.Normalize([System.Text.NormalizationForm]::FormC)
+        if ($NfcPaths.ContainsKey($nfcPrefix)) {
+            if ([string]$NfcPaths[$nfcPrefix] -cne $prefix) {
+                throw "$Context contains a Unicode NFC path collision between '$($NfcPaths[$nfcPrefix])' and '$prefix'."
+            }
+        }
+        else {
+            $NfcPaths.Add($nfcPrefix, $prefix)
+        }
+
+        $asciiFoldPrefix = ConvertTo-AdapterAsciiFoldPath -Value $nfcPrefix
+        if ($AsciiFoldPaths.ContainsKey($asciiFoldPrefix)) {
+            if ([string]$AsciiFoldPaths[$asciiFoldPrefix] -cne $prefix) {
+                throw "$Context contains an ASCII case-folded path collision between '$($AsciiFoldPaths[$asciiFoldPrefix])' and '$prefix'."
+            }
+        }
+        else {
+            $AsciiFoldPaths.Add($asciiFoldPrefix, $prefix)
+        }
+
+        if ($TargetPathCasings.ContainsKey($nfcPrefix)) {
+            if ([string]$TargetPathCasings[$nfcPrefix] -cne $prefix) {
+                throw "$Context contains a case-insensitive path collision between '$($TargetPathCasings[$nfcPrefix])' and '$prefix'."
+            }
+        }
+        else {
+            $TargetPathCasings.Add($nfcPrefix, $prefix)
+        }
+    }
+}
+
 function Resolve-AdapterRelativePath {
     param(
         [Parameter(Mandatory = $true)][string] $Value,
@@ -500,10 +591,7 @@ function Resolve-AdapterRelativePath {
     }
     $relativeParts = @($relative -split '/')
     foreach ($part in $relativeParts) {
-        if ($part -match '[\x00-\x1F\x7F]' -or $part -ceq '' -or $part -ceq '.' -or $part -ceq '..' -or
-            $part.Contains(':') -or $part.EndsWith('.') -or $part.EndsWith(' ')) {
-            throw "$Context contains a non-portable or unsafe path segment."
-        }
+        Assert-AdapterPortablePathSegment -Segment $part -Context $Context
     }
     $candidate = if ([string]::IsNullOrWhiteSpace($relative)) {
         [System.IO.Path]::GetFullPath($Root)
@@ -563,6 +651,9 @@ function Get-AdapterSkillResourceInventory {
     [void](Assert-AdapterNoReparsePath -Path $skillFull -Root $Root -Context $Context)
 
     $inventory = New-Object 'System.Collections.Generic.List[string]'
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $targetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
     $pendingDirectories.Push($skillFull)
     while ($pendingDirectories.Count -gt 0) {
@@ -572,17 +663,23 @@ function Get-AdapterSkillResourceInventory {
             # Validate the entry before deciding whether to recurse into it.
             # This prevents an unchecked symlink/junction from redirecting enumeration.
             [void](Assert-AdapterNoReparsePath -Path $itemPath -Root $Root -Context "$Context resource")
+            $relative = $itemPath.Substring($skillFull.Length).TrimStart(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            ).Replace('\', '/')
+            Assert-AdapterPortableInventoryPath `
+                -RelativePath $relative `
+                -NfcPaths $nfcPaths `
+                -AsciiFoldPaths $asciiFoldPaths `
+                -TargetPathCasings $targetPathCasings `
+                -Context "$Context resource"
             if ($item.PSIsContainer) {
                 $pendingDirectories.Push($itemPath)
                 continue
             }
             [void](Assert-AdapterRegularFile -Path $itemPath -Context "$Context resource")
-            $relative = $itemPath.Substring($skillFull.Length).TrimStart(
-                [System.IO.Path]::DirectorySeparatorChar,
-                [System.IO.Path]::AltDirectorySeparatorChar
-            )
             if ([string]::IsNullOrWhiteSpace($relative)) { throw "$Context contains an invalid resource path." }
-            $inventory.Add($relative.Replace('\', '/'))
+            $inventory.Add($relative)
         }
     }
     if ($inventory.Count -eq 0) { throw "$Context must contain at least one regular file." }

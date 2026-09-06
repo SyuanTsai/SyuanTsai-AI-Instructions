@@ -1212,6 +1212,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.errors=$false } },
             @{ Mutate={ param($r) $r.warnings='0' } },
             @{ Mutate={ param($r) $r.results=[pscustomobject]@{ level='pass'; category='structure'; message='scalar' } } },
+            @{ Mutate={ param($r) $r.results=@($r.results[0]) } },
             @{ Mutate={ param($r) $r.results=@($true) } },
             @{ Mutate={ param($r) $r.results[0].level='warning' } },
             @{ Mutate={ param($r) $r.results[0].level='error' } },
@@ -1232,6 +1233,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
 
         $skillPath = Join-Path $reportFixture.Root 'SKILL.md'
+        $metadataPath = Join-Path $reportFixture.Root 'agents/openai.yaml'
         $sarifBaseline = [pscustomobject][ordered]@{
             version='2.1.0'
             runs=@([pscustomobject]@{
@@ -1241,7 +1243,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 } }
                 results=@([pscustomobject]@{
                     ruleId='fixture-rule'; level='warning'; message=[pscustomobject]@{ text='Controlled fixture advisory.' }
-                    locations=@([pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$skillPath } } })
+                    locations=@(
+                        [pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$skillPath } } },
+                        [pscustomobject]@{ physicalLocation=[pscustomobject]@{ artifactLocation=[pscustomobject]@{ uri=$metadataPath } } }
+                    )
                 })
             })
         }
@@ -1266,6 +1271,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.runs[0].results[0].level=@('warning') } },
             @{ Mutate={ param($r) $r.runs[0].results[0].level='error' } },
             @{ Mutate={ param($r) $r.runs[0].results[0].ruleId='unknown-rule' } },
+            @{ Mutate={ param($r) $r.runs[0].results[0].locations=@($r.runs[0].results[0].locations[0]) } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].PSObject.Properties.Remove('defaultConfiguration') } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].defaultConfiguration.level=$true } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].defaultConfiguration.level='fatal' } },
@@ -2310,6 +2316,36 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 catch { $nestedFifoError = $_.Exception.Message }
                 Assert-Match $nestedFifoError 'regular file' 'A Unix FIFO nested inside a declared Skill must be blocked.'
             }
+        }
+
+        if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+            $portableResourceRoot = Join-Path $TestDrive 'upstream-adapter-portable-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $portableResourceRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $portableResourceRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $portableResourceRoot 'skills/fixture-skill/assets/CON.txt') -Text 'device alias'
+            $portableResourceError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $portableResourceRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $portableResourceError = $_.Exception.Message }
+            Assert-Match $portableResourceError 'portable|device' 'A Windows-invalid or device-name nested Skill resource must be blocked on Unix.'
+
+            $wildcardRoot = Join-Path $TestDrive 'upstream-adapter-wildcard-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $wildcardRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $wildcardRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $wildcardRoot 'skills/fixture-skill/assets/bad*name.txt') -Text 'invalid wildcard'
+            $wildcardError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $wildcardRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $wildcardError = $_.Exception.Message }
+            Assert-Match $wildcardError 'portable' 'A Windows-invalid wildcard nested Skill resource must be blocked on Unix.'
+
+            $collisionRoot = Join-Path $TestDrive 'upstream-adapter-resource-collision'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $collisionRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets') -Force)
+            Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/A.txt') -Text 'upper'
+            Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/a.txt') -Text 'lower'
+            $collisionError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $collisionError = $_.Exception.Message }
+            Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
         }
     }
 
