@@ -2617,6 +2617,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $report = [pscustomobject][ordered]@{
             schemaVersion = [int64]1
             policy = 'upstream-interoperability-adapter-v1'
+            adapterVersion = 'upstream-interoperability-adapter-v1'
             status = 'not-applicable'
             decision = 'NOT_APPLICABLE'
         }

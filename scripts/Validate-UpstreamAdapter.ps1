@@ -591,6 +591,9 @@ function Assert-AdapterReservedSurfacePaths {
             }
             $exact = @($matches | Where-Object { [string]$_.Name -ceq $expectedName })
             if ($exact.Count -eq 0) { break }
+            if ([string]$reserved.relative -ceq 'hooks') {
+                throw "BLOCK: Plugin hooks path is not permitted by the '$($Policy.hooksPolicy)' hooks policy."
+            }
             if ($index -lt ($parts.Count - 1)) {
                 if (-not $exact[0].PSIsContainer) { break }
                 $current = [System.IO.Path]::GetFullPath($exact[0].FullName)
