@@ -2136,6 +2136,81 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $upstream 'Do Not Adopt' 'The upstream decision record must contain Do Not Adopt decisions.'
         Assert-Match $upstream 'MUST NOT.*replace.*central Catalog/Lock' 'Upstream packaging must not replace central provenance and lifecycle authority.'
         Assert-Match $upstream 'schema' 'Schema/pin limitations must be recorded instead of inferred from mutable documentation.'
+        Assert-Match $upstream 'SYP-192 Gate 1' 'Plugin conformance must be bound to the deterministic package-validation gate.'
+        Assert-Match $upstream 'skill-validator' 'The upstream decision must preserve skill-validator as a Gate 1 requirement.'
+        Assert-Match $upstream 'skill-tools check' 'The upstream decision must preserve skill-tools check as a Gate 1 requirement.'
+        Assert-Match $upstream 'marketplace\.json' 'Marketplace install-surface responsibility must be explicit.'
+        Assert-Match $upstream 'source\.path' 'Marketplace source-path responsibility must be explicit.'
+        Assert-Match $upstream 'ref.*sha' 'Marketplace selector integrity responsibility must be explicit.'
+        Assert-Match $upstream 'agents/openai\.yaml' 'Host metadata responsibility must be explicit.'
+        Assert-Match $upstream 'catalog/source\.json' 'Central source inventory responsibility must be explicit.'
+        Assert-Match $upstream 'SkillSpector' 'Security validation responsibility must be explicit.'
+        Assert-Match $upstream 'AI Review' 'AI review responsibility must be explicit.'
+        Assert-Match $upstream 'Human Approval' 'Human approval responsibility must be explicit.'
+        Assert-Match $upstream 'SYP-155' 'Reference implementation impact must be explicit.'
+        Assert-Match $upstream 'SYP-156' 'Fan-out migration impact must be explicit.'
+
+        $negativeCases = @(
+            [pscustomobject][ordered]@{
+                id='package-missing-skill-md'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ skillMdPresent=$false }
+            }
+            [pscustomobject][ordered]@{
+                id='plugin-path-out-of-root'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ path='../outside/skills' }
+            }
+            [pscustomobject][ordered]@{
+                id='mcp-unapproved-endpoint'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ endpoint='https://unapproved.example.test/mcp'; approved=$false }
+            }
+            [pscustomobject][ordered]@{
+                id='marketplace-mutable-ref'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ ref='main'; sha=$null }
+            }
+            [pscustomobject][ordered]@{
+                id='marketplace-unknown-field'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ unknownField='trust' }
+            }
+            [pscustomobject][ordered]@{
+                id='marketplace-unapproved-endpoint'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ endpoint='https://unapproved.example.test/plugin.git'; approved=$false }
+            }
+            [pscustomobject][ordered]@{
+                id='plugin-hook-bypass'; expectedDecision='BLOCK'
+                input=[pscustomobject][ordered]@{ hookTrusted=$false; centralApproval=$false }
+            }
+        )
+        $expectedNegativeCaseIds = @(
+            'package-missing-skill-md',
+            'plugin-path-out-of-root',
+            'mcp-unapproved-endpoint',
+            'marketplace-mutable-ref',
+            'marketplace-unknown-field',
+            'marketplace-unapproved-endpoint',
+            'plugin-hook-bypass'
+        )
+        Assert-ExactStringSequence (@($negativeCases | ForEach-Object { $_.id })) $expectedNegativeCaseIds 'SYP-193 negative regression inventory changed.'
+        foreach ($case in $negativeCases) {
+            Assert-Equal $case.expectedDecision 'BLOCK' "SYP-193 case '$($case.id)' must be a blocking case."
+            $blocked = switch ($case.id) {
+                'package-missing-skill-md' { -not [bool]$case.input.skillMdPresent; break }
+                'plugin-path-out-of-root' {
+                    $path = [string]$case.input.path
+                    $safe = $path.StartsWith('./', [StringComparison]::Ordinal) -and
+                        -not [IO.Path]::IsPathRooted($path) -and
+                        $path -notmatch '(^|/)\.\.(?:/|$)'
+                    -not $safe
+                    break
+                }
+                'mcp-unapproved-endpoint' { -not [bool]$case.input.approved; break }
+                'marketplace-mutable-ref' { [string]$case.input.sha -notmatch '^[0-9a-f]{40}$'; break }
+                'marketplace-unknown-field' { -not [string]::IsNullOrWhiteSpace([string]$case.input.unknownField); break }
+                'marketplace-unapproved-endpoint' { -not [bool]$case.input.approved; break }
+                'plugin-hook-bypass' { -not [bool]$case.input.hookTrusted -or -not [bool]$case.input.centralApproval; break }
+                default { $false }
+            }
+            Assert-True ([bool]$blocked) "SYP-193 negative case '$($case.id)' must remain fail-closed."
+        }
     }
 
     # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.

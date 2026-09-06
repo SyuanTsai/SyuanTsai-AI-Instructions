@@ -3,7 +3,7 @@
 Status: **Normative companion decision record for Standard v1**
 Authority: `SyuanTsai-AI-Instructions/docs/standards/`
 Tracking: Jira `SYP-193`
-Review baseline: **2026-09-05 (Asia/Taipei)**
+Review baseline: **2026-09-06 (Asia/Taipei)**
 
 本文件把上游 Agent Skills 與 Agent Plugins 契約轉換成 Standard v1 的採用邊界。它不是 source repository 可以複製的第二套規範；與本文件衝突時，以 [`skill-repository-standard.md`](skill-repository-standard.md) 為準。Source repository 只能透過 Standard 定義的 adapter、extension、config 與 domain tests 接入上游能力。
 
@@ -12,12 +12,12 @@ Review baseline: **2026-09-05 (Asia/Taipei)**
 | Upstream contract | Immutable or review binding | Reviewed surface | Result |
 | --- | --- | --- | --- |
 | Agent Skills format | `agentskills/agentskills@69ef37e9424c0a7ea9dd2293b559e43ec8176379` | [`docs/specification.mdx`](https://github.com/agentskills/agentskills/blob/69ef37e9424c0a7ea9dd2293b559e43ec8176379/docs/specification.mdx) | Portable `SKILL.md` directory contract |
-| OpenAI Plugin architecture | Official documentation URL + review date; no immutable public docs revision was exposed by the reviewed surface | [`Plugin architecture`](https://developers.openai.com/plugins/concepts/plugins) | Plugin is a package containing Skills, an MCP server, or both; capabilities may remain surface-specific |
-| OpenAI Plugin package contract | Official documentation URL + review date; no versioned public JSON Schema was found during this review | [`Package your plugin`](https://developers.openai.com/plugins/build/plugins) | `.codex-plugin/plugin.json` is the required manifest; `skills/`, `.mcp.json`, `.app.json`, hooks and marketplace are optional package surfaces |
-| OpenAI Skill/MCP boundary | Official documentation URL + review date | [`Skills`](https://developers.openai.com/plugins/concepts/skills) | Skill supplies workflow instructions; MCP supplies live data, authentication, authorization and actions |
+| OpenAI Plugin architecture | Official documentation URL + review date (`2026-09-06`); no immutable public docs revision was exposed by the reviewed surface | [`Plugin architecture`](https://developers.openai.com/plugins/concepts/plugins) | Plugin is a package containing Skills, an MCP server, or both; capabilities may remain surface-specific |
+| OpenAI Plugin package contract | Official documentation URL + review date (`2026-09-06`); no versioned public JSON Schema was found during this review | [`Package your plugin`](https://developers.openai.com/plugins/build/plugins) | `.codex-plugin/plugin.json` is the required manifest; `skills/`, `.mcp.json`, `.app.json`, hooks and marketplace are optional package surfaces |
+| OpenAI Skill/MCP boundary | Official documentation URL + review date (`2026-09-06`) | [`Skills`](https://developers.openai.com/plugins/concepts/skills) | Skill supplies workflow instructions; MCP supplies live data, authentication, authorization and actions |
 | OpenAI metadata baseline already adopted by Standard v1 | `openai/skills@49f948faa9258a0c61caceaf225e179651397431` | [`quick_validate.py`](https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/scripts/quick_validate.py), [`openai_yaml.md`](https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/references/openai_yaml.md) | Existing pinned compatibility baseline; not silently advanced by upstream drift |
 
-The Agent Skills commit is the reproducible format baseline. The OpenAI Plugin pages are a documented package interface rather than a machine-readable, versioned schema in the reviewed evidence. Therefore a later Plugin field or behavior change **MUST NOT** silently become Standard v1: it requires a new reviewed pin/evidence entry, authority regression, and the Standard change contract.
+The Agent Skills commit is the reproducible format baseline. The OpenAI Plugin pages are a documented package interface rather than a machine-readable, versioned schema in the reviewed evidence. The current package documentation defines repo/personal marketplace JSON at `.agents/plugins/marketplace.json`, plugin entries under `plugins[]`, root-contained `./` `source.path` values, installation/authentication policy fields, and Git `ref`/`sha` or npm version selectors. These are install-surface inputs, not source provenance. Therefore a later Plugin or marketplace field/behavior change **MUST NOT** silently become Standard v1: it requires a new reviewed pin/evidence entry, authority regression, and the Standard change contract.
 
 ## 2. Gap / overlap / decision matrix
 
@@ -31,14 +31,27 @@ The Agent Skills commit is the reproducible format baseline. The OpenAI Plugin p
 | `compatibility`, `metadata`, `allowed-tools` | Optional Agent Skills fields; `allowed-tools` is experimental | Portable clients may ignore them; `allowed-tools` is not a universal permission model | **Partial Adopt** | Preserve valid metadata as package data. `allowed-tools` **MUST NOT** grant credentials, write access, network access or bypass approval/security gates; host semantics remain an adapter concern |
 | Canonical `skills/<skill-id>` root | OpenAI Plugin package examples point `skills` at a root directory; Standard v1 requires `skills` | Strong overlap | **Adopt** | Source repositories use `skills/` plus `catalog/source.json`; consumer projections such as `.agents/skills/` remain separate managed targets |
 | `.codex-plugin/plugin.json` | Required Plugin manifest at the plugin root | Gap: a Skill source repository does not need to be a Plugin | **Partial Adopt** | A Plugin wrapper **MAY** package Standard-conformant `skills/`; manifest paths **MUST** be relative, `./`-prefixed and root-contained. It is a distribution adapter, never the source inventory or lifecycle authority |
+| Agent Plugins package conformance / SYP-192 Gate 1 | Plugin package shape is optional, but a present Plugin surface has manifest, path and component contracts | A Plugin adapter is an extension of deterministic package validation, not a replacement for the Skill validators | **Partial Adopt** | When a Plugin/marketplace surface is present, its manifest, declared paths, marketplace shape and package-local MCP declaration **MUST** pass SYP-192 Gate 1 before Gate 2. `skill-validator` and `skill-tools check` remain mandatory for every bundled/active Skill; the Plugin adapter adds checks and cannot weaken either tool |
 | Plugin `skills` manifest field | Manifest points to bundled Skill folders | Overlaps the canonical source root but does not describe provenance | **Partial Adopt** | Resolve only declared package paths; validate every bundled Skill with the same canonical gate and bind source commit, archive hash, package hash and manifest identity |
 | `.mcp.json` / `mcpServers` | Optional direct or wrapped MCP server map | Standard permits MCP dependencies, but a declaration is not a security approval | **Partial Adopt** | Accept only through a declared adapter. Bind endpoint, transport, tool schema, credential/permission boundary, read/write authorization and deterministic test adapter; run conditional semantic security review when capability changes |
 | `.app.json` / manifest `apps` | Optional registered MCP app mapping and compatibility field | Host-specific mapping, not portable Skill content | **Partial Adopt** | Keep as Plugin/host adapter metadata. It **MUST NOT** become a central Catalog dependency or silently alter the shared MCP/security semantics |
 | MCP discovery | Plugin may expose an MCP server and tools | Dynamic registry/network discovery is outside the portable Skill package | **Partial Adopt** | Only package-declared, reviewed and pinned server/tool schemas may enter a release. No implicit remote discovery, mutable endpoint, credential inheritance or auto-install is allowed |
 | Plugin hooks | Optional lifecycle hooks | Hooks are host-specific executable behavior and are not required by Agent Skills | **Do Not Adopt** for Standard v1 core | A future host adapter may add hooks under the central extension/security contract; hooks cannot bypass ownership, validation, approval, rollback or post-install verification |
-| `marketplace.json` | JSON catalog for Plugin distribution and install policy | Distribution view overlaps central Catalog naming, but it is not source provenance | **Partial Adopt** as a derived view | It **MAY** advertise an approved immutable Plugin release. It **MUST NOT** replace `catalog/source.json`, central Catalog/Lock, source pin, lifecycle manifest, provenance or Human Approval evidence |
-| Plugin `version` / marketplace `ref` | Install-surface version/ref selectors | Version or floating ref alone is not a source/integrity proof | **Partial Adopt** | Release evidence **MUST** bind immutable Git commit/archive/package SHA and all required manifests. Mutable `main`, moving tag, unverified URL or version-only install **MUST NOT** pass |
+| Repo/personal `.agents/plugins/marketplace.json` | JSON catalog of Plugin entries with root-contained `source.path`, installation/authentication policy and optional category/interface metadata | Distribution view overlaps central Catalog naming, but it is not source provenance and its documented fields are not a Standard v1 schema | **Partial Adopt** as a derived view | It **MAY** advertise an approved immutable Plugin release. Unknown fields, unsafe paths or unapproved source/endpoints **MUST** block. It **MUST NOT** replace `catalog/source.json`, central Catalog/Lock, source pin, lifecycle manifest, provenance or Human Approval evidence |
+| Plugin `version` / marketplace `ref` / `sha` | Install-surface selectors include Git `ref`/`sha` and npm package version/range inputs | A selector can be mutable or registry-controlled and is not itself integrity evidence | **Partial Adopt** | Release evidence **MUST** bind immutable Git commit/archive/package SHA and all required manifests. Mutable `main`, moving tag, unverified URL, registry substitution or version-only install **MUST NOT** pass |
 | Plugin package publication | Public/workspace/marketplace publication surfaces | Publication occurs after, not instead of, the shared release gate | **Partial Adopt** | Canonical order remains Controlled Acquisition → Integrity → Package → SkillSpector → Repository Tests → Conditional Semantic Scan → AI Review → Human Approval → Publish/Install → Post-install Verification |
+
+## 2.1 SYP-192 Gate 1 binding
+
+Agent Plugins conformance is a conditional extension of SYP-192 **Gate 1 — Deterministic Package Validation**:
+
+- When no Plugin, marketplace, `.mcp.json` or `.app.json` surface is present, the normal Skill package gate still applies and no Plugin adapter is inferred.
+- When any such surface is present, the adapter MUST validate the exact manifest/component inventory, root-contained relative paths, marketplace property/policy shape and package-local MCP declaration in Gate 1, before SkillSpector Static or any Pester/repository/domain code can run.
+- `skill-validator` remains the complete Agent Skills package/spec validator, and `skill-tools check` remains mandatory for every active/bundled Skill. The Plugin adapter result is additional package evidence; it MUST NOT replace, reorder or weaken either tool.
+- Endpoint authorization, tool capability and credential/permission semantics that require contextual analysis enter the conditional semantic/security stage after deterministic package validation. An unapproved endpoint is a block, not an advisory.
+- `catalog/source.json`, central Catalog/Lock, source pin, provenance, lifecycle ownership and Human Approval remain SYP authority. A valid Plugin or marketplace shape is never sufficient release evidence by itself.
+
+The canonical machine-readable order remains the SYP-192 policy's `package-validation` stage (order 3), followed by SkillSpector Static (order 4), Repository Tests (order 5), and conditional semantic scan (order 6).
 
 ## 3. Portable contract versus SYP-specific governance
 
@@ -48,6 +61,17 @@ The portable contract is intentionally small:
 - `SKILL.md` with valid frontmatter and Markdown instructions;
 - optional package-local resources addressed by relative paths;
 - a host that can ignore unknown extension metadata without losing the core workflow.
+
+The responsibility boundary is explicit:
+
+| Surface | Portable/upstream or host role | SYP Standard v1 authority |
+| --- | --- | --- |
+| `skills/<skill-id>/SKILL.md` | Portable Skill instructions and metadata | Canonical package identity, parser, content/integrity and security rules |
+| `.codex-plugin/plugin.json` and declared `skills`/hooks/MCP paths | Optional Plugin distribution adapter | Gate 1 package evidence; root/path/inventory checks; never source ownership |
+| `agents/openai.yaml` and other host metadata | Host routing and presentation extension | Required organization metadata baseline; cannot grant permission or change validation |
+| `.mcp.json` / `.app.json` and MCP tools | Host/server connection and controlled capabilities | Declared endpoint, transport, schema, credential and read/write boundary; contextual security review |
+| `.agents/plugins/marketplace.json` | Repo/personal install catalog | Derived install view only; source path/policy/selector checks; no provenance authority |
+| `catalog/source.json`, Catalog/Lock and consumer projection | Not defined by upstream Plugin portability | Central source inventory, immutable provenance, managed lifecycle and post-install authority |
 
 SYP-specific governance remains central and is not exported as an upstream replacement:
 
@@ -73,6 +97,8 @@ An adapter that exposes the upstream surfaces **MUST**:
 6. Emit provenance and integrity evidence that can be joined to the central release record.
 7. Re-enter the canonical lifecycle and post-install verification after package projection; an upstream installer cannot stop after copying files.
 
+For marketplace inputs, the adapter MUST also reject unknown policy/entry fields, non-root `source.path`, unapproved Git/HTTP endpoints, floating-only `ref` selectors and version-only/npm-registry evidence. For hooks, installation or host trust MUST NOT be treated as SYP Human Approval; the Standard v1 core does not adopt hooks as an authority or automatic execution mechanism.
+
 Source repositories **MUST NOT** add a local Plugin/marketplace policy to compensate for a missing central decision. A requested new upstream feature is an extension proposal: update this decision record, the normative Standard if semantics change, all affected authority regressions, and the applicable repository adapters in one reviewed change.
 
 ## 5. Conformance and regression requirements
@@ -84,6 +110,6 @@ SYP-193 is complete only when the central authority proves:
 - the portable/governance boundary is stated and no source repository is instructed to maintain a second policy;
 - schema/pin limitations are fail-closed rather than inferred from a mutable upstream document;
 - authority workflow watches this document and runs all three authority regression suites;
-- representative package, Plugin, MCP declaration, mutable ref, unsafe path, unknown marketplace field and unapproved endpoint cases have negative regression coverage before any fan-out migration.
+- representative negative cases have regression coverage before any fan-out migration: `package-missing-skill-md`, `plugin-path-out-of-root`, `mcp-unapproved-endpoint`, `marketplace-mutable-ref`, `marketplace-unknown-field`, `marketplace-unapproved-endpoint` and `plugin-hook-bypass`.
 
 The SYP-155 reference implementation and SYP-156～159 migrations may add adapter/domain tests, but they **MUST NOT** change the decisions above locally. Any finding affecting portability, security, ownership, provenance, integrity, rollback or compatibility is fixed in the current delivery or blocks the delivery; only clearly out-of-scope non-blocking work may be carried to a new Jira item with evidence.

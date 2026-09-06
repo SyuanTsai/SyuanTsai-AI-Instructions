@@ -317,6 +317,10 @@ Version: this line also belongs to the description body
 
         Assert-Match $upstream 'adapter' 'Upstream packaging must be described as an explicit adapter boundary.'
         Assert-Match $upstream 'dynamic.*discovery' 'Dynamic MCP discovery must be explicitly bounded.'
+        Assert-Match $upstream 'SYP-192 Gate 1' 'Plugin package conformance must remain in the central Gate 1 decision.'
+        Assert-Match $upstream 'skill-validator' 'The central decision must retain skill-validator as a package gate.'
+        Assert-Match $upstream 'skill-tools check' 'The central decision must retain skill-tools check as a package gate.'
+        Assert-Match $upstream 'marketplace\.json' 'Marketplace policy must remain an explicit adapter boundary.'
         Assert-NotMatch $resolver '\.codex-plugin/plugin\.json|\.mcp\.json|marketplace\.json' 'Validation-tool resolution must not become an upstream packaging or marketplace policy engine.'
     }
 

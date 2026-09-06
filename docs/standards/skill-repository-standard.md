@@ -56,7 +56,7 @@ Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標�
 
 ### 3.5 Upstream interoperability boundary
 
-SYP-193 的上游採用與 adapter 邊界記錄於 [`upstream-interoperability.md`](upstream-interoperability.md)。Standard v1 **MUST** 採用其 pinned Agent Skills portable core；Plugin manifest、MCP/app mapping、marketplace、hooks 與上游 metadata 只能依該 decision record 作為 declared adapter/extension，**MUST NOT** 取代 central Catalog/Lock、provenance、canonical validation、security、approval 或 managed lifecycle authority。上游文件若沒有可重現的 immutable schema/revision，**MUST NOT** 以 mutable 文件變更靜默改寫 Standard v1。
+SYP-193 的上游採用與 adapter 邊界記錄於 [`upstream-interoperability.md`](upstream-interoperability.md)。Standard v1 **MUST** 採用其 pinned Agent Skills portable core；Plugin manifest、MCP/app mapping、marketplace、hooks 與上游 metadata 只能依該 decision record 作為 declared adapter/extension，**MUST NOT** 取代 central Catalog/Lock、provenance、canonical validation、security、approval 或 managed lifecycle authority。當 Plugin／marketplace／MCP adapter surface 存在時，其 deterministic package conformance **MUST** 進入 SYP-192 Gate 1，與 `skill-validator`／`skill-tools check` 的結果共同阻擋後續 gate；adapter 不得把 path、manifest、endpoint 或 selector 檢查延後到 Pester，也不得重排 canonical gate。上游文件若沒有可重現的 immutable schema/revision，**MUST NOT** 以 mutable 文件變更靜默改寫 Standard v1。
 
 ## 4. Repository and Skill package contract
 

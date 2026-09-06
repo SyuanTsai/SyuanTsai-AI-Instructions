@@ -136,6 +136,7 @@ Describe 'Agent Skill authority workflow contract' {
         $standardTestsPath = Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1'
 
         Assert-True (Test-Path -LiteralPath $upstreamPath -PathType Leaf) 'Upstream interoperability authority document is missing.'
+        $upstream = Get-Content -Raw -Encoding UTF8 -LiteralPath $upstreamPath
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
@@ -144,6 +145,18 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared gate for upstream changes.'
         }
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
+        foreach ($caseId in @(
+            'package-missing-skill-md',
+            'plugin-path-out-of-root',
+            'mcp-unapproved-endpoint',
+            'marketplace-mutable-ref',
+            'marketplace-unknown-field',
+            'marketplace-unapproved-endpoint',
+            'plugin-hook-bypass'
+        )) {
+            Assert-Match $standardTests ([regex]::Escape($caseId)) "The upstream authority regression must retain negative case '$caseId'."
+        }
+        Assert-Match $upstream 'SYP-192 Gate 1' 'The upstream decision must bind Plugin conformance to Gate 1.'
     }
 
     # Scenario: The canonical validation/security policy changes without reaching both authority workflows and its executable gate.
