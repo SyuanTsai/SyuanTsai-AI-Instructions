@@ -2142,6 +2142,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $validatorText 'Assert-AdapterRegularFile' 'Upstream adapter validator must reject non-regular files before reading or executing package-local inputs.'
         Assert-Match $validatorText 'duplicate object key' 'Upstream adapter validator must reject duplicate JSON object keys before deserialization.'
         Assert-Match $validatorText 'allowedRemoteMcpEndpoints' 'Upstream adapter policy must approve exact MCP endpoints rather than hostnames.'
+        Assert-Match $validatorText 'ReparsePoint|mkfifo|Mode' 'Upstream adapter validator and regression boundary must account for Windows reparse and Unix special-file inputs.'
         Assert-Match $validatorText 'BLOCK' 'Upstream adapter validator must fail closed.'
         Assert-Match $index 'upstream-interoperability\.md' 'Standards index must expose the upstream interoperability authority record.'
         Assert-Match $standard 'upstream-interoperability\.md' 'Normative Standard must bind the upstream interoperability boundary.'
@@ -2240,6 +2241,34 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         try { & $script:UpstreamAdapterValidatorPath -PackageRoot $exactEndpointRoot -PolicyPath $exactEndpointPolicyPath | Out-Null }
         catch { $endpointError = $_.Exception.Message }
         Assert-Match $endpointError 'endpoint' 'An endpoint with an unapproved path must fail exact endpoint authorization.'
+
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $reparseRoot = Join-Path $TestDrive 'upstream-adapter-reparse'
+            $reparseOutside = Join-Path $TestDrive 'upstream-adapter-reparse-outside'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $reparseRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path $reparseOutside -Force)
+            Write-TestUtf8File -Path (Join-Path $reparseOutside 'adapter-command.ps1') -Text "Write-Output 'outside'`n"
+            [void](New-Item -ItemType Junction -Path (Join-Path $reparseRoot 'linked') -Target $reparseOutside)
+            Write-TestUtf8File -Path (Join-Path $reparseRoot '.mcp.json') -Text '{"mcpServers":{"linked":{"command":"./linked/adapter-command.ps1"}}}'
+            $reparseError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $reparseRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $reparseError = $_.Exception.Message }
+            Assert-Match $reparseError 'reparse|regular' 'A Windows reparse-backed package-local command must be blocked before reading the target.'
+        }
+        else {
+            $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $mkfifo) { Set-TestInconclusive 'mkfifo is unavailable on this Unix host.'; return }
+            $fifoRoot = Join-Path $TestDrive 'upstream-adapter-fifo'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $fifoRoot -Recurse -Force
+            $fifoPath = Join-Path $fifoRoot 'adapter-command.pipe'
+            & $mkfifo.Source $fifoPath
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the upstream adapter FIFO fixture.' }
+            Write-TestUtf8File -Path (Join-Path $fifoRoot '.mcp.json') -Text '{"mcpServers":{"fifo":{"command":"./adapter-command.pipe"}}}'
+            $fifoError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $fifoRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $fifoError = $_.Exception.Message }
+            Assert-Match $fifoError 'regular file' 'A Unix FIFO must be blocked without opening or reading it.'
+        }
     }
 
     # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.
