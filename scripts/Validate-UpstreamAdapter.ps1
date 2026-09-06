@@ -69,15 +69,27 @@ function Assert-AdapterStringArray {
     param(
         [Parameter(Mandatory = $true)] $Value,
         [Parameter(Mandatory = $true)][string] $Context,
-        [switch] $AllowEmpty
+        [switch] $AllowEmpty,
+        [switch] $Ordinal
     )
 
     if ($Value -isnot [array]) { throw "$Context must be an array." }
-    $seen = @{}
+    $seen = if ($Ordinal) {
+        New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    }
+    else {
+        @{}
+    }
     foreach ($item in @($Value)) {
         Assert-AdapterString -Value $item -Context "$Context item" -AllowEmpty:$AllowEmpty
-        if ($seen.ContainsKey([string]$item)) { throw "$Context contains duplicate value '$item'." }
-        $seen[[string]$item] = $true
+        $isDuplicate = if ($Ordinal) {
+            -not $seen.Add([string]$item)
+        }
+        else {
+            $seen.ContainsKey([string]$item)
+        }
+        if ($isDuplicate) { throw "$Context contains duplicate value '$item'." }
+        if (-not $Ordinal) { $seen[[string]$item] = $true }
     }
 }
 
@@ -495,7 +507,7 @@ function Assert-AdapterPortablePathSegment {
     }
 
     $deviceName = $Segment.Split([char]'.')[0]
-    if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+    if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])$') {
         throw "$Context contains a Windows device-name path segment '$Segment'."
     }
 }
@@ -642,7 +654,11 @@ function Get-AdapterSkillResourceInventory {
     param(
         [Parameter(Mandatory = $true)][string] $SkillPath,
         [Parameter(Mandatory = $true)][string] $Root,
-        [Parameter(Mandatory = $true)][string] $Context
+        [Parameter(Mandatory = $true)][string] $Context,
+        [string] $PackageRelativePrefix = '',
+        $NfcPaths,
+        $AsciiFoldPaths,
+        $TargetPathCasings
     )
 
     $skillFull = [System.IO.Path]::GetFullPath($SkillPath)
@@ -651,9 +667,15 @@ function Get-AdapterSkillResourceInventory {
     [void](Assert-AdapterNoReparsePath -Path $skillFull -Root $Root -Context $Context)
 
     $inventory = New-Object 'System.Collections.Generic.List[string]'
-    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    $asciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    $targetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    if ($null -eq $NfcPaths) {
+        $NfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    }
+    if ($null -eq $AsciiFoldPaths) {
+        $AsciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    }
+    if ($null -eq $TargetPathCasings) {
+        $TargetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    }
     $pendingDirectories = New-Object 'System.Collections.Generic.Stack[string]'
     $pendingDirectories.Push($skillFull)
     while ($pendingDirectories.Count -gt 0) {
@@ -667,11 +689,17 @@ function Get-AdapterSkillResourceInventory {
                 [System.IO.Path]::DirectorySeparatorChar,
                 [System.IO.Path]::AltDirectorySeparatorChar
             ).Replace('\', '/')
+            $packageRelativePath = if ([string]::IsNullOrEmpty($PackageRelativePrefix)) {
+                $relative
+            }
+            else {
+                "$PackageRelativePrefix/$relative"
+            }
             Assert-AdapterPortableInventoryPath `
-                -RelativePath $relative `
-                -NfcPaths $nfcPaths `
-                -AsciiFoldPaths $asciiFoldPaths `
-                -TargetPathCasings $targetPathCasings `
+                -RelativePath $packageRelativePath `
+                -NfcPaths $NfcPaths `
+                -AsciiFoldPaths $AsciiFoldPaths `
+                -TargetPathCasings $TargetPathCasings `
                 -Context "$Context resource"
             if ($item.PSIsContainer) {
                 $pendingDirectories.Push($itemPath)
@@ -731,9 +759,13 @@ function Assert-AdapterApps {
     )
 
     if ($Apps -isnot [array]) { throw "$Context must be an array." }
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($app in @($Apps)) {
         Assert-AdapterPropertySet -Object $app -Expected @($Policy.allowedAppFields) -Context "$Context entry"
         Assert-AdapterSafeName -Value $app.name -Context "$Context name"
+        if (-not $seenNames.Add([string]$app.name)) {
+            throw "$Context contains duplicate app identity '$($app.name)'."
+        }
         Assert-AdapterSafeName -Value $app.mcpServer -Context "$Context mcpServer"
     }
 }
@@ -763,8 +795,11 @@ function Invoke-UpstreamAdapterValidation {
         [void]$approvedMarketplaceRepositories.Add([string]$repository)
     }
 
-    $hooksPath = Join-Path $rootFull 'hooks'
-    if (Test-Path -LiteralPath $hooksPath) { throw 'BLOCK: Plugin hooks are not adopted by Standard v1.' }
+    foreach ($rootEntry in @(Get-ChildItem -Force -LiteralPath $rootFull -ErrorAction Stop)) {
+        if ([string]::Equals([string]$rootEntry.Name, 'hooks', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "BLOCK: Plugin hooks path '$($rootEntry.Name)' is not adopted by Standard v1."
+        }
+    }
 
     $pluginPath = Join-Path $rootFull $Policy.pluginManifestPath
     if (Test-AdapterOptionalFile -Path $pluginPath) {
@@ -782,19 +817,44 @@ function Invoke-UpstreamAdapterValidation {
         }
         $skills = Get-AdapterProperty -Object $plugin -Name 'skills'
         if ($null -ne $skills) {
-            Assert-AdapterStringArray -Value $skills -Context 'Plugin manifest skills'
+            Assert-AdapterStringArray -Value $skills -Context 'Plugin manifest skills' -Ordinal
+            $packageNfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+            $packageAsciiFoldPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+            $packageTargetPathCasings = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+            $declaredSkills = New-Object 'System.Collections.Generic.List[object]'
             foreach ($skillPathValue in @($skills)) {
                 $skillPath = Resolve-AdapterRelativePath -Value $skillPathValue -Root $rootFull -Context 'Plugin manifest skill path'
                 if (-not (Test-Path -LiteralPath $skillPath -PathType Container)) { throw "Plugin manifest skill path is missing: $skillPathValue" }
                 $skillMdPath = Join-Path $skillPath 'SKILL.md'
                 if (-not (Test-Path -LiteralPath $skillMdPath)) { throw "BLOCK: Plugin Skill is missing SKILL.md: $skillPathValue" }
                 [void](Assert-AdapterRegularFile -Path $skillMdPath -Context 'Plugin Skill SKILL.md')
+                $skillRootRelative = $skillPath.Substring($rootFull.Length).TrimStart(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    [System.IO.Path]::AltDirectorySeparatorChar
+                ).Replace('\', '/')
+                Assert-AdapterPortableInventoryPath `
+                    -RelativePath $skillRootRelative `
+                    -NfcPaths $packageNfcPaths `
+                    -AsciiFoldPaths $packageAsciiFoldPaths `
+                    -TargetPathCasings $packageTargetPathCasings `
+                    -Context "Plugin Skill '$skillPathValue' path"
+                [void]$declaredSkills.Add([pscustomobject]@{
+                    value = [string]$skillPathValue
+                    path = $skillPath
+                    packageRelativePath = $skillRootRelative
+                })
+            }
+            foreach ($declaredSkill in @($declaredSkills.ToArray())) {
                 $skillInventory = Get-AdapterSkillResourceInventory `
-                    -SkillPath $skillPath `
+                    -SkillPath $declaredSkill.path `
                     -Root $rootFull `
-                    -Context "Plugin Skill '$skillPathValue'"
+                    -Context "Plugin Skill '$($declaredSkill.value)'" `
+                    -PackageRelativePrefix $declaredSkill.packageRelativePath `
+                    -NfcPaths $packageNfcPaths `
+                    -AsciiFoldPaths $packageAsciiFoldPaths `
+                    -TargetPathCasings $packageTargetPathCasings
                 $bundledSkillInventories.Add([ordered]@{
-                    path = [string]$skillPathValue
+                    path = [string]$declaredSkill.value
                     inventory = @($skillInventory)
                 })
             }

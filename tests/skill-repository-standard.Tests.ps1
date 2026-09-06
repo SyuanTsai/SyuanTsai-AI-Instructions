@@ -2235,7 +2235,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ id='marketplace-unapproved-repository'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"attacker/plugin","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='marketplace-repository-case-variant'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"github","repo":"syuantsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
             @{ id='marketplace-unapproved-endpoint'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.agents/plugins/marketplace.json') -Text ('{"plugins":[{"name":"fixture-plugin","source":{"source":"http","path":"./","sha":"' + ('a' * 40) + '"}}]}') } },
-            @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } }
+            @{ id='app-duplicate-name'; mutate={ param($root) Write-TestUtf8File -Path (Join-Path $root '.app.json') -Text '{"apps":[{"name":"fixture-app","mcpServer":"local"},{"name":"fixture-app","mcpServer":"local"}]}' } },
+            @{ id='plugin-hook-bypass'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'hooks/run.ps1') -Text 'Write-Output hook' } },
+            @{ id='plugin-hook-case-variant'; mutate={ param($root) [void](New-Item -ItemType Directory -Path (Join-Path $root 'Hooks') -Force); Write-TestUtf8File -Path (Join-Path $root 'Hooks/run.ps1') -Text 'Write-Output hook' } }
         )
         foreach ($case in $cases) {
             $caseRoot = Join-Path $TestDrive ([string]$case.id)
@@ -2358,6 +2360,26 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
             catch { $collisionError = $_.Exception.Message }
             Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
+
+            $deviceAliasRoot = Join-Path $TestDrive 'upstream-adapter-device-alias-resource'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $deviceAliasRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $deviceAliasRoot 'skills/fixture-skill/assets') -Force)
+            $deviceAliasName = 'COM' + [char]0x00B9 + '.txt'
+            Write-TestUtf8File -Path (Join-Path $deviceAliasRoot ('skills/fixture-skill/assets/' + $deviceAliasName)) -Text 'superscript device alias'
+            $deviceAliasError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $deviceAliasRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $deviceAliasError = $_.Exception.Message }
+            Assert-Match $deviceAliasError 'device' 'Windows superscript device-name aliases must be blocked on Unix.'
+
+            $skillRootCollisionRoot = Join-Path $TestDrive 'upstream-adapter-skill-root-collision'
+            Copy-Item -LiteralPath $fixtureRoot -Destination $skillRootCollisionRoot -Recurse -Force
+            [void](New-Item -ItemType Directory -Path (Join-Path $skillRootCollisionRoot 'skills/Fixture-Skill') -Force)
+            Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot 'skills/Fixture-Skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A second case-colliding Skill root.`n---`n`n# Fixture`n"
+            Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill","./skills/Fixture-Skill"]}'
+            $skillRootCollisionError = $null
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $skillRootCollisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            catch { $skillRootCollisionError = $_.Exception.Message }
+            Assert-Match $skillRootCollisionError 'collision' 'Declared Skill roots that collide under portable case rules must be blocked.'
         }
     }
 
