@@ -1295,7 +1295,6 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.runs[0].results[0].level=@('warning') } },
             @{ Mutate={ param($r) $r.runs[0].results[0].level='error' } },
             @{ Mutate={ param($r) $r.runs[0].results[0].ruleId='unknown-rule' } },
-            @{ Mutate={ param($r) $r.runs[0].results[0].locations=@($r.runs[0].results[0].locations[0]) } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].PSObject.Properties.Remove('defaultConfiguration') } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].defaultConfiguration.level=$true } },
             @{ Mutate={ param($r) $r.runs[0].results[0].PSObject.Properties.Remove('level'); $r.runs[0].tool.driver.rules[0].defaultConfiguration.level='fatal' } },
@@ -1310,6 +1309,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage 'skill-tools' 'SARIF rule binding, effective severity, result shape, and fixture location must fail closed on drift.'
         }
+
+        $sarifPartialLocations = Copy-TestJsonObject $sarifBaseline
+        $sarifPartialLocations.runs[0].results[0].locations=@($sarifPartialLocations.runs[0].results[0].locations[0])
+        Assert-AuthoritySkillToolsSarifReport -Report $sarifPartialLocations -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -CoverageEnvelope $skillToolsCoverageBaseline
 
         $skillToolsCoverageCases = @(
             @{ Mutate={ param($e) $e.PSObject.Properties.Remove('files') } },

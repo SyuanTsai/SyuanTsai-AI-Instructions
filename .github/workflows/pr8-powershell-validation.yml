@@ -11,6 +11,8 @@ on:
     branches:
       - syp-86
       - main
+    # This required context intentionally has no paths filter, so every PR
+    # runs the shared gate, including scripts/Validate-UpstreamAdapter.ps1.
   workflow_dispatch:
 
 permissions:
