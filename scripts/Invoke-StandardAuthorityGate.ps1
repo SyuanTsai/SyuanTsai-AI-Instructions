@@ -577,6 +577,76 @@ function Get-AuthorityReportedInventoryPath {
     throw "$Context does not identify a file in the controlled fixture inventory."
 }
 
+function Get-AuthoritySkillValidatorCoveragePaths {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $FixtureRoot,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+    )
+
+    # skill-validator v1.6.1 intentionally emits package-level pass/info
+    # results without a file.  Its token_counts and other_token_counts are the
+    # complete file coverage envelope, so bind that envelope separately from
+    # the optional result locations.
+    $coveragePaths = New-Object 'System.Collections.Generic.List[string]'
+    $envelopeCount = 0
+    foreach ($envelopeName in @('token_counts', 'other_token_counts')) {
+        $envelopeProperty = $Report.PSObject.Properties[$envelopeName]
+        if ($null -eq $envelopeProperty) { continue }
+        $envelopeCount++
+        $envelope = $envelopeProperty.Value
+        if ($envelope -isnot [pscustomobject]) {
+            throw "skill-validator $envelopeName coverage envelope must be an object."
+        }
+        $files = Get-AuthorityRequiredProperty -Object $envelope -Name 'files' -Context "skill-validator $envelopeName coverage envelope"
+        $total = Get-AuthorityRequiredProperty -Object $envelope -Name 'total' -Context "skill-validator $envelopeName coverage envelope"
+        if ($files -isnot [array] -and $files -isnot [pscustomobject]) {
+            throw "skill-validator $envelopeName coverage envelope files must be a non-empty array."
+        }
+        $fileEntries = @($files)
+        if ($fileEntries.Count -le 0) {
+            throw "skill-validator $envelopeName coverage envelope files must be a non-empty array."
+        }
+        Assert-AuthorityNonNegativeInteger -Value $total -Context "skill-validator $envelopeName coverage total"
+        [int64]$sum = 0
+        foreach ($entry in $fileEntries) {
+            if ($entry -isnot [pscustomobject]) {
+                throw "skill-validator $envelopeName coverage entries must be structured objects."
+            }
+            $file = Get-AuthorityRequiredProperty -Object $entry -Name 'file' -Context "skill-validator $envelopeName coverage entry"
+            $tokens = Get-AuthorityRequiredProperty -Object $entry -Name 'tokens' -Context "skill-validator $envelopeName coverage entry"
+            Assert-AuthorityNonNegativeInteger -Value $tokens -Context "skill-validator $envelopeName coverage tokens"
+            [int64]$sum += [int64]$tokens
+            if ($file -isnot [string] -or [string]::IsNullOrWhiteSpace($file)) {
+                throw "skill-validator $envelopeName coverage entry file must be a non-empty string."
+            }
+            if ([string]$file -ceq 'SKILL.md body') {
+                $reportedPath = 'SKILL.md'
+            }
+            else {
+                $reportedPath = Get-AuthorityReportedInventoryPath `
+                    -Value $file `
+                    -FixtureRoot $FixtureRoot `
+                    -ExpectedInventoryPaths $ExpectedInventoryPaths `
+                    -Context "skill-validator $envelopeName coverage entry file"
+            }
+            if (-not $coveragePaths.Contains($reportedPath)) {
+                [void]$coveragePaths.Add($reportedPath)
+            }
+            else {
+                throw "skill-validator coverage envelope contains duplicate file '$reportedPath'."
+            }
+        }
+        if ($sum -ne [int64]$total) {
+            throw "skill-validator $envelopeName coverage total does not equal the sum of its file token counts."
+        }
+    }
+    if ($envelopeCount -eq 0) {
+        throw 'skill-validator report is missing its file coverage envelope.'
+    }
+    return ,$coveragePaths.ToArray()
+}
+
 function Assert-AuthoritySkillSpectorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -673,7 +743,6 @@ function Assert-AuthoritySkillValidatorReport {
         $results -isnot [array] -or @($results).Count -le 0) {
         throw 'skill-validator did not produce a clean, non-empty package validation report.'
     }
-    $reportedPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($result in @($results)) {
         if ($result -isnot [pscustomobject]) {
             throw 'skill-validator result entries must be structured validation objects.'
@@ -688,25 +757,30 @@ function Assert-AuthoritySkillValidatorReport {
             throw 'skill-validator result entries do not describe a clean controlled fixture.'
         }
         $fileProperty = $result.PSObject.Properties['file']
-        if ($null -eq $fileProperty -or $null -eq $fileProperty.Value) {
-            throw 'skill-validator result must identify every file in the controlled fixture inventory.'
+        if ($null -ne $fileProperty) {
+            if ($fileProperty.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$fileProperty.Value)) {
+                throw 'skill-validator result file must be a non-empty path string when present.'
+            }
+            [void](Get-AuthorityReportedInventoryPath `
+                -Value $fileProperty.Value `
+                -FixtureRoot $ExpectedFixtureRoot `
+                -ExpectedInventoryPaths $ExpectedInventoryPaths `
+                -Context 'skill-validator result file')
         }
-        $reportedPath = Get-AuthorityReportedInventoryPath `
-            -Value $fileProperty.Value `
-            -FixtureRoot $ExpectedFixtureRoot `
-            -ExpectedInventoryPaths $ExpectedInventoryPaths `
-            -Context 'skill-validator result file'
-        if (-not $reportedPaths.Contains($reportedPath)) { [void]$reportedPaths.Add($reportedPath) }
         $lineProperty = $result.PSObject.Properties['line']
         if ($null -ne $lineProperty -and
             (($lineProperty.Value -isnot [int] -and $lineProperty.Value -isnot [long]) -or [int64]$lineProperty.Value -le 0)) {
             throw 'skill-validator result line must be a positive integer when present.'
         }
     }
+    $coveragePaths = Get-AuthoritySkillValidatorCoveragePaths `
+        -Report $Report `
+        -FixtureRoot $ExpectedFixtureRoot `
+        -ExpectedInventoryPaths $ExpectedInventoryPaths
     Assert-AuthorityExactPathInventory `
-        -Value $reportedPaths.ToArray() `
+        -Value $coveragePaths `
         -Expected $ExpectedInventoryPaths `
-        -Context 'skill-validator reported inventory' | Out-Null
+        -Context 'skill-validator coverage envelope' | Out-Null
 }
 
 function Assert-AuthoritySkillToolsSarifReport {

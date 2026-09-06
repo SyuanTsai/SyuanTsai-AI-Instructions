@@ -1202,8 +1202,17 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             skill_dir=$reportFixture.Root; passed=$true; errors=0; warnings=0
             results=@(
                 [pscustomobject]@{ level='pass'; category='structure'; message='SKILL.md structure is valid.'; file='SKILL.md'; line=1 },
-                [pscustomobject]@{ level='info'; category='metadata'; message='Optional metadata was inspected.'; file='agents/openai.yaml' }
+                [pscustomobject]@{ level='info'; category='metadata'; message='Optional metadata was inspected.'; file='agents/openai.yaml' },
+                [pscustomobject]@{ level='pass'; category='overall'; message='Package validation completed.' }
             )
+            token_counts=[pscustomobject]@{
+                files=@([pscustomobject]@{ file='SKILL.md body'; tokens=1 })
+                total=1
+            }
+            other_token_counts=[pscustomobject]@{
+                files=@([pscustomobject]@{ file='agents/openai.yaml'; tokens=1 })
+                total=1
+            }
         }
         Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
         $skillValidatorCases = @(
@@ -1212,7 +1221,6 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.errors=$false } },
             @{ Mutate={ param($r) $r.warnings='0' } },
             @{ Mutate={ param($r) $r.results=[pscustomobject]@{ level='pass'; category='structure'; message='scalar' } } },
-            @{ Mutate={ param($r) $r.results=@($r.results[0]) } },
             @{ Mutate={ param($r) $r.results=@($true) } },
             @{ Mutate={ param($r) $r.results[0].level='warning' } },
             @{ Mutate={ param($r) $r.results[0].level='error' } },
@@ -1221,7 +1229,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             @{ Mutate={ param($r) $r.results[0].category=$true } },
             @{ Mutate={ param($r) $r.results[0].message='' } },
             @{ Mutate={ param($r) $r.results[0].file='../outside.md' } },
-            @{ Mutate={ param($r) $r.results[0].line='1' } }
+            @{ Mutate={ param($r) $r.results[0].line='1' } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.PSObject.Properties.Remove('token_counts') } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.other_token_counts.files=@([pscustomobject]@{ file='other.md'; tokens=1 }); $r.other_token_counts.total=1 } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.other_token_counts.total=2 } },
+            @{ Pattern='coverage envelope'; Mutate={ param($r) $r.token_counts.files[0].tokens='1' } }
         )
         foreach ($case in $skillValidatorCases) {
             $report = Copy-TestJsonObject $skillValidatorBaseline
