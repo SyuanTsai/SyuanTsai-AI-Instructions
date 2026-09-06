@@ -60,7 +60,83 @@
             "minLength": 1
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "controlled-acquisition" },
+                "evidence": { "const": ["candidateIdentity", "authoritySnapshot", "sourcePin"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "integrity-verification" },
+                "evidence": { "const": ["archiveSha256", "contentSha256", "provenance"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "package-validation" },
+                "evidence": { "const": ["packageInventory", "packageSchema", "packageValidatorResult"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "skillspector-static" },
+                "evidence": { "const": ["scannerIdentity", "analyzerCompleteness", "staticReport"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "repository-tests" },
+                "evidence": { "const": ["testInventory", "testResult", "domainAdapterResult"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "conditional-semantic-scan" },
+                "evidence": { "const": ["triggerDecision", "semanticReport", "semanticCompleteness"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "ai-review" },
+                "evidence": { "const": ["reviewFindings", "findingDisposition", "reviewedCandidate"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "human-approval" },
+                "evidence": { "const": ["approver", "approvalTimestamp", "approvedCandidate"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "publish-or-install" },
+                "evidence": { "const": ["releaseIdentity", "publishOrInstallResult", "authorization"] }
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": { "const": "post-install-verification" },
+                "evidence": { "const": ["installedInventory", "installedManifest", "postInstallIntegrity"] }
+              }
+            }
+          ]
+        }
+      ]
     },
     "severity": {
       "type": "object",

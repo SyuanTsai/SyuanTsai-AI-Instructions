@@ -148,6 +148,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal])) {
                     if ([decimal]$Value -ne [decimal]$expected) { return $false }
                 }
+                elseif ($expected -is [array]) {
+                    if ($Value -isnot [array] -or
+                        ($Value | ConvertTo-Json -Depth 50 -Compress) -cne ($expected | ConvertTo-Json -Depth 50 -Compress)) {
+                        return $false
+                    }
+                }
                 elseif ($null -eq $Value -or $Value.GetType() -ne $expected.GetType() -or $Value -ne $expected) {
                     return $false
                 }
@@ -2115,8 +2121,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
+        Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
         Assert-Equal $policy.schemaVersion 1 'Canonical validation/security gate policy must remain v1.'
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security gate policy identity changed.'
         $expectedIds = @(
@@ -2143,12 +2151,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             'Publish / Install',
             'Post-install Verification'
         )
+        $expectedEvidence = @(
+            ,@('candidateIdentity', 'authoritySnapshot', 'sourcePin')
+            ,@('archiveSha256', 'contentSha256', 'provenance')
+            ,@('packageInventory', 'packageSchema', 'packageValidatorResult')
+            ,@('scannerIdentity', 'analyzerCompleteness', 'staticReport')
+            ,@('testInventory', 'testResult', 'domainAdapterResult')
+            ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
+            ,@('reviewFindings', 'findingDisposition', 'reviewedCandidate')
+            ,@('approver', 'approvalTimestamp', 'approvedCandidate')
+            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization')
+            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity')
+        )
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.order }) (@(1..10 | ForEach-Object { [string]$_ })) 'Canonical validation/security stage order numbers must be contiguous.'
         foreach ($stage in @($policy.stages)) {
+            $stageIndex = [int]$stage.order - 1
             Assert-Equal $stage.failureAction 'BLOCK' "Stage '$($stage.id)' must fail closed."
-            Assert-True (@($stage.evidence).Count -gt 0) "Stage '$($stage.id)' must declare evidence."
+            Assert-ExactStringSequence $stage.evidence $expectedEvidence[$stageIndex] "Stage '$($stage.id)' must declare the exact canonical evidence sequence."
+        }
+        foreach ($mutation in @(
+            @{ Name='placeholder'; Mutate={ param($item) $item.stages[0].evidence=@('placeholder') } },
+            @{ Name='reordered'; Mutate={ param($item) $item.stages[0].evidence=@('authoritySnapshot', 'candidateIdentity', 'sourcePin') } }
+        )) {
+            $weakened = Copy-TestJsonObject -Value $policy
+            & $mutation.Mutate $weakened
+            Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message "Weakened evidence '$($mutation.Name)' must fail schema validation."
+            $errorMessage = $null
+            try { Assert-AuthorityValidationSecurityGate -Policy $weakened | Out-Null }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'exact canonical evidence set|evidence 1' "Weakened evidence '$($mutation.Name)' must fail the executable authority gate."
         }
         Assert-Equal $policy.security.scannerFailure 'BLOCK' 'Scanner failure must block.'
         Assert-Equal $policy.security.analyzerIncomplete 'BLOCK' 'Analyzer incompleteness must block.'

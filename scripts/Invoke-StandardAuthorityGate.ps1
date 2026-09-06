@@ -183,16 +183,16 @@ function Assert-AuthorityValidationSecurityGate {
         -Context 'Validation/security gate policy identity'
 
     $expectedStages = @(
-        [ordered]@{ order=1; id='controlled-acquisition'; name='Controlled Acquisition'; condition='always' },
-        [ordered]@{ order=2; id='integrity-verification'; name='Integrity Verification'; condition='always' },
-        [ordered]@{ order=3; id='package-validation'; name='Package Validation'; condition='always' },
-        [ordered]@{ order=4; id='skillspector-static'; name='SkillSpector Static'; condition='always' },
-        [ordered]@{ order=5; id='repository-tests'; name='Repository Tests'; condition='always' },
-        [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered' },
-        [ordered]@{ order=7; id='ai-review'; name='AI Review'; condition='always' },
-        [ordered]@{ order=8; id='human-approval'; name='Human Approval'; condition='always' },
-        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install' },
-        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install' }
+        [ordered]@{ order=1; id='controlled-acquisition'; name='Controlled Acquisition'; condition='always'; evidence=@('candidateIdentity', 'authoritySnapshot', 'sourcePin') },
+        [ordered]@{ order=2; id='integrity-verification'; name='Integrity Verification'; condition='always'; evidence=@('archiveSha256', 'contentSha256', 'provenance') },
+        [ordered]@{ order=3; id='package-validation'; name='Package Validation'; condition='always'; evidence=@('packageInventory', 'packageSchema', 'packageValidatorResult') },
+        [ordered]@{ order=4; id='skillspector-static'; name='SkillSpector Static'; condition='always'; evidence=@('scannerIdentity', 'analyzerCompleteness', 'staticReport') },
+        [ordered]@{ order=5; id='repository-tests'; name='Repository Tests'; condition='always'; evidence=@('testInventory', 'testResult', 'domainAdapterResult') },
+        [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered'; evidence=@('triggerDecision', 'semanticReport', 'semanticCompleteness') },
+        [ordered]@{ order=7; id='ai-review'; name='AI Review'; condition='always'; evidence=@('reviewFindings', 'findingDisposition', 'reviewedCandidate') },
+        [ordered]@{ order=8; id='human-approval'; name='Human Approval'; condition='always'; evidence=@('approver', 'approvalTimestamp', 'approvedCandidate') },
+        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install'; evidence=@('releaseIdentity', 'publishOrInstallResult', 'authorization') },
+        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install'; evidence=@('installedInventory', 'installedManifest', 'postInstallIntegrity') }
     )
     $stages = Get-AuthorityRequiredProperty -Object $Policy -Name 'stages' -Context 'Validation/security gate policy'
     if ($stages -isnot [array] -or @($stages).Count -ne $expectedStages.Count) {
@@ -216,8 +216,15 @@ function Assert-AuthorityValidationSecurityGate {
             -Expected 'BLOCK' `
             -Context "Validation/security gate stage $($index + 1) failure action"
         $evidence = Get-AuthorityRequiredProperty -Object $stage -Name 'evidence' -Context "Validation/security gate stage $($index + 1)"
-        if ($evidence -isnot [array] -or @($evidence).Count -le 0) {
-            throw "Validation/security gate stage $($index + 1) must declare evidence."
+        $expectedEvidence = @($expected.evidence)
+        if ($evidence -isnot [array] -or @($evidence).Count -ne $expectedEvidence.Count) {
+            throw "Validation/security gate stage $($index + 1) must declare the exact canonical evidence set."
+        }
+        for ($evidenceIndex = 0; $evidenceIndex -lt $expectedEvidence.Count; $evidenceIndex++) {
+            Assert-AuthorityExactString `
+                -Value $evidence[$evidenceIndex] `
+                -Expected ([string]$expectedEvidence[$evidenceIndex]) `
+                -Context "Validation/security gate stage $($index + 1) evidence $($evidenceIndex + 1)"
         }
     }
 
