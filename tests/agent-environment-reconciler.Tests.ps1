@@ -509,7 +509,9 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $journalPath | Should Be $true
     }
 
-    It 'returns concurrent when the recovery global lock is already held' {
+    # Scenario: An invalid recovery journal is present while the user-scope recovery lock is already held.
+    # Purpose: Verify ordinary lock contention returns the documented concurrent result without interpreting or replacing the preserved journal.
+    It 'InterT55_returns_concurrent_when_the_recovery_global_lock_is_already_held' {
         $backupRoot = Join-Path $userHome '.agents\backups\recovery-concurrent'
         $agentsRoot = Join-Path $userHome '.agents'
         New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
