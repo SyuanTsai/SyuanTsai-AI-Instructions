@@ -160,6 +160,26 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $legacyEvidence[0].evidence | Should Match 'lifecycle-alias'
     }
 
+    # Scenario: A controlled candidate exposes an absolute target path before user-environment mutation.
+    # Purpose: Keep structured unsafe-path evidence schema-valid while preserving the raw rejected input for diagnosis.
+    It 'InterT50_reports_a_schema_safe_path_for_an_unsafe_candidate' {
+        $unsafePath = 'C:\outside\SKILL.md'
+        $desired = New-TestDesiredState -Root $staging
+        $desired.Files[0].targetPath = $unsafePath
+        $desired.Manifest.files[0].targetPath = $unsafePath
+
+        $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails).Count | Should Be 1
+        $detail = @($result.failureDetails)[0]
+        $detail.code | Should Be 'unsafe-target-path'
+        $detail.path | Should Be '.agents/skills/<rejected-target-path>'
+        $detail.evidence | Should Match 'C:\\outside\\SKILL\.md'
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\backups') | Should Be $false
+    }
+
     # Scenario: The immutable candidate changes at its original staging path after reconciliation preflight has completed.
     # Purpose: Verify writes use the transaction-owned preflight snapshot instead of a mutable staging path.
     It 'InterT40_writes_from_a_transaction_owned_candidate_snapshot' {
