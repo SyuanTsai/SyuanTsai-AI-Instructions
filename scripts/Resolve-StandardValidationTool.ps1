@@ -2073,7 +2073,14 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     else {
         try {
             Assert-NoConflictingGoTransportEnvironment
-            @(Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
+            $callerParameterDefaults = $PSDefaultParameterValues
+            $PSDefaultParameterValues = @{}
+            try {
+                @(Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
+            }
+            finally {
+                $PSDefaultParameterValues = $callerParameterDefaults
+            }
         }
         catch {
             throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"

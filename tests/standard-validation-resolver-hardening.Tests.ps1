@@ -286,7 +286,16 @@ catch {
             (New-Object Text.UTF8Encoding($false))
         )
 
-        $powerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
+        $powerShellExecutableName = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            'powershell.exe'
+        }
+        elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            'pwsh.exe'
+        }
+        else {
+            'pwsh'
+        }
+        $powerShellExecutable = Join-Path $PSHOME $powerShellExecutableName
         Assert-True (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf) 'A PowerShell executable is required for the real child-process transport regression.'
         $transportNames = @(
             'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
@@ -313,8 +322,17 @@ catch {
                     '-File', ('"' + $childScript + '"'),
                     '-ResolverPath', ('"' + $script:ResolverPath + '"')
                 )
-                $child = Start-Process -FilePath $powerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden `
-                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+                $startParameters = @{
+                    FilePath = $powerShellExecutable
+                    ArgumentList = $arguments
+                    PassThru = $true
+                    RedirectStandardOutput = $stdoutPath
+                    RedirectStandardError = $stderrPath
+                }
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $startParameters.WindowStyle = 'Hidden'
+                }
+                $child = Start-Process @startParameters
                 if (-not $child.WaitForExit(15000)) {
                     try { Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue } catch { }
                     throw "Transport isolation child process did not finish for '$($case.Name)'."
