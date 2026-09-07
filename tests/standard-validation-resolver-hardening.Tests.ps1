@@ -297,11 +297,21 @@ catch {
         }
         $powerShellExecutable = Join-Path $PSHOME $powerShellExecutableName
         Assert-True (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf) 'A PowerShell executable is required for the real child-process transport regression.'
-        $transportNames = @(
-            'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-            'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
-            'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
-        )
+        $transportNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            # Windows environment names are case-insensitive. Keep one spelling
+            # per variable so restoration cannot clear a value twice.
+            @(
+                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+            )
+        }
+        else {
+            @(
+                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+            )
+        }
 
         foreach ($case in @(
             @{ Name = 'HTTPS_PROXY'; Value = 'http://127.0.0.1:1' },
