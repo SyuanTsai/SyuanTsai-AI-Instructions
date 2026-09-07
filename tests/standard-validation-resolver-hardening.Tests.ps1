@@ -357,6 +357,28 @@ catch {
         }
     }
 
+    # Scenario: A caller shadows the unqualified PowerShell collection-selection cmdlets.
+    # Purpose: Ensure release selection cannot be redirected after official metadata is authenticated.
+    It 'UnitT66_uses_module_qualified_release_selection_cmdlets' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $metadata = @(
+            [pscustomobject]@{ version = 'go1.26.7'; stable = $true }
+            [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
+        )
+        function Sort-Object { throw 'The caller-shadowed Sort-Object was invoked.' }
+        function Select-Object { throw 'The caller-shadowed Select-Object was invoked.' }
+        try {
+            $actual = Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $metadata
+        }
+        finally {
+            Remove-Item Function:Sort-Object -ErrorAction SilentlyContinue
+            Remove-Item Function:Select-Object -ErrorAction SilentlyContinue
+        }
+
+        Assert-Equal $actual '1.26.8' 'Release selection must use the newest stable official version even when caller cmdlets are shadowed.'
+    }
+
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
     # Purpose: Bind asset acquisition to the exact approved GitHub release path before digest verification.
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
