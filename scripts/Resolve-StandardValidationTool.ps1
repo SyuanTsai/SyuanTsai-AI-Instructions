@@ -2126,12 +2126,15 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     if ($stableCandidates.Count -eq 0) {
         throw "Official Go release metadata from '$trustedGoRuntimeSource' contained no stable release."
     }
-    $latestCandidate = @(
-        $stableCandidates |
-            Microsoft.PowerShell.Utility\Sort-Object -Property parsedVersion -Descending |
-            Microsoft.PowerShell.Utility\Select-Object -First 1
-    )
-    return [string]$latestCandidate[0].version
+    # Select through .NET so a caller cannot redirect release choice with
+    # shadowed cmdlets or PSDefaultParameterValues.
+    $latestCandidate = $null
+    foreach ($candidate in $stableCandidates) {
+        if ($null -eq $latestCandidate -or $candidate.parsedVersion -gt $latestCandidate.parsedVersion) {
+            $latestCandidate = $candidate
+        }
+    }
+    return [string]$latestCandidate.version
 }
 
 function Get-ApprovedGoRuntimeVersion {

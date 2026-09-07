@@ -357,21 +357,27 @@ catch {
         }
     }
 
-    # Scenario: A caller shadows the unqualified PowerShell collection-selection cmdlets.
+    # Scenario: A caller shadows PowerShell collection-selection cmdlets or sets their defaults.
     # Purpose: Ensure release selection cannot be redirected after official metadata is authenticated.
-    It 'UnitT66_uses_module_qualified_release_selection_cmdlets' {
+    It 'UnitT66_uses_caller_independent_release_selection' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
         $metadata = @(
             [pscustomobject]@{ version = 'go1.26.7'; stable = $true }
             [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
         )
+        $previousDefaults = $PSDefaultParameterValues
+        $PSDefaultParameterValues = @{
+            'Select-Object:Skip' = 1
+            'Sort-Object:Descending' = $false
+        }
         function Sort-Object { throw 'The caller-shadowed Sort-Object was invoked.' }
         function Select-Object { throw 'The caller-shadowed Select-Object was invoked.' }
         try {
             $actual = Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $metadata
         }
         finally {
+            $PSDefaultParameterValues = $previousDefaults
             Remove-Item Function:Sort-Object -ErrorAction SilentlyContinue
             Remove-Item Function:Select-Object -ErrorAction SilentlyContinue
         }

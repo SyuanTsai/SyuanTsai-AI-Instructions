@@ -1792,7 +1792,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 @{ Output=@(); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
                 @{ Output=@($stableGoOutput, 'unexpected second line'); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
                 @{ Output=@("go version devel go$stableGoVersion linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
-                @{ Output=@("go version go$stableGoVersion`rc1 linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
+                @{ Output=@("go version go${stableGoVersion}rc1 linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
                 @{ Output=@('go version go1.99.7 linux/amd64'); Expected=$stableGoVersion; Pattern='does not match the independently authenticated latest stable Go runtime' },
                 @{ Output=@('go version go1.99.7 linux/amd64'); Expected='1.99.7'; Pattern='caller-supplied Go runtime.*does not match the independently authenticated latest stable Go runtime' },
                 @{ Output=@($stableGoOutput); Expected=''; Pattern='run-resolved latest stable Go runtime version is required' }
