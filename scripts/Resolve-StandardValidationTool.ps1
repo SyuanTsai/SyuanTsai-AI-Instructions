@@ -2137,7 +2137,15 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     finally {
         $PSDefaultParameterValues = $callerParameterDefaults
     }
-    Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata $metadata
+    $metadataFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Get-OfficialLatestStableGoRuntimeVersionFromMetadata',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $metadataFunction -or $metadataFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The official Go metadata parser function is unavailable.'
+    }
+    & $metadataFunction -ReleaseMetadata $metadata
 }
 
 function Get-OfficialLatestStableGoRuntimeVersionFromMetadata {
@@ -2259,7 +2267,15 @@ function Get-ApprovedGoRuntimeVersion {
     finally {
         $PSDefaultParameterValues = $callerParameterDefaults
     }
-    Assert-ApprovedGoRuntimeEvidence `
+    $evidenceFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Assert-ApprovedGoRuntimeEvidence',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $evidenceFunction -or $evidenceFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The approved Go runtime evidence validator function is unavailable.'
+    }
+    & $evidenceFunction `
         -VersionOutput $VersionOutput `
         -ExpectedVersionRule $ExpectedVersionRule `
         -ExpectedRuntimeVersion $ExpectedRuntimeVersion `

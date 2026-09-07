@@ -422,7 +422,21 @@ catch {
             [System.Net.WebRequest]::DefaultWebProxy = $testProxy
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $testCertificateCallback
             if ($null -ne $certificatePolicyProperty) {
-                [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+                if (-not ('StandardV1PermissiveCertificatePolicy' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
+{
+    public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem)
+    {
+        return true;
+    }
+}
+'@
+                }
+                $testCertificatePolicy = New-Object -TypeName StandardV1PermissiveCertificatePolicy
+                [void]$certificatePolicyProperty.SetValue($null, $testCertificatePolicy, $null)
             }
 
             $inside = Invoke-WithApprovedGoWebTransport -Action {
@@ -436,7 +450,8 @@ catch {
             Assert-True ($null -eq $inside.DefaultProxy) 'Approved Go metadata transport must clear the process-global default proxy.'
             Assert-True ($null -eq $inside.CertificateCallback) 'Approved Go metadata transport must clear the process-global certificate callback.'
             if ($null -ne $certificatePolicyProperty) {
-                Assert-True ($null -eq $inside.CertificatePolicy) 'Approved Go metadata transport must clear the legacy process-global certificate policy.'
+                Assert-True ($null -ne $inside.CertificatePolicy -and
+                    -not [object]::ReferenceEquals($inside.CertificatePolicy, $testCertificatePolicy)) 'Approved Go metadata transport must replace the caller legacy certificate policy with the framework default policy.'
             }
             Assert-True ([object]::ReferenceEquals([System.Net.WebRequest]::DefaultWebProxy, $testProxy)) 'The caller default proxy must be restored after the approved transport action.'
             Assert-True ([object]::ReferenceEquals([System.Net.ServicePointManager]::ServerCertificateValidationCallback, $testCertificateCallback)) 'The caller certificate callback must be restored after the approved transport action.'
@@ -469,6 +484,51 @@ catch {
         $metadataBody = $resolver.Substring($metadataStart, $metadataEnd - $metadataStart)
         Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Invoke-WithApprovedGoWebTransport'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind its transport boundary by the Function command type.'
         Assert-NotMatch $metadataBody '(?m)^\s*\$metadata\s*=\s*Invoke-WithApprovedGoWebTransport\s+-Action' 'Official Go metadata retrieval must not invoke an alias-precedence transport boundary.'
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Get-OfficialLatestStableGoRuntimeVersionFromMetadata'[\s\S]*CommandTypes\]::Function" 'Official Go metadata parsing must bind the parser by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*Get-OfficialLatestStableGoRuntimeVersionFromMetadata\s+-ReleaseMetadata' 'Official Go metadata parsing must not invoke an alias-precedence parser.'
+        $evidenceStart = $resolver.IndexOf('function Get-ApprovedGoRuntimeVersion')
+        $evidenceEnd = $resolver.IndexOf('function Resolve-Pester', $evidenceStart)
+        Assert-True ($evidenceStart -ge 0 -and $evidenceEnd -gt $evidenceStart) 'Go runtime evidence resolver body was not found.'
+        $evidenceBody = $resolver.Substring($evidenceStart, $evidenceEnd - $evidenceStart)
+        Assert-Match $evidenceBody "InvokeCommand\.GetCommand\(\s*'Assert-ApprovedGoRuntimeEvidence'[\s\S]*CommandTypes\]::Function" 'Go runtime evidence validation must bind the validator by the Function command type.'
+        Assert-NotMatch $evidenceBody '(?m)^\s*Assert-ApprovedGoRuntimeEvidence\s+`' 'Go runtime evidence validation must not invoke an alias-precedence validator.'
+    }
+
+    # Scenario: A caller installs aliases for nested runtime-authentication helpers.
+    # Purpose: Exercise the Function bindings end to end without contacting the network.
+    It 'UnitT69_resists_alias_redirects_in_nested_runtime_authentication' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        Set-Item -Path Function:Invoke-WithApprovedGoWebTransport -Value {
+            param([scriptblock] $Action)
+            @(
+                [pscustomobject]@{ version = 'go1.26.7'; stable = $true }
+                [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
+            )
+        }
+        Set-Item -Path Function:Get-OfficialLatestStableGoRuntimeVersion -Value {
+            '1.26.8'
+        }
+        Set-Item -Path Function:StandardV1AliasTrap -Value {
+            throw 'The caller alias trap was invoked.'
+        }
+        Set-Alias -Name Get-OfficialLatestStableGoRuntimeVersionFromMetadata -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-ApprovedGoRuntimeEvidence -Value StandardV1AliasTrap
+        try {
+            $metadataVersion = Get-OfficialLatestStableGoRuntimeVersion
+            Assert-Equal $metadataVersion '1.26.8' 'Nested official metadata parsing must ignore a caller alias.'
+            $evidenceVersion = Get-ApprovedGoRuntimeVersion `
+                -VersionOutput @('go version go1.26.8 linux/amd64') `
+                -ExpectedVersionRule 'latest-stable' `
+                -ExpectedRuntimeVersion '1.26.8'
+            Assert-Equal $evidenceVersion '1.26.8' 'Nested runtime evidence validation must ignore a caller alias.'
+        }
+        finally {
+            Remove-Item Alias:Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ErrorAction SilentlyContinue
+            Remove-Item Alias:Assert-ApprovedGoRuntimeEvidence -ErrorAction SilentlyContinue
+            Remove-Item Function:StandardV1AliasTrap -ErrorAction SilentlyContinue
+            . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        }
     }
 
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
