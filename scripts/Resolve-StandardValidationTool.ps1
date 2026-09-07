@@ -1947,11 +1947,32 @@ function Invoke-WithApprovedGoWebTransport {
     else {
         $certificatePolicyProperty.GetValue($null, $null)
     }
+    $defaultCertificatePolicy = $null
+    if ($null -ne $certificatePolicyProperty) {
+        # .NET Framework exposes the legacy policy as an interface and keeps
+        # its framework-default implementation internal. Instantiate that
+        # implementation explicitly so a caller-provided policy is replaced
+        # by the framework default rather than by a null policy.
+        $defaultCertificatePolicyType = $servicePointManagerType.Assembly.GetType('System.Net.DefaultCertPolicy', $false)
+        if ($null -eq $defaultCertificatePolicyType) {
+            throw 'The framework default certificate policy type could not be resolved.'
+        }
+        try {
+            $defaultCertificatePolicy = [Activator]::CreateInstance($defaultCertificatePolicyType, $true)
+        }
+        catch {
+            throw "The framework default certificate policy could not be instantiated: $($_.Exception.Message)"
+        }
+        if ($null -eq $defaultCertificatePolicy -or
+            -not $certificatePolicyProperty.PropertyType.IsInstanceOfType($defaultCertificatePolicy)) {
+            throw 'The framework default certificate policy has an unexpected type.'
+        }
+    }
     try {
         [System.Net.WebRequest]::DefaultWebProxy = $null
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
         if ($null -ne $certificatePolicyProperty) {
-            [void]$certificatePolicyProperty.SetValue($null, $null, $null)
+            [void]$certificatePolicyProperty.SetValue($null, $defaultCertificatePolicy, $null)
         }
         return & $Action
     }
