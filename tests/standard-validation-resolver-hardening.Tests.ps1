@@ -486,6 +486,14 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
         Assert-NotMatch $metadataBody '(?m)^\s*\$metadata\s*=\s*Invoke-WithApprovedGoWebTransport\s+-Action' 'Official Go metadata retrieval must not invoke an alias-precedence transport boundary.'
         Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Get-OfficialLatestStableGoRuntimeVersionFromMetadata'[\s\S]*CommandTypes\]::Function" 'Official Go metadata parsing must bind the parser by the Function command type.'
         Assert-NotMatch $metadataBody '(?m)^\s*Get-OfficialLatestStableGoRuntimeVersionFromMetadata\s+-ReleaseMetadata' 'Official Go metadata parsing must not invoke an alias-precedence parser.'
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Assert-NoConflictingGoTransportEnvironment'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind the production transport environment boundary by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*Assert-NoConflictingGoTransportEnvironment\s*$' 'Official Go metadata retrieval must not invoke an alias-precedence transport environment boundary.'
+        $transportStart = $resolver.IndexOf('function Assert-NoConflictingGoTransportEnvironment')
+        $transportEnd = $resolver.IndexOf('function Assert-GoTransportEnvironmentValues', $transportStart)
+        Assert-True ($transportStart -ge 0 -and $transportEnd -gt $transportStart) 'Go transport environment boundary body was not found.'
+        $transportBody = $resolver.Substring($transportStart, $transportEnd - $transportStart)
+        Assert-Match $transportBody "InvokeCommand\.GetCommand\(\s*'Assert-GoTransportEnvironmentValues'[\s\S]*CommandTypes\]::Function" 'Go transport environment validation must bind the nested validator by the Function command type.'
+        Assert-NotMatch $transportBody '(?m)^\s*Assert-GoTransportEnvironmentValues\s+-EnvironmentReader' 'Go transport environment validation must not invoke an alias-precedence nested validator.'
         $evidenceStart = $resolver.IndexOf('function Get-ApprovedGoRuntimeVersion')
         $evidenceEnd = $resolver.IndexOf('function Resolve-Pester', $evidenceStart)
         Assert-True ($evidenceStart -ge 0 -and $evidenceEnd -gt $evidenceStart) 'Go runtime evidence resolver body was not found.'
@@ -498,6 +506,32 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
     # Purpose: Exercise the Function bindings end to end without contacting the network.
     It 'UnitT69_resists_alias_redirects_in_nested_runtime_authentication' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $transportNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+        }
+        else {
+            @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+        }
+        $previousTransportValues = [ordered]@{}
+        foreach ($name in $transportNames) {
+            $previousTransportValues[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        }
+        $originalTransportFunction = (Get-Command Invoke-WithApprovedGoWebTransport -CommandType Function -ErrorAction Stop).ScriptBlock
+        $aliasNames = @(
+            'Invoke-WithApprovedGoWebTransport',
+            'Assert-NoConflictingGoTransportEnvironment',
+            'Assert-GoTransportEnvironmentValues',
+            'Get-OfficialLatestStableGoRuntimeVersionFromMetadata',
+            'Assert-ApprovedGoRuntimeEvidence'
+        )
+        $previousAliases = @{}
+        foreach ($name in $aliasNames) {
+            $previousAlias = Get-Alias -Name $name -ErrorAction SilentlyContinue
+            if ($null -ne $previousAlias) { $previousAliases[$name] = [string]$previousAlias.Definition }
+            Remove-Item -Path "Alias:$name" -ErrorAction SilentlyContinue
+        }
 
         Set-Item -Path Function:Invoke-WithApprovedGoWebTransport -Value {
             param([scriptblock] $Action)
@@ -512,6 +546,9 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
         Set-Item -Path Function:StandardV1AliasTrap -Value {
             throw 'The caller alias trap was invoked.'
         }
+        Set-Alias -Name Invoke-WithApprovedGoWebTransport -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-NoConflictingGoTransportEnvironment -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-GoTransportEnvironmentValues -Value StandardV1AliasTrap
         Set-Alias -Name Get-OfficialLatestStableGoRuntimeVersionFromMetadata -Value StandardV1AliasTrap
         Set-Alias -Name Assert-ApprovedGoRuntimeEvidence -Value StandardV1AliasTrap
         try {
@@ -524,9 +561,15 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
             Assert-Equal $evidenceVersion '1.26.8' 'Nested runtime evidence validation must ignore a caller alias.'
         }
         finally {
-            Remove-Item Alias:Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ErrorAction SilentlyContinue
-            Remove-Item Alias:Assert-ApprovedGoRuntimeEvidence -ErrorAction SilentlyContinue
+            foreach ($name in $aliasNames) {
+                Remove-Item -Path "Alias:$name" -ErrorAction SilentlyContinue
+                if ($previousAliases.ContainsKey($name)) { Set-Alias -Name $name -Value $previousAliases[$name] }
+            }
             Remove-Item Function:StandardV1AliasTrap -ErrorAction SilentlyContinue
+            Set-Item -Path Function:Invoke-WithApprovedGoWebTransport -Value $originalTransportFunction
+            foreach ($entry in $previousTransportValues.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+            }
             . $script:ResolverPath -ValidatePolicyOnly | Out-Null
         }
     }

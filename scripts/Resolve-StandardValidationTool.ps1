@@ -1904,7 +1904,15 @@ function Assert-NoConflictingGoEnvironment {
 }
 
 function Assert-NoConflictingGoTransportEnvironment {
-    Assert-GoTransportEnvironmentValues -EnvironmentReader {
+    $transportValidatorFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Assert-GoTransportEnvironmentValues',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $transportValidatorFunction -or $transportValidatorFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The approved Go transport environment validator function is unavailable.'
+    }
+    & $transportValidatorFunction -EnvironmentReader {
         param([string] $Name)
         [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
     }
@@ -2099,7 +2107,15 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     $callerParameterDefaults = $PSDefaultParameterValues
     $PSDefaultParameterValues = @{}
     try {
-        Assert-NoConflictingGoTransportEnvironment
+        $transportEnvironmentFunction = $ExecutionContext.InvokeCommand.GetCommand(
+            'Assert-NoConflictingGoTransportEnvironment',
+            [System.Management.Automation.CommandTypes]::Function,
+            $null
+        )
+        if ($null -eq $transportEnvironmentFunction -or $transportEnvironmentFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+            throw 'The approved Go transport environment boundary function is unavailable.'
+        }
+        & $transportEnvironmentFunction
         try {
             # Invoke-RestMethod returns the JSON array as one Object[] value. Do not
             # wrap that value in @(), which would make the metadata parser see one
