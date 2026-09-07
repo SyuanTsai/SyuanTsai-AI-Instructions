@@ -456,7 +456,7 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
             Assert-True ([object]::ReferenceEquals([System.Net.WebRequest]::DefaultWebProxy, $testProxy)) 'The caller default proxy must be restored after the approved transport action.'
             Assert-True ([object]::ReferenceEquals([System.Net.ServicePointManager]::ServerCertificateValidationCallback, $testCertificateCallback)) 'The caller certificate callback must be restored after the approved transport action.'
             if ($null -ne $certificatePolicyProperty) {
-                Assert-True ([object]::ReferenceEquals($certificatePolicyProperty.GetValue($null, $null), $previousCertificatePolicy)) 'The caller legacy certificate policy must be restored after the approved transport action.'
+                Assert-True ([object]::ReferenceEquals($certificatePolicyProperty.GetValue($null, $null), $testCertificatePolicy)) 'The caller legacy certificate policy must be restored after the approved transport action.'
             }
         }
         finally {
