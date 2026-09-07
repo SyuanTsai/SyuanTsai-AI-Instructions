@@ -1768,30 +1768,47 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver '#buildCache=\$\(' 'Resolved skill-validator identity must record build-cache isolation.'
             Assert-Match $resolver '#goflags=empty' 'Resolved skill-validator identity must record clean build flags.'
             Assert-Match $resolver '#goRuntime=\$goRuntimeVersion' 'Resolved skill-validator identity must bind the selected Go runtime version.'
+            Assert-Match $resolver '#goRuntimeSource=\$trustedGoRuntimeSource' 'Resolved skill-validator identity must bind the official Go release metadata source.'
             Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")) 'The resolver must verify the native Go runtime before module resolution.'
             Assert-Match $resolver ([regex]::Escape("Invoke-CheckedCommand -Command `$goCommand -Arguments @('clean', '-cache', '-modcache')")) 'Run-owned Go caches must be cleaned through Go before their temporary root is removed.'
             Assert-Match $resolver '\$result\.goRuntimeVersion = \[string\]\$resolved\.goRuntimeVersion' 'The receipt must project the verified Go runtime version.'
+            Assert-Match $resolver '\$result\.goRuntimeSource = \[string\]\$resolved\.goRuntimeSource' 'The receipt must project the official Go release metadata source.'
             Assert-Match $resolver 'ExpectedRuntimeVersion \$ExpectedGoRuntimeVersion' 'The resolver must compare native Go to the run-resolved latest stable runtime.'
+            Assert-Match $resolver 'Get-OfficialLatestStableGoRuntimeVersion' 'The resolver must independently authenticate latest stable Go release metadata.'
             $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
             $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
             Assert-True ($versionProbeIndex -ge 0 -and $moduleLookupIndex -gt $versionProbeIndex) 'Go runtime verification must fail closed before module resolution can start.'
 
-            $stableGoVersion = '1.99.7'
+            $stableGoVersion = '1.99.8'
             $stableGoOutput = "go version go$stableGoVersion linux/amd64"
-            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion $stableGoVersion) $stableGoVersion 'A stable Go runtime selected for the run must be accepted.'
+            $officialGoMetadata = @(
+                [pscustomobject]@{ version = 'go1.99.7'; stable = $true }
+                [pscustomobject]@{ version = 'go1.99.8'; stable = $true }
+                [pscustomobject]@{ version = 'go1.100.0'; stable = $false }
+            )
+            Assert-Equal (Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $officialGoMetadata) $stableGoVersion 'The official Go metadata resolver must select the highest stable release and ignore prereleases.'
+            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion $stableGoVersion -OfficialReleaseMetadata $officialGoMetadata) $stableGoVersion 'A stable Go runtime independently selected for the run must be accepted.'
             foreach ($case in @(
                 @{ Output=@(); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
                 @{ Output=@($stableGoOutput, 'unexpected second line'); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
                 @{ Output=@("go version devel go$stableGoVersion linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
                 @{ Output=@("go version go$stableGoVersion`rc1 linux/amd64"); Expected=$stableGoVersion; Pattern='Unapproved Go runtime' },
-                @{ Output=@('go version go1.99.6 linux/amd64'); Expected=$stableGoVersion; Pattern='does not match the run-resolved latest stable Go runtime' },
+                @{ Output=@('go version go1.99.7 linux/amd64'); Expected=$stableGoVersion; Pattern='does not match the independently authenticated latest stable Go runtime' },
+                @{ Output=@('go version go1.99.7 linux/amd64'); Expected='1.99.7'; Pattern='caller-supplied Go runtime.*does not match the independently authenticated latest stable Go runtime' },
                 @{ Output=@($stableGoOutput); Expected=''; Pattern='run-resolved latest stable Go runtime version is required' }
             )) {
                 $runtimeError = $null
-                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion ([string]$case.Expected) | Out-Null }
+                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion ([string]$case.Expected) -OfficialReleaseMetadata $officialGoMetadata | Out-Null }
                 catch { $runtimeError = $_.Exception.Message }
                 Assert-Match $runtimeError ([string]$case.Pattern) 'Untrusted Go runtime evidence must fail closed.'
             }
+
+            $malformedMetadataError = $null
+            try {
+                Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata @([pscustomobject]@{ version = 'go1.99.8rc1'; stable = $true }) | Out-Null
+            }
+            catch { $malformedMetadataError = $_.Exception.Message }
+            Assert-Match $malformedMetadataError 'marked.*as stable.*not a stable release version' 'Malformed official stable release metadata must fail closed.'
 
             $singleFileClosureRoot = Join-Path $TestDrive 'single-file-go-closure'
             [void](New-Item -ItemType Directory -Path $singleFileClosureRoot -Force)

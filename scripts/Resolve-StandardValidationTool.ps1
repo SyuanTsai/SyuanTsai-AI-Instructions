@@ -31,6 +31,7 @@ $trustedRegistries = [ordered]@{
 
 $trustedPythonIndex = 'https://pypi.org/simple'
 $trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
+$trustedGoRuntimeSource = 'https://go.dev/dl/?mode=json'
 $trustedGoRuntimeVersionRule = 'latest-stable'
 
 $trustedGoEnvironment = [ordered]@{
@@ -2035,11 +2036,71 @@ function Invoke-WithApprovedGoEnvironment {
     }
 }
 
+function Get-OfficialLatestStableGoRuntimeVersion {
+    param(
+        [Parameter()][AllowNull()][object[]] $ReleaseMetadata
+    )
+
+    $metadata = if ($PSBoundParameters.ContainsKey('ReleaseMetadata')) {
+        @($ReleaseMetadata)
+    }
+    else {
+        try {
+            @(Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -ErrorAction Stop)
+        }
+        catch {
+            throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"
+        }
+    }
+    if ($metadata.Count -eq 0) {
+        throw "Official Go release metadata from '$trustedGoRuntimeSource' was empty."
+    }
+
+    $stableCandidates = @()
+    foreach ($release in $metadata) {
+        if ($null -eq $release -or $null -eq $release.PSObject) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained a non-object entry."
+        }
+        $versionProperty = $release.PSObject.Properties['version']
+        $stableProperty = $release.PSObject.Properties['stable']
+        if ($null -eq $versionProperty -or $null -eq $stableProperty -or
+            $versionProperty.Value -isnot [string] -or
+            $stableProperty.Value -isnot [bool] -or
+            [string]::IsNullOrWhiteSpace([string]$versionProperty.Value)) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained an invalid release entry."
+        }
+        if (-not [bool]$stableProperty.Value) {
+            continue
+        }
+
+        $versionMatch = [regex]::Match([string]$versionProperty.Value, '^go(?<version>[0-9]+\.[0-9]+\.[0-9]+)$')
+        if (-not $versionMatch.Success) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' marked '$($versionProperty.Value)' as stable, but it is not a stable release version."
+        }
+        try {
+            $parsedVersion = [version]$versionMatch.Groups['version'].Value
+        }
+        catch {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained an invalid stable version '$($versionProperty.Value)'."
+        }
+        $stableCandidates += [pscustomobject]@{
+            version = [string]$versionMatch.Groups['version'].Value
+            parsedVersion = $parsedVersion
+        }
+    }
+
+    if ($stableCandidates.Count -eq 0) {
+        throw "Official Go release metadata from '$trustedGoRuntimeSource' contained no stable release."
+    }
+    return [string](@($stableCandidates | Sort-Object -Property parsedVersion -Descending | Select-Object -First 1).version)
+}
+
 function Get-ApprovedGoRuntimeVersion {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
         [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion,
+        [Parameter()][AllowNull()][object[]] $OfficialReleaseMetadata
     )
 
     if ($ExpectedVersionRule -cne $trustedGoRuntimeVersionRule) {
@@ -2048,6 +2109,16 @@ function Get-ApprovedGoRuntimeVersion {
     if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeVersion) -or
         $ExpectedRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
         throw "The run-resolved latest stable Go runtime version is required and must be a stable semver string. Expected='$ExpectedRuntimeVersion'."
+    }
+
+    $officialLatestStableVersion = if ($PSBoundParameters.ContainsKey('OfficialReleaseMetadata')) {
+        Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $OfficialReleaseMetadata
+    }
+    else {
+        Get-OfficialLatestStableGoRuntimeVersion
+    }
+    if ($ExpectedRuntimeVersion -cne $officialLatestStableVersion) {
+        throw "The caller-supplied Go runtime '$ExpectedRuntimeVersion' does not match the independently authenticated latest stable Go runtime '$officialLatestStableVersion' from '$trustedGoRuntimeSource'."
     }
 
     $lines = @($VersionOutput | ForEach-Object { [string]$_ })
@@ -2062,8 +2133,8 @@ function Get-ApprovedGoRuntimeVersion {
     if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
         throw "Unapproved Go runtime '$($lines[0])'. Expected a stable release matching '$trustedGoRuntimeVersionRule'."
     }
-    if ($runtimeVersion -cne $ExpectedRuntimeVersion) {
-        throw "Go runtime '$runtimeVersion' does not match the run-resolved latest stable Go runtime '$ExpectedRuntimeVersion'."
+    if ($runtimeVersion -cne $officialLatestStableVersion) {
+        throw "Go runtime '$runtimeVersion' does not match the independently authenticated latest stable Go runtime '$officialLatestStableVersion' from '$trustedGoRuntimeSource'."
     }
 
     return $runtimeVersion
@@ -2397,7 +2468,7 @@ function Resolve-SkillValidator {
                 Add-ProcessPathValue -Name 'PATH' -Value $effectiveBinPath
             }
 
-            $identity = "go:$modulePath@$version#goRuntime=$goRuntimeVersion#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
+            $identity = "go:$modulePath@$version#goRuntime=$goRuntimeVersion#goRuntimeSource=$trustedGoRuntimeSource#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
             if ($null -ne $installedClosure) {
                 $identity += "#binarySha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
             }
@@ -2411,6 +2482,7 @@ function Resolve-SkillValidator {
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
                 goRuntimeVersion = $goRuntimeVersion
+                goRuntimeSource = $trustedGoRuntimeSource
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
                 temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
@@ -2776,6 +2848,7 @@ else {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.goRuntimeVersion = [string]$resolved.goRuntimeVersion
+        $result.goRuntimeSource = [string]$resolved.goRuntimeSource
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
         $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation

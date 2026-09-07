@@ -13,6 +13,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$expectedGoRuntimeSource = 'https://go.dev/dl/?mode=json'
+
 function Get-AuthorityProperty {
     param(
         [Parameter(Mandatory = $true)] $Object,
@@ -1407,7 +1409,9 @@ if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorRece
     $skillValidatorReceipt.moduleCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.moduleCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.buildCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.buildCacheIsolation -cne 'temporary-empty' -or
     $skillValidatorReceipt.temporaryDirectoryIsolation -isnot [string] -or [string]$skillValidatorReceipt.temporaryDirectoryIsolation -cne 'temporary-empty' -or
-    $skillValidatorReceipt.binaryInstallIsolation -isnot [string] -or [string]$skillValidatorReceipt.binaryInstallIsolation -cne 'run-owned') {
+    $skillValidatorReceipt.binaryInstallIsolation -isnot [string] -or [string]$skillValidatorReceipt.binaryInstallIsolation -cne 'run-owned' -or
+    $skillValidatorReceipt.goRuntimeSource -isnot [string] -or [string]$skillValidatorReceipt.goRuntimeSource -cne $expectedGoRuntimeSource -or
+    [string]$skillValidatorReceipt.resolvedIdentity -cnotmatch ('#goRuntimeSource=' + [regex]::Escape($expectedGoRuntimeSource) + '#')) {
     throw 'skill-validator receipt does not bind the approved Go distribution isolation.'
 }
 if ($skillValidatorRuntimeVersion -cne $expectedGoRuntimeVersion) {
