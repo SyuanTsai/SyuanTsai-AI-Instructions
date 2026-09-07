@@ -262,6 +262,78 @@ Version: this line also belongs to the description body
         Assert-Equal $commandOutput[0] 'resolver-stdout' 'Native stdout must remain available when one diagnostic line is written to stderr.'
     }
 
+    # Scenario: A resolver subprocess inherits a caller-controlled proxy or trust-root variable.
+    # Purpose: Exercise the default environment reader in a real child process and prove rejection before network access.
+    It 'UnitT65_rejects_real_process_transport_overrides_before_network_access' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $childScript = Join-Path $TestDrive 'transport-isolation-child.ps1'
+        [IO.File]::WriteAllText(
+            $childScript,
+            @'
+param([Parameter(Mandatory = $true)][string] $ResolverPath)
+$ErrorActionPreference = 'Stop'
+try {
+    . $ResolverPath -ValidatePolicyOnly | Out-Null
+    Get-OfficialLatestStableGoRuntimeVersion | Out-Null
+    throw 'The resolver unexpectedly accepted a caller-controlled transport environment.'
+}
+catch {
+    [Console]::Error.WriteLine([string]$_.Exception.Message)
+    exit 17
+}
+'@,
+            (New-Object Text.UTF8Encoding($false))
+        )
+
+        $powerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
+        Assert-True (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf) 'A PowerShell executable is required for the real child-process transport regression.'
+        $transportNames = @(
+            'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+            'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+            'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+        )
+
+        foreach ($case in @(
+            @{ Name = 'HTTPS_PROXY'; Value = 'http://127.0.0.1:1' },
+            @{ Name = 'SSL_CERT_FILE'; Value = (Join-Path $TestDrive 'untrusted-ca.pem') }
+        )) {
+            $previous = [ordered]@{}
+            $stdoutPath = Join-Path $TestDrive ("transport-$($case.Name).stdout.txt")
+            $stderrPath = Join-Path $TestDrive ("transport-$($case.Name).stderr.txt")
+            try {
+                foreach ($name in $transportNames) {
+                    $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+                    [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+                }
+                [Environment]::SetEnvironmentVariable($case.Name, $case.Value, [EnvironmentVariableTarget]::Process)
+
+                $arguments = @(
+                    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"' + $childScript + '"'),
+                    '-ResolverPath', ('"' + $script:ResolverPath + '"')
+                )
+                $child = Start-Process -FilePath $powerShellExecutable -ArgumentList $arguments -PassThru -WindowStyle Hidden `
+                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+                if (-not $child.WaitForExit(15000)) {
+                    try { Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue } catch { }
+                    throw "Transport isolation child process did not finish for '$($case.Name)'."
+                }
+                $captured = @(
+                    if (Test-Path -LiteralPath $stdoutPath) { Get-Content -Raw -LiteralPath $stdoutPath }
+                    if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath }
+                ) -join [Environment]::NewLine
+                Assert-Equal $child.ExitCode 17 "A real resolver child must fail closed for '$($case.Name)'."
+                Assert-Match $captured ("Untrusted Go transport environment override.*{0}" -f $case.Name) "The default process environment reader must reject '$($case.Name)' before any network request."
+            }
+            finally {
+                foreach ($entry in $previous.GetEnumerator()) {
+                    [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+                }
+            }
+        }
+    }
+
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
     # Purpose: Bind asset acquisition to the exact approved GitHub release path before digest verification.
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
