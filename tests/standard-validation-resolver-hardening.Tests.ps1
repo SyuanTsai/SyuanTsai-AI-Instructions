@@ -271,10 +271,13 @@ Version: this line also belongs to the description body
         [IO.File]::WriteAllText(
             $childScript,
             @'
-param([Parameter(Mandatory = $true)][string] $ResolverPath)
+param(
+    [Parameter(Mandatory = $true)][string] $ResolverPath,
+    [Parameter(Mandatory = $true)][string] $PolicyPath
+)
 $ErrorActionPreference = 'Stop'
 try {
-    . $ResolverPath -ValidatePolicyOnly | Out-Null
+    . $ResolverPath -PolicyPath $PolicyPath -ValidatePolicyOnly | Out-Null
     Get-OfficialLatestStableGoRuntimeVersion | Out-Null
     throw 'The resolver unexpectedly accepted a caller-controlled transport environment.'
 }
@@ -328,7 +331,8 @@ catch {
                 $arguments = @(
                     '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                     '-File', ('"' + $childScript + '"'),
-                    '-ResolverPath', ('"' + $script:ResolverPath + '"')
+                    '-ResolverPath', ('"' + $script:ResolverPath + '"'),
+                    '-PolicyPath', ('"' + $script:ToolchainPath + '"')
                 )
                 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
                 $startInfo.FileName = $powerShellExecutable
