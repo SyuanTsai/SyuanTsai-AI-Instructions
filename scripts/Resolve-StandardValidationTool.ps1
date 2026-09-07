@@ -33,6 +33,11 @@ $trustedPythonIndex = 'https://pypi.org/simple'
 $trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
 $trustedGoRuntimeSource = 'https://go.dev/dl/?mode=json'
 $trustedGoRuntimeVersionRule = 'latest-stable'
+$trustedGoTransportEnvironmentNames = @(
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+)
 
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
@@ -1898,6 +1903,26 @@ function Assert-NoConflictingGoEnvironment {
     }
 }
 
+function Assert-NoConflictingGoTransportEnvironment {
+    param([scriptblock] $EnvironmentReader)
+
+    $reader = if ($null -eq $EnvironmentReader) {
+        {
+            param([string] $Name)
+            [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
+        }
+    }
+    else {
+        $EnvironmentReader
+    }
+    foreach ($name in $trustedGoTransportEnvironmentNames) {
+        $actual = [string](& $reader $name)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Go transport environment override for '$name'; official release metadata requires the host default transport and trust roots to be unset."
+        }
+    }
+}
+
 function Invoke-WithApprovedGoEnvironment {
     param(
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
@@ -1908,6 +1933,7 @@ function Invoke-WithApprovedGoEnvironment {
     )
 
     Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment -DeniedEnvironmentNames $deniedGoEnvironmentNames
+    Assert-NoConflictingGoTransportEnvironment
     $dynamicNames = @('GOMODCACHE', 'GOCACHE', 'GOTMPDIR', 'GOBIN')
     foreach ($name in $dynamicNames) {
         $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
@@ -2046,7 +2072,8 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     }
     else {
         try {
-            @(Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -ErrorAction Stop)
+            Assert-NoConflictingGoTransportEnvironment
+            @(Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
         }
         catch {
             throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"

@@ -1810,6 +1810,19 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             catch { $malformedMetadataError = $_.Exception.Message }
             Assert-Match $malformedMetadataError 'marked.*as stable.*not a stable release version' 'Malformed official stable release metadata must fail closed.'
 
+            $transportError = $null
+            try {
+                Assert-NoConflictingGoTransportEnvironment -EnvironmentReader {
+                    param([string] $Name)
+                    if ($Name -ceq 'HTTPS_PROXY') { return 'https://attacker.invalid:8443' }
+                    return ''
+                }
+            }
+            catch { $transportError = $_.Exception.Message }
+            Assert-Match $transportError 'Untrusted Go transport environment override.*HTTPS_PROXY' 'Official Go release authentication must reject caller-controlled proxy transport.'
+            $resolverLines = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+            Assert-Match $resolverLines 'MaximumRedirection 0' 'Official Go release authentication must not follow an untrusted redirect.'
+
             $singleFileClosureRoot = Join-Path $TestDrive 'single-file-go-closure'
             [void](New-Item -ItemType Directory -Path $singleFileClosureRoot -Force)
             [IO.File]::WriteAllText(
