@@ -1921,6 +1921,25 @@ function Assert-GoTransportEnvironmentValues {
     }
 }
 
+function Invoke-WithApprovedGoWebTransport {
+    param([Parameter(Mandatory = $true)][scriptblock] $Action)
+
+    # PowerShell 5.1 uses process-global WebRequest transport state. Clear the
+    # caller's proxy and certificate callback for the authenticated request,
+    # then restore the exact objects even when the request fails.
+    $previousDefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+    $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    try {
+        [System.Net.WebRequest]::DefaultWebProxy = $null
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+        return & $Action
+    }
+    finally {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
+        [System.Net.WebRequest]::DefaultWebProxy = $previousDefaultProxy
+    }
+}
+
 function Invoke-WithApprovedGoEnvironment {
     param(
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
@@ -2069,7 +2088,23 @@ function Get-OfficialLatestStableGoRuntimeVersion {
             # Invoke-RestMethod returns the JSON array as one Object[] value. Do not
             # wrap that value in @(), which would make the metadata parser see one
             # array entry instead of the individual official release objects.
-            $metadata = Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop
+            $metadata = Invoke-WithApprovedGoWebTransport -Action {
+                $requestParameters = @{
+                    Uri = $trustedGoRuntimeSource
+                    Headers = @{ Accept = 'application/json' }
+                    Method = 'Get'
+                    MaximumRedirection = 0
+                    ErrorAction = 'Stop'
+                }
+                $invokeRestMethod = @(Microsoft.PowerShell.Core\Get-Command -Name 'Microsoft.PowerShell.Utility\Invoke-RestMethod' -CommandType Cmdlet -ErrorAction Stop)[0]
+                if ($null -eq $invokeRestMethod -or -not $invokeRestMethod.Parameters.ContainsKey('Uri')) {
+                    throw 'The approved Invoke-RestMethod cmdlet is unavailable.'
+                }
+                if ($invokeRestMethod.Parameters.ContainsKey('NoProxy')) {
+                    $requestParameters['NoProxy'] = $true
+                }
+                & $invokeRestMethod @requestParameters
+            }
         }
         catch {
             throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"
@@ -2187,7 +2222,15 @@ function Get-ApprovedGoRuntimeVersion {
     $callerParameterDefaults = $PSDefaultParameterValues
     $PSDefaultParameterValues = @{}
     try {
-        $officialLatestStableVersion = Get-OfficialLatestStableGoRuntimeVersion
+        $officialRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
+            'Get-OfficialLatestStableGoRuntimeVersion',
+            [System.Management.Automation.CommandTypes]::Function,
+            $null
+        )
+        if ($null -eq $officialRuntimeFunction -or $officialRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+            throw 'The approved Go runtime metadata resolver function is unavailable.'
+        }
+        $officialLatestStableVersion = & $officialRuntimeFunction
     }
     finally {
         $PSDefaultParameterValues = $callerParameterDefaults
@@ -2487,7 +2530,15 @@ function Resolve-SkillValidator {
         return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
             param($goCommand, $effectiveBinPath)
 
-            $goRuntimeVersion = Get-ApprovedGoRuntimeVersion `
+            $approvedRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
+                'Get-ApprovedGoRuntimeVersion',
+                [System.Management.Automation.CommandTypes]::Function,
+                $null
+            )
+            if ($null -eq $approvedRuntimeFunction -or $approvedRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+                throw 'The approved Go runtime evidence authenticator function is unavailable.'
+            }
+            $goRuntimeVersion = & $approvedRuntimeFunction `
                 -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
                 -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion) `
                 -ExpectedRuntimeVersion $ExpectedGoRuntimeVersion

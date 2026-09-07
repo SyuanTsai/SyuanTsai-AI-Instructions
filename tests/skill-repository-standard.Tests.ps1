@@ -1775,6 +1775,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver '\$result\.goRuntimeSource = \[string\]\$resolved\.goRuntimeSource' 'The receipt must project the official Go release metadata source.'
             Assert-Match $resolver 'ExpectedRuntimeVersion \$ExpectedGoRuntimeVersion' 'The resolver must compare native Go to the run-resolved latest stable runtime.'
             Assert-Match $resolver 'Get-OfficialLatestStableGoRuntimeVersion' 'The resolver must independently authenticate latest stable Go release metadata.'
+            Assert-Match $resolver 'Invoke-WithApprovedGoWebTransport' 'Official Go release metadata must execute inside the approved web transport boundary.'
+            Assert-Match $resolver 'DefaultWebProxy' 'Official Go release metadata must clear process-global proxy state.'
+            Assert-Match $resolver 'ServerCertificateValidationCallback' 'Official Go release metadata must clear process-global certificate callback state.'
+            Assert-Match $resolver "InvokeCommand\.GetCommand\(\s*'Get-ApprovedGoRuntimeVersion'[\s\S]*CommandTypes\]::Function" 'The resolver must bind runtime evidence authentication to the Function command type.'
             $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
             $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
             Assert-True ($versionProbeIndex -ge 0 -and $moduleLookupIndex -gt $versionProbeIndex) 'Go runtime verification must fail closed before module resolution can start.'
@@ -1822,7 +1826,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             catch { $transportError = $_.Exception.Message }
             Assert-Match $transportError 'Untrusted Go transport environment override.*HTTPS_PROXY' 'Official Go release authentication must reject caller-controlled proxy transport.'
             $resolverLines = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
-            Assert-Match $resolverLines 'MaximumRedirection 0' 'Official Go release authentication must not follow an untrusted redirect.'
+            Assert-Match $resolverLines 'MaximumRedirection\s*=\s*0' 'Official Go release authentication must not follow an untrusted redirect.'
+            Assert-Match $resolverLines 'NoProxy' 'PowerShell web transport must explicitly disable proxy use when the current cmdlet supports it.'
 
             $singleFileClosureRoot = Join-Path $TestDrive 'single-file-go-closure'
             [void](New-Item -ItemType Directory -Path $singleFileClosureRoot -Force)

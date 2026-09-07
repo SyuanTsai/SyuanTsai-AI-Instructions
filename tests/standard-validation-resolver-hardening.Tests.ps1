@@ -399,6 +399,52 @@ catch {
         Assert-Equal $actual '1.26.8' 'Release selection must use the newest stable official version even when caller cmdlets are shadowed.'
     }
 
+    # Scenario: A caller controls process-global WebRequest proxy or certificate state.
+    # Purpose: Authenticate official Go metadata with a clean transport and restore the caller's exact state afterward.
+    It 'UnitT67_isolates_and_restores_process_global_web_transport_state' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $previousProxy = [System.Net.WebRequest]::DefaultWebProxy
+        $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        $testProxy = New-Object System.Net.WebProxy('http://127.0.0.1:1')
+        $testCertificateCallback = [System.Net.Security.RemoteCertificateValidationCallback]{
+            param($sender, $certificate, $chain, $errors)
+            return $true
+        }
+        try {
+            [System.Net.WebRequest]::DefaultWebProxy = $testProxy
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $testCertificateCallback
+
+            $inside = Invoke-WithApprovedGoWebTransport -Action {
+                [pscustomobject]@{
+                    DefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+                    CertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                }
+            }
+
+            Assert-True ($null -eq $inside.DefaultProxy) 'Approved Go metadata transport must clear the process-global default proxy.'
+            Assert-True ($null -eq $inside.CertificateCallback) 'Approved Go metadata transport must clear the process-global certificate callback.'
+            Assert-True ([object]::ReferenceEquals([System.Net.WebRequest]::DefaultWebProxy, $testProxy)) 'The caller default proxy must be restored after the approved transport action.'
+            Assert-True ([object]::ReferenceEquals([System.Net.ServicePointManager]::ServerCertificateValidationCallback, $testCertificateCallback)) 'The caller certificate callback must be restored after the approved transport action.'
+        }
+        finally {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
+            [System.Net.WebRequest]::DefaultWebProxy = $previousProxy
+        }
+    }
+
+    # Scenario: A caller installs an alias with the same name as the runtime authenticator.
+    # Purpose: Bind the resolver to a Function command rather than normal alias-precedence lookup.
+    It 'UnitT68_binds_runtime_authentication_to_the_function_command_type' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $resolveStart = $resolver.IndexOf('function Resolve-SkillValidator')
+        $resolveEnd = $resolver.IndexOf('function Resolve-SkillSpector', $resolveStart)
+        Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillValidator body was not found.'
+        $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
+        Assert-Match $body "InvokeCommand\.GetCommand\(\s*'Get-ApprovedGoRuntimeVersion'[\s\S]*CommandTypes\]::Function" 'Skill-validator resolution must bind the runtime authenticator by its Function command type.'
+        Assert-NotMatch $body '(?m)^\s*\$goRuntimeVersion\s*=\s*Get-ApprovedGoRuntimeVersion\s+`' 'Skill-validator resolution must not invoke an alias-precedence runtime authenticator.'
+    }
+
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
     # Purpose: Bind asset acquisition to the exact approved GitHub release path before digest verification.
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
