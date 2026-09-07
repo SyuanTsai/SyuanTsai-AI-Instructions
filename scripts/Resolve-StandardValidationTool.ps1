@@ -1904,19 +1904,17 @@ function Assert-NoConflictingGoEnvironment {
 }
 
 function Assert-NoConflictingGoTransportEnvironment {
-    param([scriptblock] $EnvironmentReader)
+    Assert-GoTransportEnvironmentValues -EnvironmentReader {
+        param([string] $Name)
+        [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
+    }
+}
 
-    $reader = if ($null -eq $EnvironmentReader) {
-        {
-            param([string] $Name)
-            [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
-        }
-    }
-    else {
-        $EnvironmentReader
-    }
+function Assert-GoTransportEnvironmentValues {
+    param([Parameter(Mandatory = $true)][scriptblock] $EnvironmentReader)
+
     foreach ($name in $trustedGoTransportEnvironmentNames) {
-        $actual = [string](& $reader $name)
+        $actual = [string](& $EnvironmentReader $name)
         if (-not [string]::IsNullOrEmpty($actual)) {
             throw "Untrusted Go transport environment override for '$name'; official release metadata requires the host default transport and trust roots to be unset."
         }

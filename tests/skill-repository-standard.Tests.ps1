@@ -1812,7 +1812,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
             $transportError = $null
             try {
-                Assert-NoConflictingGoTransportEnvironment -EnvironmentReader {
+                Assert-GoTransportEnvironmentValues -EnvironmentReader {
                     param([string] $Name)
                     if ($Name -ceq 'HTTPS_PROXY') { return 'https://attacker.invalid:8443' }
                     return ''
