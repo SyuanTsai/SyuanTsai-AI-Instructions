@@ -2063,29 +2063,29 @@ function Invoke-WithApprovedGoEnvironment {
 }
 
 function Get-OfficialLatestStableGoRuntimeVersion {
-    param(
-        [Parameter()][AllowNull()][object[]] $ReleaseMetadata
-    )
-
-    $metadata = if ($PSBoundParameters.ContainsKey('ReleaseMetadata')) {
-        @($ReleaseMetadata)
-    }
-    else {
+    $callerParameterDefaults = $PSDefaultParameterValues
+    $PSDefaultParameterValues = @{}
+    try {
+        Assert-NoConflictingGoTransportEnvironment
         try {
-            Assert-NoConflictingGoTransportEnvironment
-            $callerParameterDefaults = $PSDefaultParameterValues
-            $PSDefaultParameterValues = @{}
-            try {
-                @(Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
-            }
-            finally {
-                $PSDefaultParameterValues = $callerParameterDefaults
-            }
+            $metadata = @(Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
         }
         catch {
             throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"
         }
     }
+    finally {
+        $PSDefaultParameterValues = $callerParameterDefaults
+    }
+    Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata $metadata
+}
+
+function Get-OfficialLatestStableGoRuntimeVersionFromMetadata {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ReleaseMetadata
+    )
+
+    $metadata = @($ReleaseMetadata)
     if ($metadata.Count -eq 0) {
         throw "Official Go release metadata from '$trustedGoRuntimeSource' was empty."
     }
@@ -2137,12 +2137,12 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     return [string]$latestCandidate.version
 }
 
-function Get-ApprovedGoRuntimeVersion {
+function Assert-ApprovedGoRuntimeEvidence {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
         [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion,
-        [Parameter()][AllowNull()][object[]] $OfficialReleaseMetadata
+        [Parameter(Mandatory = $true)][string] $OfficialLatestStableVersion
     )
 
     if ($ExpectedVersionRule -cne $trustedGoRuntimeVersionRule) {
@@ -2153,14 +2153,8 @@ function Get-ApprovedGoRuntimeVersion {
         throw "The run-resolved latest stable Go runtime version is required and must be a stable semver string. Expected='$ExpectedRuntimeVersion'."
     }
 
-    $officialLatestStableVersion = if ($PSBoundParameters.ContainsKey('OfficialReleaseMetadata')) {
-        Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $OfficialReleaseMetadata
-    }
-    else {
-        Get-OfficialLatestStableGoRuntimeVersion
-    }
-    if ($ExpectedRuntimeVersion -cne $officialLatestStableVersion) {
-        throw "The caller-supplied Go runtime '$ExpectedRuntimeVersion' does not match the independently authenticated latest stable Go runtime '$officialLatestStableVersion' from '$trustedGoRuntimeSource'."
+    if ($ExpectedRuntimeVersion -cne $OfficialLatestStableVersion) {
+        throw "The caller-supplied Go runtime '$ExpectedRuntimeVersion' does not match the independently authenticated latest stable Go runtime '$OfficialLatestStableVersion' from '$trustedGoRuntimeSource'."
     }
 
     $lines = @($VersionOutput | ForEach-Object { [string]$_ })
@@ -2175,11 +2169,33 @@ function Get-ApprovedGoRuntimeVersion {
     if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
         throw "Unapproved Go runtime '$($lines[0])'. Expected a stable release matching '$trustedGoRuntimeVersionRule'."
     }
-    if ($runtimeVersion -cne $officialLatestStableVersion) {
-        throw "Go runtime '$runtimeVersion' does not match the independently authenticated latest stable Go runtime '$officialLatestStableVersion' from '$trustedGoRuntimeSource'."
+    if ($runtimeVersion -cne $OfficialLatestStableVersion) {
+        throw "Go runtime '$runtimeVersion' does not match the independently authenticated latest stable Go runtime '$OfficialLatestStableVersion' from '$trustedGoRuntimeSource'."
     }
 
     return $runtimeVersion
+}
+
+function Get-ApprovedGoRuntimeVersion {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion
+    )
+
+    $callerParameterDefaults = $PSDefaultParameterValues
+    $PSDefaultParameterValues = @{}
+    try {
+        $officialLatestStableVersion = Get-OfficialLatestStableGoRuntimeVersion
+    }
+    finally {
+        $PSDefaultParameterValues = $callerParameterDefaults
+    }
+    Assert-ApprovedGoRuntimeEvidence `
+        -VersionOutput $VersionOutput `
+        -ExpectedVersionRule $ExpectedVersionRule `
+        -ExpectedRuntimeVersion $ExpectedRuntimeVersion `
+        -OfficialLatestStableVersion $officialLatestStableVersion
 }
 
 function Resolve-Pester {

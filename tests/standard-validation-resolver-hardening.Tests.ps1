@@ -374,7 +374,7 @@ catch {
         function Sort-Object { throw 'The caller-shadowed Sort-Object was invoked.' }
         function Select-Object { throw 'The caller-shadowed Select-Object was invoked.' }
         try {
-            $actual = Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $metadata
+            $actual = Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata $metadata
         }
         finally {
             $PSDefaultParameterValues = $previousDefaults

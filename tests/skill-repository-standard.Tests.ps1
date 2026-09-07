@@ -1786,8 +1786,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 [pscustomobject]@{ version = 'go1.99.8'; stable = $true }
                 [pscustomobject]@{ version = 'go1.100.0'; stable = $false }
             )
-            Assert-Equal (Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata $officialGoMetadata) $stableGoVersion 'The official Go metadata resolver must select the highest stable release and ignore prereleases.'
-            Assert-Equal (Get-ApprovedGoRuntimeVersion -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion $stableGoVersion -OfficialReleaseMetadata $officialGoMetadata) $stableGoVersion 'A stable Go runtime independently selected for the run must be accepted.'
+            Assert-Equal (Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata $officialGoMetadata) $stableGoVersion 'The official Go metadata resolver must select the highest stable release and ignore prereleases.'
+            Assert-Equal (Assert-ApprovedGoRuntimeEvidence -VersionOutput @($stableGoOutput) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion $stableGoVersion -OfficialLatestStableVersion $stableGoVersion) $stableGoVersion 'A stable Go runtime independently selected for the run must be accepted.'
             foreach ($case in @(
                 @{ Output=@(); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
                 @{ Output=@($stableGoOutput, 'unexpected second line'); Expected=$stableGoVersion; Pattern='ambiguous runtime-version evidence' },
@@ -1798,14 +1798,14 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 @{ Output=@($stableGoOutput); Expected=''; Pattern='run-resolved latest stable Go runtime version is required' }
             )) {
                 $runtimeError = $null
-                try { Get-ApprovedGoRuntimeVersion -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion ([string]$case.Expected) -OfficialReleaseMetadata $officialGoMetadata | Out-Null }
+                try { Assert-ApprovedGoRuntimeEvidence -VersionOutput @($case.Output) -ExpectedVersionRule 'latest-stable' -ExpectedRuntimeVersion ([string]$case.Expected) -OfficialLatestStableVersion $stableGoVersion | Out-Null }
                 catch { $runtimeError = $_.Exception.Message }
                 Assert-Match $runtimeError ([string]$case.Pattern) 'Untrusted Go runtime evidence must fail closed.'
             }
 
             $malformedMetadataError = $null
             try {
-                Get-OfficialLatestStableGoRuntimeVersion -ReleaseMetadata @([pscustomobject]@{ version = 'go1.99.8rc1'; stable = $true }) | Out-Null
+                Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata @([pscustomobject]@{ version = 'go1.99.8rc1'; stable = $true }) | Out-Null
             }
             catch { $malformedMetadataError = $_.Exception.Message }
             Assert-Match $malformedMetadataError 'marked.*as stable.*not a stable release version' 'Malformed official stable release metadata must fail closed.'
