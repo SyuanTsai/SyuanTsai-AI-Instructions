@@ -2070,6 +2070,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-NotMatch $matrix 'post-materialization' 'Review matrix must not retain the obsolete online-pip post-materialization model.'
         Assert-NotMatch $standard 'post-materialization' 'Normative Standard must not retain the obsolete online-pip post-materialization model.'
         Assert-Match $standard 'MUST NOT.*installed interpreter.*\.pth' 'Normative Standard must require static installed-metadata verification before Python startup processing.'
+        Assert-NotMatch $standard 'exact security-patched Go runtime' 'Normative Standard must not require a fixed Go patch version after adopting latest-stable resolution.'
+        Assert-Match $standard 'go-version: stable.*check-latest: true.*latest-stable Go runtime' 'Normative Standard must require the run-resolved latest-stable Go runtime.'
         Assert-Match $matrix 'persist-credentials' 'Review matrix must record CI checkout credential isolation.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'

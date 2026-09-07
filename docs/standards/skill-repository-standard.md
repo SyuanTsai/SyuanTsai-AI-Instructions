@@ -726,7 +726,7 @@ Migration 順序：
 - `SkillSpector` resolver 在 helper／Python／pip／其他 tool resolution 前仍暴露 `GITHUB_TOKEN`／`GH_TOKEN`，或為了 installed-version verification 啟動已安裝的 interpreter 並處理 package-controlled `.pth` startup line；
 - 將同一 validation run 的 run-owned validation tool 跨 run 重用，或把 application-level endpoint/direct-reference checks 說成完整 process network-egress sandbox；需要完整 egress guarantee 時 **MUST** 另加 transport/sandbox control；
 - 將 Go prerelease / pseudo-version 當成 `skill-validator` latest stable；
-- authority workflow 使用 mutable Go setup action、未安裝 policy 指定的 exact security-patched Go runtime，或 resolver 未在 module resolution 前驗證並記錄 runtime identity；
+- authority workflow 使用 mutable Go setup action、未以 `go-version: stable` 與 `check-latest: true` 取得並驗證該次 run 的 latest-stable Go runtime，或 resolver 未在 module resolution 前驗證並記錄 runtime identity；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
 - canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
