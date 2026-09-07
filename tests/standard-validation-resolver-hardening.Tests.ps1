@@ -540,9 +540,6 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
                 [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
             )
         }
-        Set-Item -Path Function:Get-OfficialLatestStableGoRuntimeVersion -Value {
-            '1.26.8'
-        }
         Set-Item -Path Function:StandardV1AliasTrap -Value {
             throw 'The caller alias trap was invoked.'
         }
