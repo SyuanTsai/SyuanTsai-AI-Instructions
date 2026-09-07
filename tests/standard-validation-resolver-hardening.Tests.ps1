@@ -406,6 +406,13 @@ catch {
 
         $previousProxy = [System.Net.WebRequest]::DefaultWebProxy
         $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        $certificatePolicyProperty = ([System.Net.ServicePointManager]).GetProperty('CertificatePolicy')
+        $previousCertificatePolicy = if ($null -eq $certificatePolicyProperty) {
+            $null
+        }
+        else {
+            $certificatePolicyProperty.GetValue($null, $null)
+        }
         $testProxy = New-Object System.Net.WebProxy('http://127.0.0.1:1')
         $testCertificateCallback = [System.Net.Security.RemoteCertificateValidationCallback]{
             param($sender, $certificate, $chain, $errors)
@@ -414,20 +421,33 @@ catch {
         try {
             [System.Net.WebRequest]::DefaultWebProxy = $testProxy
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $testCertificateCallback
+            if ($null -ne $certificatePolicyProperty) {
+                [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+            }
 
             $inside = Invoke-WithApprovedGoWebTransport -Action {
                 [pscustomobject]@{
                     DefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
                     CertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                    CertificatePolicy = if ($null -eq $certificatePolicyProperty) { $null } else { $certificatePolicyProperty.GetValue($null, $null) }
                 }
             }
 
             Assert-True ($null -eq $inside.DefaultProxy) 'Approved Go metadata transport must clear the process-global default proxy.'
             Assert-True ($null -eq $inside.CertificateCallback) 'Approved Go metadata transport must clear the process-global certificate callback.'
+            if ($null -ne $certificatePolicyProperty) {
+                Assert-True ($null -eq $inside.CertificatePolicy) 'Approved Go metadata transport must clear the legacy process-global certificate policy.'
+            }
             Assert-True ([object]::ReferenceEquals([System.Net.WebRequest]::DefaultWebProxy, $testProxy)) 'The caller default proxy must be restored after the approved transport action.'
             Assert-True ([object]::ReferenceEquals([System.Net.ServicePointManager]::ServerCertificateValidationCallback, $testCertificateCallback)) 'The caller certificate callback must be restored after the approved transport action.'
+            if ($null -ne $certificatePolicyProperty) {
+                Assert-True ([object]::ReferenceEquals($certificatePolicyProperty.GetValue($null, $null), $previousCertificatePolicy)) 'The caller legacy certificate policy must be restored after the approved transport action.'
+            }
         }
         finally {
+            if ($null -ne $certificatePolicyProperty) {
+                [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+            }
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
             [System.Net.WebRequest]::DefaultWebProxy = $previousProxy
         }
@@ -443,6 +463,12 @@ catch {
         $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
         Assert-Match $body "InvokeCommand\.GetCommand\(\s*'Get-ApprovedGoRuntimeVersion'[\s\S]*CommandTypes\]::Function" 'Skill-validator resolution must bind the runtime authenticator by its Function command type.'
         Assert-NotMatch $body '(?m)^\s*\$goRuntimeVersion\s*=\s*Get-ApprovedGoRuntimeVersion\s+`' 'Skill-validator resolution must not invoke an alias-precedence runtime authenticator.'
+        $metadataStart = $resolver.IndexOf('function Get-OfficialLatestStableGoRuntimeVersion')
+        $metadataEnd = $resolver.IndexOf('function Get-OfficialLatestStableGoRuntimeVersionFromMetadata', $metadataStart)
+        Assert-True ($metadataStart -ge 0 -and $metadataEnd -gt $metadataStart) 'Official Go metadata resolver body was not found.'
+        $metadataBody = $resolver.Substring($metadataStart, $metadataEnd - $metadataStart)
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Invoke-WithApprovedGoWebTransport'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind its transport boundary by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*\$metadata\s*=\s*Invoke-WithApprovedGoWebTransport\s+-Action' 'Official Go metadata retrieval must not invoke an alias-precedence transport boundary.'
     }
 
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.

@@ -1925,16 +1925,32 @@ function Invoke-WithApprovedGoWebTransport {
     param([Parameter(Mandatory = $true)][scriptblock] $Action)
 
     # PowerShell 5.1 uses process-global WebRequest transport state. Clear the
-    # caller's proxy and certificate callback for the authenticated request,
-    # then restore the exact objects even when the request fails.
+    # caller's proxy and certificate state for the authenticated request, then
+    # restore the exact objects even when the request fails. CertificatePolicy
+    # was removed from newer runtimes, so use reflection instead of binding the
+    # property on hosts where it does not exist.
     $previousDefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
     $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    $servicePointManagerType = [System.Net.ServicePointManager]
+    $certificatePolicyProperty = $servicePointManagerType.GetProperty('CertificatePolicy')
+    $previousCertificatePolicy = if ($null -eq $certificatePolicyProperty) {
+        $null
+    }
+    else {
+        $certificatePolicyProperty.GetValue($null, $null)
+    }
     try {
         [System.Net.WebRequest]::DefaultWebProxy = $null
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+        if ($null -ne $certificatePolicyProperty) {
+            [void]$certificatePolicyProperty.SetValue($null, $null, $null)
+        }
         return & $Action
     }
     finally {
+        if ($null -ne $certificatePolicyProperty) {
+            [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+        }
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
         [System.Net.WebRequest]::DefaultWebProxy = $previousDefaultProxy
     }
@@ -2088,7 +2104,15 @@ function Get-OfficialLatestStableGoRuntimeVersion {
             # Invoke-RestMethod returns the JSON array as one Object[] value. Do not
             # wrap that value in @(), which would make the metadata parser see one
             # array entry instead of the individual official release objects.
-            $metadata = Invoke-WithApprovedGoWebTransport -Action {
+            $webTransportFunction = $ExecutionContext.InvokeCommand.GetCommand(
+                'Invoke-WithApprovedGoWebTransport',
+                [System.Management.Automation.CommandTypes]::Function,
+                $null
+            )
+            if ($null -eq $webTransportFunction -or $webTransportFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+                throw 'The approved Go web transport boundary function is unavailable.'
+            }
+            $metadata = & $webTransportFunction -Action {
                 $requestParameters = @{
                     Uri = $trustedGoRuntimeSource
                     Headers = @{ Accept = 'application/json' }

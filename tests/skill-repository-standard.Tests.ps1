@@ -1778,6 +1778,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $resolver 'Invoke-WithApprovedGoWebTransport' 'Official Go release metadata must execute inside the approved web transport boundary.'
             Assert-Match $resolver 'DefaultWebProxy' 'Official Go release metadata must clear process-global proxy state.'
             Assert-Match $resolver 'ServerCertificateValidationCallback' 'Official Go release metadata must clear process-global certificate callback state.'
+            Assert-Match $resolver 'CertificatePolicy' 'Windows PowerShell 5.1 official Go release authentication must clear legacy certificate policy state when that property exists.'
+            Assert-Match $resolver "InvokeCommand\.GetCommand\(\s*'Invoke-WithApprovedGoWebTransport'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind its transport boundary to the Function command type.'
             Assert-Match $resolver "InvokeCommand\.GetCommand\(\s*'Get-ApprovedGoRuntimeVersion'[\s\S]*CommandTypes\]::Function" 'The resolver must bind runtime evidence authentication to the Function command type.'
             $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
             $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
