@@ -11,6 +11,8 @@ param(
 
     [string] $InstallRoot,
 
+    [string] $ExpectedGoRuntimeVersion,
+
     [string] $OutputPath
 )
 
@@ -29,7 +31,13 @@ $trustedRegistries = [ordered]@{
 
 $trustedPythonIndex = 'https://pypi.org/simple'
 $trustedPowerShellRepository = 'https://www.powershellgallery.com/api/v2'
-$trustedGoRuntimeVersion = '1.26.8'
+$trustedGoRuntimeSource = 'https://go.dev/dl/?mode=json'
+$trustedGoRuntimeVersionRule = 'latest-stable'
+$trustedGoTransportEnvironmentNames = @(
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+)
 
 $trustedGoEnvironment = [ordered]@{
     'GOENV' = 'off'
@@ -285,7 +293,7 @@ function Get-Policy {
         'source', 'channel', 'stableVersionRule', 'proxy', 'checksumDatabase', 'goRuntimeVersion', 'goEnvironment', 'goDistribution'
     ) -Context '$.tools.skill-validator'
     Assert-JsonString -Value $skillValidator.stableVersionRule -Expected 'release-semver-only' -Context '$.tools.skill-validator.stableVersionRule'
-    Assert-JsonString -Value $skillValidator.goRuntimeVersion -Expected $trustedGoRuntimeVersion -Context '$.tools.skill-validator.goRuntimeVersion'
+    Assert-JsonString -Value $skillValidator.goRuntimeVersion -Expected $trustedGoRuntimeVersionRule -Context '$.tools.skill-validator.goRuntimeVersion'
     if ($skillValidator.proxy -isnot [string] -or $skillValidator.checksumDatabase -isnot [string]) {
         throw 'skill-validator proxy and checksumDatabase must be strings.'
     }
@@ -1895,6 +1903,88 @@ function Assert-NoConflictingGoEnvironment {
     }
 }
 
+function Assert-NoConflictingGoTransportEnvironment {
+    $transportValidatorFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Assert-GoTransportEnvironmentValues',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $transportValidatorFunction -or $transportValidatorFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The approved Go transport environment validator function is unavailable.'
+    }
+    & $transportValidatorFunction -EnvironmentReader {
+        param([string] $Name)
+        [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
+    }
+}
+
+function Assert-GoTransportEnvironmentValues {
+    param([Parameter(Mandatory = $true)][scriptblock] $EnvironmentReader)
+
+    foreach ($name in $trustedGoTransportEnvironmentNames) {
+        $actual = [string](& $EnvironmentReader $name)
+        if (-not [string]::IsNullOrEmpty($actual)) {
+            throw "Untrusted Go transport environment override for '$name'; official release metadata requires the host default transport and trust roots to be unset."
+        }
+    }
+}
+
+function Invoke-WithApprovedGoWebTransport {
+    param([Parameter(Mandatory = $true)][scriptblock] $Action)
+
+    # PowerShell 5.1 uses process-global WebRequest transport state. Clear the
+    # caller's proxy and certificate state for the authenticated request, then
+    # restore the exact objects even when the request fails. CertificatePolicy
+    # was removed from newer runtimes, so use reflection instead of binding the
+    # property on hosts where it does not exist.
+    $previousDefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+    $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    $servicePointManagerType = [System.Net.ServicePointManager]
+    $certificatePolicyProperty = $servicePointManagerType.GetProperty('CertificatePolicy')
+    $previousCertificatePolicy = if ($null -eq $certificatePolicyProperty) {
+        $null
+    }
+    else {
+        $certificatePolicyProperty.GetValue($null, $null)
+    }
+    $defaultCertificatePolicy = $null
+    if ($null -ne $certificatePolicyProperty) {
+        # .NET Framework exposes the legacy policy as an interface and keeps
+        # its framework-default implementation internal. Instantiate that
+        # implementation explicitly so a caller-provided policy is replaced
+        # by the framework default rather than by a null policy.
+        $defaultCertificatePolicyType = $servicePointManagerType.Assembly.GetType('System.Net.DefaultCertPolicy', $false)
+        if ($null -eq $defaultCertificatePolicyType) {
+            throw 'The framework default certificate policy type could not be resolved.'
+        }
+        try {
+            $defaultCertificatePolicy = [Activator]::CreateInstance($defaultCertificatePolicyType, $true)
+        }
+        catch {
+            throw "The framework default certificate policy could not be instantiated: $($_.Exception.Message)"
+        }
+        if ($null -eq $defaultCertificatePolicy -or
+            -not $certificatePolicyProperty.PropertyType.IsInstanceOfType($defaultCertificatePolicy)) {
+            throw 'The framework default certificate policy has an unexpected type.'
+        }
+    }
+    try {
+        [System.Net.WebRequest]::DefaultWebProxy = $null
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+        if ($null -ne $certificatePolicyProperty) {
+            [void]$certificatePolicyProperty.SetValue($null, $defaultCertificatePolicy, $null)
+        }
+        return & $Action
+    }
+    finally {
+        if ($null -ne $certificatePolicyProperty) {
+            [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+        }
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
+        [System.Net.WebRequest]::DefaultWebProxy = $previousDefaultProxy
+    }
+}
+
 function Invoke-WithApprovedGoEnvironment {
     param(
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
@@ -1905,6 +1995,7 @@ function Invoke-WithApprovedGoEnvironment {
     )
 
     Assert-NoConflictingGoEnvironment -ExpectedEnvironment $ExpectedEnvironment -DeniedEnvironmentNames $deniedGoEnvironmentNames
+    Assert-NoConflictingGoTransportEnvironment
     $dynamicNames = @('GOMODCACHE', 'GOCACHE', 'GOTMPDIR', 'GOBIN')
     foreach ($name in $dynamicNames) {
         $actual = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
@@ -2033,11 +2124,143 @@ function Invoke-WithApprovedGoEnvironment {
     }
 }
 
-function Get-ApprovedGoRuntimeVersion {
+function Get-OfficialLatestStableGoRuntimeVersion {
+    $callerParameterDefaults = $PSDefaultParameterValues
+    $PSDefaultParameterValues = @{}
+    try {
+        $transportEnvironmentFunction = $ExecutionContext.InvokeCommand.GetCommand(
+            'Assert-NoConflictingGoTransportEnvironment',
+            [System.Management.Automation.CommandTypes]::Function,
+            $null
+        )
+        if ($null -eq $transportEnvironmentFunction -or $transportEnvironmentFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+            throw 'The approved Go transport environment boundary function is unavailable.'
+        }
+        & $transportEnvironmentFunction
+        try {
+            # Invoke-RestMethod returns the JSON array as one Object[] value. Do not
+            # wrap that value in @(), which would make the metadata parser see one
+            # array entry instead of the individual official release objects.
+            $webTransportFunction = $ExecutionContext.InvokeCommand.GetCommand(
+                'Invoke-WithApprovedGoWebTransport',
+                [System.Management.Automation.CommandTypes]::Function,
+                $null
+            )
+            if ($null -eq $webTransportFunction -or $webTransportFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+                throw 'The approved Go web transport boundary function is unavailable.'
+            }
+            $metadata = & $webTransportFunction -Action {
+                $requestParameters = @{
+                    Uri = $trustedGoRuntimeSource
+                    Headers = @{ Accept = 'application/json' }
+                    Method = 'Get'
+                    MaximumRedirection = 0
+                    ErrorAction = 'Stop'
+                }
+                $invokeRestMethod = @(Microsoft.PowerShell.Core\Get-Command -Name 'Microsoft.PowerShell.Utility\Invoke-RestMethod' -CommandType Cmdlet -ErrorAction Stop)[0]
+                if ($null -eq $invokeRestMethod -or -not $invokeRestMethod.Parameters.ContainsKey('Uri')) {
+                    throw 'The approved Invoke-RestMethod cmdlet is unavailable.'
+                }
+                if ($invokeRestMethod.Parameters.ContainsKey('NoProxy')) {
+                    $requestParameters['NoProxy'] = $true
+                }
+                & $invokeRestMethod @requestParameters
+            }
+        }
+        catch {
+            throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"
+        }
+    }
+    finally {
+        $PSDefaultParameterValues = $callerParameterDefaults
+    }
+    $metadataFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Get-OfficialLatestStableGoRuntimeVersionFromMetadata',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $metadataFunction -or $metadataFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The official Go metadata parser function is unavailable.'
+    }
+    & $metadataFunction -ReleaseMetadata $metadata
+}
+
+function Get-OfficialLatestStableGoRuntimeVersionFromMetadata {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ReleaseMetadata
+    )
+
+    $metadata = @($ReleaseMetadata)
+    if ($metadata.Count -eq 0) {
+        throw "Official Go release metadata from '$trustedGoRuntimeSource' was empty."
+    }
+
+    $stableCandidates = @()
+    foreach ($release in $metadata) {
+        if ($null -eq $release -or $null -eq $release.PSObject) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained a non-object entry."
+        }
+        $versionProperty = $release.PSObject.Properties['version']
+        $stableProperty = $release.PSObject.Properties['stable']
+        if ($null -eq $versionProperty -or $null -eq $stableProperty -or
+            $versionProperty.Value -isnot [string] -or
+            $stableProperty.Value -isnot [bool] -or
+            [string]::IsNullOrWhiteSpace([string]$versionProperty.Value)) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained an invalid release entry."
+        }
+        if (-not [bool]$stableProperty.Value) {
+            continue
+        }
+
+        $versionMatch = [regex]::Match([string]$versionProperty.Value, '^go(?<version>[0-9]+\.[0-9]+\.[0-9]+)$')
+        if (-not $versionMatch.Success) {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' marked '$($versionProperty.Value)' as stable, but it is not a stable release version."
+        }
+        try {
+            $parsedVersion = [version]$versionMatch.Groups['version'].Value
+        }
+        catch {
+            throw "Official Go release metadata from '$trustedGoRuntimeSource' contained an invalid stable version '$($versionProperty.Value)'."
+        }
+        $stableCandidates += [pscustomobject]@{
+            version = [string]$versionMatch.Groups['version'].Value
+            parsedVersion = $parsedVersion
+        }
+    }
+
+    if ($stableCandidates.Count -eq 0) {
+        throw "Official Go release metadata from '$trustedGoRuntimeSource' contained no stable release."
+    }
+    # Select through .NET so a caller cannot redirect release choice with
+    # shadowed cmdlets or PSDefaultParameterValues.
+    $latestCandidate = $null
+    foreach ($candidate in $stableCandidates) {
+        if ($null -eq $latestCandidate -or $candidate.parsedVersion -gt $latestCandidate.parsedVersion) {
+            $latestCandidate = $candidate
+        }
+    }
+    return [string]$latestCandidate.version
+}
+
+function Assert-ApprovedGoRuntimeEvidence {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
-        [Parameter(Mandatory = $true)][string] $ExpectedVersion
+        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion,
+        [Parameter(Mandatory = $true)][string] $OfficialLatestStableVersion
     )
+
+    if ($ExpectedVersionRule -cne $trustedGoRuntimeVersionRule) {
+        throw "Unsupported Go runtime version rule '$ExpectedVersionRule'. Expected '$trustedGoRuntimeVersionRule'."
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeVersion) -or
+        $ExpectedRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+        throw "The run-resolved latest stable Go runtime version is required and must be a stable semver string. Expected='$ExpectedRuntimeVersion'."
+    }
+
+    if ($ExpectedRuntimeVersion -cne $OfficialLatestStableVersion) {
+        throw "The caller-supplied Go runtime '$ExpectedRuntimeVersion' does not match the independently authenticated latest stable Go runtime '$OfficialLatestStableVersion' from '$trustedGoRuntimeSource'."
+    }
 
     $lines = @($VersionOutput | ForEach-Object { [string]$_ })
     if ($lines.Count -ne 1) {
@@ -2048,11 +2271,52 @@ function Get-ApprovedGoRuntimeVersion {
         '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$'
     )
     $runtimeVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['version'].Value } else { $null }
-    if ([string]$runtimeVersion -cne $ExpectedVersion) {
-        throw "Unapproved Go runtime '$($lines[0])'. Expected exact version '$ExpectedVersion'."
+    if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+        throw "Unapproved Go runtime '$($lines[0])'. Expected a stable release matching '$trustedGoRuntimeVersionRule'."
+    }
+    if ($runtimeVersion -cne $OfficialLatestStableVersion) {
+        throw "Go runtime '$runtimeVersion' does not match the independently authenticated latest stable Go runtime '$OfficialLatestStableVersion' from '$trustedGoRuntimeSource'."
     }
 
     return $runtimeVersion
+}
+
+function Get-ApprovedGoRuntimeVersion {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $VersionOutput,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersionRule,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ExpectedRuntimeVersion
+    )
+
+    $callerParameterDefaults = $PSDefaultParameterValues
+    $PSDefaultParameterValues = @{}
+    try {
+        $officialRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
+            'Get-OfficialLatestStableGoRuntimeVersion',
+            [System.Management.Automation.CommandTypes]::Function,
+            $null
+        )
+        if ($null -eq $officialRuntimeFunction -or $officialRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+            throw 'The approved Go runtime metadata resolver function is unavailable.'
+        }
+        $officialLatestStableVersion = & $officialRuntimeFunction
+    }
+    finally {
+        $PSDefaultParameterValues = $callerParameterDefaults
+    }
+    $evidenceFunction = $ExecutionContext.InvokeCommand.GetCommand(
+        'Assert-ApprovedGoRuntimeEvidence',
+        [System.Management.Automation.CommandTypes]::Function,
+        $null
+    )
+    if ($null -eq $evidenceFunction -or $evidenceFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+        throw 'The approved Go runtime evidence validator function is unavailable.'
+    }
+    & $evidenceFunction `
+        -VersionOutput $VersionOutput `
+        -ExpectedVersionRule $ExpectedVersionRule `
+        -ExpectedRuntimeVersion $ExpectedRuntimeVersion `
+        -OfficialLatestStableVersion $officialLatestStableVersion
 }
 
 function Resolve-Pester {
@@ -2320,7 +2584,8 @@ function Resolve-SkillValidator {
     param(
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)] $ToolPolicy,
-        [string] $RequestedInstallRoot
+        [string] $RequestedInstallRoot,
+        [string] $ExpectedGoRuntimeVersion
     )
 
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
@@ -2342,9 +2607,18 @@ function Resolve-SkillValidator {
         return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
             param($goCommand, $effectiveBinPath)
 
-            $goRuntimeVersion = Get-ApprovedGoRuntimeVersion `
+            $approvedRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
+                'Get-ApprovedGoRuntimeVersion',
+                [System.Management.Automation.CommandTypes]::Function,
+                $null
+            )
+            if ($null -eq $approvedRuntimeFunction -or $approvedRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
+                throw 'The approved Go runtime evidence authenticator function is unavailable.'
+            }
+            $goRuntimeVersion = & $approvedRuntimeFunction `
                 -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
-                -ExpectedVersion ([string]$ToolPolicy.goRuntimeVersion)
+                -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion) `
+                -ExpectedRuntimeVersion $ExpectedGoRuntimeVersion
 
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
@@ -2381,7 +2655,7 @@ function Resolve-SkillValidator {
                 Add-ProcessPathValue -Name 'PATH' -Value $effectiveBinPath
             }
 
-            $identity = "go:$modulePath@$version#goRuntime=$goRuntimeVersion#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
+            $identity = "go:$modulePath@$version#goRuntime=$goRuntimeVersion#goRuntimeSource=$trustedGoRuntimeSource#proxy=$($ToolPolicy.proxy)#sumdb=$($ToolPolicy.checksumDatabase)#moduleCache=$($ToolPolicy.goDistribution.moduleCacheIsolation)#buildCache=$($ToolPolicy.goDistribution.buildCacheIsolation)#goflags=empty#temporaryDirectory=$($ToolPolicy.goDistribution.temporaryDirectoryIsolation)#binaryInstall=$($ToolPolicy.goDistribution.binaryInstallIsolation)"
             if ($null -ne $installedClosure) {
                 $identity += "#binarySha256=$executableSha256#installedClosureSha256=$($installedClosure.sha256)"
             }
@@ -2395,6 +2669,7 @@ function Resolve-SkillValidator {
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
                 goRuntimeVersion = $goRuntimeVersion
+                goRuntimeSource = $trustedGoRuntimeSource
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
                 temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
@@ -2697,7 +2972,7 @@ if ($ValidatePolicyOnly) {
         trustedRegistries = $trustedRegistries
         trustedPythonIndex = $trustedPythonIndex
         trustedPowerShellRepository = $trustedPowerShellRepository
-        trustedGoRuntimeVersion = $trustedGoRuntimeVersion
+        trustedGoRuntimeVersion = $trustedGoRuntimeVersionRule
         trustedGoEnvironment = $trustedGoEnvironment
         trustedGoDistribution = $trustedGoDistribution
         recordResolvedIdentityWhenAvailable = [bool]$policy.resolution.recordResolvedIdentityWhenAvailable
@@ -2716,7 +2991,11 @@ else {
             Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) -DistributionPolicy $policy.tools.'skill-tools'.npmDistribution -RequestedInstallRoot $InstallRoot
         }
         'skill-validator' {
-            Resolve-SkillValidator -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.'skill-validator' -RequestedInstallRoot $InstallRoot
+            Resolve-SkillValidator `
+                -ShouldInstall ([bool]$Install) `
+                -ToolPolicy $policy.tools.'skill-validator' `
+                -RequestedInstallRoot $InstallRoot `
+                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion
         }
         'skillspector' {
             Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot
@@ -2756,6 +3035,7 @@ else {
         $result.proxy = [string]$toolPolicy.proxy
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.goRuntimeVersion = [string]$resolved.goRuntimeVersion
+        $result.goRuntimeSource = [string]$resolved.goRuntimeSource
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
         $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation

@@ -52,9 +52,20 @@ jobs:
       - name: Set up approved Go runtime
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.8'
-          check-latest: false
+          go-version: 'stable'
+          check-latest: true
           cache: false
+
+      - name: Capture resolved stable Go runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $versionOutput = @(& go version)
+          if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or
+              [string]$versionOutput[0] -notmatch '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$') {
+            throw "setup-go did not provide one stable Go runtime version. Evidence='$($versionOutput -join ' | ')'"
+          }
+          "STANDARD_GO_RUNTIME_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run canonical Standard v1 authority gate
         shell: pwsh
@@ -62,7 +73,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -ExpectedGoRuntimeVersion $env:STANDARD_GO_RUNTIME_VERSION
 
       - name: Check whitespace in the event range
         shell: bash

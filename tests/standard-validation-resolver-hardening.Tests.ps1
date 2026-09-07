@@ -262,6 +262,315 @@ Version: this line also belongs to the description body
         Assert-Equal $commandOutput[0] 'resolver-stdout' 'Native stdout must remain available when one diagnostic line is written to stderr.'
     }
 
+    # Scenario: A resolver subprocess inherits a caller-controlled proxy or trust-root variable.
+    # Purpose: Exercise the default environment reader in a real child process and prove rejection before network access.
+    It 'UnitT65_rejects_real_process_transport_overrides_before_network_access' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $childScript = Join-Path $TestDrive 'transport-isolation-child.ps1'
+        [IO.File]::WriteAllText(
+            $childScript,
+            @'
+param(
+    [Parameter(Mandatory = $true)][string] $ResolverPath,
+    [Parameter(Mandatory = $true)][string] $PolicyPath
+)
+$ErrorActionPreference = 'Stop'
+try {
+    . $ResolverPath -PolicyPath $PolicyPath -ValidatePolicyOnly | Out-Null
+    Get-OfficialLatestStableGoRuntimeVersion | Out-Null
+    throw 'The resolver unexpectedly accepted a caller-controlled transport environment.'
+}
+catch {
+    [Console]::Error.WriteLine([string]$_.Exception.Message)
+    exit 17
+}
+'@,
+            (New-Object Text.UTF8Encoding($false))
+        )
+
+        $powerShellExecutableName = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            'powershell.exe'
+        }
+        elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            'pwsh.exe'
+        }
+        else {
+            'pwsh'
+        }
+        $powerShellExecutable = Join-Path $PSHOME $powerShellExecutableName
+        Assert-True (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf) 'A PowerShell executable is required for the real child-process transport regression.'
+        $transportNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            # Windows environment names are case-insensitive. Keep one spelling
+            # per variable so restoration cannot clear a value twice.
+            @(
+                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+            )
+        }
+        else {
+            @(
+                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'
+            )
+        }
+
+        foreach ($case in @(
+            @{ Name = 'HTTPS_PROXY'; Value = 'http://127.0.0.1:1' },
+            @{ Name = 'SSL_CERT_FILE'; Value = (Join-Path $TestDrive 'untrusted-ca.pem') }
+        )) {
+            $previous = [ordered]@{}
+            try {
+                foreach ($name in $transportNames) {
+                    $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+                    [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+                }
+                [Environment]::SetEnvironmentVariable($case.Name, $case.Value, [EnvironmentVariableTarget]::Process)
+
+                $arguments = @(
+                    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"' + $childScript + '"'),
+                    '-ResolverPath', ('"' + $script:ResolverPath + '"'),
+                    '-PolicyPath', ('"' + $script:ToolchainPath + '"')
+                )
+                $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $startInfo.FileName = $powerShellExecutable
+                $startInfo.Arguments = $arguments -join ' '
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $true
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError = $true
+                $child = New-Object System.Diagnostics.Process
+                $child.StartInfo = $startInfo
+                try {
+                    if (-not $child.Start()) {
+                        throw "Unable to start the transport isolation child for '$($case.Name)'."
+                    }
+                    $stdoutTask = $child.StandardOutput.ReadToEndAsync()
+                    $stderrTask = $child.StandardError.ReadToEndAsync()
+                    if (-not $child.WaitForExit(15000)) {
+                        try { $child.Kill() } catch { }
+                        throw "Transport isolation child process did not finish for '$($case.Name)'."
+                    }
+                    $child.WaitForExit()
+                    $captured = @($stdoutTask.Result, $stderrTask.Result) -join [Environment]::NewLine
+                    $childExitCode = $child.ExitCode
+                }
+                finally {
+                    $child.Dispose()
+                }
+                Assert-Equal $childExitCode 17 "A real resolver child must fail closed for '$($case.Name)'."
+                Assert-Match $captured ("Untrusted Go transport environment override.*{0}" -f $case.Name) "The default process environment reader must reject '$($case.Name)' before any network request."
+            }
+            finally {
+                foreach ($entry in $previous.GetEnumerator()) {
+                    [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+                }
+            }
+        }
+    }
+
+    # Scenario: A caller shadows PowerShell collection-selection cmdlets or sets their defaults.
+    # Purpose: Ensure release selection cannot be redirected after official metadata is authenticated.
+    It 'UnitT66_uses_caller_independent_release_selection' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $metadata = @(
+            [pscustomobject]@{ version = 'go1.26.7'; stable = $true }
+            [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
+        )
+        $previousDefaults = $PSDefaultParameterValues
+        $PSDefaultParameterValues = @{
+            'Select-Object:Skip' = 1
+            'Sort-Object:Descending' = $false
+        }
+        function Sort-Object { throw 'The caller-shadowed Sort-Object was invoked.' }
+        function Select-Object { throw 'The caller-shadowed Select-Object was invoked.' }
+        try {
+            $actual = Get-OfficialLatestStableGoRuntimeVersionFromMetadata -ReleaseMetadata $metadata
+        }
+        finally {
+            $PSDefaultParameterValues = $previousDefaults
+            Remove-Item Function:Sort-Object -ErrorAction SilentlyContinue
+            Remove-Item Function:Select-Object -ErrorAction SilentlyContinue
+        }
+
+        Assert-Equal $actual '1.26.8' 'Release selection must use the newest stable official version even when caller cmdlets are shadowed.'
+    }
+
+    # Scenario: A caller controls process-global WebRequest proxy or certificate state.
+    # Purpose: Authenticate official Go metadata with a clean transport and restore the caller's exact state afterward.
+    It 'UnitT67_isolates_and_restores_process_global_web_transport_state' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $previousProxy = [System.Net.WebRequest]::DefaultWebProxy
+        $previousCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        $certificatePolicyProperty = ([System.Net.ServicePointManager]).GetProperty('CertificatePolicy')
+        $previousCertificatePolicy = if ($null -eq $certificatePolicyProperty) {
+            $null
+        }
+        else {
+            $certificatePolicyProperty.GetValue($null, $null)
+        }
+        $testProxy = New-Object System.Net.WebProxy('http://127.0.0.1:1')
+        $testCertificateCallback = [System.Net.Security.RemoteCertificateValidationCallback]{
+            param($sender, $certificate, $chain, $errors)
+            return $true
+        }
+        try {
+            [System.Net.WebRequest]::DefaultWebProxy = $testProxy
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $testCertificateCallback
+            if ($null -ne $certificatePolicyProperty) {
+                if (-not ('StandardV1PermissiveCertificatePolicy' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
+{
+    public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem)
+    {
+        return true;
+    }
+}
+'@
+                }
+                $testCertificatePolicy = New-Object -TypeName StandardV1PermissiveCertificatePolicy
+                [void]$certificatePolicyProperty.SetValue($null, $testCertificatePolicy, $null)
+            }
+
+            $inside = Invoke-WithApprovedGoWebTransport -Action {
+                [pscustomobject]@{
+                    DefaultProxy = [System.Net.WebRequest]::DefaultWebProxy
+                    CertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                    CertificatePolicy = if ($null -eq $certificatePolicyProperty) { $null } else { $certificatePolicyProperty.GetValue($null, $null) }
+                }
+            }
+
+            Assert-True ($null -eq $inside.DefaultProxy) 'Approved Go metadata transport must clear the process-global default proxy.'
+            Assert-True ($null -eq $inside.CertificateCallback) 'Approved Go metadata transport must clear the process-global certificate callback.'
+            if ($null -ne $certificatePolicyProperty) {
+                Assert-True ($null -ne $inside.CertificatePolicy -and
+                    -not [object]::ReferenceEquals($inside.CertificatePolicy, $testCertificatePolicy)) 'Approved Go metadata transport must replace the caller legacy certificate policy with the framework default policy.'
+            }
+            Assert-True ([object]::ReferenceEquals([System.Net.WebRequest]::DefaultWebProxy, $testProxy)) 'The caller default proxy must be restored after the approved transport action.'
+            Assert-True ([object]::ReferenceEquals([System.Net.ServicePointManager]::ServerCertificateValidationCallback, $testCertificateCallback)) 'The caller certificate callback must be restored after the approved transport action.'
+            if ($null -ne $certificatePolicyProperty) {
+                Assert-True ([object]::ReferenceEquals($certificatePolicyProperty.GetValue($null, $null), $testCertificatePolicy)) 'The caller legacy certificate policy must be restored after the approved transport action.'
+            }
+        }
+        finally {
+            if ($null -ne $certificatePolicyProperty) {
+                [void]$certificatePolicyProperty.SetValue($null, $previousCertificatePolicy, $null)
+            }
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateCallback
+            [System.Net.WebRequest]::DefaultWebProxy = $previousProxy
+        }
+    }
+
+    # Scenario: A caller installs an alias with the same name as the runtime authenticator.
+    # Purpose: Bind the resolver to a Function command rather than normal alias-precedence lookup.
+    It 'UnitT68_binds_runtime_authentication_to_the_function_command_type' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $resolveStart = $resolver.IndexOf('function Resolve-SkillValidator')
+        $resolveEnd = $resolver.IndexOf('function Resolve-SkillSpector', $resolveStart)
+        Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillValidator body was not found.'
+        $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
+        Assert-Match $body "InvokeCommand\.GetCommand\(\s*'Get-ApprovedGoRuntimeVersion'[\s\S]*CommandTypes\]::Function" 'Skill-validator resolution must bind the runtime authenticator by its Function command type.'
+        Assert-NotMatch $body '(?m)^\s*\$goRuntimeVersion\s*=\s*Get-ApprovedGoRuntimeVersion\s+`' 'Skill-validator resolution must not invoke an alias-precedence runtime authenticator.'
+        $metadataStart = $resolver.IndexOf('function Get-OfficialLatestStableGoRuntimeVersion')
+        $metadataEnd = $resolver.IndexOf('function Get-OfficialLatestStableGoRuntimeVersionFromMetadata', $metadataStart)
+        Assert-True ($metadataStart -ge 0 -and $metadataEnd -gt $metadataStart) 'Official Go metadata resolver body was not found.'
+        $metadataBody = $resolver.Substring($metadataStart, $metadataEnd - $metadataStart)
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Invoke-WithApprovedGoWebTransport'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind its transport boundary by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*\$metadata\s*=\s*Invoke-WithApprovedGoWebTransport\s+-Action' 'Official Go metadata retrieval must not invoke an alias-precedence transport boundary.'
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Get-OfficialLatestStableGoRuntimeVersionFromMetadata'[\s\S]*CommandTypes\]::Function" 'Official Go metadata parsing must bind the parser by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*Get-OfficialLatestStableGoRuntimeVersionFromMetadata\s+-ReleaseMetadata' 'Official Go metadata parsing must not invoke an alias-precedence parser.'
+        Assert-Match $metadataBody "InvokeCommand\.GetCommand\(\s*'Assert-NoConflictingGoTransportEnvironment'[\s\S]*CommandTypes\]::Function" 'Official Go metadata retrieval must bind the production transport environment boundary by the Function command type.'
+        Assert-NotMatch $metadataBody '(?m)^\s*Assert-NoConflictingGoTransportEnvironment\s*$' 'Official Go metadata retrieval must not invoke an alias-precedence transport environment boundary.'
+        $transportStart = $resolver.IndexOf('function Assert-NoConflictingGoTransportEnvironment')
+        $transportEnd = $resolver.IndexOf('function Assert-GoTransportEnvironmentValues', $transportStart)
+        Assert-True ($transportStart -ge 0 -and $transportEnd -gt $transportStart) 'Go transport environment boundary body was not found.'
+        $transportBody = $resolver.Substring($transportStart, $transportEnd - $transportStart)
+        Assert-Match $transportBody "InvokeCommand\.GetCommand\(\s*'Assert-GoTransportEnvironmentValues'[\s\S]*CommandTypes\]::Function" 'Go transport environment validation must bind the nested validator by the Function command type.'
+        Assert-NotMatch $transportBody '(?m)^\s*Assert-GoTransportEnvironmentValues\s+-EnvironmentReader' 'Go transport environment validation must not invoke an alias-precedence nested validator.'
+        $evidenceStart = $resolver.IndexOf('function Get-ApprovedGoRuntimeVersion')
+        $evidenceEnd = $resolver.IndexOf('function Resolve-Pester', $evidenceStart)
+        Assert-True ($evidenceStart -ge 0 -and $evidenceEnd -gt $evidenceStart) 'Go runtime evidence resolver body was not found.'
+        $evidenceBody = $resolver.Substring($evidenceStart, $evidenceEnd - $evidenceStart)
+        Assert-Match $evidenceBody "InvokeCommand\.GetCommand\(\s*'Assert-ApprovedGoRuntimeEvidence'[\s\S]*CommandTypes\]::Function" 'Go runtime evidence validation must bind the validator by the Function command type.'
+        Assert-NotMatch $evidenceBody '(?m)^\s*Assert-ApprovedGoRuntimeEvidence\s+`' 'Go runtime evidence validation must not invoke an alias-precedence validator.'
+    }
+
+    # Scenario: A caller installs aliases for nested runtime-authentication helpers.
+    # Purpose: Exercise the Function bindings end to end without contacting the network.
+    It 'UnitT69_resists_alias_redirects_in_nested_runtime_authentication' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $transportNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+        }
+        else {
+            @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+        }
+        $previousTransportValues = [ordered]@{}
+        foreach ($name in $transportNames) {
+            $previousTransportValues[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        }
+        $originalTransportFunction = (Get-Command Invoke-WithApprovedGoWebTransport -CommandType Function -ErrorAction Stop).ScriptBlock
+        $aliasNames = @(
+            'Invoke-WithApprovedGoWebTransport',
+            'Assert-NoConflictingGoTransportEnvironment',
+            'Assert-GoTransportEnvironmentValues',
+            'Get-OfficialLatestStableGoRuntimeVersionFromMetadata',
+            'Assert-ApprovedGoRuntimeEvidence'
+        )
+        $previousAliases = @{}
+        foreach ($name in $aliasNames) {
+            $previousAlias = Get-Alias -Name $name -ErrorAction SilentlyContinue
+            if ($null -ne $previousAlias) { $previousAliases[$name] = [string]$previousAlias.Definition }
+            Remove-Item -Path "Alias:$name" -ErrorAction SilentlyContinue
+        }
+
+        Set-Item -Path Function:Invoke-WithApprovedGoWebTransport -Value {
+            param([scriptblock] $Action)
+            @(
+                [pscustomobject]@{ version = 'go1.26.7'; stable = $true }
+                [pscustomobject]@{ version = 'go1.26.8'; stable = $true }
+            )
+        }
+        Set-Item -Path Function:StandardV1AliasTrap -Value {
+            throw 'The caller alias trap was invoked.'
+        }
+        Set-Alias -Name Invoke-WithApprovedGoWebTransport -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-NoConflictingGoTransportEnvironment -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-GoTransportEnvironmentValues -Value StandardV1AliasTrap
+        Set-Alias -Name Get-OfficialLatestStableGoRuntimeVersionFromMetadata -Value StandardV1AliasTrap
+        Set-Alias -Name Assert-ApprovedGoRuntimeEvidence -Value StandardV1AliasTrap
+        try {
+            $metadataVersion = Get-OfficialLatestStableGoRuntimeVersion
+            Assert-Equal $metadataVersion '1.26.8' 'Nested official metadata parsing must ignore a caller alias.'
+            $evidenceVersion = Get-ApprovedGoRuntimeVersion `
+                -VersionOutput @('go version go1.26.8 linux/amd64') `
+                -ExpectedVersionRule 'latest-stable' `
+                -ExpectedRuntimeVersion '1.26.8'
+            Assert-Equal $evidenceVersion '1.26.8' 'Nested runtime evidence validation must ignore a caller alias.'
+        }
+        finally {
+            foreach ($name in $aliasNames) {
+                Remove-Item -Path "Alias:$name" -ErrorAction SilentlyContinue
+                if ($previousAliases.ContainsKey($name)) { Set-Alias -Name $name -Value $previousAliases[$name] }
+            }
+            Remove-Item Function:StandardV1AliasTrap -ErrorAction SilentlyContinue
+            Set-Item -Path Function:Invoke-WithApprovedGoWebTransport -Value $originalTransportFunction
+            foreach ($entry in $previousTransportValues.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, [EnvironmentVariableTarget]::Process)
+            }
+            . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        }
+    }
+
     # Scenario: Release metadata points the expected wheel name at another host, port, tag or URL variant.
     # Purpose: Bind asset acquisition to the exact approved GitHub release path before digest verification.
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {

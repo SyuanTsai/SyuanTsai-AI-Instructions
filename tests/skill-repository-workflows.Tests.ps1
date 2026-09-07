@@ -3,7 +3,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:CheckoutSha = '3d3c42e5aac5ba805825da76410c181273ba90b1'
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
-        $script:AuthorityGoVersion = '1.26.8'
+        $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 3
             '.github/workflows/standards-conformance.yml' = 1
@@ -69,11 +69,15 @@ Describe 'Agent Skill authority workflow contract' {
         foreach ($workflow in @($standards, $required)) {
             $setupPattern = "actions/setup-go@$($script:SetupGoSha)\s+# v7\.0\.0"
             Assert-Equal ([regex]::Matches($workflow, $setupPattern)).Count 1 'Each authority workflow must use the reviewed immutable setup-go v7.0.0 commit exactly once.'
-            Assert-Match $workflow ("go-version:\s*'{0}'" -f [regex]::Escape($script:AuthorityGoVersion)) 'Each authority workflow must provision the exact approved Go runtime.'
-            Assert-Match $workflow 'check-latest:\s*false' 'Authority Go setup must not drift to another patch release.'
+            Assert-Match $workflow "go-version:\s*'stable'" 'Each authority workflow must provision the latest stable Go runtime.'
+            Assert-Match $workflow 'check-latest:\s*true' 'Authority Go setup must check for the latest stable runtime.'
+            Assert-NotMatch $workflow "go-version:\s*'[0-9]+\.[0-9]+\.[0-9]+'" 'Authority workflows must not pin a Go patch version.'
             Assert-Match $workflow 'cache:\s*false' 'Authority Go setup must not restore a cross-run module or build cache.'
             Assert-NotMatch $workflow 'actions/setup-go@v[0-9]+' 'Authority workflows must not use a mutable setup-go tag.'
-            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The approved Go runtime must be provisioned before the authority gate starts.'
+            Assert-Match $workflow 'STANDARD_GO_RUNTIME_VERSION=\$\(\$Matches\.version\)' 'Authority workflows must capture the exact Go runtime resolved by setup-go.'
+            Assert-Match $workflow '& ./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION' 'Authority workflows must pass the setup-go resolved runtime into the shared gate.'
+            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=')) 'The approved Go runtime must be provisioned before its version is captured.'
+            Assert-True ($workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The resolved Go runtime must be captured before the authority gate starts.'
         }
 
         foreach ($workflowName in $script:AuthorityWorkflowDependencies) {
@@ -86,6 +90,9 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Equal ([regex]::Matches($standards, [regex]::Escape($testName))).Count 2 "Dedicated authority workflow must watch '$testName' for push and pull request events."
             Assert-Equal ([regex]::Matches($gate, [regex]::Escape($testName))).Count 1 "Shared authority gate must execute '$testName'."
         }
+        Assert-Match $gate 'ExpectedGoRuntimeVersion = \$env:STANDARD_GO_RUNTIME_VERSION' 'The shared authority gate must require the setup-go resolved runtime when invoked directly.'
+        Assert-Match $gate '-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion' 'The shared authority gate must pass the resolved runtime into the resolver.'
+        Assert-Match $gate 'skill-validator receipt Go runtime.*does not match the setup-go run-resolved latest stable runtime' 'The shared authority gate must bind the resolver receipt to setup-go evidence.'
     }
 
     # Scenario: A main push or pull request is checked against a fixed branch range that can be empty or incomplete.
