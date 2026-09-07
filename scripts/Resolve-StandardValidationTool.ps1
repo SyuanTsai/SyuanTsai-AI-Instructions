@@ -2066,7 +2066,10 @@ function Get-OfficialLatestStableGoRuntimeVersion {
     try {
         Assert-NoConflictingGoTransportEnvironment
         try {
-            $metadata = @(Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop)
+            # Invoke-RestMethod returns the JSON array as one Object[] value. Do not
+            # wrap that value in @(), which would make the metadata parser see one
+            # array entry instead of the individual official release objects.
+            $metadata = Microsoft.PowerShell.Utility\Invoke-RestMethod -Uri $trustedGoRuntimeSource -Headers @{ Accept = 'application/json' } -Method Get -MaximumRedirection 0 -ErrorAction Stop
         }
         catch {
             throw "Could not retrieve official Go release metadata from '$trustedGoRuntimeSource': $($_.Exception.Message)"

@@ -1778,6 +1778,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $versionProbeIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('version')")
             $moduleLookupIndex = $resolver.IndexOf("Invoke-CheckedCommand -Command `$goCommand -Arguments @('list', '-m', '-json'")
             Assert-True ($versionProbeIndex -ge 0 -and $moduleLookupIndex -gt $versionProbeIndex) 'Go runtime verification must fail closed before module resolution can start.'
+            Assert-NotMatch $resolver '\$metadata = @\(Microsoft\.PowerShell\.Utility\\Invoke-RestMethod' 'Official Go JSON arrays must be passed to the strict metadata parser without nesting the array as one entry.'
 
             $stableGoVersion = '1.99.8'
             $stableGoOutput = "go version go$stableGoVersion linux/amd64"
