@@ -308,8 +308,6 @@ catch {
             @{ Name = 'SSL_CERT_FILE'; Value = (Join-Path $TestDrive 'untrusted-ca.pem') }
         )) {
             $previous = [ordered]@{}
-            $stdoutPath = Join-Path $TestDrive ("transport-$($case.Name).stdout.txt")
-            $stderrPath = Join-Path $TestDrive ("transport-$($case.Name).stderr.txt")
             try {
                 foreach ($name in $transportNames) {
                     $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
@@ -322,26 +320,33 @@ catch {
                     '-File', ('"' + $childScript + '"'),
                     '-ResolverPath', ('"' + $script:ResolverPath + '"')
                 )
-                $startParameters = @{
-                    FilePath = $powerShellExecutable
-                    ArgumentList = $arguments
-                    PassThru = $true
-                    RedirectStandardOutput = $stdoutPath
-                    RedirectStandardError = $stderrPath
+                $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $startInfo.FileName = $powerShellExecutable
+                $startInfo.Arguments = $arguments -join ' '
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $true
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError = $true
+                $child = New-Object System.Diagnostics.Process
+                $child.StartInfo = $startInfo
+                try {
+                    if (-not $child.Start()) {
+                        throw "Unable to start the transport isolation child for '$($case.Name)'."
+                    }
+                    $stdoutTask = $child.StandardOutput.ReadToEndAsync()
+                    $stderrTask = $child.StandardError.ReadToEndAsync()
+                    if (-not $child.WaitForExit(15000)) {
+                        try { $child.Kill() } catch { }
+                        throw "Transport isolation child process did not finish for '$($case.Name)'."
+                    }
+                    $child.WaitForExit()
+                    $captured = @($stdoutTask.Result, $stderrTask.Result) -join [Environment]::NewLine
+                    $childExitCode = $child.ExitCode
                 }
-                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                    $startParameters.WindowStyle = 'Hidden'
+                finally {
+                    $child.Dispose()
                 }
-                $child = Start-Process @startParameters
-                if (-not $child.WaitForExit(15000)) {
-                    try { Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue } catch { }
-                    throw "Transport isolation child process did not finish for '$($case.Name)'."
-                }
-                $captured = @(
-                    if (Test-Path -LiteralPath $stdoutPath) { Get-Content -Raw -LiteralPath $stdoutPath }
-                    if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath }
-                ) -join [Environment]::NewLine
-                Assert-Equal $child.ExitCode 17 "A real resolver child must fail closed for '$($case.Name)'."
+                Assert-Equal $childExitCode 17 "A real resolver child must fail closed for '$($case.Name)'."
                 Assert-Match $captured ("Untrusted Go transport environment override.*{0}" -f $case.Name) "The default process environment reader must reject '$($case.Name)' before any network request."
             }
             finally {
