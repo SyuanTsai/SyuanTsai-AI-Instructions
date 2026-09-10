@@ -149,6 +149,87 @@ function Get-AiInstructionsNormalizedExcludedPaths {
     return @($normalizedPaths | Sort-Object -Unique)
 }
 
+function Resolve-AiInstructionsCatalogSkillId {
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][hashtable] $SkillsById,
+        [Parameter(Mandatory = $true)][hashtable] $AliasesById
+    )
+
+    if ($SkillsById.ContainsKey($SkillId)) {
+        $skill = $SkillsById[$SkillId]
+        if ([string]$skill.lifecycle.status -ceq 'removed' -and
+            (Test-AiInstructionsObjectHasProperty -Object $skill.lifecycle -Name 'replacementId') -and
+            -not [string]::IsNullOrWhiteSpace([string]$skill.lifecycle.replacementId)) {
+            return [string]$skill.lifecycle.replacementId
+        }
+        return $SkillId
+    }
+    if ($AliasesById.ContainsKey($SkillId)) { return [string]$AliasesById[$SkillId] }
+    throw "AI instruction sync configuration references unknown Skill '$SkillId'."
+}
+
+function Get-AiInstructionsNormalizedExplicitIncludes {
+    param(
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Profiles,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $IncludeSkills
+    )
+
+    if (-not (Test-AiInstructionsObjectHasProperty -Object $Catalog -Name 'profiles') -or
+        -not (Test-AiInstructionsObjectHasProperty -Object $Catalog -Name 'skills')) {
+        throw 'Skills Catalog normalization requires profiles and skills.'
+    }
+
+    $profilesById = @{}
+    foreach ($profile in @($Catalog.profiles)) { $profilesById[[string]$profile.id] = $profile }
+    $skillsById = @{}
+    $aliasesById = @{}
+    foreach ($skill in @($Catalog.skills)) {
+        $skillId = [string]$skill.id
+        $skillsById[$skillId] = $skill
+        if ([string]$skill.lifecycle.status -ceq 'removed') { continue }
+        foreach ($aliasValue in @($skill.lifecycle.aliases)) {
+            $alias = [string]$aliasValue
+            if ($aliasesById.ContainsKey($alias) -and [string]$aliasesById[$alias] -cne $skillId) {
+                throw "Ambiguous Skills Catalog alias '$alias'."
+            }
+            $aliasesById[$alias] = $skillId
+        }
+    }
+
+    $requestedProfiles = @($Profiles)
+    if ($requestedProfiles.Count -eq 0) {
+        $requestedProfiles = @($Catalog.profiles | Where-Object { $_.default -eq $true } | Select-Object -ExpandProperty id)
+    }
+    $profileSelected = @{}
+    $profileExcluded = @{}
+    foreach ($profileIdValue in $requestedProfiles) {
+        $profileId = [string]$profileIdValue
+        if (-not $profilesById.ContainsKey($profileId)) {
+            throw "AI instruction sync configuration references unknown profile '$profileId'."
+        }
+        $profile = $profilesById[$profileId]
+        foreach ($skillIdValue in @($profile.includes)) {
+            $skillId = Resolve-AiInstructionsCatalogSkillId -SkillId ([string]$skillIdValue) -SkillsById $skillsById -AliasesById $aliasesById
+            $profileSelected[$skillId] = $true
+        }
+        foreach ($skillIdValue in @($profile.excludes)) {
+            $skillId = Resolve-AiInstructionsCatalogSkillId -SkillId ([string]$skillIdValue) -SkillsById $skillsById -AliasesById $aliasesById
+            $profileExcluded[$skillId] = $true
+        }
+    }
+    foreach ($skillId in @($profileExcluded.Keys)) { $profileSelected.Remove($skillId) }
+
+    return @(
+        foreach ($configuredIdValue in @($IncludeSkills)) {
+            $configuredId = [string]$configuredIdValue
+            $skillId = Resolve-AiInstructionsCatalogSkillId -SkillId $configuredId -SkillsById $skillsById -AliasesById $aliasesById
+            if (-not $profileSelected.ContainsKey($skillId)) { $configuredId }
+        }
+    )
+}
+
 function ConvertTo-AiInstructionsSyncConfigurationV4 {
     [CmdletBinding()]
     param(
@@ -157,6 +238,7 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
         [Parameter(Mandatory = $true)][string] $CatalogRef,
         [string[]] $AdditionalExcludedRepositoryUrls = @(),
         [string[]] $AdditionalExcludedRepositoryPaths = @(),
+        [AllowNull()][object] $Catalog,
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
 
@@ -221,6 +303,9 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
         $profiles = @($existingCatalog.profiles)
         $includeSkills = @($existingCatalog.includeSkills)
         $excludeSkills = @($existingCatalog.excludeSkills)
+    }
+    if ($null -ne $Catalog) {
+        $includeSkills = @(Get-AiInstructionsNormalizedExplicitIncludes -Catalog $Catalog -Profiles $profiles -IncludeSkills $includeSkills)
     }
 
     $updateMode = 'notify-only'

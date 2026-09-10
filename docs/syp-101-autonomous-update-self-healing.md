@@ -88,7 +88,7 @@ Installer 在 Codex Home 建立同磁碟 staging/backup：
 6. 全程持有 Codex Home／`hooks` 的可阻擋 rename directory handles，以 handle-bound create/write 替換 stable commands；每個 stable file 都在同一 mutation handle 內比較 backup snapshot 的 original bytes，再記錄 transaction-applied bytes，之後才 swap runtime、寫入 config 並更新個人文件/hooks。
 7. 任一步失敗即恢復所有備份；stable-file rollback 只在 current bytes 仍等於 transaction-applied bytes 時還原或刪除，並會繼續恢復其他未 drift 檔案。Transaction runtime 先原子移入 recovery backup，再以 staged configuration 與 candidate identity 重驗 exact bundle/inventory；只有驗證成功才可遞迴刪除，外部新增、替換或 hash drift 一律保留。外部並行修改會升級為 rollback failure，recovery backup 也會保留；包含 staging validation failure 在內，rollback 成功後都刪除 transaction directories。
 
-若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行；驗證完成後，launcher／updater snapshot／Agent environment updater／cleanup 會持有 shared runtime read lock 到 runtime 使用結束，installer 的 exclusive lock 因此不能在執行中 swap bundle。Agent environment `-Apply` 僅在執行 runtime updater 時釋放 read lock，之後重新取得鎖才能 import 與 reconcile。Updater 另從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤持有 install-state lock，只在把 immutable candidate 交給 installer transaction 前釋放；若安裝失敗，必須重新取得鎖並確認 active identity 未變，才可寫入 failure receipt。
+若 rollback 本身失敗，backup 保留並在例外中回報。Launcher 的 identity/inventory validation 可阻止被中斷的混合版本繼續執行；驗證完成後，launcher／updater snapshot／Agent environment updater／cleanup 會持有 shared runtime read lock 到 runtime 使用結束，installer 的 exclusive lock 因此不能在執行中 swap bundle。Agent environment `-Apply` 只 reconcile 目前 verified runtime，不呼叫 runtime updater，也不暗中傳遞 candidate approval；需要更新時由 operator 先獨立完成 updater workflow。Updater 另從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤持有 install-state lock，只在把 immutable candidate 交給 installer transaction 前釋放；若安裝失敗，必須重新取得鎖並確認 active identity 未變，才可寫入 failure receipt。
 
 既有受管檔案的 write/delete handle 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 final path，並拒絕 reparse file 與 `NumberOfLinks != 1` 的 hard-link alias，使 path precheck 與 native open 間的 alias／parent-junction swap 不能把 mutation 導向 root 外。新檔建立從 target root 起逐層建立或開啟 parent directory，並持有帶讀取存取權且不分享 delete 的 handles 到 file handle 驗證完成；Windows 因此會阻擋途中 rename。移除會以同一個 deny-write/delete handle 讀取與驗證 bytes，再設定 delete disposition，直到關閉 handle 才完成刪除，避免最後一次驗證與 `Remove-Item` 間的 TOCTOU。Exact-hash read-only 檔案會在 handle-bound transaction 暫時清除 attribute；guard handle 保持開啟，重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復再回報。
 
@@ -127,6 +127,9 @@ Migration 結果永遠是 strict v4 object，不保留未知或 legacy auto-comm
 | Failure | 行為 |
 | --- | --- |
 | Network unavailable 或 GitHub API rate limit | 寫 offline receipt，保留已驗證 runtime；不降級、不安裝。 |
+| `notify-only` candidate available | 寫 available receipt並回報 notification／not-installed／non-retryable，保留目前 verified runtime。 |
+| Sandbox／permission denial | 回報 sandbox／retryable；取得核准後最多重試一次。 |
+| Configuration／compatibility failure | Fail closed 並回報 central config／Catalog remediation；不偽造 evidence、不修改 consumer Repository、不在同一 task 重試。 |
 | Candidate behind/diverged | 寫 stale receipt，不下載、不降級、不安裝。 |
 | GitHub candidate drift | 寫 drift receipt，刪除暫存下載，不安裝。 |
 | Verified bundle/config pin mismatch | Launcher fail closed；同一 stable updater 以 `-RecoverInterruptedInstall` 驗證兩份 strict identity、exact runtime inventory 與 stable entry-point references，然後只將 config pin 對齊 active verified runtime commit 並立即返回，不會接續 network check 或 install workflow。 |

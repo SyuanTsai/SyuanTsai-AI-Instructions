@@ -56,6 +56,7 @@
       ]
     },
     "outcome": {
+      "description": "available is a notify-only result and never proves installation; installed is the only candidate-install success outcome.",
       "enum": [
         "current",
         "available",

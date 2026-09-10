@@ -84,6 +84,44 @@ function Test-AiInstructionsTransientNetworkError {
     return $false
 }
 
+function Get-AiInstructionsUpdateDisposition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('current','available','installed','offline','stale','rate-limit','drift','failed','concurrent')]
+        [string] $Outcome,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+
+    $classification = switch ($Outcome) {
+        'current' { 'current' }
+        'available' { 'notification' }
+        'installed' { 'installation' }
+        'offline' { 'transient-network' }
+        'rate-limit' { 'throttled' }
+        'stale' { 'integrity' }
+        'drift' { 'integrity' }
+        'concurrent' { 'concurrency' }
+        default {
+            if ($Message -match '(?i)access(?: to the path.*?)? is denied|permission denied|unauthorizedaccess|operation not permitted') { 'sandbox' }
+            elseif ($Message -match '(?i)incompatible|capability evidence') { 'compatibility' }
+            elseif ($Message -match '(?i)hash|sha-?256|inventory|bundle|archive|tamper|drift|mismatch|immutable pin') { 'integrity' }
+            elseif ($Message -match '(?i)configuration|schemaVersion|unknown (?:profile|Skill)|update policy|unsupported property') { 'configuration' }
+            else { 'operational' }
+        }
+    }
+    $installationState = switch ($Outcome) {
+        'installed' { 'installed' }
+        'current' { 'current' }
+        default { 'not-installed' }
+    }
+    return [pscustomobject][ordered]@{
+        classification = $classification
+        installationState = $installationState
+        retryable = [bool]($classification -ceq 'sandbox')
+    }
+}
+
 function Get-AiInstructionsRepositoryCoordinates {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
@@ -540,6 +578,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
 }
 
 Export-ModuleMember -Function @(
+    'Get-AiInstructionsUpdateDisposition',
     'Get-AiInstructionsCandidatePackage',
     'Get-AiInstructionsRemoteCandidate',
     'Install-AiInstructionsCandidatePackage',

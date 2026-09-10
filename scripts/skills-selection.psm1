@@ -402,6 +402,7 @@ function Resolve-SkillsSelection {
     }
 
     $selected = @{}
+    $profileSelected = @{}
     $profileExcludes = @{}
     $explicitIncludes = @{}
     $explicitExcludes = @{}
@@ -420,6 +421,7 @@ function Resolve-SkillsSelection {
                 throw "Skills Catalog profile '$profileId' references unknown Skill '$configuredId'."
             }
             $selected[$skillId] = $true
+            $profileSelected[$skillId] = $true
         }
         foreach ($skillIdValue in @($profile.excludes)) {
             $configuredId = [string]$skillIdValue
@@ -433,6 +435,7 @@ function Resolve-SkillsSelection {
 
     foreach ($skillId in @($profileExcludes.Keys)) {
         $selected.Remove($skillId)
+        $profileSelected.Remove($skillId)
     }
 
     foreach ($skillIdValue in @($Selection.includeSkills)) {
@@ -441,7 +444,9 @@ function Resolve-SkillsSelection {
         if ([string]::IsNullOrWhiteSpace($skillId)) {
             throw "Explicitly included Skill '$configuredId' does not exist in the Skills Catalog."
         }
-        $explicitIncludes[$skillId] = $true
+        if (-not $profileSelected.ContainsKey($skillId)) {
+            $explicitIncludes[$skillId] = $true
+        }
         $selected[$skillId] = $true
     }
 

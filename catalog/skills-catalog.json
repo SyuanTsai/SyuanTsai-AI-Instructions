@@ -149,13 +149,7 @@
           "any"
         ],
         "shells": [],
-        "requiredCapabilities": [
-          {
-            "kind": "connector",
-            "id": "notion",
-            "state": "configured"
-          }
-        ],
+        "requiredCapabilities": [],
         "anyOfCapabilities": []
       },
       "dependencies": [],

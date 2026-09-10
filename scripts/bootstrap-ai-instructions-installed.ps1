@@ -9,6 +9,54 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-InstalledAiInstructionsFailureDisposition {
+    param(
+        [Parameter(Mandatory = $true)][string] $Message,
+        [AllowNull()][System.Exception] $Exception,
+        [ValidateSet('operational','integrity')][string] $FallbackClassification = 'operational'
+    )
+
+    if ($Message -match '\[classification=([^;\]]+);[^\]]*retryable=(true|false)\]') {
+        return [pscustomobject]@{
+            classification = [string]$Matches[1]
+            retryable = [bool]([string]$Matches[2] -ceq 'true')
+        }
+    }
+    $currentException = $Exception
+    while ($null -ne $currentException) {
+        if ($currentException -is [System.UnauthorizedAccessException] -or
+            $currentException -is [System.Security.SecurityException]) {
+            return [pscustomobject]@{ classification='sandbox'; retryable=$true }
+        }
+        $currentException = $currentException.InnerException
+    }
+    $classification = if ($Message -match '(?i)access(?: to the path.*?)? is denied|permission denied|unauthorizedaccess|operation not permitted') { 'sandbox' }
+        elseif ($Message -match '(?i)incompatible|capability evidence') { 'compatibility' }
+        elseif ($Message -match '(?i)hash|sha-?256|inventory|bundle|archive|tamper|drift|mismatch|immutable pin') { 'integrity' }
+        elseif ($Message -match '(?i)configuration|schemaVersion|unknown (?:profile|Skill)|update policy|unsupported property') { 'configuration' }
+        else { $FallbackClassification }
+    return [pscustomobject]@{ classification=$classification; retryable=[bool]($classification -ceq 'sandbox') }
+}
+
+trap {
+    $message = [string]$_.Exception.Message
+    if ($message -match 'AI instructions bootstrap stopped \[classification=') { throw $_.Exception }
+    $disposition = Get-InstalledAiInstructionsFailureDisposition -Message $message -Exception $_.Exception
+    $retryable = ([string]$disposition.retryable).ToLowerInvariant()
+    $remediation = switch ([string]$disposition.classification) {
+        'sandbox' { 'Request sandbox approval and retry this bootstrap once; do not retry it again in the same task.' }
+        'concurrency' { 'Wait for the active installer to finish, then start a later bootstrap run; do not loop this bootstrap.' }
+        'compatibility' { 'Keep the verified runtime; repair the central selection or Catalog without fabricating capability evidence or changing the consumer repository.' }
+        'configuration' { 'Keep the verified runtime; normalize or repair the personal configuration through the central installer before a later run.' }
+        'integrity' { 'Keep fail-closed state; recover or reinstall the verified AI-Instructions runtime before a later run.' }
+        default { 'Inspect the reported operation and use a separate operator-approved recovery; do not loop this bootstrap.' }
+    }
+    throw [System.InvalidOperationException]::new(
+        "$message`nAI instructions bootstrap disposition [classification=$($disposition.classification); retryable=$retryable]. Remediation: $remediation",
+        $_.Exception
+    )
+}
+
 $codexHome = Split-Path -Parent $PSScriptRoot
 $runtimeRoot = Join-Path $PSScriptRoot 'ai-instructions-runtime'
 $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
@@ -214,6 +262,25 @@ function Assert-InstalledRuntime {
     }
 }
 
+function Assert-VerifiedInstalledRuntime {
+    param([switch] $AllowPinMismatch)
+
+    try { return Assert-InstalledRuntime -AllowPinMismatch:$AllowPinMismatch }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match 'AI instructions bootstrap stopped \[classification=') { throw $_.Exception }
+        $disposition = Get-InstalledAiInstructionsFailureDisposition `
+            -Message $message `
+            -Exception $_.Exception `
+            -FallbackClassification 'integrity'
+        $retryable = ([string]$disposition.retryable).ToLowerInvariant()
+        throw [System.InvalidOperationException]::new(
+            "$message`nAI instructions bootstrap stopped [classification=$($disposition.classification); retryable=$retryable].",
+            $_.Exception
+        )
+    }
+}
+
 function Repair-InterruptedRuntimePin {
     param([Parameter(Mandatory = $true)][object] $State)
 
@@ -229,7 +296,7 @@ function Repair-InterruptedRuntimePin {
         $json = ($State.Configuration | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
         [System.IO.File]::WriteAllText($temporaryPath,$json,(New-Object System.Text.UTF8Encoding($false)))
         [System.IO.File]::Replace($temporaryPath,$configurationPath,$backupPath)
-        try { Assert-InstalledRuntime | Out-Null }
+        try { Assert-VerifiedInstalledRuntime | Out-Null }
         catch {
             $validationError = $_
             try { [System.IO.File]::Replace($backupPath,$configurationPath,$failedPath) }
@@ -248,11 +315,15 @@ function Repair-InterruptedRuntimePin {
 function Open-InstalledRuntimeReadLock {
     $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
     if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
-        throw 'AI instructions install lock is missing from the installed runtime.'
+        throw [System.InvalidOperationException]::new(
+            "AI instructions install lock is missing from the installed runtime.`nAI instructions bootstrap stopped [classification=integrity; retryable=false]."
+        )
     }
     $installLockItem = Get-Item -Force -LiteralPath $installLockPath
     if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'AI instructions install lock must be a non-reparse file.'
+        throw [System.InvalidOperationException]::new(
+            "AI instructions install lock must be a non-reparse file.`nAI instructions bootstrap stopped [classification=integrity; retryable=false]."
+        )
     }
     try {
         return [System.IO.File]::Open(
@@ -263,7 +334,10 @@ function Open-InstalledRuntimeReadLock {
         )
     }
     catch [System.IO.IOException] {
-        throw 'AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.'
+        throw [System.InvalidOperationException]::new(
+            "AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
+            $_.Exception
+        )
     }
 }
 
@@ -272,7 +346,9 @@ if ($RecoverInterruptedInstall) {
     if (Test-Path -LiteralPath $installLockPath) {
         $installLockItem = Get-Item -Force -LiteralPath $installLockPath
         if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'AI instructions install lock must be a non-reparse file.'
+            throw [System.InvalidOperationException]::new(
+                "AI instructions install lock must be a non-reparse file.`nAI instructions bootstrap stopped [classification=integrity; retryable=false]."
+            )
         }
     }
     $installLockStream = $null
@@ -286,9 +362,12 @@ if ($RecoverInterruptedInstall) {
             )
         }
         catch [System.IO.IOException] {
-            throw 'Interrupted-install recovery refused to run while another AI instructions installer is active.'
+            throw [System.InvalidOperationException]::new(
+                "Interrupted-install recovery refused to run while another AI instructions installer is active.`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
+                $_.Exception
+            )
         }
-        $recoveryState = Assert-InstalledRuntime -AllowPinMismatch
+        $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
         if (Repair-InterruptedRuntimePin -State $recoveryState) {
             Write-Output "Recovered interrupted AI instructions installation by aligning the verified configuration pin to runtime commit $($recoveryState.Bundle.commit)."
         }
@@ -299,7 +378,7 @@ if ($RecoverInterruptedInstall) {
 }
 
 $runtimeReadLock = Open-InstalledRuntimeReadLock
-try { Assert-InstalledRuntime | Out-Null }
+try { Assert-VerifiedInstalledRuntime | Out-Null }
 finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
 if (-not $SkipUpdateCheck) {
@@ -313,7 +392,7 @@ if (-not $SkipUpdateCheck) {
 
 $runtimeReadLock = Open-InstalledRuntimeReadLock
 try {
-    Assert-InstalledRuntime | Out-Null
+    Assert-VerifiedInstalledRuntime | Out-Null
     $arguments = @{
         CatalogPath = $catalogPath
         LockPath = $lockPath

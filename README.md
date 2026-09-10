@@ -169,7 +169,7 @@ Installer 會把 v1／v2／v3／v4 idempotent 遷移為 v4。舊 `autoCommitRepo
 
 ## Runtime 更新
 
-預設 `notify-only`：launcher 解析 canonical candidate，若有新版只寫 receipt 與通知，仍使用目前已驗證 runtime。
+預設 `notify-only`：launcher 解析 canonical candidate，若有新版只寫 receipt 與通知，仍使用目前已驗證 runtime。`outcome = available` 會明確標示 `classification = notification`、`installationState = not-installed`、`retryable = false`，不得解讀為已安裝或更新失敗。
 
 啟用／停用策略：
 
@@ -216,19 +216,32 @@ Recovery 只會將個人 config 的 bundle pin 對齊目前完整驗證的 activ
 - 下載 codeload ZIP，從同一個 exclusive file handle 計算 archive SHA-256 並安全解壓；git-checkout 安裝則從完整 commit SHA 的 Git objects 建立 installer-owned snapshot，不執行 mutable worktree bytes；之後 parse 全部 PowerShell 並驗證 Catalog/Lock；
 - 安裝前再次解析 candidate，遇到 TOCTOU drift 即停止；
 - 透過 installer transaction swap；stable launcher、updater、Agent environment updater、cleanup、config、個人 `AGENTS.md` 與 `hooks.json` 都在 handle 內以 backup original bytes 做 CAS，失敗時只 rollback 仍等於 transaction-applied bytes 的檔案並保留並行外部修改；
-- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；updater 從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤都持有 install-state lock，只在交給 candidate installer 前釋放。Verified launcher／updater snapshot／Agent environment updater／cleanup 在使用 runtime 時持有 shared read lock，installer 只有取得 exclusive lock 才能 swap；Agent environment `-Apply` 僅在交棒給 runtime updater 時釋放 read lock，更新後必須重新取得鎖才能 import 與 reconcile。Installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit 與 mode/channel/ref，核准已撤銷或 policy 已變更時在任何 mutation 前停止；
+- 使用 per-Codex-Home update lock 阻止並行檢查，並以獨立 install lock 序列化 manual/updater transaction；updater 從 active runtime preflight、remote resolution、archive acquisition 到 non-install receipt 落盤都持有 install-state lock，只在交給 candidate installer 前釋放。Verified launcher／updater snapshot／Agent environment updater／cleanup 在使用 runtime 時持有 shared read lock，installer 只有取得 exclusive lock 才能 swap；Agent environment `-Apply` 不呼叫 updater，會在同一份 verified runtime read lease 下完成 desired-state resolution 與 reconciliation。Installer 取得鎖後會重驗 updater 選擇 candidate 時的 current commit 與 mode/channel/ref，核准已撤銷或 policy 已變更時在任何 mutation 前停止；
 - 以原子替換的 `ai-instructions-update-receipt.json` 記錄 current、available、installed、offline、stale、drift 或 failed；`current` 以 `currentCommit` 表示已解析版本且 `candidateCommit` 為 `null`，避免重複身分無法由 JSON Schema 驗證。若舊 receipt 損壞，先 quarantine 再從已驗證 runtime 繼續檢查。
 
 最小檢查間隔尚未經過時，updater 回傳不落盤的 `rate-limit` workflow 結果並保留上一份有效 receipt；鎖已被其他 updater／installer 持有時則回傳不落盤的 `concurrent` 並讓 manual command／launcher fail closed。兩者都不屬於 update receipt schema 的 persisted outcomes。
 
-網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／Agent environment updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
+網路不可用或 GitHub API 暫時 rate-limited 時，updater 不會破壞或降級現有 runtime；已驗證 runtime 仍可繼續使用已安裝 Catalog/Lock。Stable launcher 以自身內建、未載入 runtime code 的 preflight 先驗證 strict config/bundle、launcher reference 與完整 inventory，manual updater／Agent environment updater／cleanup 也先呼叫同一 preflight，通過後才載入任何 runtime module。Launcher／updater 會輸出 failure `classification` 與 `retryable`；只有 sandbox／permission denial 可在核准後重試一次，configuration、compatibility 或 integrity failure 不得迴圈重跑。若 stable launcher 與 reference copy 不同，或 local runtime inventory 有缺檔、額外檔案、reparse point 或 hash drift，所有 stable entry point 都會 fail closed，應重新執行可信 installer。
 
-## 使用者層級 Agent 環境升級
+## 使用者層級 Agent 環境同步
 
-完成 runtime 安裝後，可從任何目錄以單一命令更新 runtime 並同步 `$HOME/.agents/skills`：
+完成 runtime 安裝後，可從任何目錄依目前 verified runtime 同步 `$HOME/.agents/skills`。這個命令不檢查或安裝 AI-Instructions candidate；需要更新 runtime 時，先使用上一節的 updater 明確完成，再執行同步：
 
 ```powershell
 & (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -OutputFormat Json
+```
+
+本修正合併並發布後，每個彼此獨立的 `CODEX_HOME` 各執行一次下列升級／正規化／驗證流程；不需要逐一修改 consumer Repository：
+
+```powershell
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME '.codex'
+}
+& (Join-Path $codexHome 'hooks\update-ai-instructions.ps1') -ForceCheck -InstallApproved
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -Apply -OutputFormat Json
+& (Join-Path $codexHome 'hooks\update-agent-environment.ps1') -VerifyOnly -OutputFormat Json
 ```
 
 先預覽或只驗證目前狀態：
@@ -299,7 +312,7 @@ Runtime／Instructions／選取的 Skill 會遞送來源版本的授權文件、
 - `scripts/bootstrap-ai-instructions-installed.ps1`：stable launcher、更新前後 runtime validation。
 - `scripts/ai-instructions-runtime-contract.psm1`：config v4、bundle v2 與 exact inventory 契約。
 - `scripts/ai-instructions-updater.psm1`、`scripts/update-ai-instructions.ps1`：更新 workflow 與 installed command。
-- `scripts/agent-environment-reconciler.psm1`、`scripts/update-agent-environment.ps1`：使用者層級 Catalog Skills transaction、recovery 與單一升級入口。
+- `scripts/agent-environment-reconciler.psm1`、`scripts/update-agent-environment.ps1`：使用者層級 Catalog Skills transaction、recovery 與 verified-runtime reconciliation 入口。
 - `scripts/bootstrap-ai-instructions-multisource.ps1`：Catalog selection、immutable acquisition 與 composition。
 - `scripts/bootstrap-ai-instructions.ps1`、`scripts/agent-artifact-remediation.psm1`：manifest protection、tracked reserved artifact 自癒、local ignore、recovery evidence 與 rollback。
 - `scripts/ai-instructions-rollout.psm1`、`scripts/invoke-ai-instructions-rollout.ps1`：fixed-drive Repository discovery、逐 Repo bootstrap、post-scan 與結構化 rollout report。

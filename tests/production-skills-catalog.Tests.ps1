@@ -238,8 +238,8 @@ Describe 'production Skills Catalog' {
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
 
-    # Scenario: Durable AI memory is selected explicitly and has a configured Notion connector.
-    # Purpose: Keep the new Skill opt-in and fail closed when Notion capability evidence is absent.
+    # Scenario: Durable AI memory is selected while a Notion connector may be unavailable in the current runtime.
+    # Purpose: Keep the Skill opt-in while allowing its own safe non-Notion fallback to run without fabricated capability evidence.
     It 'InterT19_routes_Notion_memory_through_the_opt_in_ai_memory_profile' {
         $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'ai-memory' })
         $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-notion-ai-memory' })
@@ -250,10 +250,16 @@ Describe 'production Skills Catalog' {
         $skill.Count | Should Be 1
         [string]$skill[0].group | Should Be 'knowledge-management'
         Assert-StringSequence -Actual @($skill[0].profiles) -Expected @('ai-memory')
-        @($skill[0].compatibility.requiredCapabilities).Count | Should Be 1
-        [string]$skill[0].compatibility.requiredCapabilities[0].kind | Should Be 'connector'
-        [string]$skill[0].compatibility.requiredCapabilities[0].id | Should Be 'notion'
-        [string]$skill[0].compatibility.requiredCapabilities[0].state | Should Be 'configured'
+        @($skill[0].compatibility.requiredCapabilities).Count | Should Be 0
+
+        try {
+            Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
+            $selection = [pscustomobject]@{ profiles=@('ai-memory'); includeSkills=@(); excludeSkills=@() }
+            Assert-StringSequence `
+                -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
+                -Expected @('manage-notion-ai-memory')
+        }
+        finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
 
     # Scenario: The production catalog contains the profiles used by a new installation.
