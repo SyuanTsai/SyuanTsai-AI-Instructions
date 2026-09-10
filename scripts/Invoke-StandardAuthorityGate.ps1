@@ -696,17 +696,36 @@ function Assert-AuthoritySkillValidatorTokenCounts {
     param(
         [Parameter(Mandatory = $true)] $Report,
         [Parameter(Mandatory = $true)][string] $FixtureRoot,
-        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedTokenPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ExpectedOtherTokenPaths
     )
 
     # Upstream excludes scripts from token accounting while still checking
-    # their structure and reachability. Validate token data independently;
-    # the run-owned input inventory binds the complete package instead.
+    # their structure and reachability. The controlled caller supplies the
+    # known token-eligible paths for each native table; input hashes separately
+    # bind every file, including resources omitted from token accounting.
     [void](Get-AuthorityRequiredProperty -Object $Report -Name 'token_counts' -Context 'skill-validator token accounting')
+    $expectedByTable = @{ token_counts=$ExpectedTokenPaths; other_token_counts=$ExpectedOtherTokenPaths }
+    $expectedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($path in @($ExpectedTokenPaths) + @($ExpectedOtherTokenPaths)) {
+        if ($ExpectedInventoryPaths -cnotcontains $path -or -not $expectedPaths.Add($path)) {
+            throw 'skill-validator token-accounted inventory must contain distinct controlled input paths.'
+        }
+    }
+    if ($ExpectedTokenPaths -cnotcontains 'SKILL.md') {
+        throw 'skill-validator token-accounted inventory must include the SKILL.md body.'
+    }
     $tokenPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($envelopeName in @('token_counts', 'other_token_counts')) {
+        $expectedTablePaths = @($expectedByTable[$envelopeName])
         $envelopeProperty = $Report.PSObject.Properties[$envelopeName]
-        if ($null -eq $envelopeProperty) { continue }
+        if ($null -eq $envelopeProperty) {
+            if ($expectedTablePaths.Count -gt 0) {
+                throw "skill-validator $envelopeName token-accounted inventory is missing."
+            }
+            continue
+        }
         $envelope = $envelopeProperty.Value
         if ($envelope -isnot [pscustomobject]) {
             throw "skill-validator $envelopeName token accounting must be an object."
@@ -722,6 +741,7 @@ function Assert-AuthoritySkillValidatorTokenCounts {
         }
         Assert-AuthorityNonNegativeInteger -Value $total -Context "skill-validator $envelopeName token total"
         [int64]$sum = 0
+        $tablePaths = New-Object 'System.Collections.Generic.List[string]'
         foreach ($entry in $fileEntries) {
             if ($entry -isnot [pscustomobject]) {
                 throw "skill-validator $envelopeName token entries must be structured objects."
@@ -745,6 +765,7 @@ function Assert-AuthoritySkillValidatorTokenCounts {
             }
             if (-not $tokenPaths.Contains($reportedPath)) {
                 [void]$tokenPaths.Add($reportedPath)
+                [void]$tablePaths.Add($reportedPath)
             }
             else {
                 throw "skill-validator token accounting contains duplicate file '$reportedPath'."
@@ -753,6 +774,11 @@ function Assert-AuthoritySkillValidatorTokenCounts {
         if ($sum -ne [int64]$total) {
             throw "skill-validator $envelopeName token total does not equal the sum of its file token counts."
         }
+        if ($expectedTablePaths.Count -eq 0) {
+            throw "skill-validator $envelopeName token-accounted inventory contains unexpected files."
+        }
+        Assert-AuthorityExactPathInventory -Value @($tablePaths.ToArray()) -Expected $expectedTablePaths `
+            -Context "skill-validator $envelopeName token-accounted inventory" | Out-Null
     }
 }
 
@@ -946,7 +972,9 @@ function Assert-AuthoritySkillValidatorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
         [Parameter(Mandatory = $true)][string] $ExpectedFixtureRoot,
-        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedTokenPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ExpectedOtherTokenPaths
     )
 
     $skillDirectory = Get-AuthorityProperty -Object $Report -Name 'skill_dir'
@@ -995,7 +1023,9 @@ function Assert-AuthoritySkillValidatorReport {
     Assert-AuthoritySkillValidatorTokenCounts `
         -Report $Report `
         -FixtureRoot $ExpectedFixtureRoot `
-        -ExpectedInventoryPaths $ExpectedInventoryPaths
+        -ExpectedInventoryPaths $ExpectedInventoryPaths `
+        -ExpectedTokenPaths $ExpectedTokenPaths `
+        -ExpectedOtherTokenPaths $ExpectedOtherTokenPaths
 }
 
 function Assert-AuthoritySkillToolsSarifReport {
@@ -1657,7 +1687,9 @@ $skillValidatorReport = Read-AuthorityJson -Path $skillValidatorOutputPath -Cont
 Assert-AuthoritySkillValidatorReport `
     -Report $skillValidatorReport `
     -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths `
+    -ExpectedTokenPaths @('SKILL.md') `
+    -ExpectedOtherTokenPaths @('agents/openai.yaml')
 Assert-AuthorityToolInputInventory `
     -Envelope $skillValidatorCoverageEnvelope `
     -ExpectedToolName 'skill-validator' `

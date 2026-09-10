@@ -1217,7 +1217,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 total=1
             }
         }
-        Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml')
         $skillValidatorCases = @(
             @{ Mutate={ param($r) $r.skill_dir=(Split-Path -Parent $reportFixture.Root) } },
             @{ Mutate={ param($r) $r.errors='0' } },
@@ -1242,7 +1242,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $report = Copy-TestJsonObject $skillValidatorBaseline
             & $case.Mutate $report
             $errorMessage = $null
-            try { Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory }
+            try { Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage 'skill-validator' 'skill-validator package binding, result shape, severity, and optional locations must fail closed on drift.'
         }
@@ -2060,7 +2060,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             token_counts=[pscustomobject]@{ files=@([pscustomobject]@{ file='SKILL.md body'; tokens=1 }); total=1 }
             other_token_counts=[pscustomobject]@{ files=@([pscustomobject]@{ file='agents/openai.yaml'; tokens=1 }); total=1 }
         }
-        Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory
+        Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml')
+        # Scenario: A clean-looking native report omits the token table for required metadata.
+        # Purpose: Input hashes must not substitute for the validator's token-accounted file evidence.
+        $missingMetadataReport = Copy-TestJsonObject $report
+        $missingMetadataReport.PSObject.Properties.Remove('other_token_counts')
+        $errorMessage = $null
+        try { Assert-AuthoritySkillValidatorReport -Report $missingMetadataReport -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'token-accounted inventory' 'The report must include every known token-eligible input.'
+        foreach ($reportCase in @('wrong-table', 'unexpected-script')) {
+            $wrongTokenReport = Copy-TestJsonObject $report
+            if ($reportCase -ceq 'wrong-table') {
+                # The union still contains both files, but their native table identities are wrong.
+                $wrongTokenReport.token_counts.files[0].file = 'agents/openai.yaml'
+                $wrongTokenReport.other_token_counts.files[0].file = 'SKILL.md body'
+            }
+            else {
+                $wrongTokenReport.other_token_counts.files += [pscustomobject]@{ file='scripts/run.ps1'; tokens=1 }
+                $wrongTokenReport.other_token_counts.total = 2
+            }
+            $errorMessage = $null
+            try { Assert-AuthoritySkillValidatorReport -Report $wrongTokenReport -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'token-accounted inventory' 'Each native table must match its known eligible inputs.'
+        }
         $baseline = [pscustomobject][ordered]@{
             schemaVersion=1; toolName='skill-validator'; coverageMode='authority-input-inventory'; root=$fixture.Root
             files=@($inventory | ForEach-Object {
