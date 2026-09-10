@@ -1143,7 +1143,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
         Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$upstreamAdapterSkillRoot)")) 'Shared gate must explicitly validate the declared bundled Skill with the Standard-required agents metadata directory.'
-        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents-bundled-skill'" 'Authority evidence must record the exact bundled-Skill validator compatibility mode.'
+        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents-bundled-skill\+authority-input-inventory'" 'Authority evidence must record the native validator mode and complete input binding.'
+        Assert-Match $gate 'skill-validator-coverage\.json' 'Authority evidence must persist the validator input inventory independently of token statistics.'
         Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
         Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$upstreamAdapterSkillRoot' 'Shared gate must pass the frozen skill-tools entry point and check command against the declared bundled Skill without a wrapper re-resolution.'
         Assert-Match $gate 'Assert-AuthorityExactPathInventory' 'Shared gate must bind package-tool reports to the exact adapter Skill inventory.'
@@ -1216,7 +1217,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 total=1
             }
         }
-        Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory
+        Assert-AuthoritySkillValidatorReport -Report $skillValidatorBaseline -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml')
         $skillValidatorCases = @(
             @{ Mutate={ param($r) $r.skill_dir=(Split-Path -Parent $reportFixture.Root) } },
             @{ Mutate={ param($r) $r.errors='0' } },
@@ -1241,7 +1242,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $report = Copy-TestJsonObject $skillValidatorBaseline
             & $case.Mutate $report
             $errorMessage = $null
-            try { Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory }
+            try { Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $reportFixture.Root -ExpectedInventoryPaths $fixtureInventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage 'skill-validator' 'skill-validator package binding, result shape, severity, and optional locations must fail closed on drift.'
         }
@@ -2044,6 +2045,95 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-AuthoritySchemaInstance -Value $differentToken -Schema $schema -SchemaPath $script:OpenAiMetadataSchemaPath -Expected $true -Message 'JSON Schema validates token grammar, not exact package identity.'
         $schemaDescription = [string]$schema.description
         Assert-Match $schemaDescription 'exact \$<skill-id> binding.*YAML-aware checks' 'Schema documentation must assign exact lexical identity binding to the YAML-aware validator.'
+    }
+
+    # Scenario: A valid package includes a script that upstream intentionally omits from token accounting.
+    # Purpose: Bind the whole input with hashes without mistaking token statistics for per-file analysis coverage.
+    It 'UnitT38_binds_script_inputs_without_requiring_script_token_counts' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $fixture = New-TestAuthorityFixture -Root (Join-Path $TestDrive 'package-input-fixture')
+        Write-TestUtf8File -Path (Join-Path $fixture.Root 'scripts/run.ps1') -Text "Write-Output 'fixture'`n"
+        $inventory = @('SKILL.md', 'agents/openai.yaml', 'scripts/run.ps1')
+        $report = [pscustomobject]@{
+            skill_dir=$fixture.Root; passed=$true; errors=0; warnings=0
+            results=@([pscustomobject]@{ level='pass'; category='structure'; message='Package structure is valid.' })
+            token_counts=[pscustomobject]@{ files=@([pscustomobject]@{ file='SKILL.md body'; tokens=1 }); total=1 }
+            other_token_counts=[pscustomobject]@{ files=@([pscustomobject]@{ file='agents/openai.yaml'; tokens=1 }); total=1 }
+        }
+        Assert-AuthoritySkillValidatorReport -Report $report -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml')
+        # Scenario: A clean-looking native report omits the token table for required metadata.
+        # Purpose: Input hashes must not substitute for the validator's token-accounted file evidence.
+        $missingMetadataReport = Copy-TestJsonObject $report
+        $missingMetadataReport.PSObject.Properties.Remove('other_token_counts')
+        $errorMessage = $null
+        try { Assert-AuthoritySkillValidatorReport -Report $missingMetadataReport -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'token-accounted inventory' 'The report must include every known token-eligible input.'
+        foreach ($reportCase in @('wrong-table', 'unexpected-script')) {
+            $wrongTokenReport = Copy-TestJsonObject $report
+            if ($reportCase -ceq 'wrong-table') {
+                # The union still contains both files, but their native table identities are wrong.
+                $wrongTokenReport.token_counts.files[0].file = 'agents/openai.yaml'
+                $wrongTokenReport.other_token_counts.files[0].file = 'SKILL.md body'
+            }
+            else {
+                $wrongTokenReport.other_token_counts.files += [pscustomobject]@{ file='scripts/run.ps1'; tokens=1 }
+                $wrongTokenReport.other_token_counts.total = 2
+            }
+            $errorMessage = $null
+            try { Assert-AuthoritySkillValidatorReport -Report $wrongTokenReport -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory -ExpectedTokenPaths @('SKILL.md') -ExpectedOtherTokenPaths @('agents/openai.yaml') }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'token-accounted inventory' 'Each native table must match its known eligible inputs.'
+        }
+        $baseline = [pscustomobject][ordered]@{
+            schemaVersion=1; toolName='skill-validator'; coverageMode='authority-input-inventory'; root=$fixture.Root
+            files=@($inventory | ForEach-Object {
+                [pscustomobject][ordered]@{ path=$_; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixture.Root $_)).Hash.ToLowerInvariant() }
+            })
+        }
+        Assert-AuthorityToolInputInventory -Envelope $baseline -ExpectedToolName 'skill-validator' -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory
+        $cases = @(
+            @{ Mutate={ param($e) $e.PSObject.Properties.Remove('files') } },
+            @{ Mutate={ param($e) $e.files=@($e.files[0], $e.files[1]) } },
+            @{ Mutate={ param($e) $e.files += [pscustomobject]@{ path='unexpected.txt'; sha256=('0' * 64) } } },
+            @{ Mutate={ param($e) $e.files += $e.files[0] } },
+            @{ Mutate={ param($e) $e.files[2].path='../outside.ps1' } },
+            @{ Mutate={ param($e) $e.files[2].sha256='invalid' } },
+            @{ Mutate={ param($e) $e.files[2].sha256=('0' * 64) } },
+            @{ Mutate={ param($e) $e.toolName='skill-tools' } },
+            @{ Mutate={ param($e) $e.coverageMode='token-counts' } },
+            @{ Mutate={ param($e) $e.root=(Split-Path -Parent $fixture.Root) } },
+            @{ Mutate={ param($e) $e.schemaVersion='1' } },
+            @{ Mutate={ param($e) $e.files[2] | Add-Member -NotePropertyName ignored -NotePropertyValue $true } }
+        )
+        foreach ($case in $cases) {
+            $envelope = Copy-TestJsonObject $baseline
+            & $case.Mutate $envelope
+            $errorMessage = $null
+            try { Assert-AuthorityToolInputInventory -Envelope $envelope -ExpectedToolName 'skill-validator' -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'skill-validator coverage envelope' 'Input identity and exact file hashes must fail closed on envelope drift.'
+        }
+
+        # Scenario: An unrecorded regular file appears in the input directory after capture.
+        # Purpose: Ensure the envelope binds the actual complete input, not only the listed files.
+        $extraPath = Join-Path $fixture.Root 'unexpected.txt'
+        Write-TestUtf8File -Path $extraPath -Text 'unexpected fixture file'
+        try {
+            $errorMessage = $null
+            try { Assert-AuthorityToolInputInventory -Envelope $baseline -ExpectedToolName 'skill-validator' -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'exact expected inventory' 'Unrecorded input files must fail closed.'
+        }
+        finally { Remove-Item -LiteralPath $extraPath -Force }
+
+        # Scenario: A script changes after the native tool ran while the captured envelope stays unchanged.
+        # Purpose: Reject stale input evidence even when the native report remains clean.
+        Write-TestUtf8File -Path (Join-Path $fixture.Root 'scripts/run.ps1') -Text "Write-Output 'changed fixture'`n"
+        $errorMessage = $null
+        try { Assert-AuthorityToolInputInventory -Envelope $baseline -ExpectedToolName 'skill-validator' -ExpectedFixtureRoot $fixture.Root -ExpectedInventoryPaths $inventory }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'changed after the tool run' 'Post-run input verification must reject a modified script.'
     }
 
     It 'UnitT40_distinguishes_release_approval_from_installing_an_already_approved_release' {
