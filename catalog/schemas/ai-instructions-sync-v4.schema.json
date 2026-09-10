@@ -44,6 +44,7 @@
           "$ref": "#/$defs/stableIdArray"
         },
         "includeSkills": {
+          "description": "Explicit Skill requirements not already supplied by an active profile; installer migration removes profile overlap.",
           "$ref": "#/$defs/stableIdArray"
         },
         "excludeSkills": {
@@ -62,6 +63,7 @@
       ],
       "properties": {
         "mode": {
+          "description": "notify-only reports an available candidate without installing it; auto-install-approved authorizes the configured update channel.",
           "enum": [
             "notify-only",
             "auto-install-approved"

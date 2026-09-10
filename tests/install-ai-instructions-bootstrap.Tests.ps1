@@ -207,10 +207,18 @@ Describe 'install-ai-instructions-bootstrap' {
         $agents | Should Not Match 'SessionStart'
         $agents | Should Match 'excludedRepositoryUrls'
         $agents | Should Match 'excludedRepositoryPaths'
+        $agents | Should Match '目前 Codex Home'
+        $agents | Should Not Match ([regex]::Escape('~/.codex/ai-instructions-sync.json'))
         $agents | Should Match 'Agent Skills'
         $agents | Should Match 'customized or unmanaged Instructions or Agent Skills'
         $agents | Should Match '所有 branch 共用的個人 runtime artifacts'
         $agents | Should Match '只包含精確 reserved path deletions 的一次性本機 remediation commit'
+        $agents | Should Match '沙箱或權限拒絕'
+        $agents | Should Match '核准後重試一次'
+        $agents | Should Match 'compatibility、configuration 或 integrity'
+        $agents | Should Match '不得重試'
+        $agents | Should Match 'notify-only.*available.*未安裝'
+        $agents | Should Match '不得偽造 capability evidence'
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json') | Should Be $false
     }
 
@@ -394,6 +402,23 @@ Keep this section too.
         [int]$updated.updates.minimumCheckIntervalMinutes | Should Be 60
     }
 
+    # Scenario: An existing v4 configuration repeats a Skill already selected by its active profile.
+    # Purpose: Normalize the legacy overlap during installation so profile compatibility remains soft in every Codex Home.
+    It 'InterT36_normalizes_redundant_profile_and_includeSkills_selection_during_installation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.catalog.profiles = @('atlassian')
+        $configuration.catalog.includeSkills = @('work-with-jira','plan-production-change')
+        Set-TestJson -Path $configurationPath -Document $configuration
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $updated = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
+        @($updated.catalog.profiles) | Should Be @('atlassian')
+        @($updated.catalog.includeSkills) | Should Be @('plan-production-change')
+    }
+
     # Scenario: An existing schema-v4 configuration was manually changed to a mutable Catalog ref.
     # Purpose: Fail before installation mutation rather than normalizing an untrusted bundle identity.
     It 'InterT37_rejects_a_mutable_schema_v4_bundle_ref_before_installation_changes' {
@@ -525,7 +550,8 @@ Keep this section too.
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
         foreach ($fileName in @(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
-            'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1'
+            'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1',
+            'ai-instructions-runtime-contract.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
                 -Destination (Join-Path $invalidSource "scripts\$fileName") -Force
@@ -788,9 +814,9 @@ else {
         }
     }
 
-    # Scenario: Apply must let the runtime updater own the install lock, then consume the resulting runtime as one stable snapshot.
-    # Purpose: Release the read lease only for update and reacquire it before importing or calling the reconciler.
-    It 'InterT54a_agent_environment_apply_releases_then_reacquires_the_runtime_read_lock' {
+    # Scenario: Apply runs while a newer AI-Instructions candidate may exist under the separate updater policy.
+    # Purpose: Reconcile only the current verified runtime without invoking the updater or silently approving a candidate.
+    It 'InterT54a_agent_environment_apply_uses_the_current_verified_runtime_without_invoking_the_updater' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
         $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
@@ -802,14 +828,8 @@ else {
 
         $updaterFixture = @"
 param([string]`$CodexHome,[switch]`$ForceCheck,[switch]`$InstallApproved)
-`$exclusive = [System.IO.File]::Open(
-    '$escapedInstallLockPath',
-    [System.IO.FileMode]::Open,
-    [System.IO.FileAccess]::ReadWrite,
-    [System.IO.FileShare]::None
-)
-try { [System.IO.File]::WriteAllText('$escapedUpdaterMarker','exclusive-acquired') }
-finally { `$exclusive.Dispose() }
+[System.IO.File]::WriteAllText('$escapedUpdaterMarker','unexpected-invocation')
+throw 'Agent environment reconciliation must not invoke the AI-Instructions updater.'
 "@
         Set-TestText -Path (Join-Path $codexHome 'hooks\update-ai-instructions.ps1') -Value $updaterFixture
         Set-TestText -Path (Join-Path $runtimeRoot 'update-ai-instructions.ps1') -Value $updaterFixture
@@ -890,7 +910,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
 
         $exitCode | Should Be 0
         ($output -join [Environment]::NewLine) | Should Match '"outcome":"current"'
-        [System.IO.File]::ReadAllText($updaterMarker) | Should Be 'exclusive-acquired'
+        Test-Path -LiteralPath $updaterMarker | Should Be $false
         [System.IO.File]::ReadAllText($reconcilerMarker) | Should Be 'blocked-by-read-lock'
     }
 
@@ -906,6 +926,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
         $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $hookPath 2>&1
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'runtime bundle does not match'
+        ($output -join [Environment]::NewLine) | Should Match 'classification=integrity; retryable=false'
     }
 
     # Scenario: An interrupted swap leaves a strict configuration and verified runtime bundle pinned to different canonical commits.
@@ -975,7 +996,10 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
         finally { $installLock.Dispose() }
 
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'recovery refused to run while another AI instructions installer is active'
+        $outputText = $output -join [Environment]::NewLine
+        $outputText | Should Match 'recovery refused to run while another AI instructions installer is active'
+        $outputText | Should Match 'classification=concurrency; retryable=false'
+        $outputText | Should Not Match 'classification=operational'
         [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json).catalog.ref |
             Should Be ('0' * 40)
     }
@@ -994,6 +1018,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'update policy is invalid'
+        ($output -join [Environment]::NewLine) | Should Match 'classification=configuration; retryable=false'
     }
 
     # Scenario: The installed updater module is missing and an unmanaged sibling module is placed beside the stable command.
@@ -1073,6 +1098,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stable launcher does not match'
+        ($output -join [Environment]::NewLine) | Should Match 'classification=integrity; retryable=false'
     }
 
     # Scenario: The stable Agent environment updater drifts from its immutable runtime reference copy.
@@ -1103,6 +1129,7 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
 
         $LASTEXITCODE | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match '(?s)runtime is incomplete:.*update-agent-environment\.ps1'
+        ($output -join [Environment]::NewLine) | Should Match 'classification=integrity; retryable=false'
     }
 
     # Scenario: The installed runtime directory is replaced by a file while unmanaged cleanup contracts exist beside the stable command.

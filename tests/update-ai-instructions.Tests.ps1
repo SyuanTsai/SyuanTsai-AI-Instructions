@@ -83,6 +83,37 @@ Describe 'AI instructions updater workflow' {
         $result.candidateCommit | Should Be ('b' * 40)
     }
 
+    # Scenario: The updater returns notify-only availability without installing the verified candidate.
+    # Purpose: Give launchers and Agents an explicit non-error, non-installed disposition instead of relying on prose interpretation.
+    It 'UnitT22_classifies_notify_only_availability_as_a_non_retryable_notification' {
+        $disposition = Get-AiInstructionsUpdateDisposition `
+            -Outcome 'available' `
+            -Message 'A verified canonical candidate is available; notify-only mode did not install it.'
+
+        $disposition.classification | Should Be 'notification'
+        $disposition.installationState | Should Be 'not-installed'
+        $disposition.retryable | Should Be $false
+    }
+
+    # Scenario: Bootstrap-facing errors represent sandbox denial, configuration, compatibility, or integrity failures.
+    # Purpose: Allow one approved retry only for sandbox denial while keeping deterministic failures fail closed.
+    It 'UnitT23_classifies_only_sandbox_denial_as_retryable' {
+        $cases = @(
+            @{ Message='Access to the path is denied.'; Classification='sandbox'; Retryable=$true },
+            @{ Message='Access is denied.'; Classification='sandbox'; Retryable=$true },
+            @{ Message='AI instruction sync configuration schemaVersion is invalid.'; Classification='configuration'; Retryable=$false },
+            @{ Message='Explicitly included Skill is incompatible with capability evidence.'; Classification='compatibility'; Retryable=$false },
+            @{ Message='Runtime bundle inventory hash mismatch.'; Classification='integrity'; Retryable=$false }
+        )
+
+        foreach ($case in $cases) {
+            $disposition = Get-AiInstructionsUpdateDisposition -Outcome 'failed' -Message $case.Message
+            $disposition.classification | Should Be $case.Classification
+            $disposition.retryable | Should Be $case.Retryable
+            $disposition.installationState | Should Be 'not-installed'
+        }
+    }
+
     # Scenario: The configured mutable ref resolves behind or off the installed immutable history.
     # Purpose: Refuse downgrades and divergent candidates before acquisition in every update mode.
     It 'UnitT25_reports_a_stale_non_forward_candidate_without_installing' {
@@ -533,6 +564,9 @@ param(
         }
 
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'concurrent|installer is already running'
+        $outputText = $output -join [Environment]::NewLine
+        $outputText | Should Match 'classification=concurrency; installationState=not-installed; retryable=false'
+        $outputText | Should Match 'concurrent|installer is already running'
+        $outputText | Should Not Match 'classification=operational'
     }
 }

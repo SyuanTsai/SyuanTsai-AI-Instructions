@@ -31,7 +31,7 @@
 Resolver 依固定順序處理：
 
 1. 合併所有選定 profile 的 `includes`。
-2. 套用個人 `includeSkills`，並遷移 alias／replacement ID。
+2. 套用個人 `includeSkills`，並遷移 alias／replacement ID；若同一 Skill 已由選定 profile 帶入，該重複項會正規化移除，且 resolver 防禦性地維持 profile 的 soft compatibility 語意。只有 profile 未選入的真正明確 include 才是 hard requirement。
 3. 套用個人 `excludeSkills`，並遷移 alias／replacement ID；明確 exclude 最終優先。
 4. 過濾 platform、shell 與 capability compatibility；profile 帶入但不相容的 Skill 會被移除，明確 `includeSkills` 指定但不相容則 fail closed。唯一例外是缺少的 `anyOfCapabilities` alternative set 同時包含某個 conditional dependency 的 condition 與 fallback capability，而且該 dependency 目前 required 且本身相容；此時保留 workflow Skill 供下一步加入 setup fallback。Platform、shell、`requiredCapabilities` 或無關 capability set 的失敗不可以這個例外放寬。
 5. 驗證 dependencies：
@@ -60,6 +60,7 @@ Conditional operator 的 production semantics：
 - `anyOfCapabilities` 的每個內層集合代表 alternatives；每個集合至少滿足一項。
 - Capability `kind` 為 `command`、`connector` 或 `environment`；`state` 為 `available`、`authenticated` 或 `configured`。
 - `command` + `available` 可由本機 `Get-Command` 驗證；authentication、connector、API/environment readiness 不得由名稱猜測，必須有明確 runtime evidence。
+- 只有 Skill 在任何安全路徑都無法運作時，connector 或 environment 才屬於安裝期 compatibility。若 Skill 已定義「tool 不可用時略過外部寫入並繼續本機工作」的安全 fallback，該 connector 是執行期 dependency，保留在 Skill metadata／instructions，不得放入 `requiredCapabilities` 阻止 Skill 載入。`manage-notion-ai-memory` 的 Notion MCP 即採此模式。
 - Runtime evidence 透過 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 傳入 JSON array，例如：
 
 ```json
@@ -70,7 +71,7 @@ Conditional operator 的 production semantics：
 ]
 ```
 
-- 沒有 evidence 時採 fail-closed；不得只因 profile 被選取就假設 connector、authentication 或 API capability 可用。
+- 對 Catalog 明確宣告的安裝期 compatibility，沒有 evidence 時採 fail-closed；不得只因 profile 被選取就假設 connector、authentication 或 API capability 可用。執行期 optional dependency 則由 Skill 自身 fallback 處理，不得偽造 evidence。
 
 ## Source acquisition、pin 與 hash contract
 
@@ -99,14 +100,17 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 
-- 保留合法的 `excludedRepositoryUrls`、`excludedRepositoryPaths`；v3／v4 另保留 `profiles`、`includeSkills`、`excludeSkills`。
+- 保留合法的 `excludedRepositoryUrls`、`excludedRepositoryPaths`；v3／v4 另保留 `profiles`、`includeSkills`、`excludeSkills`，但會依 candidate Catalog 移除已由選定 profile 帶入的冗餘 `includeSkills`。這項 migration 不改變真正的額外 include 或 explicit exclude。
 - 所有舊 `autoCommitRepositoryUrls`、`autoCommitRepositoryPaths` 與 `repositoryUrls` 都會移除；正常同步不會 stage 或 commit 目標 Repository。唯一例外是 tracked reserved Agent artifact 的一次性隔離 remediation commit，且 runtime 永遠不會 push consumer Repository。
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須介於 1 與 2147483647，確保所有 schema-valid v4 設定都能由 installer idempotent 遷移並交給 updater。
+- `notify-only` 的 `outcome = available` 是通知，不是失敗也不是安裝完成；它必須回報 `classification = notification`、`installationState = not-installed` 與 `retryable = false`，並繼續使用目前 verified runtime。安裝 candidate 必須由獨立 updater policy 或明確的單次核准觸發。
+- `update-agent-environment.ps1 -Apply` 只依目前 verified runtime 重建並套用 user Skills desired state，不執行 update check，也不傳入 `InstallApproved`。需要更新 AI-Instructions runtime 時先獨立執行 `update-ai-instructions.ps1`，完成驗證後再 reconcile environment。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
 - Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／Agent environment updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。
 - Updater 只解析 canonical protected branch 或 latest release 到 immutable commit；下載後驗證安全 ZIP、PowerShell parse、Catalog/Lock，再次解析 candidate 避免 TOCTOU，最後呼叫 transactional installer。Windows PowerShell 的 WebException 與 PowerShell 7 的 HttpResponseException rate-limit 形態都會安全退回 offline。Receipt 使用同目錄原子替換，損壞的舊 receipt 會 quarantine 後重建。並行檢查與安裝分別由 per-home update/install lock 拒絕。
 - `rate-limit` 與 `concurrent` 是不落盤的 workflow 結果；前者在最小檢查間隔尚未經過時保留上一份有效 receipt，後者讓 manual command／launcher fail closed，避免與 runtime swap 交錯，因此 receipt schema 只列出實際 persisted outcomes。
+- Stable launcher／updater 的操作輸出會標示 `classification` 與 `retryable`。只有明確的 sandbox／permission denial 可在取得核准後重試一次；configuration、compatibility、integrity 與其他 deterministic failure 保持 fail closed，不得在同一 task 迴圈重跑、偽造 capability evidence 或修改 consumer Repository 規避。
 - Stable installer 先以內建 canonical identity／archive hash／git HEAD verifier 驗證 candidate source，通過後才 import candidate contract；接著在 install lock 內重驗 expected current commit 與 updater 決策時的 mode/channel/ref，並於 staging 完成 parse、Catalog/Lock 與 runtime bundle 驗證，再替換 launcher、updater、Agent environment updater、cleanup、runtime 與 config。任何 pre-swap failure 都清除 transaction directories，正常 mutation 例外會完整 rollback，rollback 本身失敗才保留 backup path。
 
 Production wrapper 已完成 config validation、compatibility/dependency selection、routing、immutable acquisition、manifest v2 wiring 與 v1 safe migration。Mutation engine 只接受 wrapper 產生的已組合 archive 與 immutable provenance；舊單一來源直接呼叫模式已移除。Tracked reserved artifact 會先由隔離 remediation 備份並解除追蹤，再進入正常 v1／v2 migration；相同 strict legacy parser 也供舊 runtime 的明確授權 pollution cleanup 使用。

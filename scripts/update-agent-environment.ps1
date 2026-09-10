@@ -91,7 +91,6 @@ $codexHomePath = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd([char[]]@('\'
 $userHomePath = [System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
 $runtimeRoot = Join-Path $codexHomePath 'hooks/ai-instructions-runtime'
 $launcher = Join-Path $codexHomePath 'hooks/bootstrap-ai-instructions.ps1'
-$runtimeUpdater = Join-Path $codexHomePath 'hooks/update-ai-instructions.ps1'
 
 function Open-AgentEnvironmentRuntimeReadLock {
     $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
@@ -145,18 +144,6 @@ try {
 
     $script:agentEnvironmentRuntimeReadLock = Open-AgentEnvironmentRuntimeReadLock
     & $launcher -ValidateOnly | Out-Null
-
-    if ($Apply -and -not $WhatIfPreference) {
-        if (-not (Test-Path -LiteralPath $runtimeUpdater -PathType Leaf)) { throw "Installed AI instructions updater is missing: $runtimeUpdater" }
-
-        # The updater may need the exclusive install lock. Release the verified read lease only
-        # for that child workflow, then reacquire and revalidate before loading any runtime code.
-        $script:agentEnvironmentRuntimeReadLock.Dispose()
-        $script:agentEnvironmentRuntimeReadLock = $null
-        & $runtimeUpdater -CodexHome $codexHomePath -ForceCheck -InstallApproved | Out-Null
-        $script:agentEnvironmentRuntimeReadLock = Open-AgentEnvironmentRuntimeReadLock
-        & $launcher -ValidateOnly | Out-Null
-    }
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue
     Import-Module $reconcilerPath -Force

@@ -124,6 +124,32 @@ Describe 'AI instructions runtime contracts' {
         { Assert-AiInstructionsSyncConfigurationV4 -Configuration $migrated } | Should Not Throw
     }
 
+    # Scenario: A legacy v4 configuration repeats a Skill already selected by one of its active profiles.
+    # Purpose: Remove the redundant hard-selection marker during installation while preserving unrelated explicit includes.
+    It 'UnitT15_normalizes_profile_and_includeSkills_overlap_with_the_Catalog' {
+        $existing = New-TestConfigurationDocument -SchemaVersion 4
+        $existing.catalog.profiles = @('atlassian')
+        $existing.catalog.includeSkills = @('work-with-jira','plan-production-change')
+        $catalog = [pscustomobject]@{
+            profiles = @(
+                [pscustomobject]@{ id='atlassian'; default=$false; includes=@('work-with-jira'); excludes=@() }
+            )
+            skills = @(
+                [pscustomobject]@{ id='work-with-jira'; lifecycle=[pscustomobject]@{ status='active'; aliases=@() } },
+                [pscustomobject]@{ id='plan-production-change'; lifecycle=[pscustomobject]@{ status='active'; aliases=@() } }
+            )
+        }
+
+        $migrated = ConvertTo-AiInstructionsSyncConfigurationV4 `
+            -ExistingConfiguration $existing `
+            -CatalogRepository $script:CanonicalRepository `
+            -CatalogRef ('5' * 40) `
+            -Catalog $catalog
+
+        @($migrated.catalog.profiles) | Should Be @('atlassian')
+        @($migrated.catalog.includeSkills) | Should Be @('plan-production-change')
+    }
+
     # Scenario: A staged runtime is represented by bundle schema v2 and an exact file inventory.
     # Purpose: Make launcher validation cover every runtime byte rather than repository identity alone.
     It 'UnitT50_validates_runtime_bundle_v2_identity_and_complete_inventory' {

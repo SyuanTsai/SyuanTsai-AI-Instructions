@@ -152,6 +152,20 @@ function New-SelectionCatalog {
         @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
     }
 
+    # Scenario: The same incompatible Skill is selected by an active profile and redundantly repeated in includeSkills.
+    # Purpose: Keep the profile's soft compatibility semantics instead of turning a redundant selection into a global hard failure.
+    It 'UnitT75_does_not_harden_a_redundant_profile_selected_Skill' {
+        $catalog = New-SelectionCatalog
+        $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(
+            (New-TestSkill -Id 'skill-optional' -Compatibility (New-TestCompatibility -RequiredCapabilities @(
+                [pscustomobject]@{ kind='connector'; id='datadog'; state='configured' }
+            )))
+        )
+        $selection = [pscustomobject]@{ profiles=@('optional'); includeSkills=@('skill-optional'); excludeSkills=@() }
+
+        @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection).Count | Should Be 0
+    }
+
     It 'UnitT80_fails_closed_when_an_explicitly_included_skill_is_incompatible' {
         $catalog = New-SelectionCatalog
         $catalog.skills = @($catalog.skills | Where-Object { $_.id -ne 'skill-optional' }) + @(

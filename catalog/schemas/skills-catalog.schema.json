@@ -101,7 +101,11 @@
           "properties": {
             "platforms": {"type": "array","minItems": 1,"uniqueItems": true,"items": {"type": "string","enum": ["any","linux","macos","windows"]}},
             "shells": {"type": "array","uniqueItems": true,"items": {"type": "string","minLength": 1}},
-            "requiredCapabilities": {"type": "array","items": {"$ref": "#/$defs/capability"}},
+            "requiredCapabilities": {
+              "description": "Install-time requirements that every safe Skill path needs; runtime-optional tools with a safe Skill fallback do not belong here.",
+              "type": "array",
+              "items": {"$ref": "#/$defs/capability"}
+            },
             "anyOfCapabilities": {"type": "array","items": {"type": "array","minItems": 1,"items": {"$ref": "#/$defs/capability"}}}
           }
         },
