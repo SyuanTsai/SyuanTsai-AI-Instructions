@@ -299,6 +299,77 @@ jobs:
                 Name = 'public-release-command'
                 RelativePath = 'README.md'
                 Text = "Run ./scripts/run-domain-tests.ps1 as the release gate.`n"
+            },
+            @{
+                Name = 'release-workflow-without-canonical'
+                RelativePath = '.github/workflows/release.yml'
+                Text = @'
+name: Release
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-action-without-canonical'
+                RelativePath = '.github/workflows/release-action.yml'
+                Text = @'
+name: Release action
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - uses: softprops/action-gh-release@v2
+'@
+            },
+            @{
+                Name = 'release-workflow-step-name-only-canonical'
+                RelativePath = '.github/workflows/release-step-name.yml'
+                Text = @'
+name: Release step metadata
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - name: ./scripts/Validate.ps1
+        run: gh release create v1.0.0
+'@
+            },
+            @{
+                Name = 'release-workflow-comment-only-canonical'
+                RelativePath = '.github/workflows/release-comment.yml'
+                Text = @'
+name: Release comment metadata
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - run: |
+          # ./scripts/Validate.ps1
+          gh release create v1.0.0
+'@
+            },
+            @{
+                Name = 'compatibility-independent-validation'
+                RelativePath = '.github/workflows/compatibility-independent.yml'
+                Text = @'
+name: Compatibility status
+on:
+  workflow_dispatch:
+jobs:
+  compatibility-status:
+    needs: canonical-validation
+    steps:
+      - run: Invoke-Pester -Path tests/domain
+'@
             }
         )
         foreach ($case in $negativeCases) {
@@ -339,6 +410,8 @@ jobs:
 name: Duplicate PR adapter
 on:
   pull_request:
+    branches:
+      - main
 jobs:
   duplicate:
     steps:
@@ -379,6 +452,36 @@ jobs:
                 -RepositoryRoot $splitRoot `
                 -CanonicalValidatorPath 'scripts/Validate.ps1' `
                 -Policy $policy) 'Protected PR and trusted push adapters may be separate when their events do not duplicate execution.'
+
+        $disjointCandidateRoot = Join-Path $TestDrive 'entry-point-disjoint-candidates'
+        [void](New-Item -ItemType Directory -Path (Join-Path $disjointCandidateRoot '.github/workflows') -Force)
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot '.github/workflows/main-pr.yml') -Text @'
+name: Main pull request adapter
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot '.github/workflows/release-pr.yml') -Text @'
+name: Release pull request adapter
+on:
+  pull_request:
+    branches:
+      - release
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $disjointCandidateRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'Disjoint branch candidates for the same event may each execute the canonical validator once.'
 
         $roles = @($policy.entryPointContract.authorityWorkflowRoles)
         Assert-Equal $roles.Count 4 'The authority repository must explicitly classify all four legitimate workflow roles.'

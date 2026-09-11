@@ -523,48 +523,167 @@ function Assert-AuthorityEntryPointPolicy {
     }
 }
 
+function Remove-AuthorityConsumerShellComments {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Line)
+
+    if ($Line -match '^\s*(?:#|REM(?:\s|$)|::)') { return '' }
+    $singleQuote = [char]39
+    $doubleQuote = [char]34
+    $hash = [char]35
+    $inSingleQuote = $false
+    $inDoubleQuote = $false
+    for ($index = 0; $index -lt $Line.Length; $index++) {
+        $character = $Line[$index]
+        if ($character -eq $singleQuote -and -not $inDoubleQuote) {
+            $inSingleQuote = -not $inSingleQuote
+            continue
+        }
+        if ($character -eq $doubleQuote -and -not $inSingleQuote) {
+            $inDoubleQuote = -not $inDoubleQuote
+            continue
+        }
+        if ($character -eq $hash -and -not $inSingleQuote -and -not $inDoubleQuote -and
+            ($index -eq 0 -or [char]::IsWhiteSpace($Line[$index - 1]))) {
+            return $Line.Substring(0, $index)
+        }
+    }
+    return $Line
+}
+
+function Get-AuthorityConsumerExecutableText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $fragments = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -notmatch '^\s*(?:-\s+)?(?:"run"|''run''|run|"uses"|''uses''|uses)\s*:\s*(?<value>.*)$') { continue }
+        $keyIndent = ([regex]::Match($line, '^\s*')).Value.Length
+        $value = (Remove-AuthorityConsumerShellComments -Line ([string]$Matches.value)).Trim()
+        if ($value -match '^[|>][+-]?\s*$') {
+            $blockLines = New-Object 'System.Collections.Generic.List[string]'
+            $nestedIndex = $index + 1
+            while ($nestedIndex -lt $lines.Count) {
+                $nestedLine = [string]$lines[$nestedIndex]
+                if ($nestedLine -match '^\s*$') {
+                    [void]$blockLines.Add('')
+                    $nestedIndex++
+                    continue
+                }
+                $nestedIndent = ([regex]::Match($nestedLine, '^\s*')).Value.Length
+                if ($nestedIndent -le $keyIndent) { break }
+                [void]$blockLines.Add((Remove-AuthorityConsumerShellComments -Line $nestedLine))
+                $nestedIndex++
+            }
+            [void]$fragments.Add([string]::Join("`n", $blockLines.ToArray()))
+            $index = $nestedIndex - 1
+            continue
+        }
+        [void]$fragments.Add($value)
+    }
+    return [string]::Join("`n", $fragments.ToArray())
+}
+
+function Get-AuthorityConsumerScriptText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $cleanLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $lines) {
+        [void]$cleanLines.Add((Remove-AuthorityConsumerShellComments -Line ([string]$line)))
+    }
+    return [string]::Join("`n", $cleanLines.ToArray())
+}
+
+function Get-AuthorityConsumerWorkflowCandidateKey {
+    param(
+        [Parameter(Mandatory = $true)][string] $Event,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines
+    )
+
+    $normalizedLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $Lines) {
+        $cleanLine = (Remove-AuthorityConsumerShellComments -Line ([string]$line)).Trim()
+        if ([string]::IsNullOrWhiteSpace($cleanLine)) { continue }
+        [void]$normalizedLines.Add(($cleanLine -replace '\s+', ' '))
+    }
+    $orderedLines = @($normalizedLines.ToArray() | Sort-Object)
+    return '{0}|{1}' -f $Event, ([string]::Join('|', $orderedLines))
+}
+
 function Get-AuthorityConsumerWorkflowEvents {
     param([Parameter(Mandatory = $true)][string] $Text)
 
     $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
     $lines = $normalized.Split("`n")
-    $events = New-Object 'System.Collections.Generic.List[string]'
+    $candidates = New-Object 'System.Collections.Generic.List[object]'
     $onFound = $false
     for ($index = 0; $index -lt $lines.Count; $index++) {
         $line = [string]$lines[$index]
-        if ($line -notmatch '^(?:"on"|''on''|on)\s*:\s*(?<value>.*)$') { continue }
+        if ($line -notmatch '^\s*(?:"on"|''on''|on)\s*:\s*(?<value>.*)$') { continue }
         $onFound = $true
-        $inlineValue = ([string]$Matches.value) -replace '\s+#.*$', ''
+        $inlineValue = (Remove-AuthorityConsumerShellComments -Line ([string]$Matches.value)).Trim()
         if (-not [string]::IsNullOrWhiteSpace($inlineValue) -and $inlineValue -notmatch '^\{?\s*\}?$') {
+            $recognized = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
             foreach ($match in [regex]::Matches($inlineValue, '(?<![A-Za-z0-9_-])(pull_request|push|workflow_dispatch)(?![A-Za-z0-9_-])')) {
-                [void]$events.Add([string]$match.Groups[1].Value)
+                $event = [string]$match.Groups[1].Value
+                if ($recognized.Add($event)) {
+                    [void]$candidates.Add([pscustomobject]@{
+                            Event = $event
+                            CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $event -Lines @($inlineValue)
+                        })
+                }
             }
-            if ($events.Count -eq 0) {
-                [void]$events.Add('__unsupported__')
+            if ($candidates.Count -eq 0) {
+                [void]$candidates.Add([pscustomobject]@{ Event = '__unsupported__'; CandidateKey = '__unsupported__' })
             }
             break
         }
 
         $onIndent = ([regex]::Match($line, '^\s*')).Value.Length
         $eventIndent = $null
+        $currentEvent = $null
+        $currentLines = New-Object 'System.Collections.Generic.List[string]'
         for ($nestedIndex = $index + 1; $nestedIndex -lt $lines.Count; $nestedIndex++) {
             $nestedLine = [string]$lines[$nestedIndex]
-            if ($nestedLine -match '^\s*(?:#.*)?$') { continue }
+            if ($nestedLine -match '^\s*(?:#.*)?$') {
+                if ($null -ne $currentEvent) { [void]$currentLines.Add($nestedLine) }
+                continue
+            }
             $nestedIndent = ([regex]::Match($nestedLine, '^\s*')).Value.Length
             if ($nestedIndent -le $onIndent) { break }
-            if ($nestedLine -match '^(?<indent>\s*)(?<event>[A-Za-z_][A-Za-z0-9_-]*)\s*:') {
+            if ($nestedLine -match '^(?<indent>\s*)(?<event>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?<value>.*)$') {
                 if ($null -eq $eventIndent) { $eventIndent = $nestedIndent }
-                if ($nestedIndent -ne $eventIndent) { continue }
-                [void]$events.Add([string]$Matches.event)
+                if ($nestedIndent -eq $eventIndent) {
+                    if ($null -ne $currentEvent) {
+                        [void]$candidates.Add([pscustomobject]@{
+                                Event = $currentEvent
+                                CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $currentEvent -Lines $currentLines.ToArray()
+                            })
+                    }
+                    $currentEvent = [string]$Matches.event
+                    $currentLines = New-Object 'System.Collections.Generic.List[string]'
+                    [void]$currentLines.Add([string]$Matches.value)
+                    continue
+                }
             }
+            if ($null -ne $currentEvent) { [void]$currentLines.Add($nestedLine) }
+        }
+        if ($null -ne $currentEvent) {
+            [void]$candidates.Add([pscustomobject]@{
+                    Event = $currentEvent
+                    CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $currentEvent -Lines $currentLines.ToArray()
+                })
         }
         break
     }
 
-    if (-not $onFound -or $events.Count -eq 0) {
-        return @('__unsupported__')
+    if (-not $onFound -or $candidates.Count -eq 0) {
+        return ,([pscustomobject]@{ Event = '__unsupported__'; CandidateKey = '__unsupported__' })
     }
-    return @($events)
+    return $candidates.ToArray()
 }
 
 function Get-AuthorityConsumerCanonicalTokenPattern {
@@ -581,7 +700,21 @@ function Test-AuthorityConsumerCanonicalInvocation {
     )
 
     $pattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
-    return ([regex]::Matches($Text, $pattern)).Count
+    $count = 0
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    foreach ($line in $normalized.Split("`n")) {
+        $commandSegments = [regex]::Split((Remove-AuthorityConsumerShellComments -Line ([string]$line)), '(?:;|&&|\|\|)')
+        foreach ($segment in $commandSegments) {
+            $command = ([string]$segment).Trim()
+            if ([string]::IsNullOrWhiteSpace($command) -or
+                $command -match '(?i)^(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String)\b' -or
+                $command -match '(?i)^(?:[A-Za-z_][A-Za-z0-9_]*\s*=|set\s+[A-Za-z_][A-Za-z0-9_]*=)') {
+                continue
+            }
+            $count += [regex]::Matches($command, $pattern).Count
+        }
+    }
+    return $count
 }
 
 function Test-AuthorityConsumerNonCanonicalValidationCommand {
@@ -602,14 +735,33 @@ function Test-AuthorityConsumerNonCanonicalValidationCommand {
     return [regex]::IsMatch($Text, $toolPattern)
 }
 
-function Test-AuthorityConsumerCompatibilityLane {
+function Test-AuthorityConsumerCompatibilityMarker {
     param([Parameter(Mandatory = $true)][string] $Text)
 
-    if ($Text -notmatch '(?im)\bneeds\s*:\s*[^\r\n]*canonical') { return $false }
-    if ($Text -notmatch '(?i)\b(?:compatibility|legacy|windows\s+powershell\s*5\.1|pester\s*3)\b') { return $false }
-    if ($Text -match '(?im)actions/checkout@|\b(?:Install-Module|pip\s+install|npm\s+(?:install|ci)|go\s+install)\b') { return $false }
-    if ($Text -match '(?im)^\s*(?:if\s*:\s*failure\(\)|exit\s+[1-9]|throw\b)|\|\s*failure\b') { return $false }
+    return ($Text -match '(?im)\bneeds\s*:\s*[^\r\n]*canonical' -and
+        $Text -match '(?i)\b(?:compatibility|legacy|windows\s+powershell\s*5\.1|pester\s*3)\b')
+}
+
+function Test-AuthorityConsumerCompatibilityLane {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $ExecutableText,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    if (-not (Test-AuthorityConsumerCompatibilityMarker -Text $Text)) { return $false }
+    if ($ExecutableText -match '(?im)actions/checkout@|\b(?:Install-Module|pip\s+install|npm\s+(?:install|ci)|go\s+install)\b') { return $false }
+    if (Test-AuthorityConsumerNonCanonicalValidationCommand -Text $ExecutableText -CanonicalRelativePath $CanonicalRelativePath) { return $false }
+    if ($Text -match '(?im)^\s*if\s*:\s*failure\(\)|\|\s*failure\b' -or
+        $ExecutableText -match '(?im)^\s*(?:exit\s+[1-9]|exit\s+/b\s+[1-9]|throw\b|return\s+[1-9]|false\b)') { return $false }
     return $true
+}
+
+function Test-AuthorityConsumerReleaseAffectingCommand {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?)(?![A-Za-z0-9_.-])'
+    return [regex]::IsMatch($Text, $releasePattern)
 }
 
 function Assert-AuthorityConsumerEntryPointContract {
@@ -649,7 +801,6 @@ function Assert-AuthorityConsumerEntryPointContract {
     }
 
     $authorityRolePaths = @($contract.authorityWorkflowRoles | ForEach-Object { ([string]$_.path).Replace('\', '/') })
-    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $canonicalRelative
     $eventOwners = @{}
     $workflowRoot = Join-Path $rootFull '.github/workflows'
     $workflowFiles = @()
@@ -670,28 +821,48 @@ function Assert-AuthorityConsumerEntryPointContract {
         ).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
         if ($isAuthorityRepository -and $authorityRolePaths -contains $relativePath) { continue }
         $text = [System.IO.File]::ReadAllText($workflowFile.FullName)
-        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $text -CanonicalRelativePath $canonicalRelative
-        $nonCanonical = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $text -CanonicalRelativePath $canonicalRelative
-        $compatibility = Test-AuthorityConsumerCompatibilityLane -Text $text
-        if ($nonCanonical -and -not $compatibility) {
+        $executableText = Get-AuthorityConsumerExecutableText -Text $text
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $executableText -CanonicalRelativePath $canonicalRelative
+        $nonCanonical = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $executableText -CanonicalRelativePath $canonicalRelative
+        $compatibility = Test-AuthorityConsumerCompatibilityLane `
+            -Text $text `
+            -ExecutableText $executableText `
+            -CanonicalRelativePath $canonicalRelative
+        $compatibilityDeclared = Test-AuthorityConsumerCompatibilityMarker -Text $text
+        $releaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText
+        if ($compatibilityDeclared -and $canonicalCount -eq 0 -and -not $compatibility) {
+            throw "BLOCK: compatibility workflow '$relativePath' must depend on the canonical result and only mirror its status."
+        }
+        if ($nonCanonical) {
+            if ($compatibility) {
+                throw "BLOCK: compatibility workflow '$relativePath' executes an independent validation command; compatibility lanes may only mirror the canonical result."
+            }
             throw "BLOCK: consumer entry-point contract found an alternate or non-canonical validation command in workflow '$relativePath'."
+        }
+        if ($compatibility -and $releaseAffecting) {
+            throw "BLOCK: compatibility workflow '$relativePath' must not publish, deploy, or otherwise act as a release gate."
+        }
+        if ($releaseAffecting -and $canonicalCount -ne 1) {
+            throw "BLOCK: release-affecting workflow '$relativePath' must execute the canonical validator exactly once."
         }
         if ($canonicalCount -gt 1) {
             throw "BLOCK: consumer entry-point contract found duplicate canonical executions in workflow '$relativePath'."
         }
-        $events = @(Get-AuthorityConsumerWorkflowEvents -Text $text)
+        $candidates = @(Get-AuthorityConsumerWorkflowEvents -Text $text)
         if ($canonicalCount -gt 0) {
-            if ($events -contains '__unsupported__') {
+            if (@($candidates | Where-Object { [string]$_.Event -ceq '__unsupported__' }).Count -gt 0) {
                 throw "BLOCK: consumer entry-point contract found an unsupported or unbound trigger in workflow '$relativePath'."
             }
-            foreach ($event in $events) {
+            foreach ($candidate in $candidates) {
+                $event = [string]$candidate.Event
                 if ($event -notin @('pull_request', 'push', 'workflow_dispatch')) {
                     throw "BLOCK: consumer entry-point contract found unsupported trigger '$event' in workflow '$relativePath'."
                 }
-                if ($eventOwners.ContainsKey($event)) {
-                    throw "BLOCK: consumer entry-point contract found duplicate canonical execution for event/candidate '$event' in '$relativePath' and '$($eventOwners[$event])'."
+                $candidateKey = [string]$candidate.CandidateKey
+                if ($eventOwners.ContainsKey($candidateKey)) {
+                    throw "BLOCK: consumer entry-point contract found duplicate canonical execution for event/candidate '$candidateKey' in '$relativePath' and '$($eventOwners[$candidateKey])'."
                 }
-                $eventOwners[$event] = $relativePath
+                $eventOwners[$candidateKey] = $relativePath
             }
         }
     }
@@ -713,9 +884,14 @@ function Assert-AuthorityConsumerEntryPointContract {
                 throw "BLOCK: consumer entry-point hook '$($hookFile.FullName)' is a reparse point."
             }
             $hookText = [System.IO.File]::ReadAllText($hookFile.FullName)
-            $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookText -CanonicalRelativePath $canonicalRelative
-            if ((Test-AuthorityConsumerNonCanonicalValidationCommand -Text $hookText -CanonicalRelativePath $canonicalRelative) -or
-                $hookCanonicalCount -eq 0 -and $hookText -match '(?im)\b(?:validate|validation|test|pester|pytest|lint|scan|gate)\b') {
+            $hookExecutableText = Get-AuthorityConsumerScriptText -Text $hookText
+            $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative
+            $hookReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $hookExecutableText
+            if ($hookReleaseAffecting -and $hookCanonicalCount -ne 1) {
+                throw "BLOCK: consumer entry-point contract found a release-affecting hook that does not execute the canonical validator exactly once: '$hookFile'."
+            }
+            if ((Test-AuthorityConsumerNonCanonicalValidationCommand -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative) -or
+                $hookCanonicalCount -eq 0 -and $hookExecutableText -match '(?im)\b(?:validate|validation|test|pester|pytest|lint|scan|gate)\b') {
                 throw "BLOCK: consumer entry-point contract found a hook that bypasses the canonical validator: '$hookFile'."
             }
             if ($hookCanonicalCount -gt 1) {
@@ -733,7 +909,12 @@ function Assert-AuthorityConsumerEntryPointContract {
         }
         $publicText = [System.IO.File]::ReadAllText($publicPath)
         $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
+        $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicText -CanonicalRelativePath $canonicalRelative
+        $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicText
         $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
+        if ($publicReleaseAffecting -and $publicCanonicalCount -ne 1) {
+            throw "BLOCK: consumer entry-point contract found a public release command without exactly one canonical validator invocation: '$publicRelativePath'."
+        }
         if ($nonCanonicalPublicCommand -and ($isReleaseInstructions -or
             $publicText -match '(?is)(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate).{0,240}(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install)|(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install).{0,240}(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate)')) {
             throw "BLOCK: consumer entry-point contract found a public command that declares an alternate release gate: '$publicRelativePath'."
