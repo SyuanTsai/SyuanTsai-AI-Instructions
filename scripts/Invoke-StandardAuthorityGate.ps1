@@ -1071,48 +1071,66 @@ function Get-AuthorityReportedInventoryPath {
     throw "$Context does not identify a file in the controlled fixture inventory."
 }
 
-function Get-AuthoritySkillValidatorCoveragePaths {
+function Assert-AuthoritySkillValidatorTokenCounts {
     param(
         [Parameter(Mandatory = $true)] $Report,
         [Parameter(Mandatory = $true)][string] $FixtureRoot,
-        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedTokenPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ExpectedOtherTokenPaths
     )
 
-    # skill-validator v1.6.1 intentionally emits package-level pass/info
-    # results without a file.  Its token_counts and other_token_counts are the
-    # complete file coverage envelope, so bind that envelope separately from
-    # the optional result locations.
-    $coveragePaths = New-Object 'System.Collections.Generic.List[string]'
-    $envelopeCount = 0
+    # Upstream excludes scripts from token accounting while still checking
+    # their structure and reachability. The controlled caller supplies the
+    # known token-eligible paths for each native table; input hashes separately
+    # bind every file, including resources omitted from token accounting.
+    [void](Get-AuthorityRequiredProperty -Object $Report -Name 'token_counts' -Context 'skill-validator token accounting')
+    $expectedByTable = @{ token_counts=$ExpectedTokenPaths; other_token_counts=$ExpectedOtherTokenPaths }
+    $expectedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($path in @($ExpectedTokenPaths) + @($ExpectedOtherTokenPaths)) {
+        if ($ExpectedInventoryPaths -cnotcontains $path -or -not $expectedPaths.Add($path)) {
+            throw 'skill-validator token-accounted inventory must contain distinct controlled input paths.'
+        }
+    }
+    if ($ExpectedTokenPaths -cnotcontains 'SKILL.md') {
+        throw 'skill-validator token-accounted inventory must include the SKILL.md body.'
+    }
+    $tokenPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($envelopeName in @('token_counts', 'other_token_counts')) {
+        $expectedTablePaths = @($expectedByTable[$envelopeName])
         $envelopeProperty = $Report.PSObject.Properties[$envelopeName]
-        if ($null -eq $envelopeProperty) { continue }
-        $envelopeCount++
+        if ($null -eq $envelopeProperty) {
+            if ($expectedTablePaths.Count -gt 0) {
+                throw "skill-validator $envelopeName token-accounted inventory is missing."
+            }
+            continue
+        }
         $envelope = $envelopeProperty.Value
         if ($envelope -isnot [pscustomobject]) {
-            throw "skill-validator $envelopeName coverage envelope must be an object."
+            throw "skill-validator $envelopeName token accounting must be an object."
         }
-        $files = Get-AuthorityRequiredProperty -Object $envelope -Name 'files' -Context "skill-validator $envelopeName coverage envelope"
-        $total = Get-AuthorityRequiredProperty -Object $envelope -Name 'total' -Context "skill-validator $envelopeName coverage envelope"
+        $files = Get-AuthorityRequiredProperty -Object $envelope -Name 'files' -Context "skill-validator $envelopeName token accounting"
+        $total = Get-AuthorityRequiredProperty -Object $envelope -Name 'total' -Context "skill-validator $envelopeName token accounting"
         if ($files -isnot [array] -and $files -isnot [pscustomobject]) {
-            throw "skill-validator $envelopeName coverage envelope files must be a non-empty array."
+            throw "skill-validator $envelopeName token accounting files must be a non-empty array."
         }
         $fileEntries = @($files)
         if ($fileEntries.Count -le 0) {
-            throw "skill-validator $envelopeName coverage envelope files must be a non-empty array."
+            throw "skill-validator $envelopeName token accounting files must be a non-empty array."
         }
-        Assert-AuthorityNonNegativeInteger -Value $total -Context "skill-validator $envelopeName coverage total"
+        Assert-AuthorityNonNegativeInteger -Value $total -Context "skill-validator $envelopeName token total"
         [int64]$sum = 0
+        $tablePaths = New-Object 'System.Collections.Generic.List[string]'
         foreach ($entry in $fileEntries) {
             if ($entry -isnot [pscustomobject]) {
-                throw "skill-validator $envelopeName coverage entries must be structured objects."
+                throw "skill-validator $envelopeName token entries must be structured objects."
             }
-            $file = Get-AuthorityRequiredProperty -Object $entry -Name 'file' -Context "skill-validator $envelopeName coverage entry"
-            $tokens = Get-AuthorityRequiredProperty -Object $entry -Name 'tokens' -Context "skill-validator $envelopeName coverage entry"
-            Assert-AuthorityNonNegativeInteger -Value $tokens -Context "skill-validator $envelopeName coverage tokens"
+            $file = Get-AuthorityRequiredProperty -Object $entry -Name 'file' -Context "skill-validator $envelopeName token entry"
+            $tokens = Get-AuthorityRequiredProperty -Object $entry -Name 'tokens' -Context "skill-validator $envelopeName token entry"
+            Assert-AuthorityNonNegativeInteger -Value $tokens -Context "skill-validator $envelopeName token count"
             [int64]$sum += [int64]$tokens
             if ($file -isnot [string] -or [string]::IsNullOrWhiteSpace($file)) {
-                throw "skill-validator $envelopeName coverage entry file must be a non-empty string."
+                throw "skill-validator $envelopeName token entry file must be a non-empty string."
             }
             if ([string]$file -ceq 'SKILL.md body') {
                 $reportedPath = 'SKILL.md'
@@ -1122,23 +1140,121 @@ function Get-AuthoritySkillValidatorCoveragePaths {
                     -Value $file `
                     -FixtureRoot $FixtureRoot `
                     -ExpectedInventoryPaths $ExpectedInventoryPaths `
-                    -Context "skill-validator $envelopeName coverage entry file"
+                    -Context "skill-validator $envelopeName token entry file"
             }
-            if (-not $coveragePaths.Contains($reportedPath)) {
-                [void]$coveragePaths.Add($reportedPath)
+            if (-not $tokenPaths.Contains($reportedPath)) {
+                [void]$tokenPaths.Add($reportedPath)
+                [void]$tablePaths.Add($reportedPath)
             }
             else {
-                throw "skill-validator coverage envelope contains duplicate file '$reportedPath'."
+                throw "skill-validator token accounting contains duplicate file '$reportedPath'."
             }
         }
         if ($sum -ne [int64]$total) {
-            throw "skill-validator $envelopeName coverage total does not equal the sum of its file token counts."
+            throw "skill-validator $envelopeName token total does not equal the sum of its file token counts."
+        }
+        if ($expectedTablePaths.Count -eq 0) {
+            throw "skill-validator $envelopeName token-accounted inventory contains unexpected files."
+        }
+        Assert-AuthorityExactPathInventory -Value @($tablePaths.ToArray()) -Expected $expectedTablePaths `
+            -Context "skill-validator $envelopeName token-accounted inventory" | Out-Null
+    }
+}
+
+function Assert-AuthorityToolInputInventory {
+    param(
+        [Parameter(Mandatory = $true)] $Envelope,
+        [Parameter(Mandatory = $true)][ValidateSet('skill-validator', 'skill-tools')][string] $ExpectedToolName,
+        [Parameter(Mandatory = $true)][string] $ExpectedFixtureRoot,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+    )
+
+    if ($null -eq $Envelope -or $null -eq $Envelope.PSObject) {
+        throw "$ExpectedToolName coverage envelope is missing."
+    }
+    $propertyNames = @($Envelope.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    $expectedPropertyNames = @('schemaVersion', 'toolName', 'coverageMode', 'root', 'files')
+    if ($propertyNames.Count -ne $expectedPropertyNames.Count) {
+        throw "$ExpectedToolName coverage envelope has an unexpected property set."
+    }
+    foreach ($name in $expectedPropertyNames) {
+        if ($propertyNames -cnotcontains $name) {
+            throw "$ExpectedToolName coverage envelope is missing '$name'."
         }
     }
-    if ($envelopeCount -eq 0) {
-        throw 'skill-validator report is missing its file coverage envelope.'
+
+    $schemaVersion = Get-AuthorityRequiredProperty -Object $Envelope -Name 'schemaVersion' -Context "$ExpectedToolName coverage envelope"
+    $toolName = Get-AuthorityRequiredProperty -Object $Envelope -Name 'toolName' -Context "$ExpectedToolName coverage envelope"
+    $coverageMode = Get-AuthorityRequiredProperty -Object $Envelope -Name 'coverageMode' -Context "$ExpectedToolName coverage envelope"
+    $root = Get-AuthorityRequiredProperty -Object $Envelope -Name 'root' -Context "$ExpectedToolName coverage envelope"
+    $files = Get-AuthorityRequiredProperty -Object $Envelope -Name 'files' -Context "$ExpectedToolName coverage envelope"
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        $toolName -isnot [string] -or [string]$toolName -cne $ExpectedToolName -or
+        $coverageMode -isnot [string] -or [string]$coverageMode -cne 'authority-input-inventory' -or
+        $root -isnot [string] -or -not (Test-AuthorityPathEqual -Left $root -Right $ExpectedFixtureRoot) -or
+        $files -isnot [array] -or @($files).Count -le 0) {
+        throw "$ExpectedToolName coverage envelope is not bound to the expected tool and fixture root."
     }
-    return ,$coveragePaths.ToArray()
+
+    $inputRootItem = Get-Item -LiteralPath $ExpectedFixtureRoot -Force -ErrorAction Stop
+    if (-not $inputRootItem.PSIsContainer -or ($inputRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$ExpectedToolName coverage envelope requires a regular input directory."
+    }
+    $inputRoot = $inputRootItem.FullName.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $directories = New-Object 'System.Collections.Generic.Queue[string]'
+    $directories.Enqueue($inputRoot)
+    $actualPaths = New-Object 'System.Collections.Generic.List[string]'
+    while ($directories.Count -gt 0) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $directories.Dequeue() -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$ExpectedToolName coverage envelope input contains a link or reparse point."
+            }
+            if ($item.PSIsContainer) { $directories.Enqueue($item.FullName) }
+            else {
+                $relative = $item.FullName.Substring($inputRoot.Length + 1).Replace([IO.Path]::DirectorySeparatorChar, '/')
+                [void]$actualPaths.Add($relative)
+            }
+        }
+    }
+    Assert-AuthorityExactPathInventory -Value $actualPaths.ToArray() -Expected $ExpectedInventoryPaths -Context "$ExpectedToolName coverage envelope on-disk input" | Out-Null
+
+    $observedPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($entry in @($files)) {
+        if ($entry -isnot [pscustomobject]) {
+            throw "$ExpectedToolName coverage envelope file entries must be structured objects."
+        }
+        $entryProperties = @($entry.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        if ($entryProperties.Count -ne 2 -or $entryProperties -cnotcontains 'path' -or $entryProperties -cnotcontains 'sha256') {
+            throw "$ExpectedToolName coverage envelope file has an unexpected property set."
+        }
+        $path = Get-AuthorityRequiredProperty -Object $entry -Name 'path' -Context "$ExpectedToolName coverage envelope file"
+        $sha256 = Get-AuthorityRequiredProperty -Object $entry -Name 'sha256' -Context "$ExpectedToolName coverage envelope file"
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) {
+            throw "$ExpectedToolName coverage envelope file path must be a non-empty string."
+        }
+        Assert-AuthoritySha256 -Value $sha256 -Context "$ExpectedToolName coverage envelope file hash"
+        $reportedPath = Get-AuthorityReportedInventoryPath `
+            -Value $path `
+            -FixtureRoot $ExpectedFixtureRoot `
+            -ExpectedInventoryPaths $ExpectedInventoryPaths `
+            -Context "$ExpectedToolName coverage envelope file path"
+        if (-not $observedPaths.Contains($reportedPath)) {
+            [void]$observedPaths.Add($reportedPath)
+        }
+        else {
+            throw "$ExpectedToolName coverage envelope contains duplicate file '$reportedPath'."
+        }
+        $actualPath = Join-Path $ExpectedFixtureRoot $reportedPath
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $actualPath).Hash.ToLowerInvariant()
+        if ($actualHash -cne [string]$sha256) {
+            throw "$ExpectedToolName coverage envelope file '$reportedPath' changed after the tool run."
+        }
+    }
+    Assert-AuthorityExactPathInventory `
+        -Value $observedPaths.ToArray() `
+        -Expected $ExpectedInventoryPaths `
+        -Context "$ExpectedToolName coverage envelope" | Out-Null
+    return $true
 }
 
 function Assert-AuthoritySkillToolsCoverageEnvelope {
@@ -1148,66 +1264,11 @@ function Assert-AuthoritySkillToolsCoverageEnvelope {
         [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
     )
 
-    if ($null -eq $Envelope -or $null -eq $Envelope.PSObject) {
-        throw 'skill-tools coverage envelope is missing.'
-    }
-    $propertyNames = @($Envelope.PSObject.Properties | ForEach-Object { [string]$_.Name })
-    $expectedPropertyNames = @('schemaVersion', 'toolName', 'coverageMode', 'root', 'files')
-    if ($propertyNames.Count -ne $expectedPropertyNames.Count) {
-        throw 'skill-tools coverage envelope has an unexpected property set.'
-    }
-    foreach ($name in $expectedPropertyNames) {
-        if ($propertyNames -cnotcontains $name) {
-            throw "skill-tools coverage envelope is missing '$name'."
-        }
-    }
-
-    $schemaVersion = Get-AuthorityRequiredProperty -Object $Envelope -Name 'schemaVersion' -Context 'skill-tools coverage envelope'
-    $toolName = Get-AuthorityRequiredProperty -Object $Envelope -Name 'toolName' -Context 'skill-tools coverage envelope'
-    $coverageMode = Get-AuthorityRequiredProperty -Object $Envelope -Name 'coverageMode' -Context 'skill-tools coverage envelope'
-    $root = Get-AuthorityRequiredProperty -Object $Envelope -Name 'root' -Context 'skill-tools coverage envelope'
-    $files = Get-AuthorityRequiredProperty -Object $Envelope -Name 'files' -Context 'skill-tools coverage envelope'
-    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
-        $toolName -isnot [string] -or [string]$toolName -cne 'skill-tools' -or
-        $coverageMode -isnot [string] -or [string]$coverageMode -cne 'authority-input-inventory' -or
-        $root -isnot [string] -or -not (Test-AuthorityPathEqual -Left $root -Right $ExpectedFixtureRoot) -or
-        $files -isnot [array] -or @($files).Count -le 0) {
-        throw 'skill-tools coverage envelope is not bound to the expected tool and fixture root.'
-    }
-
-    $observedPaths = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($entry in @($files)) {
-        if ($entry -isnot [pscustomobject]) {
-            throw 'skill-tools coverage envelope file entries must be structured objects.'
-        }
-        $path = Get-AuthorityRequiredProperty -Object $entry -Name 'path' -Context 'skill-tools coverage envelope file'
-        $sha256 = Get-AuthorityRequiredProperty -Object $entry -Name 'sha256' -Context 'skill-tools coverage envelope file'
-        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) {
-            throw 'skill-tools coverage envelope file path must be a non-empty string.'
-        }
-        Assert-AuthoritySha256 -Value $sha256 -Context 'skill-tools coverage envelope file hash'
-        $reportedPath = Get-AuthorityReportedInventoryPath `
-            -Value $path `
-            -FixtureRoot $ExpectedFixtureRoot `
-            -ExpectedInventoryPaths $ExpectedInventoryPaths `
-            -Context 'skill-tools coverage envelope file path'
-        if (-not $observedPaths.Contains($reportedPath)) {
-            [void]$observedPaths.Add($reportedPath)
-        }
-        else {
-            throw "skill-tools coverage envelope contains duplicate file '$reportedPath'."
-        }
-        $actualPath = Join-Path $ExpectedFixtureRoot $reportedPath
-        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $actualPath).Hash.ToLowerInvariant()
-        if ($actualHash -cne [string]$sha256) {
-            throw "skill-tools coverage envelope file '$reportedPath' changed after the tool run."
-        }
-    }
-    Assert-AuthorityExactPathInventory `
-        -Value $observedPaths.ToArray() `
-        -Expected $ExpectedInventoryPaths `
-        -Context 'skill-tools coverage envelope' | Out-Null
-    return $true
+    Assert-AuthorityToolInputInventory `
+        -Envelope $Envelope `
+        -ExpectedToolName 'skill-tools' `
+        -ExpectedFixtureRoot $ExpectedFixtureRoot `
+        -ExpectedInventoryPaths $ExpectedInventoryPaths
 }
 
 function Assert-AuthoritySkillSpectorReport {
@@ -1290,7 +1351,9 @@ function Assert-AuthoritySkillValidatorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
         [Parameter(Mandatory = $true)][string] $ExpectedFixtureRoot,
-        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths
+        [Parameter(Mandatory = $true)][string[]] $ExpectedInventoryPaths,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedTokenPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ExpectedOtherTokenPaths
     )
 
     $skillDirectory = Get-AuthorityProperty -Object $Report -Name 'skill_dir'
@@ -1336,14 +1399,12 @@ function Assert-AuthoritySkillValidatorReport {
             throw 'skill-validator result line must be a positive integer when present.'
         }
     }
-    $coveragePaths = Get-AuthoritySkillValidatorCoveragePaths `
+    Assert-AuthoritySkillValidatorTokenCounts `
         -Report $Report `
         -FixtureRoot $ExpectedFixtureRoot `
-        -ExpectedInventoryPaths $ExpectedInventoryPaths
-    Assert-AuthorityExactPathInventory `
-        -Value $coveragePaths `
-        -Expected $ExpectedInventoryPaths `
-        -Context 'skill-validator coverage envelope' | Out-Null
+        -ExpectedInventoryPaths $ExpectedInventoryPaths `
+        -ExpectedTokenPaths $ExpectedTokenPaths `
+        -ExpectedOtherTokenPaths $ExpectedOtherTokenPaths
 }
 
 function Assert-AuthoritySkillToolsSarifReport {
@@ -1835,15 +1896,21 @@ $upstreamAdapterArchiveSha256 = ('b' * 64)
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin') -Force)
 $upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill'
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'agents') -Force)
+[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'scripts') -Force)
 [void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins') -Force)
 [System.IO.File]::WriteAllText(
     (Join-Path $upstreamAdapterSkillRoot 'SKILL.md'),
-    "---`nname: adapter-fixture-skill`ndescription: A deterministic upstream adapter fixture Skill.`n---`n`n# Adapter Fixture`n",
+    "---`nname: adapter-fixture-skill`ndescription: A deterministic upstream adapter fixture Skill.`n---`n`n# Adapter Fixture`n`nThe [fixture script](scripts/run.ps1) prints one fixture message.`n",
     (New-Object Text.UTF8Encoding($false))
 )
 [System.IO.File]::WriteAllText(
     (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml'),
     "interface:`n  display_name: `"Adapter Fixture Skill`"`n  short_description: `"Validate one deterministic upstream adapter Skill.`"`n  default_prompt: `"Use `$adapter-fixture-skill to verify the upstream adapter.`"`n",
+    (New-Object Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $upstreamAdapterSkillRoot 'scripts/run.ps1'),
+    "Write-Output 'adapter fixture'`n",
     (New-Object Text.UTF8Encoding($false))
 )
 [System.IO.File]::WriteAllText(
@@ -1874,7 +1941,8 @@ $upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapte
 Assert-AuthorityFixtureContract -FixtureRoot $upstreamAdapterSkillRoot -ExpectedSkillId 'adapter-fixture-skill'
 $upstreamAdapterSkillFiles = @(
     [pscustomobject][ordered]@{ path = 'SKILL.md'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'SKILL.md')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml')).Hash.ToLowerInvariant() }
+    [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml')).Hash.ToLowerInvariant() },
+    [pscustomobject][ordered]@{ path = 'scripts/run.ps1'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'scripts/run.ps1')).Hash.ToLowerInvariant() }
 )
 $upstreamAdapterSkillInventoryPaths = @($upstreamAdapterSkillFiles | ForEach-Object { [string]$_.path })
 $upstreamAdapterComponentFiles = @(
@@ -1884,7 +1952,8 @@ $upstreamAdapterComponentFiles = @(
     [pscustomobject][ordered]@{ path = '.mcp.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.mcp.json')).Hash.ToLowerInvariant() },
     [pscustomobject][ordered]@{ path = 'adapter-command.ps1'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot 'adapter-command.ps1')).Hash.ToLowerInvariant() },
     [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/SKILL.md'; sha256 = [string]$upstreamAdapterSkillFiles[0].sha256 },
-    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/agents/openai.yaml'; sha256 = [string]$upstreamAdapterSkillFiles[1].sha256 }
+    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/agents/openai.yaml'; sha256 = [string]$upstreamAdapterSkillFiles[1].sha256 },
+    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/scripts/run.ps1'; sha256 = [string]$upstreamAdapterSkillFiles[2].sha256 }
 )
 $upstreamAdapterComponentInventorySha256 = Get-AuthorityComponentInventorySha256 -Inventory $upstreamAdapterComponentFiles
 
@@ -1970,6 +2039,22 @@ finally {
     [System.IO.File]::WriteAllBytes($mutatedAdapterComponentPath, $originalMutatedAdapterComponentBytes)
 }
 
+# Token statistics do not enumerate every file passed to skill-validator.
+# Capture all input hashes before invocation and verify them again afterward.
+$skillValidatorCoveragePath = Join-Path $runRoot 'skill-validator-coverage.json'
+$skillValidatorCoverageEnvelope = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    toolName = 'skill-validator'
+    coverageMode = 'authority-input-inventory'
+    root = $upstreamAdapterSkillRoot
+    files = @($upstreamAdapterSkillFiles)
+}
+Assert-AuthorityToolInputInventory `
+    -Envelope $skillValidatorCoverageEnvelope `
+    -ExpectedToolName 'skill-validator' `
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
+
 $skillValidatorOutput = Invoke-AuthorityExternalCommand `
     -Command $executablePaths.'skill-validator' `
     -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $upstreamAdapterSkillRoot) `
@@ -1981,7 +2066,16 @@ $skillValidatorReport = Read-AuthorityJson -Path $skillValidatorOutputPath -Cont
 Assert-AuthoritySkillValidatorReport `
     -Report $skillValidatorReport `
     -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths `
+    -ExpectedTokenPaths @('SKILL.md') `
+    -ExpectedOtherTokenPaths @('agents/openai.yaml')
+Assert-AuthorityToolInputInventory `
+    -Envelope $skillValidatorCoverageEnvelope `
+    -ExpectedToolName 'skill-validator' `
+    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
+    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
+$skillValidatorCoverageJson = $skillValidatorCoverageEnvelope | ConvertTo-Json -Depth 20
+[System.IO.File]::WriteAllText($skillValidatorCoveragePath, $skillValidatorCoverageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 
 # skill-tools v0.4.1 SARIF carries diagnostic locations, not a complete file
 # inventory.  Keep a run-owned input snapshot in memory so the diagnostic
@@ -2086,8 +2180,8 @@ $summary = [ordered]@{
     stages = @(
         [ordered]@{
             name='package-validation'; result='passed'; exitCode=0; mode='upstream-adapter-skill-validator-skill-tools'
-            skillValidatorMode='structure-json-allow-agents-bundled-skill'; skillToolsMode='sarif-check-bundled-skill'
-            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-tools-report.sarif.json', 'skill-tools-coverage.json')
+            skillValidatorMode='structure-json-allow-agents-bundled-skill+authority-input-inventory'; skillToolsMode='sarif-check-bundled-skill'
+            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-validator-coverage.json', 'skill-tools-report.sarif.json', 'skill-tools-coverage.json')
         },
         [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm-bundled-skill'; report='skillspector-report.json' },
         [ordered]@{
