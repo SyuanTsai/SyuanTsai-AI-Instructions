@@ -64,6 +64,42 @@ $trustedGoDistribution = [ordered]@{
     'recordBinaryHash' = $true
 }
 
+function Write-ResolverJsonOutput {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Json
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and
+        -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+
+    $stream = [System.IO.File]::Open(
+        $fullPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+        try {
+            $writer.Write($Json)
+            $writer.Write([Environment]::NewLine)
+            $writer.Flush()
+        }
+        finally {
+            $writer.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 $deniedGoEnvironmentNames = @(
     'GOROOT', 'GOTOOLDIR', 'GOPATH', 'GO111MODULE',
     'GOOS', 'GOARCH', 'GOAMD64', 'GO386', 'GOARM', 'GOARM64',
@@ -3072,11 +3108,7 @@ else {
 
 $json = $result | ConvertTo-Json -Depth 20
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
-    $directory = Split-Path -Parent $OutputPath
-    if (-not [string]::IsNullOrWhiteSpace($directory)) {
-        [void](New-Item -ItemType Directory -Path $directory -Force)
-    }
-    [IO.File]::WriteAllText($OutputPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    Write-ResolverJsonOutput -Path $OutputPath -Json $json
 }
 
 $json

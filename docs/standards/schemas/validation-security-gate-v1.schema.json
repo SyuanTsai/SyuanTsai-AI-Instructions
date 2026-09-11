@@ -4,7 +4,7 @@
   "description": "Strict machine-readable stage order and fail-closed security semantics for Standard v1.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "policy", "stages", "security"],
+  "required": ["schemaVersion", "policy", "stages", "security", "entryPointContract"],
   "properties": {
     "schemaVersion": {
       "const": 1
@@ -23,6 +23,9 @@
     },
     "security": {
       "$ref": "#/$defs/security"
+    },
+    "entryPointContract": {
+      "$ref": "#/$defs/entryPointContract"
     }
   },
   "$defs": {
@@ -197,6 +200,93 @@
             "enum": ["local", "pre-push", "ci"]
           }
         }
+      }
+    },
+    "entryPointContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalExecution",
+        "releaseAffectingSurfaces",
+        "componentScripts",
+        "compatibilityLane",
+        "triggerAdapters",
+        "authorityWorkflowRoles"
+      ],
+      "properties": {
+        "canonicalExecution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxPerEventCandidate", "route", "sameCandidateBinding", "samePassBlockSemantics"],
+          "properties": {
+            "maxPerEventCandidate": { "const": 1 },
+            "route": { "const": "canonical-validator" },
+            "sameCandidateBinding": { "const": true },
+            "samePassBlockSemantics": { "const": true }
+          }
+        },
+        "releaseAffectingSurfaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workflowGlob", "hookRoots", "publicCommandFiles", "mustRouteTo", "alternateGateAction"],
+          "properties": {
+            "workflowGlob": { "const": ".github/workflows/*.{yml,yaml}" },
+            "hookRoots": { "const": [".git/hooks", ".githooks"] },
+            "publicCommandFiles": { "const": ["README.md", "RELEASING.md", "RELEASE.md", "docs/RELEASE.md", "docs/RELEASING.md"] },
+            "mustRouteTo": { "const": "canonical-validator" },
+            "alternateGateAction": { "const": "BLOCK" }
+          }
+        },
+        "componentScripts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mayExist", "mayBeTopLevelReleaseGate"],
+          "properties": {
+            "mayExist": { "const": true },
+            "mayBeTopLevelReleaseGate": { "const": false }
+          }
+        },
+        "compatibilityLane": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowed", "requiresCanonicalDependency", "requiresRestrictedPurpose", "mayMirrorCanonicalResult", "mayRunIndependentPassBlockPolicy", "mayBeCanonicalReleaseGate"],
+          "properties": {
+            "allowed": { "const": true },
+            "requiresCanonicalDependency": { "const": true },
+            "requiresRestrictedPurpose": { "const": true },
+            "mayMirrorCanonicalResult": { "const": true },
+            "mayRunIndependentPassBlockPolicy": { "const": false },
+            "mayBeCanonicalReleaseGate": { "const": false }
+          }
+        },
+        "triggerAdapters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowedEvents", "mustShareCanonicalValidator", "mustShareCandidateBinding", "duplicateEventCandidateExecution"],
+          "properties": {
+            "allowedEvents": { "const": ["pull_request", "push", "workflow_dispatch"] },
+            "mustShareCanonicalValidator": { "const": true },
+            "mustShareCandidateBinding": { "const": true },
+            "duplicateEventCandidateExecution": { "const": false }
+          }
+        },
+        "authorityWorkflowRoles": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/authorityWorkflowRole" }
+        }
+      }
+    },
+    "authorityWorkflowRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "role", "consumerAlternateGate"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]+\\.(?:yml|yaml)$" },
+        "role": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "consumerAlternateGate": { "const": false }
       }
     }
   }

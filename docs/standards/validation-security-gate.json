@@ -112,5 +112,60 @@
     ],
     "aiReviewCannotReplaceHumanApproval": true,
     "samePassBlockSemantics": ["local", "pre-push", "ci"]
+  },
+  "entryPointContract": {
+    "canonicalExecution": {
+      "maxPerEventCandidate": 1,
+      "route": "canonical-validator",
+      "sameCandidateBinding": true,
+      "samePassBlockSemantics": true
+    },
+    "releaseAffectingSurfaces": {
+      "workflowGlob": ".github/workflows/*.{yml,yaml}",
+      "hookRoots": [".git/hooks", ".githooks"],
+      "publicCommandFiles": ["README.md", "RELEASING.md", "RELEASE.md", "docs/RELEASE.md", "docs/RELEASING.md"],
+      "mustRouteTo": "canonical-validator",
+      "alternateGateAction": "BLOCK"
+    },
+    "componentScripts": {
+      "mayExist": true,
+      "mayBeTopLevelReleaseGate": false
+    },
+    "compatibilityLane": {
+      "allowed": true,
+      "requiresCanonicalDependency": true,
+      "requiresRestrictedPurpose": true,
+      "mayMirrorCanonicalResult": true,
+      "mayRunIndependentPassBlockPolicy": false,
+      "mayBeCanonicalReleaseGate": false
+    },
+    "triggerAdapters": {
+      "allowedEvents": ["pull_request", "push", "workflow_dispatch"],
+      "mustShareCanonicalValidator": true,
+      "mustShareCandidateBinding": true,
+      "duplicateEventCandidateExecution": false
+    },
+    "authorityWorkflowRoles": [
+      {
+        "path": ".github/workflows/standards-conformance.yml",
+        "role": "canonical-authority-regression",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/pr8-powershell-validation.yml",
+        "role": "compatibility-and-linux-composition-bridge",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/syp86-production-lock.yml",
+        "role": "production-lock-contract",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/syp101-production-smoke.yml",
+        "role": "production-smoke-contract",
+        "consumerAlternateGate": false
+      }
+    ]
   }
 }

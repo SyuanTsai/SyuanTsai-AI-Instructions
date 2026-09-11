@@ -1,6 +1,8 @@
 Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:ValidationSecurityGatePath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
+        $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
         $script:CheckoutSha = '3d3c42e5aac5ba805825da76410c181273ba90b1'
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
@@ -26,6 +28,11 @@ Describe 'Agent Skill authority workflow contract' {
             if (-not $Condition) { throw $Message }
         }
 
+        function Assert-False {
+            param([bool] $Condition, [string] $Message)
+            if ($Condition) { throw $Message }
+        }
+
         function Assert-Equal {
             param($Actual, $Expected, [string] $Message)
             if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
@@ -39,6 +46,35 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-NotMatch {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
+
+        function Write-TestUtf8File {
+            param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Text)
+
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $parent = [IO.Path]::GetDirectoryName($fullPath)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                [void](New-Item -ItemType Directory -Path $parent -Force)
+            }
+            [IO.File]::WriteAllText($fullPath, $Text, (New-Object Text.UTF8Encoding($false)))
+        }
+
+        function New-ConsumerEntryPointFixture {
+            param([Parameter(Mandatory = $true)][string] $Root)
+
+            [void](New-Item -ItemType Directory -Path $Root -Force)
+            Write-TestUtf8File -Path (Join-Path $Root 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+            Write-TestUtf8File -Path (Join-Path $Root '.github/workflows/validate.yml') -Text @'
+name: Canonical validation
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
         }
     }
 
@@ -213,5 +249,143 @@ Describe 'Agent Skill authority workflow contract' {
         Assert-Match $gate 'validation-security-gate\.json' 'Shared authority gate must load the canonical validation/security policy.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
         Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'
+    }
+
+    # Scenario: A consumer adds a renamed workflow, hook, release command, or duplicate trigger adapter around a component script.
+    # Purpose: Enforce the central entry-point inventory contract while allowing non-authoritative components and status-only compatibility jobs.
+    It 'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles' {
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        Assert-True ($null -ne $policy.entryPointContract) 'Canonical validation/security policy must declare the entry-point contract.'
+        Assert-Match $authorityGate 'Assert-AuthorityConsumerEntryPointContract' 'The shared authority gate must expose the consumer entry-point contract checker.'
+
+        $canonicalFixture = Join-Path $TestDrive 'entry-point-valid'
+        New-ConsumerEntryPointFixture -Root $canonicalFixture
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $canonicalFixture `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A single canonical workflow must satisfy the entry-point contract.'
+
+        Write-TestUtf8File -Path (Join-Path $canonicalFixture 'scripts/check-domain.ps1') -Text "Invoke-Pester -Path tests/domain`n"
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $canonicalFixture `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A component script must not become an alternate gate merely because it exists.'
+
+        $negativeCases = @(
+            @{
+                Name = 'arbitrary-workflow-name'
+                RelativePath = '.github/workflows/domain-check.yaml'
+                Text = "name: Domain check`non:`n  pull_request:`njobs:`n  domain:`n    steps:`n      - run: ./scripts/run-domain-tests.ps1`n"
+            },
+            @{
+                Name = 'pre-push-hook-bypass'
+                RelativePath = '.githooks/pre-push'
+                Text = "#!/bin/sh`nInvoke-Pester -Path tests/domain`n"
+            },
+            @{
+                Name = 'pre-commit-hook-bypass'
+                RelativePath = '.githooks/pre-commit'
+                Text = "#!/bin/sh`nInvoke-Pester -Path tests/domain`n"
+            },
+            @{
+                Name = 'authority-role-name-bypass'
+                RelativePath = '.github/workflows/standards-conformance.yml'
+                Text = "name: Fake authority role`non:`n  pull_request:`njobs:`n  domain:`n    steps:`n      - run: ./scripts/run-domain-tests.ps1`n"
+            },
+            @{
+                Name = 'public-release-command'
+                RelativePath = 'README.md'
+                Text = "Run ./scripts/run-domain-tests.ps1 as the release gate.`n"
+            }
+        )
+        foreach ($case in $negativeCases) {
+            $root = Join-Path $TestDrive ("entry-point-negative-{0}" -f $case.Name)
+            New-ConsumerEntryPointFixture -Root $root
+            Write-TestUtf8File -Path (Join-Path $root $case.RelativePath) -Text $case.Text
+            $errorMessage = $null
+            try {
+                Assert-AuthorityConsumerEntryPointContract `
+                    -RepositoryRoot $root `
+                    -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                    -Policy $policy | Out-Null
+            }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'entry-point contract|alternate|canonical' "Consumer entry-point case '$($case.Name)' must fail closed."
+        }
+
+        $compatibilityRoot = Join-Path $TestDrive 'entry-point-compatibility-status'
+        New-ConsumerEntryPointFixture -Root $compatibilityRoot
+        Write-TestUtf8File -Path (Join-Path $compatibilityRoot '.github/workflows/compatibility-status.yml') -Text @'
+name: Compatibility status
+on:
+  pull_request:
+jobs:
+  compatibility-status:
+    needs: canonical-validation
+    steps:
+      - run: echo canonical-validation.result
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $compatibilityRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A compatibility status job may depend on and mirror the canonical result.'
+
+        $duplicateRoot = Join-Path $TestDrive 'entry-point-duplicate-event'
+        New-ConsumerEntryPointFixture -Root $duplicateRoot
+        Write-TestUtf8File -Path (Join-Path $duplicateRoot '.github/workflows/duplicate-pr.yaml') -Text @'
+name: Duplicate PR adapter
+on:
+  pull_request:
+jobs:
+  duplicate:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        $duplicateError = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $duplicateRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy | Out-Null
+        }
+        catch { $duplicateError = $_.Exception.Message }
+        Assert-Match $duplicateError 'duplicate|event|candidate' 'Two canonical executions for the same event/candidate must fail closed.'
+
+        $splitRoot = Join-Path $TestDrive 'entry-point-split-triggers'
+        [void](New-Item -ItemType Directory -Path $splitRoot -Force)
+        Write-TestUtf8File -Path (Join-Path $splitRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $splitRoot '.github/workflows/protected-pr.yml') -Text @'
+name: Protected PR adapter
+on:
+  pull_request:
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Write-TestUtf8File -Path (Join-Path $splitRoot '.github/workflows/trusted-push.yml') -Text @'
+name: Trusted push adapter
+on:
+  push:
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $splitRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'Protected PR and trusted push adapters may be separate when their events do not duplicate execution.'
+
+        $roles = @($policy.entryPointContract.authorityWorkflowRoles)
+        Assert-Equal $roles.Count 4 'The authority repository must explicitly classify all four legitimate workflow roles.'
+        foreach ($role in $roles) {
+            Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be classified as a consumer alternate gate."
+            Assert-True (Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $role.path) -PathType Leaf) "Authority workflow role '$($role.path)' must remain present."
+        }
+        Assert-Match $authorityGate 'standards-conformance\.yml|pr8-powershell-validation\.yml|syp86-production-lock\.yml|syp101-production-smoke\.yml' 'The authority gate contract must retain the explicit four-workflow role surface.'
     }
 }

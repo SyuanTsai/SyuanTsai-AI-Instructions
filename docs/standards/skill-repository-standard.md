@@ -282,6 +282,12 @@ Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相�
 
 每個 conformant repository **MUST** 提供一個 canonical validation entry point，例如 repository root script `scripts/Validate.ps1`（實際名稱可由 adapter/config 決定）。
 
+Consumer 的 release-affecting entry-point inventory **MUST** 覆蓋所有 `.github/workflows/*.yml`／`*.yaml`、versioned/local hooks（`.git/hooks`、`.githooks`）與 public release command 文件（`README.md`、`RELEASING.md`、`RELEASE.md`、`docs/RELEASE.md`、`docs/RELEASING.md`）。所有 workflow、hook、pre-push／pre-commit 與 public command 若會影響 release pass/block，**MUST** route to the canonical validator；conformance **MUST** inventory these surfaces rather than maintain a fixed filename blacklist. There MUST be one canonical validation execution per event/candidate.
+
+Component／diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為公開 release path 或擁有獨立 pass/block policy；repository-specific domain tests **MUST** 只在 canonical `Repository Tests` stage 執行。Required-status compatibility jobs **MAY** 依賴並 mirror canonical result，或依 central policy 作明確且受限的 compatibility lane；compatibility lane **MUST** `needs` canonical result、說明 restricted purpose，且 **MUST NOT** 自行安裝工具、checkout candidate 後執行另一套 validation、取代 canonical gate 或擁有獨立 pass/block policy。Compatibility jobs mirror the canonical result and MUST NOT establish an alternate gate.
+
+Protected PR、trusted push 與 `workflow_dispatch` **MAY** 使用不同 trigger adapter，但每個 adapter **MUST** 使用相同 canonical validator、candidate binding、stage ordering 與 local/pre-push/CI pass/block semantics；同一 event/candidate **MUST NOT** 執行兩次 canonical validation。
+
 Canonical entry **MUST**：
 
 - 可由 developer local、pre-push（若存在）與 CI 呼叫；

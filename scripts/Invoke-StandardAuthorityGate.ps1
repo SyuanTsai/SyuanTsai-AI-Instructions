@@ -361,7 +361,386 @@ function Assert-AuthorityValidationSecurityGate {
         Assert-AuthorityExactString -Value $semantics[$index] -Expected $expectedSemantics[$index] -Context "Validation/security gate pass/block semantics $($index + 1)"
     }
 
+    Assert-AuthorityEntryPointPolicy -Contract (Get-AuthorityRequiredProperty `
+        -Object $Policy `
+        -Name 'entryPointContract' `
+        -Context 'Validation/security gate policy')
+
     return ,$Policy
+}
+
+function Assert-AuthorityExactBoolean {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][bool] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [bool] -or [bool]$Value -ne $Expected) {
+        throw "$Context must be '$Expected'."
+    }
+}
+
+function Assert-AuthorityJsonPropertySet {
+    param(
+        [Parameter(Mandatory = $true)] $Object,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($null -eq $Object -or $null -eq $Object.PSObject -or
+        $Object -is [array] -or $Object -is [string]) {
+        throw "$Context must be a JSON object."
+    }
+    $actual = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    $missing = @($Expected | Where-Object { $actual -cnotcontains $_ })
+    $unexpected = @($actual | Where-Object { $Expected -cnotcontains $_ })
+    if ($missing.Count -gt 0 -or $unexpected.Count -gt 0 -or $actual.Count -ne $Expected.Count) {
+        throw "$Context has an invalid property set. Missing='$($missing -join ',')' Unexpected='$($unexpected -join ',')'."
+    }
+}
+
+function Assert-AuthorityExactStringSequence {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [array] -or @($Value).Count -ne $Expected.Count) {
+        throw "$Context must contain the exact ordered sequence."
+    }
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        if ($Value[$index] -isnot [string] -or [string]$Value[$index] -cne $Expected[$index]) {
+            throw "$Context must contain the exact ordered sequence."
+        }
+    }
+}
+
+function Assert-AuthorityEntryPointPolicy {
+    param([Parameter(Mandatory = $true)] $Contract)
+
+    Assert-AuthorityJsonPropertySet -Object $Contract -Expected @(
+        'canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts',
+        'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles'
+    ) -Context 'Validation/security gate entry-point contract'
+
+    $canonicalExecution = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'canonicalExecution' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $canonicalExecution -Expected @(
+        'maxPerEventCandidate', 'route', 'sameCandidateBinding', 'samePassBlockSemantics'
+    ) -Context 'Entry-point canonical execution policy'
+    Assert-AuthorityNonNegativeInteger `
+        -Value (Get-AuthorityRequiredProperty -Object $canonicalExecution -Name 'maxPerEventCandidate' -Context 'Entry-point canonical execution policy') `
+        -Context 'Entry-point canonical execution maxPerEventCandidate'
+    if ([int64]$canonicalExecution.maxPerEventCandidate -ne 1) {
+        throw 'Entry-point contract must allow at most one canonical execution per event/candidate.'
+    }
+    Assert-AuthorityExactString `
+        -Value $canonicalExecution.route `
+        -Expected 'canonical-validator' `
+        -Context 'Entry-point canonical execution route'
+    Assert-AuthorityExactBoolean `
+        -Value $canonicalExecution.sameCandidateBinding `
+        -Expected $true `
+        -Context 'Entry-point canonical execution candidate binding'
+    Assert-AuthorityExactBoolean `
+        -Value $canonicalExecution.samePassBlockSemantics `
+        -Expected $true `
+        -Context 'Entry-point canonical execution pass/block semantics'
+
+    $surfaces = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'releaseAffectingSurfaces' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $surfaces -Expected @(
+        'workflowGlob', 'hookRoots', 'publicCommandFiles', 'mustRouteTo', 'alternateGateAction'
+    ) -Context 'Entry-point release-affecting surface policy'
+    Assert-AuthorityExactString -Value $surfaces.workflowGlob -Expected '.github/workflows/*.{yml,yaml}' -Context 'Entry-point workflow inventory'
+    Assert-AuthorityExactStringSequence -Value $surfaces.hookRoots -Expected @('.git/hooks', '.githooks') -Context 'Entry-point hook inventory'
+    Assert-AuthorityExactStringSequence -Value $surfaces.publicCommandFiles -Expected @(
+        'README.md', 'RELEASING.md', 'RELEASE.md', 'docs/RELEASE.md', 'docs/RELEASING.md'
+    ) -Context 'Entry-point public command inventory'
+    Assert-AuthorityExactString -Value $surfaces.mustRouteTo -Expected 'canonical-validator' -Context 'Entry-point release routing'
+    Assert-AuthorityExactString -Value $surfaces.alternateGateAction -Expected 'BLOCK' -Context 'Entry-point alternate gate action'
+
+    $componentScripts = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'componentScripts' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $componentScripts -Expected @('mayExist', 'mayBeTopLevelReleaseGate') -Context 'Entry-point component script policy'
+    Assert-AuthorityExactBoolean -Value $componentScripts.mayExist -Expected $true -Context 'Entry-point component script availability'
+    Assert-AuthorityExactBoolean -Value $componentScripts.mayBeTopLevelReleaseGate -Expected $false -Context 'Entry-point component script release authority'
+
+    $compatibility = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'compatibilityLane' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $compatibility -Expected @(
+        'allowed', 'requiresCanonicalDependency', 'requiresRestrictedPurpose',
+        'mayMirrorCanonicalResult', 'mayRunIndependentPassBlockPolicy', 'mayBeCanonicalReleaseGate'
+    ) -Context 'Entry-point compatibility lane policy'
+    Assert-AuthorityExactBoolean -Value $compatibility.allowed -Expected $true -Context 'Entry-point compatibility lane availability'
+    Assert-AuthorityExactBoolean -Value $compatibility.requiresCanonicalDependency -Expected $true -Context 'Entry-point compatibility canonical dependency'
+    Assert-AuthorityExactBoolean -Value $compatibility.requiresRestrictedPurpose -Expected $true -Context 'Entry-point compatibility restricted purpose'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayMirrorCanonicalResult -Expected $true -Context 'Entry-point compatibility result mirroring'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayRunIndependentPassBlockPolicy -Expected $false -Context 'Entry-point compatibility independent policy'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayBeCanonicalReleaseGate -Expected $false -Context 'Entry-point compatibility release authority'
+
+    $triggerAdapters = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'triggerAdapters' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $triggerAdapters -Expected @(
+        'allowedEvents', 'mustShareCanonicalValidator', 'mustShareCandidateBinding', 'duplicateEventCandidateExecution'
+    ) -Context 'Entry-point trigger adapter policy'
+    Assert-AuthorityExactStringSequence -Value $triggerAdapters.allowedEvents -Expected @('pull_request', 'push', 'workflow_dispatch') -Context 'Entry-point trigger adapter events'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCanonicalValidator -Expected $true -Context 'Entry-point trigger adapter validator binding'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCandidateBinding -Expected $true -Context 'Entry-point trigger adapter candidate binding'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.duplicateEventCandidateExecution -Expected $false -Context 'Entry-point duplicate event execution'
+
+    $roles = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'authorityWorkflowRoles' `
+        -Context 'Validation/security gate entry-point contract'
+    if ($roles -isnot [array] -or @($roles).Count -ne 4) {
+        throw 'Entry-point authority workflow role inventory must contain exactly four roles.'
+    }
+    $expectedRoles = @(
+        @{ path = '.github/workflows/standards-conformance.yml'; role = 'canonical-authority-regression' },
+        @{ path = '.github/workflows/pr8-powershell-validation.yml'; role = 'compatibility-and-linux-composition-bridge' },
+        @{ path = '.github/workflows/syp86-production-lock.yml'; role = 'production-lock-contract' },
+        @{ path = '.github/workflows/syp101-production-smoke.yml'; role = 'production-smoke-contract' }
+    )
+    for ($index = 0; $index -lt $expectedRoles.Count; $index++) {
+        $role = $roles[$index]
+        Assert-AuthorityJsonPropertySet -Object $role -Expected @('path', 'role', 'consumerAlternateGate') -Context "Entry-point authority workflow role $($index + 1)"
+        Assert-AuthorityExactString -Value $role.path -Expected $expectedRoles[$index].path -Context "Entry-point authority workflow role $($index + 1) path"
+        Assert-AuthorityExactString -Value $role.role -Expected $expectedRoles[$index].role -Context "Entry-point authority workflow role $($index + 1) name"
+        Assert-AuthorityExactBoolean -Value $role.consumerAlternateGate -Expected $false -Context "Entry-point authority workflow role $($index + 1) consumer alternate gate"
+    }
+}
+
+function Get-AuthorityConsumerWorkflowEvents {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $events = New-Object 'System.Collections.Generic.List[string]'
+    $onFound = $false
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -notmatch '^(?:"on"|''on''|on)\s*:\s*(?<value>.*)$') { continue }
+        $onFound = $true
+        $inlineValue = ([string]$Matches.value) -replace '\s+#.*$', ''
+        if (-not [string]::IsNullOrWhiteSpace($inlineValue) -and $inlineValue -notmatch '^\{?\s*\}?$') {
+            foreach ($match in [regex]::Matches($inlineValue, '(?<![A-Za-z0-9_-])(pull_request|push|workflow_dispatch)(?![A-Za-z0-9_-])')) {
+                [void]$events.Add([string]$match.Groups[1].Value)
+            }
+            if ($events.Count -eq 0) {
+                [void]$events.Add('__unsupported__')
+            }
+            break
+        }
+
+        $onIndent = ([regex]::Match($line, '^\s*')).Value.Length
+        $eventIndent = $null
+        for ($nestedIndex = $index + 1; $nestedIndex -lt $lines.Count; $nestedIndex++) {
+            $nestedLine = [string]$lines[$nestedIndex]
+            if ($nestedLine -match '^\s*(?:#.*)?$') { continue }
+            $nestedIndent = ([regex]::Match($nestedLine, '^\s*')).Value.Length
+            if ($nestedIndent -le $onIndent) { break }
+            if ($nestedLine -match '^(?<indent>\s*)(?<event>[A-Za-z_][A-Za-z0-9_-]*)\s*:') {
+                if ($null -eq $eventIndent) { $eventIndent = $nestedIndent }
+                if ($nestedIndent -ne $eventIndent) { continue }
+                [void]$events.Add([string]$Matches.event)
+            }
+        }
+        break
+    }
+
+    if (-not $onFound -or $events.Count -eq 0) {
+        return @('__unsupported__')
+    }
+    return @($events)
+}
+
+function Get-AuthorityConsumerCanonicalTokenPattern {
+    param([Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+
+    $pathPattern = [regex]::Escape($CanonicalRelativePath.Replace('\', '/')).Replace('/', '[/\\]')
+    return '(?<![A-Za-z0-9_.-])(?:\.[/\\])?' + $pathPattern + '(?![A-Za-z0-9_.-])'
+}
+
+function Test-AuthorityConsumerCanonicalInvocation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $pattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    return ([regex]::Matches($Text, $pattern)).Count
+}
+
+function Test-AuthorityConsumerNonCanonicalValidationCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $scriptPattern = '(?i)(?<![A-Za-z0-9_.-])(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]+\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)(?![A-Za-z0-9_.-])'
+    $localValidationPathPattern = '(?i)(?<![A-Za-z0-9_.-])(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]*(?:test|validate|check|lint|scan|gate)[A-Za-z0-9_.-]*(?![A-Za-z0-9_.-])'
+    foreach ($pattern in @($scriptPattern, $localValidationPathPattern)) {
+        foreach ($match in [regex]::Matches($Text, $pattern)) {
+            if ($match.Value -notmatch $canonicalPattern) { return $true }
+        }
+    }
+    $toolPattern = '(?im)(?<![A-Za-z0-9_.-])(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan)(?:[-:][A-Za-z0-9_.-]+)?)|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)(?![A-Za-z0-9_.-])'
+    return [regex]::IsMatch($Text, $toolPattern)
+}
+
+function Test-AuthorityConsumerCompatibilityLane {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    if ($Text -notmatch '(?im)\bneeds\s*:\s*[^\r\n]*canonical') { return $false }
+    if ($Text -notmatch '(?i)\b(?:compatibility|legacy|windows\s+powershell\s*5\.1|pester\s*3)\b') { return $false }
+    if ($Text -match '(?im)actions/checkout@|\b(?:Install-Module|pip\s+install|npm\s+(?:install|ci)|go\s+install)\b') { return $false }
+    if ($Text -match '(?im)^\s*(?:if\s*:\s*failure\(\)|exit\s+[1-9]|throw\b)|\|\s*failure\b') { return $false }
+    return $true
+}
+
+function Assert-AuthorityConsumerEntryPointContract {
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $CanonicalValidatorPath,
+        [Parameter(Mandatory = $true)] $Policy
+    )
+
+    $contract = Get-AuthorityRequiredProperty -Object $Policy -Name 'entryPointContract' -Context 'Consumer entry-point contract'
+    Assert-AuthorityEntryPointPolicy -Contract $contract
+
+    $rootItem = Get-Item -Force -LiteralPath $RepositoryRoot -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BLOCK: consumer entry-point contract requires a non-reparse repository root.'
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($rootItem.FullName)
+    $authorityRepositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+    $isAuthorityRepository = Test-AuthorityPathEqual -Left $rootFull -Right $authorityRepositoryRoot
+    $canonicalRelative = $CanonicalValidatorPath.Replace('\', '/')
+    while ($canonicalRelative.StartsWith('./', [System.StringComparison]::Ordinal)) {
+        $canonicalRelative = $canonicalRelative.Substring(2)
+    }
+    if ([string]::IsNullOrWhiteSpace($canonicalRelative) -or
+        [System.IO.Path]::IsPathRooted($CanonicalValidatorPath) -or
+        $canonicalRelative -match '(^|/)\.\.(?:/|$)' -or
+        $canonicalRelative -match '(^|/)\.(?:/|$)' -or
+        $canonicalRelative -match '^[A-Za-z]:' -or
+        $canonicalRelative -match '//') {
+        throw 'BLOCK: consumer entry-point contract has an unsafe canonical validator path.'
+    }
+    $canonicalFull = [System.IO.Path]::GetFullPath((Join-Path $rootFull ($canonicalRelative -replace '/', [System.IO.Path]::DirectorySeparatorChar)))
+    [void](Assert-AuthorityPathWithinRoot -Path $canonicalFull -Root $rootFull -Context 'Consumer canonical validator')
+    $canonicalItem = Get-Item -Force -LiteralPath $canonicalFull -ErrorAction Stop
+    if ($canonicalItem.PSIsContainer -or ($canonicalItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BLOCK: consumer entry-point contract canonical validator must be a non-reparse regular file.'
+    }
+
+    $authorityRolePaths = @($contract.authorityWorkflowRoles | ForEach-Object { ([string]$_.path).Replace('\', '/') })
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $canonicalRelative
+    $eventOwners = @{}
+    $workflowRoot = Join-Path $rootFull '.github/workflows'
+    $workflowFiles = @()
+    if (Test-Path -LiteralPath $workflowRoot -PathType Container) {
+        $workflowRootItem = Get-Item -Force -LiteralPath $workflowRoot -ErrorAction Stop
+        if (($workflowRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'BLOCK: consumer entry-point workflow inventory encountered a reparse-point directory.'
+        }
+        $workflowFiles = @(Get-ChildItem -Force -LiteralPath $workflowRoot -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in @('.yml', '.yaml') } | Sort-Object FullName)
+    }
+    foreach ($workflowFile in $workflowFiles) {
+        if (($workflowFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point workflow '$($workflowFile.FullName)' is a reparse point."
+        }
+        $relativePath = $workflowFile.FullName.Substring($rootFull.Length).TrimStart(
+            [System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar
+        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+        if ($isAuthorityRepository -and $authorityRolePaths -contains $relativePath) { continue }
+        $text = [System.IO.File]::ReadAllText($workflowFile.FullName)
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $text -CanonicalRelativePath $canonicalRelative
+        $nonCanonical = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $text -CanonicalRelativePath $canonicalRelative
+        $compatibility = Test-AuthorityConsumerCompatibilityLane -Text $text
+        if ($nonCanonical -and -not $compatibility) {
+            throw "BLOCK: consumer entry-point contract found an alternate or non-canonical validation command in workflow '$relativePath'."
+        }
+        if ($canonicalCount -gt 1) {
+            throw "BLOCK: consumer entry-point contract found duplicate canonical executions in workflow '$relativePath'."
+        }
+        $events = @(Get-AuthorityConsumerWorkflowEvents -Text $text)
+        if ($canonicalCount -gt 0) {
+            if ($events -contains '__unsupported__') {
+                throw "BLOCK: consumer entry-point contract found an unsupported or unbound trigger in workflow '$relativePath'."
+            }
+            foreach ($event in $events) {
+                if ($event -notin @('pull_request', 'push', 'workflow_dispatch')) {
+                    throw "BLOCK: consumer entry-point contract found unsupported trigger '$event' in workflow '$relativePath'."
+                }
+                if ($eventOwners.ContainsKey($event)) {
+                    throw "BLOCK: consumer entry-point contract found duplicate canonical execution for event/candidate '$event' in '$relativePath' and '$($eventOwners[$event])'."
+                }
+                $eventOwners[$event] = $relativePath
+            }
+        }
+    }
+
+    foreach ($hookRootRelative in @($contract.releaseAffectingSurfaces.hookRoots)) {
+        $hookRoot = Join-Path $rootFull ([string]$hookRootRelative -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $hookRoot -PathType Container)) { continue }
+        $hookRootItem = Get-Item -Force -LiteralPath $hookRoot -ErrorAction Stop
+        if (($hookRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point hook inventory root '$hookRootRelative' is a reparse point."
+        }
+        $hookFiles = @(Get-ChildItem -Force -LiteralPath $hookRoot -File -Recurse -ErrorAction Stop |
+            Where-Object {
+                -not ([string]$hookRootRelative -ceq '.git/hooks' -and
+                    $_.Name.EndsWith('.sample', [System.StringComparison]::OrdinalIgnoreCase))
+            })
+        foreach ($hookFile in $hookFiles) {
+            if (($hookFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "BLOCK: consumer entry-point hook '$($hookFile.FullName)' is a reparse point."
+            }
+            $hookText = [System.IO.File]::ReadAllText($hookFile.FullName)
+            $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookText -CanonicalRelativePath $canonicalRelative
+            if ((Test-AuthorityConsumerNonCanonicalValidationCommand -Text $hookText -CanonicalRelativePath $canonicalRelative) -or
+                $hookCanonicalCount -eq 0 -and $hookText -match '(?im)\b(?:validate|validation|test|pester|pytest|lint|scan|gate)\b') {
+                throw "BLOCK: consumer entry-point contract found a hook that bypasses the canonical validator: '$hookFile'."
+            }
+            if ($hookCanonicalCount -gt 1) {
+                throw "BLOCK: consumer entry-point contract found duplicate canonical executions in hook '$hookFile'."
+            }
+        }
+    }
+
+    foreach ($publicRelativePath in @($contract.releaseAffectingSurfaces.publicCommandFiles)) {
+        $publicPath = Join-Path $rootFull ([string]$publicRelativePath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $publicPath -PathType Leaf)) { continue }
+        $publicItem = Get-Item -Force -LiteralPath $publicPath -ErrorAction Stop
+        if (($publicItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point public command '$publicRelativePath' is a reparse point."
+        }
+        $publicText = [System.IO.File]::ReadAllText($publicPath)
+        $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
+        $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
+        if ($nonCanonicalPublicCommand -and ($isReleaseInstructions -or
+            $publicText -match '(?is)(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate).{0,240}(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install)|(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install).{0,240}(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate)')) {
+            throw "BLOCK: consumer entry-point contract found a public command that declares an alternate release gate: '$publicRelativePath'."
+        }
+    }
+
+    return $true
 }
 
 function Invoke-AuthorityExternalCommand {

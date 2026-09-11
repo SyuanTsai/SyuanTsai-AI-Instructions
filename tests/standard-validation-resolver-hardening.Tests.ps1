@@ -2,7 +2,9 @@ Describe 'Standard validation resolver hardening' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1'
+        $script:UpstreamAdapterValidatorPath = Join-Path $script:RepositoryRoot 'scripts/Validate-UpstreamAdapter.ps1'
         $script:ToolchainPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json'
+        $script:UpstreamAdapterPolicyPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-adapter.json'
         $script:LifecyclePath = Join-Path $script:RepositoryRoot 'docs/standards/managed-skill-lifecycle.md'
         $script:LifecycleSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/managed-skill-lifecycle-v1.schema.json'
         $script:ValidationSecurityGatePath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
@@ -61,6 +63,44 @@ Describe 'Standard validation resolver hardening' {
                 $archive.Dispose()
             }
             return $wheelPath
+        }
+
+        function Write-TestUtf8File {
+            param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Text)
+
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $parent = [IO.Path]::GetDirectoryName($fullPath)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                [void](New-Item -ItemType Directory -Path $parent -Force)
+            }
+            [IO.File]::WriteAllText($fullPath, $Text, (New-Object Text.UTF8Encoding($false)))
+        }
+
+        function Assert-TestBytesEqual {
+            param(
+                [Parameter(Mandatory = $true)][byte[]] $Actual,
+                [Parameter(Mandatory = $true)][byte[]] $Expected,
+                [Parameter(Mandatory = $true)][string] $Message
+            )
+
+            $actualBase64 = [Convert]::ToBase64String($Actual)
+            $expectedBase64 = [Convert]::ToBase64String($Expected)
+            Assert-Equal $actualBase64 $expectedBase64 $Message
+        }
+
+        function Get-TestPowerShellExecutable {
+            $name = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+                'powershell.exe'
+            }
+            elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                'pwsh.exe'
+            }
+            else {
+                'pwsh'
+            }
+            $path = Join-Path $PSHOME $name
+            Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'A PowerShell executable is required for the atomic output process regression.'
+            return $path
         }
     }
 
@@ -598,6 +638,190 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
                 $errorMessage = $_.Exception.Message
             }
             Assert-Match $errorMessage 'Untrusted SkillSpector release asset URI' "Untrusted release asset URI '$value' must fail closed."
+        }
+    }
+
+    # Scenario: Caller-supplied output paths are written by two independent resolver/adapter processes.
+    # Purpose: Require the same exclusive atomic-create contract for both public JSON report writers.
+    It 'UnitT90_requires_exclusive_atomic_creation_for_caller_output_paths' {
+        $sources = @(
+            @{ Name = 'validation-tool resolver'; Path = $script:ResolverPath; Function = 'Write-ResolverJsonOutput' },
+            @{ Name = 'upstream adapter validator'; Path = $script:UpstreamAdapterValidatorPath; Function = 'Write-AdapterJsonOutput' }
+        )
+
+        foreach ($entry in $sources) {
+            $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $entry.Path
+            $functionPattern = '(?s)function\s+' + [regex]::Escape($entry.Function) + '\b.*?(?=\r?\nfunction\s|\r?\ntry\s\{|\z)'
+            Assert-Match $source $functionPattern "The $($entry.Name) must have a dedicated caller-output writer."
+            $functionMatch = [regex]::Match($source, $functionPattern)
+            $writerBody = $functionMatch.Value
+            Assert-Match $writerBody '\[System\.IO\.File\]::Open\(\s*\$fullPath\s*,\s*\[System\.IO\.FileMode\]::CreateNew\s*,\s*\[System\.IO\.FileAccess\]::Write\s*,\s*\[System\.IO\.FileShare\]::None' "The $($entry.Name) caller-output writer must use exclusive FileMode.CreateNew/FileAccess.Write/FileShare.None."
+            Assert-Match $writerBody 'UTF8Encoding\(\$false\)' "The $($entry.Name) caller-output writer must use UTF-8 without a BOM."
+            Assert-Match $writerBody '(?s)try\s*\{.*?finally\s*\{' "The $($entry.Name) caller-output writer must release its stream in a finally block."
+            Assert-NotMatch $writerBody 'WriteAllText|FileMode\]::Create\b' "The $($entry.Name) caller-output writer must not use check-then-write or overwriting FileMode.Create."
+            Assert-Match $source ([regex]::Escape($entry.Function) + '\s+-Path\s+\$OutputPath') "The $($entry.Name) must route caller output through its atomic writer."
+        }
+    }
+
+    # Scenario: A caller points either public report writer at an existing file containing unrelated bytes.
+    # Purpose: Prove fail-closed existing-file behavior and byte preservation for both OutputPath contracts.
+    It 'UnitT91_rejects_existing_caller_output_without_mutation' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $sentinel = (New-Object Text.UTF8Encoding($false)).GetBytes('existing-report-must-remain-byte-identical')
+        $resolverOutput = Join-Path $TestDrive 'existing-resolver-output.json'
+        [IO.File]::WriteAllBytes($resolverOutput, $sentinel)
+        $resolverBefore = [IO.File]::ReadAllBytes($resolverOutput)
+        $resolverError = $null
+        try { & $script:ResolverPath -ValidatePolicyOnly -OutputPath $resolverOutput | Out-Null }
+        catch { $resolverError = $_.Exception.Message }
+        Assert-Match $resolverError 'exists|already' 'The resolver must fail closed when caller OutputPath already exists.'
+        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($resolverOutput)) -Expected $resolverBefore -Message 'The resolver must not mutate an existing caller output file.'
+
+        $adapterRoot = Join-Path $TestDrive 'existing-adapter-package'
+        [void](New-Item -ItemType Directory -Path $adapterRoot -Force)
+        $adapterOutput = Join-Path $TestDrive 'existing-adapter-output.json'
+        [IO.File]::WriteAllBytes($adapterOutput, $sentinel)
+        $adapterBefore = [IO.File]::ReadAllBytes($adapterOutput)
+        $adapterError = $null
+        try {
+            & $script:UpstreamAdapterValidatorPath -PackageRoot $adapterRoot -OutputPath $adapterOutput | Out-Null
+        }
+        catch { $adapterError = $_.Exception.Message }
+        Assert-Match $adapterError 'exists|already' 'The upstream adapter must fail closed when caller OutputPath already exists.'
+        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($adapterOutput)) -Expected $adapterBefore -Message 'The upstream adapter must not mutate an existing caller output file.'
+    }
+
+    # Scenario: Two processes pass the same not-yet-created OutputPath after a deterministic file barrier.
+    # Purpose: Prove that exactly one writer wins, the loser fails closed, and the winner leaves complete BOM-free JSON.
+    It 'UnitT92_allows_exactly_one_concurrent_output_writer_for_each_public_report' {
+        $childScript = Join-Path $TestDrive 'atomic-output-writer-child.ps1'
+        Write-TestUtf8File -Path $childScript -Text @'
+param(
+    [Parameter(Mandatory = $true)][ValidateSet('resolver', 'adapter')][string] $Mode,
+    [Parameter(Mandatory = $true)][string] $ResolverPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPath,
+    [Parameter(Mandatory = $true)][string] $ResolverPolicyPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPolicyPath,
+    [Parameter(Mandatory = $true)][string] $PackageRoot,
+    [Parameter(Mandatory = $true)][string] $OutputPath,
+    [Parameter(Mandatory = $true)][string] $SyncRoot,
+    [Parameter(Mandatory = $true)][int] $Index
+)
+$ErrorActionPreference = 'Stop'
+$readyPath = Join-Path $SyncRoot ("ready-{0}" -f $Index)
+$readyStream = [System.IO.File]::Open(
+    $readyPath,
+    [System.IO.FileMode]::CreateNew,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::None
+)
+try { $readyStream.Flush() }
+finally { $readyStream.Dispose() }
+
+$releasePath = Join-Path $SyncRoot 'release'
+while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+    [System.Threading.Thread]::Yield() | Out-Null
+}
+
+try {
+    if ($Mode -ceq 'resolver') {
+        & $ResolverPath -PolicyPath $ResolverPolicyPath -ValidatePolicyOnly -OutputPath $OutputPath | Out-Null
+    }
+    else {
+        & $AdapterPath -PackageRoot $PackageRoot -PolicyPath $AdapterPolicyPath -OutputPath $OutputPath | Out-Null
+    }
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine([string]$_.Exception.Message)
+    exit 1
+}
+'@
+
+        $powerShellExecutable = Get-TestPowerShellExecutable
+        foreach ($mode in @('resolver', 'adapter')) {
+            $syncRoot = Join-Path $TestDrive ("atomic-output-race-{0}" -f $mode)
+            [void](New-Item -ItemType Directory -Path $syncRoot -Force)
+            $packageRoot = Join-Path $syncRoot 'package'
+            [void](New-Item -ItemType Directory -Path $packageRoot -Force)
+            $outputPath = Join-Path $syncRoot 'report.json'
+            $children = @()
+            try {
+                foreach ($index in 1..2) {
+                    $arguments = @(
+                        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                        '-File', ('"' + $childScript + '"'),
+                        '-Mode', $mode,
+                        '-ResolverPath', ('"' + $script:ResolverPath + '"'),
+                        '-AdapterPath', ('"' + $script:UpstreamAdapterValidatorPath + '"'),
+                        '-ResolverPolicyPath', ('"' + $script:ToolchainPath + '"'),
+                        '-AdapterPolicyPath', ('"' + $script:UpstreamAdapterPolicyPath + '"'),
+                        '-PackageRoot', ('"' + $packageRoot + '"'),
+                        '-OutputPath', ('"' + $outputPath + '"'),
+                        '-SyncRoot', ('"' + $syncRoot + '"'),
+                        '-Index', [string]$index
+                    )
+                    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                    $startInfo.FileName = $powerShellExecutable
+                    $startInfo.Arguments = $arguments -join ' '
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.CreateNoWindow = $true
+                    $startInfo.RedirectStandardOutput = $true
+                    $startInfo.RedirectStandardError = $true
+                    $process = New-Object System.Diagnostics.Process
+                    $process.StartInfo = $startInfo
+                    if (-not $process.Start()) { throw "Unable to start atomic $mode writer $index." }
+                    $children += [pscustomobject]@{
+                        Process = $process
+                        Stdout = $process.StandardOutput.ReadToEndAsync()
+                        Stderr = $process.StandardError.ReadToEndAsync()
+                    }
+                }
+
+                $deadline = [DateTime]::UtcNow.AddSeconds(15)
+                while (@(Get-ChildItem -LiteralPath $syncRoot -Filter 'ready-*' -File -ErrorAction SilentlyContinue).Count -lt 2) {
+                    if ([DateTime]::UtcNow -gt $deadline) { throw "Atomic $mode writers did not reach the deterministic barrier." }
+                    [System.Threading.Thread]::Yield() | Out-Null
+                }
+                $releaseStream = [System.IO.File]::Open(
+                    (Join-Path $syncRoot 'release'),
+                    [System.IO.FileMode]::CreateNew,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::None
+                )
+                try { $releaseStream.Flush() }
+                finally { $releaseStream.Dispose() }
+
+                $exitCodes = @()
+                foreach ($child in $children) {
+                    if (-not $child.Process.WaitForExit(15000)) {
+                        throw "Atomic $mode writer did not finish."
+                    }
+                    $child.Process.WaitForExit()
+                    $exitCodes += [int]$child.Process.ExitCode
+                    [void]$child.Stdout.Result
+                    [void]$child.Stderr.Result
+                }
+            }
+            finally {
+                foreach ($child in $children) {
+                    if (-not $child.Process.HasExited) {
+                        try { $child.Process.Kill() } catch { }
+                    }
+                    $child.Process.Dispose()
+                }
+            }
+
+            Assert-Equal (@($exitCodes | Where-Object { $_ -eq 0 }).Count) 1 "Exactly one concurrent $mode OutputPath writer must succeed."
+            Assert-Equal (@($exitCodes | Where-Object { $_ -ne 0 }).Count) 1 "Exactly one concurrent $mode OutputPath writer must fail closed."
+            $json = [IO.File]::ReadAllText($outputPath)
+            $parsed = $null
+            try { $parsed = $json | ConvertFrom-Json }
+            catch { throw "The winning $mode OutputPath writer did not leave parseable JSON: $($_.Exception.Message)" }
+            Assert-True ($null -ne $parsed) "The winning $mode OutputPath writer must leave a complete JSON document."
+            $bytes = [IO.File]::ReadAllBytes($outputPath)
+            Assert-False ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) "The winning $mode OutputPath writer must emit UTF-8 without a BOM."
         }
     }
 

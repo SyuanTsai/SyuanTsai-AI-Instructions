@@ -2722,6 +2722,80 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
 
+    # Scenario: A consumer adds a renamed workflow, hook, or public command that runs a component validator directly.
+    # Purpose: Keep one canonical validation execution per event/candidate while making the central authority workflow exceptions explicit.
+    It 'UnitT95_binds_the_consumer_entry_point_inventory_and_authority_workflow_exceptions' {
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        Assert-True ($null -ne $policy.entryPointContract) 'Canonical validation/security policy must declare the consumer entry-point contract.'
+        Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Entry-point contract policy must be schema-valid.'
+        Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
+
+        $contract = $policy.entryPointContract
+        Assert-ExactPropertySet $contract @('canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts', 'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles') 'Entry-point contract property set changed.'
+        Assert-Equal $contract.canonicalExecution.maxPerEventCandidate 1 'A consumer must have at most one canonical execution per event/candidate.'
+        Assert-Equal $contract.canonicalExecution.route 'canonical-validator' 'All release-affecting consumer surfaces must route to the canonical validator.'
+        Assert-True ([bool]$contract.canonicalExecution.sameCandidateBinding) 'Trigger adapters must bind the same event candidate.'
+        Assert-True ([bool]$contract.canonicalExecution.samePassBlockSemantics) 'Trigger adapters must share canonical pass/block semantics.'
+        Assert-Equal $contract.releaseAffectingSurfaces.workflowGlob '.github/workflows/*.{yml,yaml}' 'Consumer workflow inventory must cover both YAML extensions.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.hookRoots @('.git/hooks', '.githooks') 'Consumer hook inventory must list versioned and local hook roots.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.publicCommandFiles @('README.md', 'RELEASING.md', 'RELEASE.md', 'docs/RELEASE.md', 'docs/RELEASING.md') 'Public release command inventory must cover the documented entry-point files.'
+        Assert-Equal $contract.releaseAffectingSurfaces.mustRouteTo 'canonical-validator' 'Release-affecting surfaces must route to the canonical validator.'
+        Assert-Equal $contract.releaseAffectingSurfaces.alternateGateAction 'BLOCK' 'Consumer alternate gates must block closed.'
+        Assert-True ([bool]$contract.componentScripts.mayExist) 'Component/diagnostic scripts must remain allowed.'
+        Assert-False ([bool]$contract.componentScripts.mayBeTopLevelReleaseGate) 'Component scripts must not become public release gates.'
+        Assert-True ([bool]$contract.compatibilityLane.allowed) 'Compatibility lanes must remain available for explicit legacy coverage.'
+        Assert-True ([bool]$contract.compatibilityLane.requiresCanonicalDependency) 'Consumer compatibility status jobs must depend on the canonical result.'
+        Assert-True ([bool]$contract.compatibilityLane.requiresRestrictedPurpose) 'Compatibility lanes must have a restricted purpose.'
+        Assert-True ([bool]$contract.compatibilityLane.mayMirrorCanonicalResult) 'Compatibility status jobs may mirror the canonical result.'
+        Assert-False ([bool]$contract.compatibilityLane.mayRunIndependentPassBlockPolicy) 'Consumer compatibility lanes must not own an independent pass/block policy.'
+        Assert-False ([bool]$contract.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lanes must never become the canonical release gate.'
+        Assert-ExactStringSequence $contract.triggerAdapters.allowedEvents @('pull_request', 'push', 'workflow_dispatch') 'Protected PR, trusted push, and manual trigger adapters must be explicit.'
+        Assert-True ([bool]$contract.triggerAdapters.mustShareCanonicalValidator) 'Trigger adapters must share the canonical validator.'
+        Assert-True ([bool]$contract.triggerAdapters.mustShareCandidateBinding) 'Trigger adapters must share candidate binding.'
+        Assert-False ([bool]$contract.triggerAdapters.duplicateEventCandidateExecution) 'The same event/candidate must not execute the canonical validator twice.'
+
+        $roles = @($contract.authorityWorkflowRoles)
+        Assert-Equal $roles.Count 4 'The authority workflow exception inventory must contain exactly four roles.'
+        Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.path }) @(
+            '.github/workflows/standards-conformance.yml',
+            '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/syp86-production-lock.yml',
+            '.github/workflows/syp101-production-smoke.yml'
+        ) 'The authority workflow exception inventory must preserve all four workflow paths.'
+        Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.role }) @(
+            'canonical-authority-regression',
+            'compatibility-and-linux-composition-bridge',
+            'production-lock-contract',
+            'production-smoke-contract'
+        ) 'The authority workflow exception roles must remain explicit and ordered.'
+        foreach ($role in $roles) {
+            Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be treated as a consumer alternate gate."
+        }
+
+        Assert-Match $standard 'one canonical validation execution per event/candidate' 'Normative Standard must prohibit duplicate canonical validation execution.'
+        Assert-Match $standard 'workflow.*hook.*public' 'Normative Standard must define the release-affecting entry-point inventory.'
+        Assert-Match $standard 'component.*MUST NOT.*release path' 'Normative Standard must keep component scripts non-authoritative.'
+        Assert-Match $standard 'compatibility.*needs.*canonical|compatibility.*canonical.*result' 'Normative Standard must constrain compatibility lanes to the canonical result.'
+        Assert-Match $index 'entry-point|canonical validation execution' 'Standards index must expose the entry-point contract.'
+        Assert-Match $matrix 'entry-point|alternate gate|canonical validation execution' 'Review matrix must record the entry-point boundary.'
+        Assert-Match $gate 'Assert-AuthorityConsumerEntryPointContract' 'The executable authority must expose the consumer entry-point contract checker.'
+
+        $weakened = Copy-TestJsonObject -Value $policy
+        $weakened.entryPointContract.canonicalExecution.maxPerEventCandidate = 2
+        Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message 'A policy allowing two canonical executions per event/candidate must fail schema validation.'
+        $errorMessage = $null
+        try { Assert-AuthorityValidationSecurityGate -Policy $weakened | Out-Null }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'entry-point|canonical execution|event/candidate' 'The executable authority must reject a weakened entry-point contract.'
+    }
+
     # Scenario: PowerShell returns JSON integers as Int64 on some Linux/runtime combinations.
     # Purpose: Keep the upstream adapter report contract cross-platform without accepting coercive strings.
     It 'UnitT91_accepts_Int64_upstream_adapter_report_schema_version' {

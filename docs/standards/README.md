@@ -60,13 +60,14 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 1. `docs/standards/skill-repository-standard.md` 是 normative authority。
 2. `docs/standards/schemas/source-inventory-v2.schema.json` 是 canonical `catalog/source.json` semantic shape；legacy schema v1 的兩種不相容 shape 都不是 Standard v1 conformance output。
 3. `docs/standards/schemas/openai-agent-metadata.schema.json` 只驗 YAML parse 後的 semantic baseline；quoted-string/unquoted-key lexical style 與 exact Skill identity binding 仍由 YAML-aware validator 負責。
-5. `docs/standards/validation-security-gate.json` 是 canonical validation stage order、security severity mapping 與 local/pre-push/CI pass-block semantics 的 machine-readable authority；schema 與 executable gate 必須同時更新。
-6. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
-7. `scripts/Invoke-StandardAuthorityGate.ps1` 是 workflow 共用的 executable authority adapter；`.github/workflows/standards-conformance.yml` 與 `.github/workflows/pr8-powershell-validation.yml` 的 Ruleset-required Linux Composition job 必須呼叫同一 gate、執行相同的三個 authority regression suites、live resolver receipt checks 與 formal tool execution，且不得各自重建 resolver／tool execution sequence。
-8. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1` 共同保護 Standard、merge-blocking workflow 與 resolver supply-chain contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
-9. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。
-10. `Skill-Knowledge-Content`、`Skill-Code-Collaboration`、`Skill-Darktide-Translate`、`Skill-Atlassian-Ecosystem` 依 SYP-156～159 做 conformance migration。
-11. 舊文件若與 Standard v1 衝突，以本目錄為準；歷史文件應保留歷史語意並加上 superseded notice，不得重寫歷史。
+5. `docs/standards/validation-security-gate.json` 是 canonical validation stage order、security severity mapping、local/pre-push/CI pass-block semantics 與 consumer entry-point contract 的 machine-readable authority；schema 與 executable gate 必須同時更新。
+6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
+7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
+8. `scripts/Invoke-StandardAuthorityGate.ps1` 是 workflow 共用的 executable authority adapter；`.github/workflows/standards-conformance.yml` 與 `.github/workflows/pr8-powershell-validation.yml` 的 Ruleset-required Linux Composition job 必須呼叫同一 gate、執行相同的三個 authority regression suites、live resolver receipt checks 與 formal tool execution，且不得各自重建 resolver／tool execution sequence。
+9. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1` 共同保護 Standard、merge-blocking workflow 與 resolver supply-chain contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
+10. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。
+11. `Skill-Knowledge-Content`、`Skill-Code-Collaboration`、`Skill-Darktide-Translate`、`Skill-Atlassian-Ecosystem` 依 SYP-156～159 做 conformance migration。
+12. 舊文件若與 Standard v1 衝突，以本目錄為準；歷史文件應保留歷史語意並加上 superseded notice，不得重寫歷史。
 
 Conformant source repository 不得直接信任 mutable branch 或未驗證 copy。Canonical validator 必須在執行 authority-derived policy 前取得並驗證一個 immutable authority snapshot，記錄 authority repository、full commit、bundle SHA-256 與實際使用的 Standard/policy/schema/resolver file inventory/hash。只記錄 `v1` 不足以重現 conformance。
 
