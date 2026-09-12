@@ -1385,7 +1385,11 @@ function Invoke-StandardValidationProcess {
                 }
             }
             $launchCommand = [string]$unixLauncher
-            $launchArguments = @($Command) + @($Arguments)
+            # GNU setsid may fork when its own PID is already a process-group
+            # leader. --wait keeps that launcher alive until the actual target
+            # exits, so the supervisor can retain the output pipe and discover
+            # the target's owned process group before cleanup.
+            $launchArguments = @('--wait', $Command) + @($Arguments)
             $processGroupLaunch = $true
         }
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -1466,9 +1470,30 @@ function Invoke-StandardValidationProcess {
         }
         elseif ($processGroupLaunch) {
             try {
-                $processGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId)
-                if ($processGroupId -ne $rootProcessId) {
-                    throw "setsid did not create a process group owned by PID $rootProcessId (actual group $processGroupId)."
+                $groupDeadline = (Get-Date).AddMilliseconds(1000)
+                $groupEstablished = $false
+                do {
+                    $candidateGroupId = -1
+                    try { $candidateGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId) } catch { }
+                    if ($candidateGroupId -eq $rootProcessId) {
+                        $processGroupId = $candidateGroupId
+                        $groupEstablished = $true
+                    }
+                    if (-not $groupEstablished) {
+                        foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) {
+                            try { $candidateGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId([int]$childPid) } catch { $candidateGroupId = -1 }
+                            if ($candidateGroupId -eq [int]$childPid) {
+                                $processGroupId = $candidateGroupId
+                                $groupEstablished = $true
+                                break
+                            }
+                        }
+                    }
+                    if ($groupEstablished -or $process.HasExited -or (Get-Date) -ge $groupDeadline) { break }
+                    Start-Sleep -Milliseconds 10
+                } while ($true)
+                if (-not $groupEstablished) {
+                    throw "setsid did not create an owned process group for root PID $rootProcessId."
                 }
             }
             catch {
