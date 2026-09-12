@@ -85,7 +85,7 @@ $script:StandardValidationTrustAnchorDefinitions = [ordered]@{
     }
 }
 
-if ([Environment]::OSVersion.Platform -in @([PlatformID]::Win32NT, [PlatformID]::Unix)) {
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     if ($null -eq ('StandardValidationProcessControlNative' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -1142,6 +1142,94 @@ function Get-StandardValidationDescendantProcessIds {
     return @($result.ToArray())
 }
 
+function Get-StandardValidationUnixKillCommand {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $null }
+    foreach ($candidate in @('/usr/bin/kill', '/bin/kill')) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
+            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                return [string]$item.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Get-StandardValidationUnixProcessGroupId {
+    param([Parameter(Mandatory = $true)][int] $ProcessId)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return 0 }
+    $statPath = Join-Path '/proc' (Join-Path ([string]$ProcessId) 'stat')
+    if (-not [IO.File]::Exists($statPath)) { return -1 }
+    try {
+        $stat = [IO.File]::ReadAllText($statPath)
+        # /proc/[pid]/stat fields are: pid, comm, state, ppid, pgrp, ... .
+        # The comm field may contain spaces and closing parentheses, so the
+        # greedy match intentionally ends at the final closing parenthesis.
+        if ($stat -match '^\s*[0-9]+\s+\(.*\)\s+\S\s+[0-9]+\s+(?<pgrp>[0-9]+)\s+') {
+            return [int]$Matches.pgrp
+        }
+    }
+    catch { }
+    return -1
+}
+
+function Test-StandardValidationUnixProcessGroupAlive {
+    param([Parameter(Mandatory = $true)][int] $ProcessGroupId)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $false }
+    if ($ProcessGroupId -le 0) { return $false }
+    if (-not (Test-Path -LiteralPath '/proc' -PathType Container)) {
+        throw 'The Unix /proc process table is unavailable for owned process-group cleanup.'
+    }
+    foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop)) {
+        if ($directory.Name -notmatch '^[0-9]+$') { continue }
+        try {
+            if ((Get-StandardValidationUnixProcessGroupId -ProcessId ([int]$directory.Name)) -eq $ProcessGroupId) {
+                return $true
+            }
+        }
+        catch { }
+    }
+    return $false
+}
+
+function Invoke-StandardValidationUnixProcessGroupSignal {
+    param(
+        [Parameter(Mandatory = $true)][int] $ProcessGroupId,
+        [Parameter(Mandatory = $true)][int] $Signal
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $false }
+    $killCommand = Get-StandardValidationUnixKillCommand
+    if ([string]::IsNullOrWhiteSpace([string]$killCommand)) {
+        throw 'No trusted kill launcher is available for an owned Unix process group.'
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $killCommand
+    $startInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments @(
+        "-$Signal", '--', "-$ProcessGroupId"
+    )
+    $startInfo.WorkingDirectory = '/'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables.Clear()
+    $signalProcess = New-Object System.Diagnostics.Process
+    $signalProcess.StartInfo = $startInfo
+    try {
+        if (-not $signalProcess.Start()) { return $false }
+        [void]$signalProcess.WaitForExit(1000)
+        if (-not $signalProcess.HasExited) {
+            try { [void]$signalProcess.Kill() } catch { }
+            return $false
+        }
+        return ([int]$signalProcess.ExitCode -eq 0)
+    }
+    finally { $signalProcess.Dispose() }
+}
+
 function Stop-StandardValidationProcessTree {
     param(
         [Parameter(Mandatory = $true)][int] $RootProcessId,
@@ -1167,7 +1255,13 @@ function Stop-StandardValidationProcessTree {
     }
     if ($ProcessGroupId -gt 0) {
         try {
-            if ([StandardValidationProcessControlNative]::TryKillProcessGroup($ProcessGroupId, 9)) {
+            $groupSignalSent = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                Invoke-StandardValidationUnixProcessGroupSignal -ProcessGroupId $ProcessGroupId -Signal 9
+            }
+            else {
+                [StandardValidationProcessControlNative]::TryKillProcessGroup($ProcessGroupId, 9)
+            }
+            if ($groupSignalSent) {
                 $cleanupAttempted = $true
             }
         }
@@ -1209,7 +1303,14 @@ function Stop-StandardValidationProcessTree {
         if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
         $processGroupAlive = $false
         if ($ProcessGroupId -gt 0) {
-            try { $processGroupAlive = [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId) }
+            try {
+                $processGroupAlive = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                    Test-StandardValidationUnixProcessGroupAlive -ProcessGroupId $ProcessGroupId
+                }
+                else {
+                    [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId)
+                }
+            }
             catch { $processGroupAlive = $true }
         }
         if (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive) { return $true }
@@ -1221,7 +1322,14 @@ function Stop-StandardValidationProcessTree {
     if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
     $processGroupAlive = $false
     if ($ProcessGroupId -gt 0) {
-        try { $processGroupAlive = [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId) }
+        try {
+            $processGroupAlive = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                Test-StandardValidationUnixProcessGroupAlive -ProcessGroupId $ProcessGroupId
+            }
+            else {
+                [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId)
+            }
+        }
         catch { $processGroupAlive = $true }
     }
     return (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive)
@@ -1474,14 +1582,30 @@ function Invoke-StandardValidationProcess {
                 $groupEstablished = $false
                 do {
                     $candidateGroupId = -1
-                    try { $candidateGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId) } catch { }
+                    try {
+                        $candidateGroupId = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                            Get-StandardValidationUnixProcessGroupId -ProcessId $rootProcessId
+                        }
+                        else {
+                            [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId)
+                        }
+                    }
+                    catch { }
                     if ($candidateGroupId -eq $rootProcessId) {
                         $processGroupId = $candidateGroupId
                         $groupEstablished = $true
                     }
                     if (-not $groupEstablished) {
                         foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) {
-                            try { $candidateGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId([int]$childPid) } catch { $candidateGroupId = -1 }
+                            try {
+                                $candidateGroupId = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                                    Get-StandardValidationUnixProcessGroupId -ProcessId ([int]$childPid)
+                                }
+                                else {
+                                    [StandardValidationProcessControlNative]::GetProcessGroupId([int]$childPid)
+                                }
+                            }
+                            catch { $candidateGroupId = -1 }
                             if ($candidateGroupId -eq [int]$childPid) {
                                 $processGroupId = $candidateGroupId
                                 $groupEstablished = $true
