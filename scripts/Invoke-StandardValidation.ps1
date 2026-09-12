@@ -326,6 +326,87 @@ function Get-StandardValidationFullPath {
     catch { throw "INVALID|$Context is not a valid path: $($_.Exception.Message)" }
 }
 
+function Get-StandardValidationCaseVariant {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $characters = $Value.ToCharArray()
+    for ($index = 0; $index -lt $characters.Length; $index++) {
+        $codePoint = [int][char]$characters[$index]
+        if ($codePoint -ge [int][char]'A' -and $codePoint -le [int][char]'Z') {
+            $variant = $characters.Clone()
+            $variant[$index] = [char]($codePoint + 32)
+            return (-join $variant)
+        }
+        if ($codePoint -ge [int][char]'a' -and $codePoint -le [int][char]'z') {
+            $variant = $characters.Clone()
+            $variant[$index] = [char]($codePoint - 32)
+            return (-join $variant)
+        }
+    }
+    return $null
+}
+
+function Get-StandardValidationPathCaseBehavior {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    $current = $fullPath
+    $caseSensitiveEvidence = $false
+    while ($true) {
+        $item = $null
+        try { $item = Get-Item -Force -LiteralPath $current -ErrorAction Stop }
+        catch [System.Management.Automation.ItemNotFoundException] { }
+        catch [System.IO.FileNotFoundException] { }
+        catch [System.IO.DirectoryNotFoundException] { }
+        catch { throw "INVALID|$Context path component could not be inspected: $($_.Exception.Message)" }
+        if ($null -ne $item) {
+            $leaf = Split-Path -Leaf $current
+            $variantLeaf = if ([string]::IsNullOrEmpty($leaf)) { $null } else { Get-StandardValidationCaseVariant -Value $leaf }
+            if (-not [string]::IsNullOrEmpty($variantLeaf)) {
+                $parent = Split-Path -Parent $current
+                if (-not [string]::IsNullOrWhiteSpace($parent)) {
+                    $variantPath = Join-Path $parent $variantLeaf
+                    $variantItem = $null
+                    try { $variantItem = Get-Item -Force -LiteralPath $variantPath -ErrorAction Stop }
+                    catch [System.Management.Automation.ItemNotFoundException] { }
+                    catch [System.IO.FileNotFoundException] { }
+                    catch [System.IO.DirectoryNotFoundException] { }
+                    catch { throw "INVALID|$Context case-behavior probe could not be inspected: $($_.Exception.Message)" }
+                    if ($null -ne $variantItem) { return 'case-insensitive' }
+                    $caseSensitiveEvidence = $true
+                }
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or [string]::Equals($parent, $current, [StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $current = $parent
+    }
+    if ($caseSensitiveEvidence) { return 'case-sensitive' }
+    return 'unknown'
+}
+
+function Get-StandardValidationPathComparison {
+    param([Parameter(Mandatory = $true)][string[]] $Paths)
+
+    $hasUnknown = $false
+    $hasCaseSensitiveEvidence = $false
+    foreach ($path in @($Paths)) {
+        $behavior = Get-StandardValidationPathCaseBehavior -Path $path -Context 'path comparison'
+        if ($behavior -ceq 'case-insensitive') { return [StringComparison]::OrdinalIgnoreCase }
+        if ($behavior -ceq 'case-sensitive') { $hasCaseSensitiveEvidence = $true }
+        else { $hasUnknown = $true }
+    }
+    # An unknown mount/root must not be treated as case-sensitive. This is a
+    # conservative fallback that prevents a case-insensitive volume from
+    # weakening the checkout-external trust boundary.
+    if ($hasUnknown -or -not $hasCaseSensitiveEvidence) {
+        return [StringComparison]::OrdinalIgnoreCase
+    }
+    return [StringComparison]::Ordinal
+}
+
 function Test-StandardValidationReparseItem {
     param([Parameter(Mandatory = $true)] $Item)
 
@@ -345,10 +426,7 @@ function Assert-StandardValidationCanonicalRootPath {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
 
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
-    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        [System.StringComparison]::OrdinalIgnoreCase
-    }
-    else { [System.StringComparison]::Ordinal }
+    $comparison = Get-StandardValidationPathComparison -Paths @($fullPath)
     $current = $fullPath
     while ($true) {
         $item = $null
@@ -395,10 +473,7 @@ function Test-StandardValidationPathWithin {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        [System.StringComparison]::OrdinalIgnoreCase
-    }
-    else { [System.StringComparison]::Ordinal }
+    $comparison = Get-StandardValidationPathComparison -Paths @($fullPath, $fullRoot)
     if ($IncludeRoot -and [string]::Equals($fullPath, $fullRoot, $comparison)) { return $true }
     return $fullPath.StartsWith($fullRoot + [System.IO.Path]::DirectorySeparatorChar, $comparison) -or
         $fullPath.StartsWith($fullRoot + [System.IO.Path]::AltDirectorySeparatorChar, $comparison)
@@ -685,10 +760,7 @@ function Assert-StandardValidationLauncherIntegrity {
     $shimPath = Get-StandardValidationFullPath -Path ([string]$shimPathValue) -Context "$Context launcher shim"
     $payloadPath = Get-StandardValidationFullPath -Path ([string]$payloadPathValue) -Context "$Context launcher payload"
     $runtimePath = Get-StandardValidationFullPath -Path ([string]$runtimePathValue) -Context "$Context launcher runtime"
-    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        [StringComparison]::OrdinalIgnoreCase
-    }
-    else { [StringComparison]::Ordinal }
+    $pathComparison = Get-StandardValidationPathComparison -Paths @($shimPath, $resolvedCommandPath)
     if (-not [string]::Equals($shimPath, $resolvedCommandPath, $pathComparison)) {
         throw "BLOCKED|$Context launcher shim path does not match the adapter command."
     }
@@ -808,7 +880,8 @@ function Assert-StandardValidationToolReceipt {
     if (-not (Test-StandardValidationPathWithin -Path $executablePath -Root $installRoot -IncludeRoot)) {
         throw "BLOCKED|$Context resolver executable is outside its signed install root."
     }
-    if (-not [string]::Equals($executablePath, $CommandPath, $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }))) {
+    $pathComparison = Get-StandardValidationPathComparison -Paths @($executablePath, $CommandPath)
+    if (-not [string]::Equals($executablePath, $CommandPath, $pathComparison)) {
         throw "BLOCKED|$Context command path does not match the signed resolver receipt."
     }
     Assert-StandardValidationSha256 -Value $receipt.executableSha256 -Context "$Context resolver executable"
@@ -1346,9 +1419,10 @@ function Get-StandardValidationSafeUnixSymlinkEntry {
     catch {
         throw "INVALID|$Context contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
     }
+    $pathComparison = Get-StandardValidationPathComparison -Paths @($targetFull, $rootFull)
     $rootPrefix = $rootFull + [IO.Path]::DirectorySeparatorChar
-    if ([string]::Equals($targetFull, $rootFull, [StringComparison]::Ordinal) -or
-        -not $targetFull.StartsWith($rootPrefix, [StringComparison]::Ordinal)) {
+    if ([string]::Equals($targetFull, $rootFull, $pathComparison) -or
+        -not $targetFull.StartsWith($rootPrefix, $pathComparison)) {
         throw "INVALID|$Context symbolic-link target escapes the install root: '$target'."
     }
     $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
@@ -2659,6 +2733,63 @@ function Assert-StandardValidationToolEnvelope {
         }
     }
     return ,$envelope
+}
+
+function Assert-StandardValidationRepositoryTestEnvelope {
+    param(
+        [Parameter(Mandatory = $true)] $Envelope,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $testInventory = Get-StandardValidationProperty -Object $Envelope -Name 'testInventory'
+    if ($testInventory -isnot [array] -or @($testInventory).Count -eq 0) {
+        throw "FAILED|$Context must provide a typed, non-empty testInventory."
+    }
+    foreach ($test in @($testInventory)) {
+        if ($test -is [string]) {
+            if ([string]::IsNullOrWhiteSpace([string]$test) -or [string]$test -match '[\x00-\x1F\x7F]') {
+                throw "FAILED|$Context testInventory contains an empty or unsafe test identity."
+            }
+            continue
+        }
+        if ($null -eq $test -or $test -is [array] -or $null -eq $test.PSObject) {
+            throw "FAILED|$Context testInventory must contain non-empty test identities."
+        }
+        $identityFound = $false
+        foreach ($propertyName in @('id', 'name', 'path')) {
+            $identity = Get-StandardValidationProperty -Object $test -Name $propertyName
+            if ($identity -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$identity) -and
+                [string]$identity -notmatch '[\x00-\x1F\x7F]') {
+                $identityFound = $true
+                break
+            }
+        }
+        if (-not $identityFound) {
+            throw "FAILED|$Context testInventory contains an object without a test identity."
+        }
+    }
+
+    $testResult = Get-StandardValidationProperty -Object $Envelope -Name 'testResult'
+    $domainAdapterResult = Get-StandardValidationProperty -Object $Envelope -Name 'domainAdapterResult'
+    foreach ($binding in @(
+        [pscustomobject]@{ name = 'testResult'; value = $testResult },
+        [pscustomobject]@{ name = 'domainAdapterResult'; value = $domainAdapterResult }
+    )) {
+        if ($null -eq $binding.value -or $binding.value -is [array] -or $null -eq $binding.value.PSObject) {
+            throw "FAILED|$Context must provide a typed $($binding.name) object."
+        }
+        $status = Get-StandardValidationProperty -Object $binding.value -Name 'status'
+        $decision = Get-StandardValidationProperty -Object $binding.value -Name 'decision'
+        if ($status -isnot [string] -or $decision -isnot [string] -or
+            [string]$status -cne 'passed' -or [string]$decision -cne 'PASS') {
+            throw "FAILED|$Context $($binding.name) must report status=passed and decision=PASS."
+        }
+    }
+    return [pscustomobject][ordered]@{
+        testInventory = @($testInventory)
+        testResult = $testResult
+        domainAdapterResult = $domainAdapterResult
+    }
 }
 
 function Assert-StandardValidationFindings {
@@ -4134,6 +4265,7 @@ function Invoke-StandardValidationRun {
 
         $stage = Get-StandardValidationStage -Stages $stages -Id 'repository-tests'
         Start-StandardValidationStage -Stage $stage
+        $repositoryTestEvidence = @()
         foreach ($test in @($adapterResult.repositoryTests)) {
             $invocation = Invoke-StandardValidationCommandAndRecord `
                 -CommandSpec $test.command `
@@ -4155,6 +4287,12 @@ function Invoke-StandardValidationRun {
                 -OutputReservationPath $outputFull `
                 -OutputReservationToken $outputReservationToken
             $stage.events += $invocation.event
+            $repositoryTestEvidence += Assert-StandardValidationRepositoryTestEnvelope `
+                -Envelope $invocation.envelope `
+                -Context "repository test '$($test.id)'"
+        }
+        if (@($repositoryTestEvidence).Count -eq 0) {
+            throw 'FAILED|Repository Tests produced no typed coverage evidence.'
         }
         Complete-StandardValidationStage -Stage $stage -Status passed
         Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage

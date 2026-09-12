@@ -50,7 +50,7 @@ Describe 'Standard validation runner contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [string[]] $SkillIds = @('alpha', 'beta'),
-                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper')]
+                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'repository-missing-evidence', 'repository-zero-tests')]
                 [string] $Behavior = 'pass'
             )
 
@@ -139,6 +139,15 @@ if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
 }
 if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
     [IO.File]::WriteAllText($env:STANDARD_VALIDATION_FIXTURE_SENTINEL, 'repository-test-ran', (New-Object Text.UTF8Encoding($false)))
+    $result.testInventory = @('fixture-repository-test')
+    $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+    $result.domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'repository-missing-evidence') {
+        $result.Remove('testInventory')
+    }
+    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'repository-zero-tests') {
+        $result.testInventory = @()
+    }
 }
 if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'snapshot-mutate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     $targetSkill = @($skills | Select-Object -First 1)[0]
@@ -625,9 +634,11 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'ExpectedToolName' 'Production command provenance must bind to the expected adapter-slot tool role.'
         Assert-Match $runnerSource 'Get-StandardValidationExpectedToolName' 'Every adapter slot must resolve through the central canonical tool-role map.'
         Assert-Match $runnerSource 'Assert-StandardValidationCanonicalRootPath' 'Root containment checks must use canonical existing filesystem components.'
+        Assert-Match $runnerSource 'Get-StandardValidationPathCaseBehavior|Get-StandardValidationPathComparison' 'Path containment checks must detect filesystem case behavior rather than infer it from the operating-system enum.'
         Assert-Match $runnerSource 'symlinked or reparse-point ancestor' 'Symlinked root ancestors must fail closed before artifact creation.'
         Assert-Match $runnerSource 'Assert-StandardValidationLauncherFileIdentity' 'Production package launchers must revalidate safe Unix launcher symlinks through the central helper.'
         Assert-Match $runnerSource 'Get-StandardValidationSafeUnixSymlinkEntry' 'Production installed closures must validate Unix symlink targets centrally.'
+        Assert-Match $runnerSource 'Assert-StandardValidationRepositoryTestEnvelope|typed, non-empty testInventory' 'Repository Tests must require typed, non-empty coverage evidence before passing.'
         Assert-Match $runnerSource 'Assert-StandardValidationSemanticEvidence' 'Semantic evidence must be authenticated and complete.'
         Assert-Match $runnerSource 'semanticEvidence = \$null' 'Every stage must expose a writable semantic evidence slot.'
         Assert-False ($runnerSource -match 'return\s+,\$(?:Evidence|evidence)') 'Imported evidence helpers must return objects rather than unary-comma arrays.'
@@ -755,6 +766,13 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True ((@($events | Where-Object { $_ -like 'skillspector-static|staticAnalyzer|*' }).Count) -eq 1) 'Static must run once for the complete active Skill set.'
         $packageStage = @($result.Evidence.stages | Where-Object id -eq 'package-validation')[0]
         Assert-True (@($packageStage.events | Where-Object { $_.outputPath -and (Test-Path -LiteralPath $_.outputPath -PathType Leaf) }).Count -eq 5) 'Every package process must retain an actual output event artifact.'
+        foreach ($behavior in @('repository-missing-evidence', 'repository-zero-tests')) {
+            $invalidFixture = New-RunnerFixture -Root (Join-Path $TestDrive $behavior) -Behavior $behavior
+            $invalidResult = Invoke-RunnerFixture -Fixture $invalidFixture
+            Assert-True ($invalidResult.ExitCode -ne 0) "Repository test evidence '$behavior' must not return a pass exit code."
+            Assert-Equal $invalidResult.Evidence.state 'FAILED' "Repository test evidence '$behavior' must fail the run."
+            Assert-Match $invalidResult.Output 'testInventory|typed.*coverage|Repository Tests' "Repository test evidence '$behavior' must identify the missing or empty coverage."
+        }
     }
 
     # Scenario: Static reports a failure or incomplete analyzer coverage.

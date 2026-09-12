@@ -1268,27 +1268,60 @@ function Test-AuthorityConsumerJobNeedsCanonical {
 
     $canonicalValues = @($CanonicalJobId, "'$CanonicalJobId'", ('"' + $CanonicalJobId + '"'))
     $needsValue = (Remove-AuthorityConsumerShellComments -Line ([string]$needsValueRaw)).Trim()
+    $canonicalDependencyFound = $false
     if (-not [string]::IsNullOrWhiteSpace($needsValue)) {
         if ($needsValue.StartsWith('[', [StringComparison]::Ordinal) -and $needsValue.EndsWith(']', [StringComparison]::Ordinal)) {
             foreach ($item in @($needsValue.Substring(1, $needsValue.Length - 2) -split ',')) {
-                if ($canonicalValues -ccontains ([string]$item).Trim()) { return $true }
+                if ($canonicalValues -ccontains ([string]$item).Trim()) { $canonicalDependencyFound = $true; break }
             }
         }
-        return $canonicalValues -ccontains $needsValue
+        else {
+            $canonicalDependencyFound = $canonicalValues -ccontains $needsValue
+        }
     }
+    else {
+        for ($index = $needsLineIndex + 1; $index -lt $lines.Count; $index++) {
+            $line = [string]$lines[$index]
+            if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+            $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+            if ($indent -le $needsIndent) { break }
+            if ($indent -ne ($needsIndent + 2)) { return $false }
+            $itemMatch = [regex]::Match($line, '^[ \t]*-\s*(?<value>.*)$')
+            if (-not $itemMatch.Success) { return $false }
+            $item = (Remove-AuthorityConsumerShellComments -Line $itemMatch.Groups['value'].Value).Trim()
+            if ($canonicalValues -ccontains $item) { $canonicalDependencyFound = $true; break }
+        }
+    }
+    if (-not $canonicalDependencyFound) { return $false }
 
-    for ($index = $needsLineIndex + 1; $index -lt $lines.Count; $index++) {
-        $line = [string]$lines[$index]
+    # A release job may add a job-level condition, but it must still be
+    # provably gated on canonical success. Conditions that only mention a
+    # dependency are not enough: a failure/cancelled result must never be an
+    # acceptable prerequisite for a release-affecting command.
+    $jobIndent = $null
+    $ifValue = $null
+    $ifCount = 0
+    foreach ($line in $lines) {
         if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
         $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
-        if ($indent -le $needsIndent) { break }
-        if ($indent -ne ($needsIndent + 2)) { return $false }
-        $itemMatch = [regex]::Match($line, '^[ \t]*-\s*(?<value>.*)$')
-        if (-not $itemMatch.Success) { return $false }
-        $item = (Remove-AuthorityConsumerShellComments -Line $itemMatch.Groups['value'].Value).Trim()
-        if ($canonicalValues -ccontains $item) { return $true }
+        if ($null -eq $jobIndent) { $jobIndent = $indent; continue }
+        $ifMatch = [regex]::Match($line, '^(?<indent>[ \t]*)if\s*:\s*(?<value>.*)$')
+        if (-not $ifMatch.Success -or $ifMatch.Groups['indent'].Value.Length -ne ([int]$jobIndent + 2)) { continue }
+        $ifCount++
+        if ($ifCount -ne 1) { return $false }
+        $ifValue = (Remove-AuthorityConsumerShellComments -Line $ifMatch.Groups['value'].Value).Trim()
     }
-    return $false
+    if ($ifCount -eq 0) { return $true }
+    if ([string]::IsNullOrWhiteSpace($ifValue) -or $ifValue -in @('|', '>', '|-', '>-', '|+', '>+')) { return $false }
+    if ($ifValue -match '(?i)\b(?:always|failure|cancelled)\s*\(' -or $ifValue -match '\|\|') { return $false }
+
+    $escapedCanonicalJobId = [regex]::Escape($CanonicalJobId)
+    $canonicalSuccessPattern = '(?i)(?:needs\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result\s*==\s*[\x27\"]success[\x27\"]|[\x27\"]success[\x27\"]\s*==\s*needs\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result)'
+    $successMatch = [regex]::Match($ifValue, $canonicalSuccessPattern)
+    if (-not $successMatch.Success) { return $false }
+    $remainingCondition = $ifValue.Remove($successMatch.Index, $successMatch.Length)
+    if ($remainingCondition -match '(?i)\bneeds\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result\b') { return $false }
+    return $true
 }
 
 function Assert-AuthorityConsumerReleaseFailurePropagation {

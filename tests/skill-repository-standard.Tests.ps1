@@ -3102,6 +3102,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin v1.2.3') 'A direct tag refspec passed to git push must be release-affecting.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin') 'An explicit git push whose ref type cannot be established must fail closed.'
 
+        $implicitSuccessJob = @'
+  release:
+    needs: canonical
+    run: gh release create v1.0.0
+'@
+        Assert-True (Test-AuthorityConsumerJobNeedsCanonical -JobText $implicitSuccessJob -CanonicalJobId 'canonical') 'A release job without an override condition must inherit canonical success gating.'
+        $explicitSuccessJob = @'
+  release:
+    needs: canonical
+    if: ${{ needs.canonical.result == 'success' }}
+    run: gh release create v1.0.0
+'@
+        Assert-True (Test-AuthorityConsumerJobNeedsCanonical -JobText $explicitSuccessJob -CanonicalJobId 'canonical') 'A release job may use an explicit canonical-success condition.'
+        $failureConditionJob = @'
+  release:
+    needs: canonical
+    if: ${{ needs.canonical.result == 'failure' }}
+    run: gh release create v1.0.0
+'@
+        Assert-False (Test-AuthorityConsumerJobNeedsCanonical -JobText $failureConditionJob -CanonicalJobId 'canonical') 'A release job must not run when the canonical validator fails.'
+
         $weakened = Copy-TestJsonObject -Value $policy
         $weakened.entryPointContract.canonicalExecution.maxPerEventCandidate = 2
         Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message 'A policy allowing two canonical executions per event/candidate must fail schema validation.'
