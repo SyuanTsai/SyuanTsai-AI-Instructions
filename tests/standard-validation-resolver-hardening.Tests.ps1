@@ -167,6 +167,8 @@ Describe 'Standard validation resolver hardening' {
         Assert-True ($venvIndex -gt $clearIndex) 'System Python must not start before GitHub token clearing.'
         Assert-True ($helperIndex -gt $clearIndex) 'Approved-index candidate resolution must not start before GitHub token clearing.'
         Assert-True ($restoreIndex -lt 0) 'The resolver must not restore GitHub credentials after third-party code becomes reachable.'
+        Assert-Match $body "'-S', '-m', 'venv', '--copies'" 'The resolver must create venv interpreter entries as regular copies for closure validation.'
+        Assert-NotMatch $body 'PlatformID\]::Unix -or -not \$Item\.PSIsContainer' 'Unix symlink validation must inspect the resolved target rather than the link metadata shape.'
         Assert-Match $body 'credentialIsolation=github-token-cleared-before-python' 'Resolved identity must record credential isolation.'
         Assert-Match $body 'resolutionRounds=\$\(\$backtrackingEvidence\.resolutionRounds\)' 'Resolved identity must bind offline resolution rounds.'
         Assert-Match $body 'consoleEntryPoint=\$consoleEntryPoint' 'Resolved identity must bind the statically verified console entry point.'

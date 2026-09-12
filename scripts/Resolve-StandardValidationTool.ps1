@@ -645,7 +645,10 @@ function Get-ResolverSafeDirectorySymlinkEntry {
         [Parameter(Mandatory = $true)][string] $Root
     )
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+    # PowerShell on Unix can report a directory symlink as a non-container
+    # item. The resolved target, not PSIsContainer on the link itself, is the
+    # authoritative directory-shape check below.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "Installed tool closure contains an unsupported reparse point: $($Item.FullName)"
     }
     $target = Get-ResolverSymlinkTarget -Item $Item
@@ -3093,7 +3096,9 @@ function Resolve-SkillSpector {
             $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
             $venvPath = Join-Path $toolInstallPath 'venv'
             $installation = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
-                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', $venvPath))
+                # Keep interpreter entries as regular files so the signed
+                # installed closure can reject external/file symlinks.
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', '--copies', $venvPath))
                 $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                     Join-Path $venvPath 'Scripts\python.exe'
                 }

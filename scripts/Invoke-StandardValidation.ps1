@@ -1191,7 +1191,10 @@ function Get-StandardValidationSafeDirectorySymlinkEntry {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+    # PowerShell on Unix can report a directory symlink as a non-container
+    # item. The resolved target, not PSIsContainer on the link itself, is the
+    # authoritative directory-shape check below.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "INVALID|$Context contains an unsupported reparse point: $($Item.FullName)"
     }
     $target = Get-StandardValidationSymlinkTarget -Item $Item -Context $Context

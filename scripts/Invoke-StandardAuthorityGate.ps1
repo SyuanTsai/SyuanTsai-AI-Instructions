@@ -372,7 +372,10 @@ function Get-AuthoritySafeDirectorySymlinkEntry {
         [Parameter(Mandatory = $true)][string] $Root
     )
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+    # PowerShell on Unix can report a directory symlink as a non-container
+    # item. The resolved target, not PSIsContainer on the link itself, is the
+    # authoritative directory-shape check below.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "Installed authority tool directory contains an unsupported reparse point: $($Item.FullName)"
     }
     $target = Get-AuthoritySymlinkTarget -Item $Item
