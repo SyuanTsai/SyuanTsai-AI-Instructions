@@ -410,6 +410,38 @@ function Assert-StandardValidationRegularFile {
     }
 }
 
+function Assert-StandardValidationLauncherFileIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $ExpectedSha256,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][bool] $AllowUnixSymlink,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "BLOCKED|$Context file is missing: $Path"
+    }
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo]) {
+        throw "BLOCKED|$Context must be a file: $Path"
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (-not $AllowUnixSymlink -or [Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+            throw "BLOCKED|$Context must be a regular non-reparse file: $Path"
+        }
+        if (-not (Test-StandardValidationPathWithin -Path $Path -Root $InstallRoot -IncludeRoot)) {
+            throw "BLOCKED|$Context symlink is outside the signed install root: $Path"
+        }
+        [void](Get-StandardValidationSafeUnixSymlinkEntry -Item $item -Root $InstallRoot -Context $Context)
+    }
+    Assert-StandardValidationSha256 -Value $ExpectedSha256 -Context "$Context receipt hash"
+    if ((Get-StandardValidationFileSha256 -Path $Path -Context $Context) -cne $ExpectedSha256) {
+        throw "BLOCKED|$Context does not match its signed hash: $Path"
+    }
+    return [IO.Path]::GetFullPath($Path)
+}
+
 function Get-StandardValidationTrustAnchorPath {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('supervisor', 'humanApproval')][string] $KeyId,
@@ -612,9 +644,19 @@ function Assert-StandardValidationLauncherIntegrity {
         [pscustomobject]@{ path = $runtimePath; hash = [string]$Launcher.runtimeSha256; name = 'runtime' }
     )
     foreach ($binding in $fileBindings) {
-        Assert-StandardValidationRegularFile -Path $binding.path -Context "$Context launcher $($binding.name)"
-        if ((Get-StandardValidationFileSha256 -Path $binding.path -Context "$Context launcher $($binding.name)") -cne $binding.hash) {
-            throw "BLOCKED|$Context launcher $($binding.name) does not match its signed hash."
+        if ($binding.name -ceq 'shim') {
+            Assert-StandardValidationLauncherFileIdentity `
+                -Path ([string]$binding.path) `
+                -ExpectedSha256 ([string]$binding.hash) `
+                -InstallRoot $InstallRoot `
+                -AllowUnixSymlink ($kind -ceq 'unix-node-shim') `
+                -Context "$Context launcher $($binding.name)" | Out-Null
+        }
+        else {
+            Assert-StandardValidationRegularFile -Path $binding.path -Context "$Context launcher $($binding.name)"
+            if ((Get-StandardValidationFileSha256 -Path $binding.path -Context "$Context launcher $($binding.name)") -cne $binding.hash) {
+                throw "BLOCKED|$Context launcher $($binding.name) does not match its signed hash."
+            }
         }
     }
     return Get-StandardValidationLauncherDigest -Launcher $Launcher -Context $Context
@@ -799,7 +841,12 @@ function Assert-StandardValidationToolReceiptUnchanged {
     if ((Get-StandardValidationFileSha256 -Path ([string]$ToolReceipt.path) -Context "$Context resolver receipt") -cne [string]$ToolReceipt.sha256) {
         throw "FAILED|$Context signed resolver receipt changed during validation."
     }
-    Assert-StandardValidationRegularFile -Path $CommandPath -Context "$Context command"
+    Assert-StandardValidationLauncherFileIdentity `
+        -Path $CommandPath `
+        -ExpectedSha256 ([string]$ToolReceipt.executableSha256) `
+        -InstallRoot ([string]$ToolReceipt.installRoot) `
+        -AllowUnixSymlink ([string]$ToolReceipt.launcher.kind -ceq 'unix-node-shim') `
+        -Context "$Context command" | Out-Null
     if ((Get-StandardValidationFileSha256 -Path $CommandPath -Context "$Context command") -cne [string]$ToolReceipt.executableSha256) {
         throw "FAILED|$Context signed resolver executable changed during validation."
     }
@@ -816,9 +863,19 @@ function Assert-StandardValidationToolReceiptUnchanged {
         [pscustomobject]@{ path = $launcher.runtimePath; hash = $launcher.runtimeSha256; name = 'runtime' }
     )) {
         if ($null -ne $binding.path) {
-            Assert-StandardValidationRegularFile -Path ([string]$binding.path) -Context "$Context launcher $($binding.name)"
-            if ((Get-StandardValidationFileSha256 -Path ([string]$binding.path) -Context "$Context launcher $($binding.name)") -cne [string]$binding.hash) {
-                throw "FAILED|$Context signed resolver launcher $($binding.name) changed during validation."
+            if ($binding.name -ceq 'shim') {
+                Assert-StandardValidationLauncherFileIdentity `
+                    -Path ([string]$binding.path) `
+                    -ExpectedSha256 ([string]$binding.hash) `
+                    -InstallRoot ([string]$ToolReceipt.installRoot) `
+                    -AllowUnixSymlink ([string]$launcher.kind -ceq 'unix-node-shim') `
+                    -Context "$Context launcher $($binding.name)" | Out-Null
+            }
+            else {
+                Assert-StandardValidationRegularFile -Path ([string]$binding.path) -Context "$Context launcher $($binding.name)"
+                if ((Get-StandardValidationFileSha256 -Path ([string]$binding.path) -Context "$Context launcher $($binding.name)") -cne [string]$binding.hash) {
+                    throw "FAILED|$Context signed resolver launcher $($binding.name) changed during validation."
+                }
             }
         }
     }
@@ -1184,16 +1241,16 @@ function Get-StandardValidationSymlinkIdentitySha256 {
     return Get-StandardValidationTextSha256 -Value "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
 }
 
-function Get-StandardValidationSafeDirectorySymlinkEntry {
+function Get-StandardValidationSafeUnixSymlinkEntry {
     param(
         [Parameter(Mandatory = $true)] $Item,
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    # PowerShell on Unix can report a directory symlink as a non-container
-    # item. The resolved target, not PSIsContainer on the link itself, is the
-    # authoritative directory-shape check below.
+    # PowerShell on Unix can report a symlink as a non-container item. The
+    # resolved target, not PSIsContainer on the link itself, is the
+    # authoritative regular-file-or-directory check below.
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "INVALID|$Context contains an unsupported reparse point: $($Item.FullName)"
     }
@@ -1220,9 +1277,9 @@ function Get-StandardValidationSafeDirectorySymlinkEntry {
         throw "INVALID|$Context symbolic-link target escapes the install root: '$target'."
     }
     $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
-    if (-not $targetItem.PSIsContainer -or
+    if ((-not $targetItem.PSIsContainer -and $targetItem -isnot [IO.FileInfo]) -or
         ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "INVALID|$Context symbolic-link target must be a non-reparse directory: '$target'."
+        throw "INVALID|$Context symbolic-link target must be a non-reparse regular file or directory: '$target'."
     }
     $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $relativeTarget = $relativeTarget.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
@@ -1316,9 +1373,9 @@ function Get-StandardValidationDirectoryClosureSha256 {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($item in @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            # Preserve the standard Unix venv directory-symlink layout while
-            # binding its target identity into the revalidated closure.
-            $symlinkEntry = Get-StandardValidationSafeDirectorySymlinkEntry -Item $item -Root $fullRoot -Context $Context
+            # Preserve safe Unix tool/package symlink layouts while binding
+            # each target identity into the revalidated closure.
+            $symlinkEntry = Get-StandardValidationSafeUnixSymlinkEntry -Item $item -Root $fullRoot -Context $Context
             Assert-StandardValidationInventoryPathCollision `
                 -Value ([string]$symlinkEntry.path) `
                 -OrdinalPaths $ordinalPaths `
@@ -1346,7 +1403,7 @@ function Get-StandardValidationDirectoryClosureSha256 {
                 sha256 = Get-StandardValidationFileSha256 -Path $item.FullName -Context $Context
             })
     }
-    if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file or approved directory symlink." }
+    if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file or approved Unix symlink." }
     $ordered = Sort-StandardValidationInventory -Inventory $entries
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     return Get-StandardValidationTextSha256 -Value $canonical
@@ -1437,8 +1494,9 @@ function Assert-StandardValidationCommandSpec {
         throw "INVALID|$Context command is not an installed file: $commandPath"
     }
     $commandItem = Get-Item -Force -LiteralPath $commandPath -ErrorAction Stop
+    $commandIsReparse = ($commandItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
     if ($commandItem.PSIsContainer -or $commandItem -isnot [System.IO.FileInfo] -or
-        ($commandItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        ($commandIsReparse -and ($DevelopmentHarness -or [Environment]::OSVersion.Platform -ne [PlatformID]::Unix))) {
         throw "INVALID|$Context command must be a regular non-reparse file: $commandPath"
     }
     Assert-StandardValidationOutsideRoot -Path $commandPath -Root $CandidateRoot -Context "$Context command"
@@ -1468,6 +1526,9 @@ function Assert-StandardValidationCommandSpec {
             -TrustAnchorRoot $TrustAnchorRoot `
             -RunId $RunId `
             -Context $Context
+        if ($commandIsReparse -and [string]$toolReceipt.launcher.kind -cne 'unix-node-shim') {
+            throw "INVALID|$Context command symlink is not an attested Unix package launcher."
+        }
     }
     $commandName = [System.IO.Path]::GetFileName($commandPath).ToLowerInvariant()
     $genericInterpreterNames = @(

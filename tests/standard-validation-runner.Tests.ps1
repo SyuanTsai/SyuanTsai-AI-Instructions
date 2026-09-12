@@ -508,7 +508,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
         Assert-Match ([string]$contract.execution.productionCommandPolicy) 'signed-resolver-receipt' 'Production commands must carry a trusted signed resolver receipt.'
         Assert-Equal ([string]$contract.execution.inventoryEncoding.line) '<path>\t<raw-file-sha256>\n' 'Canonical inventory hashing must exclude file length and use raw-file hashes.'
-        Assert-Match ([string]$contract.execution.installedClosure) 'in-root-unix-directory-symlink-target-identities' 'Installed tool closure must bind approved in-root Unix directory symlink targets.'
+        Assert-Match ([string]$contract.execution.installedClosure) 'in-root-unix-symlink-target-identities' 'Installed tool closure must bind approved in-root Unix symlink targets.'
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
         $releaseConditions = ($contract.evidence.releaseEligibility.trueOnlyWhen -join ';')
         Assert-Match $releaseConditions 'stages\[1\.\.5\]\.status=passed' 'Release eligibility must bind the first five canonical stages.'
@@ -542,6 +542,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'
         Assert-Match $runnerSource 'Assert-StandardValidationAiReviewEvidence' 'AI review evidence must use the central typed review policy.'
         Assert-Match $runnerSource 'Assert-StandardValidationToolReceipt' 'Production command provenance must use a signed resolver receipt.'
+        Assert-Match $runnerSource 'Assert-StandardValidationLauncherFileIdentity' 'Production package launchers must revalidate safe Unix launcher symlinks through the central helper.'
+        Assert-Match $runnerSource 'Get-StandardValidationSafeUnixSymlinkEntry' 'Production installed closures must validate Unix symlink targets centrally.'
         Assert-Match $runnerSource 'Assert-StandardValidationSemanticEvidence' 'Semantic evidence must be authenticated and complete.'
         Assert-Match $runnerSource 'Assert-StandardValidationFreshTimestamp' 'Resolver receipts and trusted review attestations must be fresh for the current run.'
         Assert-Match $runnerSource 'installedClosureSha256' 'Production tool execution must bind the complete installed dependency closure.'

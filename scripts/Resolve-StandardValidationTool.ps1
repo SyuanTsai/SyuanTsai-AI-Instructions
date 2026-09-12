@@ -639,15 +639,15 @@ function Get-ResolverSymlinkIdentitySha256 {
     finally { $sha.Dispose() }
 }
 
-function Get-ResolverSafeDirectorySymlinkEntry {
+function Get-ResolverSafeUnixSymlinkEntry {
     param(
         [Parameter(Mandatory = $true)] $Item,
         [Parameter(Mandatory = $true)][string] $Root
     )
 
-    # PowerShell on Unix can report a directory symlink as a non-container
-    # item. The resolved target, not PSIsContainer on the link itself, is the
-    # authoritative directory-shape check below.
+    # PowerShell on Unix can report a symlink as a non-container item. The
+    # resolved target, not PSIsContainer on the link itself, is the
+    # authoritative regular-file-or-directory check below.
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "Installed tool closure contains an unsupported reparse point: $($Item.FullName)"
     }
@@ -675,9 +675,9 @@ function Get-ResolverSafeDirectorySymlinkEntry {
         throw "Installed tool closure symbolic-link target escapes the install root: '$target'."
     }
     $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
-    if (-not $targetItem.PSIsContainer -or
+    if ((-not $targetItem.PSIsContainer -and $targetItem -isnot [IO.FileInfo]) -or
         ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Installed tool closure symbolic-link target must be a non-reparse directory: '$target'."
+        throw "Installed tool closure symbolic-link target must be a non-reparse regular file or directory: '$target'."
     }
     $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $relativeTarget = $relativeTarget.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
@@ -703,10 +703,10 @@ function Get-DirectoryClosureIdentity {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            # Unix Python venvs conventionally expose lib64 as a directory
-            # symlink. Keep that legitimate layout inside the signed closure;
-            # every other reparse shape remains rejected by the helper.
-            $symlinkEntry = Get-ResolverSafeDirectorySymlinkEntry -Item $item -Root $root
+            # Unix tool/package layouts may expose in-root file or directory
+            # symlinks. Keep only their verified target identities inside the
+            # signed closure; every other reparse shape remains rejected.
+            $symlinkEntry = Get-ResolverSafeUnixSymlinkEntry -Item $item -Root $root
             Assert-ResolverSafeRelativePath -Value ([string]$symlinkEntry.path)
             if (-not $ordinalPaths.Add([string]$symlinkEntry.path)) {
                 throw "Installed tool closure contains a duplicate path: '$($symlinkEntry.path)'."

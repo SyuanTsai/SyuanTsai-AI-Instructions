@@ -46,7 +46,7 @@
       "path": "valid-utf8-forward-slash-relative; reject-absolute-drive-unc-backslash-colon-control-empty-dot-dot; NFC-and-ASCII-case-collision-rejected",
       "canonicalHash": "sha256-of-concatenated-lines; no-length-field"
     },
-    "installedClosure": "all-regular-file-content-hashes-plus-in-root-unix-directory-symlink-target-identities; reject-external-file-or-chained-symlinks",
+    "installedClosure": "all-regular-file-content-hashes-plus-in-root-unix-symlink-target-identities; target-must-be-non-reparse-regular-file-or-directory; reject-external-chained-and-special-file-symlinks",
     "snapshotRevalidation": "before-and-after-every-child-process",
     "toolReceiptFreshness": "resolvedAtUtc-and-attestation-issuedAt-must-match-and-be-within-15-minutes-of-the-validation-start-window",
     "canonicalEntryPoint": "adapter.canonicalValidatorPath-inventoried-and-invoked-by-central-contract",

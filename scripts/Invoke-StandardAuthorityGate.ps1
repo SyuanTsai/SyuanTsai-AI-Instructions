@@ -366,15 +366,15 @@ function Get-AuthoritySymlinkIdentitySha256 {
     finally { $sha.Dispose() }
 }
 
-function Get-AuthoritySafeDirectorySymlinkEntry {
+function Get-AuthoritySafeUnixSymlinkEntry {
     param(
         [Parameter(Mandatory = $true)] $Item,
         [Parameter(Mandatory = $true)][string] $Root
     )
 
-    # PowerShell on Unix can report a directory symlink as a non-container
-    # item. The resolved target, not PSIsContainer on the link itself, is the
-    # authoritative directory-shape check below.
+    # PowerShell on Unix can report a symlink as a non-container item. The
+    # resolved target, not PSIsContainer on the link itself, is the
+    # authoritative regular-file-or-directory check below.
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
         throw "Installed authority tool directory contains an unsupported reparse point: $($Item.FullName)"
     }
@@ -397,9 +397,9 @@ function Get-AuthoritySafeDirectorySymlinkEntry {
     }
     Assert-AuthorityPathWithinRoot -Path $targetFull -Root $rootFull -Context 'Installed authority tool symbolic-link target'
     $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
-    if (-not $targetItem.PSIsContainer -or
+    if ((-not $targetItem.PSIsContainer -and $targetItem -isnot [System.IO.FileInfo]) -or
         ($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Installed authority tool symbolic-link target must be a non-reparse directory: '$target'."
+        throw "Installed authority tool symbolic-link target must be a non-reparse regular file or directory: '$target'."
     }
     $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     $relativeTarget = $relativeTarget.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
@@ -439,9 +439,9 @@ function Get-AuthorityDirectoryClosureSha256 {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            # Unix Python venvs conventionally expose lib64 as a directory
-            # symlink; bind that target identity instead of dropping it.
-            $symlinkEntry = Get-AuthoritySafeDirectorySymlinkEntry -Item $item -Root $root
+            # Unix tool/package layouts may expose in-root file or directory
+            # symlinks; bind their target identities instead of dropping them.
+            $symlinkEntry = Get-AuthoritySafeUnixSymlinkEntry -Item $item -Root $root
             $relativeSymlinkPath = [string]$symlinkEntry.path
             if (-not $ordinalPaths.Add($relativeSymlinkPath)) {
                 throw "Installed authority tool directory contains a duplicate path: '$relativeSymlinkPath'."
@@ -510,6 +510,41 @@ function Get-AuthorityDirectoryClosureSha256 {
     finally {
         $sha.Dispose()
     }
+}
+
+function Assert-AuthorityLauncherFileIdentity {
+    param(
+        [Parameter(Mandatory = $true)] $PathValue,
+        [Parameter(Mandatory = $true)] $Sha256Value,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][bool] $AllowUnixSymlink,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($PathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$PathValue)) {
+        throw "$Context path is missing."
+    }
+    $path = [System.IO.Path]::GetFullPath([string]$PathValue)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "$Context path is not an installed file: $path"
+    }
+    $item = Get-Item -Force -LiteralPath $path -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo]) {
+        throw "$Context path must be a file: $path"
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (-not $AllowUnixSymlink -or [Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+            throw "$Context path must be a regular non-reparse file: $path"
+        }
+        Assert-AuthorityPathWithinRoot -Path $path -Root $InstallRoot -Context "$Context symlink"
+        [void](Get-AuthoritySafeUnixSymlinkEntry -Item $item -Root $InstallRoot)
+    }
+    Assert-AuthoritySha256 -Value $Sha256Value -Context "$Context receipt hash"
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+    if ($actual -cne [string]$Sha256Value) {
+        throw "$Context changed after resolution. Expected '$Sha256Value', got '$actual'."
+    }
+    return $path
 }
 
 function Read-AuthorityJson {
@@ -1530,9 +1565,11 @@ function Assert-AuthorityLauncherReceipt {
     if ($windowsShim -ne ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)) {
         throw "$Context launcher kind does not match the execution platform."
     }
-    $shimPath = Assert-AuthorityFileIdentity `
+    $shimPath = Assert-AuthorityLauncherFileIdentity `
         -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimPath' -Context "$Context launcher") `
         -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimSha256' -Context "$Context launcher") `
+        -InstallRoot $InstallRoot `
+        -AllowUnixSymlink ($kind -ceq 'unix-node-shim') `
         -Context "$Context launcher shim"
     $payloadPath = Assert-AuthorityFileIdentity `
         -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'payloadPath' -Context "$Context launcher") `
@@ -1597,9 +1634,14 @@ function Assert-InstalledAuthorityToolReceipt {
     }
     Assert-AuthorityPathWithinRoot -Path ([string]$toolInstallRoot) -Root $InstallRoot -Context "$ToolName install root"
 
-    $executablePath = Assert-AuthorityFileIdentity `
+    $launcherValue = Get-AuthorityProperty -Object $Receipt -Name 'launcher'
+    $allowUnixLauncherSymlink = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+        $ToolName -ceq 'skill-tools' -and [string]$launcherValue.kind -ceq 'unix-node-shim'
+    $executablePath = Assert-AuthorityLauncherFileIdentity `
         -PathValue (Get-AuthorityProperty -Object $Receipt -Name 'executablePath') `
         -Sha256Value (Get-AuthorityProperty -Object $Receipt -Name 'executableSha256') `
+        -InstallRoot ([string]$toolInstallRoot) `
+        -AllowUnixSymlink $allowUnixLauncherSymlink `
         -Context "$ToolName executable"
     Assert-AuthorityPathWithinRoot -Path $executablePath -Root ([string]$toolInstallRoot) -Context "$ToolName executable"
 
