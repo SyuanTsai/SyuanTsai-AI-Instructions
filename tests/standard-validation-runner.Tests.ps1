@@ -201,6 +201,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [Parameter(Mandatory = $true)] $Fixture,
                 [switch] $SemanticTriggered,
                 [switch] $SemanticConsent,
+                [string] $SemanticProvider,
+                [string] $SemanticPurpose,
+                [string] $SemanticScope,
+                [string] $SemanticEvidencePath,
                 [switch] $CompleteLifecycle,
                 [bool] $DevelopmentHarness = $true,
                 [string] $AiReviewEvidencePath,
@@ -232,6 +236,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
             if ($DevelopmentHarness) { $arguments += '-DevelopmentHarness' }
             if ($SemanticTriggered) { $arguments += '-SemanticTriggered' }
             if ($SemanticConsent) { $arguments += '-SemanticConsent' }
+            if (-not [string]::IsNullOrWhiteSpace($SemanticProvider)) { $arguments += @('-SemanticProvider', $SemanticProvider) }
+            if (-not [string]::IsNullOrWhiteSpace($SemanticPurpose)) { $arguments += @('-SemanticPurpose', $SemanticPurpose) }
+            if (-not [string]::IsNullOrWhiteSpace($SemanticScope)) { $arguments += @('-SemanticScope', $SemanticScope) }
+            if (-not [string]::IsNullOrWhiteSpace($SemanticEvidencePath)) { $arguments += @('-SemanticEvidencePath', $SemanticEvidencePath) }
             if ($CompleteLifecycle) { $arguments += '-CompleteLifecycle' }
             if (-not [string]::IsNullOrWhiteSpace($AiReviewEvidencePath)) { $arguments += @('-AiReviewEvidencePath', $AiReviewEvidencePath) }
             if (-not [string]::IsNullOrWhiteSpace($HumanApprovalEvidencePath)) { $arguments += @('-HumanApprovalEvidencePath', $HumanApprovalEvidencePath) }
@@ -415,6 +423,72 @@ $result | ConvertTo-Json -Depth 10 -Compress
             }
         }
 
+        function Write-TestSemanticEvidence {
+            param(
+                [Parameter(Mandatory = $true)] $Fixture,
+                [Parameter(Mandatory = $true)][string] $Path,
+                [Parameter(Mandatory = $true)][string] $CandidateId,
+                [Parameter(Mandatory = $true)][System.Security.Cryptography.RSACryptoServiceProvider] $Rsa
+            )
+
+            Write-TestUtf8File -Path (Join-Path $Fixture.TrustedTools 'trusted-supervisor-public-key.xml') -Text $Rsa.ToXmlString($false)
+            $issuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+            $provider = 'fixture-semantic-provider'
+            $purpose = 'fixture semantic regression'
+            $scope = 'candidate'
+            $findingsSha256 = Get-TestTextSha256 -Value '[]'
+            $fields = @{
+                analyzerCompleteness = 'complete'
+                analyzerIdentity = 'fixture-semantic-analyzer'
+                candidateId = $CandidateId
+                consentGranted = 'True'
+                decision = 'PASS'
+                evidenceType = 'semantic'
+                findingsSha256 = $findingsSha256
+                issuedAt = $issuedAt
+                provider = $provider
+                purpose = $purpose
+                scope = $scope
+                status = 'passed'
+            }
+            $attestation = [ordered]@{
+                schemaVersion = 1
+                attestationType = 'trusted-supervisor-semantic-v1'
+                candidateId = $CandidateId
+                evidenceType = 'semantic'
+                status = 'passed'
+                decision = 'PASS'
+                provider = $provider
+                purpose = $purpose
+                scope = $scope
+                consentGranted = $true
+                analyzerIdentity = 'fixture-semantic-analyzer'
+                analyzerCompleteness = 'complete'
+                findingsSha256 = $findingsSha256
+                issuedAt = $issuedAt
+                signature = $null
+            }
+            $payload = Get-TestLifecycleAttestationPayload -ReceiptType 'semantic-v1' -Fields $fields
+            $attestation.signature = [Convert]::ToBase64String($Rsa.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($payload), 'SHA256'))
+            $evidence = [ordered]@{
+                schemaVersion = 1
+                evidenceType = 'semantic'
+                candidateId = $CandidateId
+                status = 'passed'
+                decision = 'PASS'
+                provider = $provider
+                purpose = $purpose
+                scope = $scope
+                consentGranted = $true
+                analyzerIdentity = 'fixture-semantic-analyzer'
+                analyzerCompleteness = 'complete'
+                findings = @()
+                findingsSha256 = $findingsSha256
+                attestation = $attestation
+            }
+            Write-TestUtf8File -Path $Path -Text ($evidence | ConvertTo-Json -Depth 50)
+        }
+
         function Write-TestLifecycleEvidence {
             param(
                 [Parameter(Mandatory = $true)][string] $Path,
@@ -546,6 +620,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Assert-StandardValidationLauncherFileIdentity' 'Production package launchers must revalidate safe Unix launcher symlinks through the central helper.'
         Assert-Match $runnerSource 'Get-StandardValidationSafeUnixSymlinkEntry' 'Production installed closures must validate Unix symlink targets centrally.'
         Assert-Match $runnerSource 'Assert-StandardValidationSemanticEvidence' 'Semantic evidence must be authenticated and complete.'
+        Assert-Match $runnerSource 'semanticEvidence = \$null' 'Every stage must expose a writable semantic evidence slot.'
+        Assert-False ($runnerSource -match 'return\s+,\$(?:Evidence|evidence)') 'Imported evidence helpers must return objects rather than unary-comma arrays.'
         Assert-Match $runnerSource 'Assert-StandardValidationFreshTimestamp' 'Resolver receipts and trusted review attestations must be fresh for the current run.'
         Assert-Match $runnerSource 'installedClosureSha256' 'Production tool execution must bind the complete installed dependency closure.'
         Assert-Match $runnerSource 'launcherDigestSha256' 'Production tool execution must bind the resolver launcher identity.'
@@ -667,6 +743,39 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $analyzerTriggerStage = @($analyzerTriggerResult.Evidence.stages | Where-Object id -eq 'conditional-semantic-scan')[0]
         Assert-True ([bool]$analyzerTriggerStage.triggerDecision.analyzerRequired) 'The semantic stage must record the analyzer-required trigger.'
         Assert-True ([bool]$analyzerTriggerStage.triggerDecision.effectiveTriggered) 'The effective semantic trigger must include the analyzer requirement.'
+
+        $semanticEvidenceFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-evidence')
+        . $script:RunnerPath `
+            -CandidateRoot $semanticEvidenceFixture.Candidate `
+            -AdapterPath $semanticEvidenceFixture.Adapter `
+            -ArtifactsRoot $semanticEvidenceFixture.Artifacts `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+        $semanticAdapterSha = Get-StandardValidationFileSha256 -Path $semanticEvidenceFixture.Adapter -Context 'test adapter'
+        $semanticInventory = Get-StandardValidationInventory -Root $semanticEvidenceFixture.Candidate -Context 'test candidate'
+        $semanticContentSha = Get-StandardValidationInventorySha256 -Inventory $semanticInventory
+        $semanticCandidateId = Get-StandardValidationTextSha256 -Value ("https://example.com/example/skills.git`n$('a' * 40)`n$('b' * 40)`nlocal`n$semanticContentSha`n$semanticAdapterSha`n")
+        $semanticEvidencePath = Join-Path $semanticEvidenceFixture.Root 'semantic.json'
+        $semanticRsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            Write-TestSemanticEvidence -Fixture $semanticEvidenceFixture -Path $semanticEvidencePath -CandidateId $semanticCandidateId -Rsa $semanticRsa
+        }
+        finally { $semanticRsa.Dispose() }
+        $semanticResult = Invoke-RunnerFixture `
+            -Fixture $semanticEvidenceFixture `
+            -SemanticTriggered `
+            -SemanticConsent `
+            -SemanticProvider 'fixture-semantic-provider' `
+            -SemanticPurpose 'fixture semantic regression' `
+            -SemanticScope 'candidate' `
+            -SemanticEvidencePath $semanticEvidencePath
+        Assert-Equal $semanticResult.Evidence.state 'PASS' 'A valid authenticated semantic result must pass the semantic barrier.'
+        $semanticStage = @($semanticResult.Evidence.stages | Where-Object id -eq 'conditional-semantic-scan')[0]
+        Assert-Equal $semanticStage.status 'passed' 'A valid semantic result must complete the semantic stage.'
+        Assert-Equal ([string]$semanticStage.semanticEvidence.evidenceType) 'semantic' 'The semantic evidence must be retained on its stage object.'
     }
 
     # Scenario: The same event/candidate is invoked twice against one artifact root.

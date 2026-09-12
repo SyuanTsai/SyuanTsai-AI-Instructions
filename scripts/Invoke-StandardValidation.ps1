@@ -1730,6 +1730,7 @@ function New-StandardValidationStages {
             endedAt = $null
             reason = $null
             triggerDecision = $null
+            semanticEvidence = $null
             aiReviewEvidence = $null
             events = @()
         }
@@ -3383,7 +3384,7 @@ function Assert-StandardValidationSemanticEvidence {
         -Fields $fields `
         -TrustAnchorRoot $TrustAnchorRoot `
         -Context "$Context attestation"
-    return ,$Evidence
+    return $Evidence
 }
 
 function Assert-StandardValidationImportedEvidence {
@@ -3469,7 +3470,7 @@ function Assert-StandardValidationImportedEvidence {
             throw "BLOCKED|$lifecycleMessage"
         }
     }
-    return ,$evidence
+    return $evidence
 }
 
 function Assert-StandardValidationContractFiles {
