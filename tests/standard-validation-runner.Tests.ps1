@@ -603,7 +603,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $outputTamperFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'output-tamper') -Behavior 'output-tamper'
         $outputTamperResult = Invoke-RunnerFixture -Fixture $outputTamperFixture
         Assert-True ($outputTamperResult.Evidence.state -ne 'PASS') 'A child process that substitutes the reserved final output must never produce PASS.'
-        Assert-True ($null -eq $outputTamperResult.Evidence.attacker) 'Final evidence must not be replaced by attacker-controlled output.'
+        $attackerProperty = if ($null -eq $outputTamperResult.Evidence) { $null } else { $outputTamperResult.Evidence.PSObject.Properties['attacker'] }
+        Assert-True ($null -eq $attackerProperty) 'Final evidence must not be replaced by attacker-controlled output.'
     }
 
     # Scenario: A candidate adds a workflow that invokes an alternate validation script.
