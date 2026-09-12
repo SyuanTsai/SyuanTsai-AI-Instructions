@@ -12,7 +12,7 @@ param(
     [string] $CandidateArchiveSha256,
     [int] $TimeoutSeconds = 300,
     [string] $CancellationPath,
-    [string] $TrustedToolRoot = (Split-Path -Parent $PSScriptRoot),
+    [string] $TrustedToolRoot,
     [switch] $DevelopmentHarness,
     [switch] $SemanticTriggered,
     [switch] $SemanticConsent,
@@ -30,6 +30,18 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($TrustedToolRoot)) {
+    $scriptRoot = [string]$PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+        $scriptPath = [string]$MyInvocation.MyCommand.Path
+        if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+            throw 'Cannot derive the validation runner script root.'
+        }
+        $scriptRoot = Split-Path -Parent $scriptPath
+    }
+    $TrustedToolRoot = Split-Path -Parent $scriptRoot
+}
 
 $script:StandardValidationStageDefinitions = @(
     [ordered]@{ order = 1; id = 'controlled-acquisition'; condition = 'always' },

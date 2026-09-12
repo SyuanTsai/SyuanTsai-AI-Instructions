@@ -253,6 +253,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $stages.Count 10 'Validation contract must expose exactly ten stages.'
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
+        $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
+        Assert-False ($runnerSource -match '\[string\]\s+\$TrustedToolRoot\s*=\s*\(Split-Path\s+-Parent\s+\$PSScriptRoot\)') 'The runner must not evaluate PSScriptRoot in a parameter default before script initialization.'
+        Assert-Match $runnerSource 'if\s*\(\[string\]::IsNullOrWhiteSpace\(\$TrustedToolRoot\)\)' 'The runner must derive its default trusted tool root after parameter binding.'
     }
 
     # Scenario: A harmless development adapter exposes two active Skills to the central runner.

@@ -288,6 +288,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/standard-validation-adapter-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-validation-evidence-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/upstream-adapter-v1.schema.json",
       "license": "Apache-2.0"
     },
@@ -297,6 +305,10 @@
     },
     {
       "path": "docs/standards/skill-repository-standard.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/standard-validation-contract-v1.json",
       "license": "Apache-2.0"
     },
     {
@@ -337,6 +349,10 @@
     },
     {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardValidation.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -573,6 +589,10 @@
     },
     {
       "path": "tests/standard-validation-resolver-hardening.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-validation-runner.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
