@@ -1727,7 +1727,16 @@ function New-StandardValidationOutputReservation {
     $token = 'standard-validation-output-reservation-v1:' + [guid]::NewGuid().ToString('N')
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($token + [Environment]::NewLine)
     try {
-        $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        # CreateNew is the reservation primitive on every platform. Unix-like
+        # systems use advisory sharing, so permit the supervisor's path-level
+        # revalidation reads while retaining exclusive create semantics.
+        $fileShare = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            [System.IO.FileShare]::ReadWrite
+        }
+        else {
+            [System.IO.FileShare]::None
+        }
+        $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, $fileShare)
         try {
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush()
