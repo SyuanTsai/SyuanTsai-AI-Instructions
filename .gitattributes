@@ -1,1 +1,2 @@
 catalog/**/*.json text eol=lf
+docs/standards/trust-anchors/*.xml text eol=lf
