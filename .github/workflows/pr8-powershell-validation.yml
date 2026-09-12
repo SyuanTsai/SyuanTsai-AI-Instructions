@@ -168,16 +168,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $versionOutput = @(& go version)
+          $goApplication = Get-Command -Name go -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1
+          $goCommandPath = if ($null -ne $goApplication.PSObject.Properties['Path']) { [string]$goApplication.Path } else { [string]$goApplication.Source }
+          if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) { throw "setup-go returned a non-absolute Go path: $goCommandPath" }
+          $versionOutput = @(& $goCommandPath version)
           if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or
               [string]$versionOutput[0] -notmatch '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$') {
             throw "setup-go did not provide one stable Go runtime version. Evidence='$($versionOutput -join ' | ')'"
           }
           "STANDARD_GO_RUNTIME_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $goApplications = @(Get-Command -Name go -CommandType Application -ErrorAction SilentlyContinue)
-          if ($goApplications.Count -ne 1) { throw 'setup-go did not provide one unambiguous Go application path.' }
-          $goCommandPath = if ($null -ne $goApplications[0].PSObject.Properties['Path']) { [string]$goApplications[0].Path } else { [string]$goApplications[0].Source }
-          if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) { throw "setup-go returned a non-absolute Go path: $goCommandPath" }
           "STANDARD_GO_COMMAND_PATH=$goCommandPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run required Standard v1 authority gate

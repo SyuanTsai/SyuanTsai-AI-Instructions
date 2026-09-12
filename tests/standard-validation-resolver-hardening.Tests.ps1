@@ -675,6 +675,22 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
         Assert-Match $requiredWorkflow '-GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'The required workflow must bind the setup-resolved Go path.'
     }
 
+    # Scenario: The runner exposes more than one Go executable in PATH after setup-go prepends its tool cache.
+    # Purpose: Select the effective PATH command rather than failing merely because a shadowed system Go is also discoverable.
+    It 'UnitT73_selects_the_effective_setup_go_command_when_path_contains_shadowed_versions' {
+        $workflows = @(
+            (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+            (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+        )
+
+        foreach ($workflowPath in $workflows) {
+            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+            Assert-Match $workflow 'Get-Command\s+-Name\s+go\s+-CommandType\s+Application' "Workflow '$workflowPath' must resolve Go through PowerShell command discovery."
+            Assert-Match $workflow 'Select-Object\s+-First\s+1' "Workflow '$workflowPath' must select the effective PATH-precedence Go command."
+            Assert-NotMatch $workflow '\$goApplications\.Count\s+-ne\s+1' "Workflow '$workflowPath' must not reject a valid setup-go command because a shadowed Go executable is discoverable."
+        }
+    }
+
     # Scenario: Caller-supplied output paths are written by two independent resolver/adapter processes.
     # Purpose: Require the same exclusive atomic-create contract for both public JSON report writers.
     It 'UnitT90_requires_exclusive_atomic_creation_for_caller_output_paths' {
