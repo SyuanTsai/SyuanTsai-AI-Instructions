@@ -211,8 +211,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [string] $ValidationRunId,
                 # Hosted Windows PowerShell 5.1 can spend more than twenty
                 # seconds creating the centrally owned child-process boundary;
-                # timeout-specific scenarios pass an explicit one-second limit.
-                [int] $TimeoutSeconds = 60
+                # keep the fixture default aligned with the production ceiling,
+                # while timeout-specific scenarios pass an explicit one-second limit.
+                [int] $TimeoutSeconds = 300
             )
 
             $arguments = @(
