@@ -24,7 +24,12 @@ function Get-AuthorityProperty {
         $DefaultValue = $null
     )
 
-    if ($null -eq $Object -or $null -eq $Object.PSObject) { return ,$DefaultValue }
+    if ($null -eq $Object) { return ,$DefaultValue }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if (-not $Object.Contains($Name)) { return ,$DefaultValue }
+        return ,$Object[$Name]
+    }
+    if ($null -eq $Object.PSObject) { return ,$DefaultValue }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return ,$DefaultValue }
     return ,$property.Value
@@ -37,7 +42,16 @@ function Get-AuthorityRequiredProperty {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    if ($null -eq $Object -or $null -eq $Object.PSObject) {
+    if ($null -eq $Object) {
+        throw "$Context is missing required property '$Name'."
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if (-not $Object.Contains($Name) -or $null -eq $Object[$Name]) {
+            throw "$Context is missing required property '$Name'."
+        }
+        return ,$Object[$Name]
+    }
+    if ($null -eq $Object.PSObject) {
         throw "$Context is missing required property '$Name'."
     }
     $property = $Object.PSObject.Properties[$Name]
@@ -80,6 +94,24 @@ function Assert-AuthorityRunReceiptContext {
     }
     else {
         throw "$Context resolvedAtUtc is missing or not a UTC timestamp."
+    }
+    $parsedResolvedAtUtc = [DateTimeOffset]::MinValue
+    $resolvedAtText = if ($resolvedAtUtc -is [DateTime]) {
+        $resolvedAtUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    elseif ($resolvedAtUtc -is [DateTimeOffset]) {
+        $resolvedAtUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    else { [string]$resolvedAtUtc }
+    if (-not [DateTimeOffset]::TryParse(
+            $resolvedAtText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None,
+            [ref]$parsedResolvedAtUtc) -or
+        $parsedResolvedAtUtc.Offset -ne [TimeSpan]::Zero -or
+        $parsedResolvedAtUtc -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+        $parsedResolvedAtUtc -lt [DateTimeOffset]::UtcNow.AddMinutes(-15)) {
+        throw "$Context resolvedAtUtc is outside the fresh validation receipt window."
     }
 
     $receiptExecutionContext = Get-AuthorityRequiredProperty -Object $Receipt -Name 'executionContext' -Context $Context
@@ -257,6 +289,11 @@ function Assert-AuthorityFileIdentity {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "$Context path is not an installed file: $path"
     }
+    $item = Get-Item -Force -LiteralPath $path -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Context path must be a regular non-reparse file: $path"
+    }
     Assert-AuthoritySha256 -Value $Sha256Value -Context "$Context receipt hash"
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
     if ($actual -cne [string]$Sha256Value) {
@@ -288,6 +325,18 @@ function Assert-AuthorityPathWithinRoot {
     }
 }
 
+function Get-AuthorityAsciiCaseFold {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $code = [int][char]$character
+        if ($code -ge 65 -and $code -le 90) { $code += 32 }
+        [void]$builder.Append([char]$code)
+    }
+    return $builder.ToString()
+}
+
 function Get-AuthorityDirectoryClosureSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -295,19 +344,61 @@ function Get-AuthorityDirectoryClosureSha256 {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    $entries = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)) {
-        $relative = $file.FullName.Substring($root.Length).TrimStart(
+    $rootItem = Get-Item -Force -LiteralPath $root -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed authority tool directory must be a regular non-reparse directory: $root"
+    }
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installed authority tool directory contains a reparse point: $($item.FullName)"
+        }
+        if ($item.PSIsContainer) { continue }
+        if ($item -isnot [System.IO.FileInfo]) {
+            throw "Installed authority tool directory contains a non-regular filesystem entry: $($item.FullName)"
+        }
+        $relative = $item.FullName.Substring($root.Length).TrimStart(
             [System.IO.Path]::DirectorySeparatorChar,
             [System.IO.Path]::AltDirectorySeparatorChar
-        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
-        $entries += [pscustomobject]@{
-            path = $relative
-            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+        if ([string]::IsNullOrEmpty($relative) -or $relative.StartsWith('/') -or $relative.Contains('\') -or
+            $relative.Contains(':') -or $relative -match '[\x00-\x1F\x7F]' -or
+            @($relative.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+            throw "Installed authority tool directory contains an unsafe relative path: '$relative'."
         }
+        if (-not $ordinalPaths.Add($relative)) {
+            throw "Installed authority tool directory contains a duplicate path: '$relative'."
+        }
+        $nfc = $relative.Normalize([System.Text.NormalizationForm]::FormC)
+        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+            throw "Installed authority tool directory contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
+        }
+        $nfcPaths[$nfc] = $relative
+        $asciiCase = Get-AuthorityAsciiCaseFold -Value $nfc
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+            throw "Installed authority tool directory contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
+        }
+        $asciiCasePaths[$asciiCase] = $relative
+        [void]$entries.Add([pscustomobject][ordered]@{
+                path = $relative
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+            })
     }
     if ($entries.Count -eq 0) { throw "Installed authority tool directory is empty: $root" }
-    $canonical = ($entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in $entries) {
+        $insertAt = 0
+        while ($insertAt -lt $ordered.Count -and
+            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
+            $insertAt++
+        }
+        [void]$ordered.Insert($insertAt, $entry)
+    }
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         return ([System.BitConverter]::ToString(
@@ -464,13 +555,16 @@ function Assert-AuthorityValidationSecurityGate {
     ) -Context 'Validation/security gate semantic evidence success conditions'
 
     $aiReview = Get-AuthorityRequiredProperty -Object $security -Name 'aiReview' -Context 'Validation/security gate AI review policy'
-    Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy') -Context 'Validation/security gate AI review policy'
+    Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy', 'authentication', 'digestFields', 'attestation') -Context 'Validation/security gate AI review policy'
     Assert-AuthorityExactString -Value $aiReview.status -Expected 'passed' -Context 'Validation/security gate AI review status'
     Assert-AuthorityExactString -Value $aiReview.decision -Expected 'PASS' -Context 'Validation/security gate AI review decision'
     Assert-AuthorityExactString -Value $aiReview.candidateBinding -Expected 'reviewedCandidate' -Context 'Validation/security gate AI review candidate binding'
     Assert-AuthorityExactStringSequence -Value $aiReview.arrayFields -Expected @('reviewFindings', 'findingDisposition') -Context 'Validation/security gate AI review arrays'
     Assert-AuthorityExactBoolean -Value $aiReview.equalCounts -Expected $true -Context 'Validation/security gate AI review count binding'
     Assert-AuthorityExactString -Value $aiReview.severityPolicy -Expected 'central' -Context 'Validation/security gate AI review severity policy'
+    Assert-AuthorityExactString -Value $aiReview.authentication -Expected 'trusted-supervisor-signed-ai-review-v1' -Context 'Validation/security gate AI review authentication'
+    Assert-AuthorityExactStringSequence -Value $aiReview.digestFields -Expected @('reviewFindingsSha256', 'findingDispositionSha256') -Context 'Validation/security gate AI review digests'
+    Assert-AuthorityExactString -Value $aiReview.attestation -Expected 'trusted-supervisor-ai-review-v1' -Context 'Validation/security gate AI review attestation'
 
     $trustAnchors = Get-AuthorityRequiredProperty -Object $security -Name 'trustAnchors' -Context 'Validation/security gate trust-anchor policy'
     Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @('root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes') -Context 'Validation/security gate trust-anchor policy'
@@ -506,11 +600,18 @@ function Assert-AuthorityJsonPropertySet {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    if ($null -eq $Object -or $null -eq $Object.PSObject -or
-        $Object -is [array] -or $Object -is [string]) {
+    if ($null -eq $Object -or $Object -is [array] -or $Object -is [string]) {
         throw "$Context must be a JSON object."
     }
-    $actual = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    if ($Object -is [System.Collections.IDictionary]) {
+        $actual = @($Object.Keys | ForEach-Object { [string]$_ })
+    }
+    elseif ($null -eq $Object.PSObject) {
+        throw "$Context must be a JSON object."
+    }
+    else {
+        $actual = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    }
     $missing = @($Expected | Where-Object { $actual -cnotcontains $_ })
     $unexpected = @($actual | Where-Object { $Expected -cnotcontains $_ })
     if ($missing.Count -gt 0 -or $unexpected.Count -gt 0 -or $actual.Count -ne $Expected.Count) {
@@ -1280,6 +1381,76 @@ function Invoke-AuthorityExternalCommand {
     }
 }
 
+function Get-AuthorityLauncherDigest {
+    param([Parameter(Mandatory = $true)] $Launcher)
+
+    $lines = @('launcherType=validation-launcher-v1')
+    foreach ($name in @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+        $propertyValue = Get-AuthorityProperty -Object $Launcher -Name $name
+        $value = if ($null -eq $propertyValue) { 'null' } else { [string]$propertyValue }
+        $lines += "$name=$value"
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash((New-Object System.Text.UTF8Encoding($false)).GetBytes(($lines -join "`n") + "`n"))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Assert-AuthorityLauncherReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $ToolName,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][string] $ExecutablePath,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $launcher = Get-AuthorityRequiredProperty -Object $Receipt -Name 'launcher' -Context $Context
+    $expectedNames = @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')
+    Assert-AuthorityJsonPropertySet -Object $launcher -Expected $expectedNames -Context "$Context launcher"
+    $kind = Get-AuthorityRequiredProperty -Object $launcher -Name 'kind' -Context "$Context launcher"
+    if ($kind -isnot [string] -or [string]$kind -notin @('direct-executable', 'windows-cmd-shim', 'unix-node-shim')) {
+        throw "$Context launcher kind is not approved."
+    }
+    if ($kind -ceq 'direct-executable') {
+        foreach ($name in @('shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+            if ($null -ne (Get-AuthorityProperty -Object $launcher -Name $name)) {
+                throw "$Context direct executable launcher must not declare shim, payload, or runtime files."
+            }
+        }
+        return
+    }
+    if ($ToolName -cne 'skill-tools') { throw "$Context package shim is only approved for skill-tools." }
+    $windowsShim = $kind -ceq 'windows-cmd-shim'
+    if ($windowsShim -ne ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)) {
+        throw "$Context launcher kind does not match the execution platform."
+    }
+    $shimPath = Assert-AuthorityFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimPath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimSha256' -Context "$Context launcher") `
+        -Context "$Context launcher shim"
+    $payloadPath = Assert-AuthorityFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'payloadPath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'payloadSha256' -Context "$Context launcher") `
+        -Context "$Context launcher payload"
+    $runtimePath = Assert-AuthorityFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'runtimePath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'runtimeSha256' -Context "$Context launcher") `
+        -Context "$Context launcher runtime"
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not [string]::Equals($shimPath, [IO.Path]::GetFullPath($ExecutablePath), $comparison)) {
+        throw "$Context launcher shim does not match the executable path."
+    }
+    Assert-AuthorityPathWithinRoot -Path $shimPath -Root $InstallRoot -Context "$Context launcher shim"
+    Assert-AuthorityPathWithinRoot -Path $payloadPath -Root $InstallRoot -Context "$Context launcher payload"
+    if ([IO.Path]::GetFileName($runtimePath).ToLowerInvariant() -notin @('node', 'node.exe', 'nodejs', 'nodejs.exe')) {
+        throw "$Context launcher runtime is not the approved Node runtime."
+    }
+}
+
 function Assert-InstalledAuthorityToolReceipt {
     param(
         [Parameter(Mandatory = $true)] $Receipt,
@@ -1329,6 +1500,24 @@ function Assert-InstalledAuthorityToolReceipt {
         -Sha256Value (Get-AuthorityProperty -Object $Receipt -Name 'executableSha256') `
         -Context "$ToolName executable"
     Assert-AuthorityPathWithinRoot -Path $executablePath -Root ([string]$toolInstallRoot) -Context "$ToolName executable"
+
+    Assert-AuthoritySha256 `
+        -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'installedClosureSha256' -Context "$ToolName receipt") `
+        -Context "$ToolName installed closure"
+    $actualInstalledClosure = Get-AuthorityDirectoryClosureSha256 -Path ([string]$toolInstallRoot)
+    if ($actualInstalledClosure -cne [string]$Receipt.installedClosureSha256) {
+        throw "$ToolName installed closure changed after resolution."
+    }
+    Assert-AuthorityLauncherReceipt `
+        -Receipt $Receipt `
+        -ToolName $ToolName `
+        -InstallRoot ([string]$toolInstallRoot) `
+        -ExecutablePath $executablePath `
+        -Context "$ToolName receipt"
+    Assert-AuthoritySha256 -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'launcherDigestSha256' -Context "$ToolName receipt") -Context "$ToolName launcher digest"
+    if ([string]$Receipt.launcherDigestSha256 -cne (Get-AuthorityLauncherDigest -Launcher $Receipt.launcher)) {
+        throw "$ToolName launcher metadata changed after resolution."
+    }
 
     Assert-AuthoritySha256 `
         -Value (Get-AuthorityProperty -Object $Receipt -Name 'dependencyClosureSha256') `
@@ -2335,12 +2524,7 @@ foreach ($entry in $expectedSources.GetEnumerator()) {
 
 foreach ($entry in $expectedSources.GetEnumerator()) {
     $receipt = $receipts[$entry.Key]
-    $expectedClosure = if ($entry.Key -in @('skillspector', 'skill-tools')) {
-        Get-AuthorityProperty -Object $receipt -Name 'installedClosureSha256'
-    }
-    else {
-        Get-AuthorityProperty -Object $receipt -Name 'dependencyClosureSha256'
-    }
+    $expectedClosure = Get-AuthorityProperty -Object $receipt -Name 'installedClosureSha256'
     Assert-AuthoritySha256 -Value $expectedClosure -Context "$($entry.Key) installed closure"
     $actualClosure = Get-AuthorityDirectoryClosureSha256 -Path ([string]$receipt.installRoot)
     if ($actualClosure -cne [string]$expectedClosure) {

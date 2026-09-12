@@ -98,12 +98,19 @@
             }
           },
           "stages": {
-            "allOf": [
-              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "ai-review" }, "status": { "const": "passed" } } } },
-              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "human-approval" }, "status": { "const": "passed" } } } },
-              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "publish-or-install" }, "status": { "const": "passed" } } } },
-              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "post-install-verification" }, "status": { "const": "passed" } } } }
-            ]
+            "prefixItems": [
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 1 }, "id": { "const": "controlled-acquisition" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 2 }, "id": { "const": "integrity-verification" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 3 }, "id": { "const": "package-validation" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 4 }, "id": { "const": "skillspector-static" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 5 }, "id": { "const": "repository-tests" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 6 }, "id": { "const": "conditional-semantic-scan" }, "condition": { "const": "when-triggered" }, "status": { "enum": ["passed", "not-applicable"] } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 7 }, "id": { "const": "ai-review" }, "condition": { "const": "lifecycle-evidence" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 8 }, "id": { "const": "human-approval" }, "condition": { "const": "lifecycle-evidence" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 9 }, "id": { "const": "publish-or-install" }, "condition": { "const": "approved-release-or-authorized-install" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 10 }, "id": { "const": "post-install-verification" }, "condition": { "const": "after-install" }, "status": { "const": "passed" } } }
+            ],
+            "items": false
           }
         }
       }
@@ -262,6 +269,7 @@
         "reason": { "type": ["string", "null"] },
         "triggerDecision": { "anyOf": [{ "$ref": "#/$defs/triggerDecision" }, { "type": "null" }] },
         "semanticEvidence": { "anyOf": [{ "$ref": "#/$defs/semanticEvidence" }, { "type": "null" }] },
+        "aiReviewEvidence": { "anyOf": [{ "$ref": "#/$defs/aiReviewEvidence" }, { "type": "null" }] },
         "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
       }
     },
@@ -327,6 +335,53 @@
         "analyzerIdentity": { "type": "string", "minLength": 1 },
         "analyzerCompleteness": { "const": "complete" },
         "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "aiReviewEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "evidenceType", "candidateId", "status", "decision", "reviewedCandidate", "reviewFindings", "findingDisposition", "reviewFindingsSha256", "findingDispositionSha256", "attestation"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "evidenceType": { "const": "ai-review" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "reviewedCandidate": { "$ref": "#/$defs/sha256" },
+        "reviewFindings": { "type": "array", "items": { "$ref": "#/$defs/aiReviewFinding" } },
+        "findingDisposition": { "type": "array", "items": { "type": "object" } },
+        "reviewFindingsSha256": { "$ref": "#/$defs/sha256" },
+        "findingDispositionSha256": { "$ref": "#/$defs/sha256" },
+        "attestation": { "$ref": "#/$defs/aiReviewAttestation" }
+      }
+    },
+    "aiReviewFinding": {
+      "type": "object",
+      "required": ["severity"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low", "informational"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "aiReviewAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attestationType", "candidateId", "evidenceType", "status", "decision", "reviewedCandidate", "reviewFindingsSha256", "findingDispositionSha256", "issuedAt", "signature"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "attestationType": { "const": "trusted-supervisor-ai-review-v1" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "evidenceType": { "const": "ai-review" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "reviewedCandidate": { "$ref": "#/$defs/sha256" },
+        "reviewFindingsSha256": { "$ref": "#/$defs/sha256" },
+        "findingDispositionSha256": { "$ref": "#/$defs/sha256" },
         "issuedAt": { "type": "string", "minLength": 1 },
         "signature": { "type": "string", "minLength": 1 }
       }

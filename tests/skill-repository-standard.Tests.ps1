@@ -207,6 +207,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $items = @($Value)
                 $minItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'minItems'
                 if ($null -ne $minItemsProperty -and $items.Count -lt [int]$minItemsProperty.Value) { return $false }
+                $maxItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'maxItems'
+                if ($null -ne $maxItemsProperty -and $items.Count -gt [int]$maxItemsProperty.Value) { return $false }
                 $uniqueProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'uniqueItems'
                 if ($null -ne $uniqueProperty -and [bool]$uniqueProperty.Value) {
                     for ($left = 0; $left -lt $items.Count; $left++) {
@@ -217,13 +219,38 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                         }
                     }
                 }
+                $prefixItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'prefixItems'
+                $prefixSchemas = @()
+                if ($null -ne $prefixItemsProperty) {
+                    $prefixSchemas = @($prefixItemsProperty.Value)
+                    if ($items.Count -lt $prefixSchemas.Count) { return $false }
+                    for ($index = 0; $index -lt $prefixSchemas.Count; $index++) {
+                        if (-not (Test-AuthorityJsonSchemaValue -Value $items[$index] -Schema $prefixSchemas[$index] -RootSchema $RootSchema)) {
+                            return $false
+                        }
+                    }
+                }
                 $itemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'items'
-                if ($null -ne $itemsProperty) {
+                if ($null -ne $itemsProperty -and $itemsProperty.Value -is [bool] -and -not [bool]$itemsProperty.Value -and
+                    $items.Count -gt $prefixSchemas.Count) {
+                    return $false
+                }
+                if ($null -ne $itemsProperty -and $itemsProperty.Value -isnot [bool]) {
                     foreach ($item in $items) {
                         if (-not (Test-AuthorityJsonSchemaValue -Value $item -Schema $itemsProperty.Value -RootSchema $RootSchema)) {
                             return $false
                         }
                     }
+                }
+                $containsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'contains'
+                if ($null -ne $containsProperty) {
+                    $containsCount = 0
+                    foreach ($item in $items) {
+                        if (Test-AuthorityJsonSchemaValue -Value $item -Schema $containsProperty.Value -RootSchema $RootSchema) {
+                            $containsCount++
+                        }
+                    }
+                    if ($containsCount -lt 1) { return $false }
                 }
             }
             elseif ($type -ceq 'string') {
@@ -1513,11 +1540,15 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $executablePath = Join-Path $toolRoot 'fixture-tool.bin'
         Write-TestUtf8File -Path $executablePath -Text 'fixture executable'
         $executableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher = [pscustomobject][ordered]@{
+            kind='direct-executable'; shimPath=$null; shimSha256=$null; payloadPath=$null; payloadSha256=$null; runtimePath=$null; runtimeSha256=$null
+        }
         $validReceipt = [pscustomobject][ordered]@{
             schemaVersion=1; toolName='fixture-tool'; source='fixture/source'; channel='latest-stable'
             frozenForRun=$true; resolvedVersion='1.0.0'; resolvedIdentity='fixture@1.0.0'
             identityKind='fixture-release'; installRoot=$toolRoot; executablePath=$executablePath
-            executableSha256=$executableSha256; dependencyClosureSha256=('a' * 64)
+            executableSha256=$executableSha256; installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher; launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher); dependencyClosureSha256=('a' * 64)
             dependencyClosure=@([pscustomobject]@{ name='fixture-tool'; version='1.0.0' }, [pscustomobject]@{ name='dependency'; version='2.0.0' })
         }
         Assert-InstalledAuthorityToolReceipt -Receipt $validReceipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null
@@ -1538,6 +1569,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Receipt coercion '$($case.Name)' must fail closed."
+        }
+
+        $closureMutationPath = Join-Path $toolRoot 'unexpected-installed-file.bin'
+        Write-TestUtf8File -Path $closureMutationPath -Text 'installed closure mutation'
+        try {
+            $errorMessage = $null
+            try { Assert-InstalledAuthorityToolReceipt -Receipt $validReceipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'installed closure changed' 'A post-resolution installed-file mutation must fail the closure binding.'
+        }
+        finally {
+            Remove-Item -LiteralPath $closureMutationPath -Force -ErrorAction SilentlyContinue
         }
 
         $validPolicy = [pscustomobject][ordered]@{
@@ -2859,6 +2902,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Equal $actual[0].action $expected.action "Severity '$($expected.level)' has the wrong action."
         }
         Assert-True ([bool]$policy.security.aiReviewCannotReplaceHumanApproval) 'AI Review must not replace Human Approval.'
+        Assert-Equal $policy.security.aiReview.authentication 'trusted-supervisor-signed-ai-review-v1' 'AI review must require trusted-supervisor authentication.'
+        Assert-ExactStringSequence $policy.security.aiReview.digestFields @('reviewFindingsSha256', 'findingDispositionSha256') 'AI review must bind both complete result digests.'
+        Assert-Equal $policy.security.aiReview.attestation 'trusted-supervisor-ai-review-v1' 'AI review must use the canonical attestation type.'
         Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
 
         Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
@@ -2951,20 +2997,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $consistent.authority.binding.selectedFiles = @(1..11 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
-                foreach ($lifecycleId in @('ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
-                    $lifecycleStage = @($consistent.stages | Where-Object { $_.id -eq $lifecycleId })
-                    if ($lifecycleStage.Count -eq 0) {
-                        $consistent.stages += [pscustomobject][ordered]@{
-                            order = 11
-                            id = $lifecycleId
-                            condition = 'lifecycle-evidence'
-                            status = 'passed'
-                            startedAt = $null
-                            endedAt = $null
-                            events = @()
-                        }
-                    }
-                    else { $lifecycleStage[0].status = 'passed' }
+                for ($stageIndex = 0; $stageIndex -lt 10; $stageIndex++) {
+                    $consistent.stages[$stageIndex].status = if ($stageIndex -eq 5) { 'not-applicable' } else { 'passed' }
                 }
             }
             Assert-AuthoritySchemaInstance -Value $consistent -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message "A consistent '$($terminal.state)' validation evidence envelope must be schema-valid."

@@ -269,14 +269,17 @@
     "aiReview": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "decision", "candidateBinding", "arrayFields", "equalCounts", "severityPolicy"],
+      "required": ["status", "decision", "candidateBinding", "arrayFields", "equalCounts", "severityPolicy", "authentication", "digestFields", "attestation"],
       "properties": {
         "status": { "const": "passed" },
         "decision": { "const": "PASS" },
         "candidateBinding": { "const": "reviewedCandidate" },
         "arrayFields": { "const": ["reviewFindings", "findingDisposition"] },
         "equalCounts": { "const": true },
-        "severityPolicy": { "const": "central" }
+        "severityPolicy": { "const": "central" },
+        "authentication": { "const": "trusted-supervisor-signed-ai-review-v1" },
+        "digestFields": { "const": ["reviewFindingsSha256", "findingDispositionSha256"] },
+        "attestation": { "const": "trusted-supervisor-ai-review-v1" }
       }
     },
     "trustAnchors": {

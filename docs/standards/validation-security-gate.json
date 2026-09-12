@@ -138,7 +138,10 @@
       "candidateBinding": "reviewedCandidate",
       "arrayFields": ["reviewFindings", "findingDisposition"],
       "equalCounts": true,
-      "severityPolicy": "central"
+      "severityPolicy": "central",
+      "authentication": "trusted-supervisor-signed-ai-review-v1",
+      "digestFields": ["reviewFindingsSha256", "findingDispositionSha256"],
+      "attestation": "trusted-supervisor-ai-review-v1"
     },
     "trustAnchors": {
       "root": "docs/standards/trust-anchors",

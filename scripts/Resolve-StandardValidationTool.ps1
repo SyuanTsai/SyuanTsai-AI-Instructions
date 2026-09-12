@@ -577,23 +577,94 @@ function Get-BytesSha256 {
     }
 }
 
+function Get-ResolverAsciiCaseFold {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $code = [int][char]$character
+        if ($code -ge 65 -and $code -le 90) { $code += 32 }
+        [void]$builder.Append([char]$code)
+    }
+    return $builder.ToString()
+}
+
+function Assert-ResolverSafeRelativePath {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    if ([string]::IsNullOrEmpty($Value) -or $Value.StartsWith('/') -or $Value.Contains('\') -or
+        $Value.Contains(':') -or $Value -match '[\x00-\x1F\x7F]') {
+        throw "Installed tool closure contains an unsafe relative path: '$Value'."
+    }
+    foreach ($segment in $Value.Split('/')) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') {
+            throw "Installed tool closure contains an unsafe relative path: '$Value'."
+        }
+    }
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        [void]$utf8.GetBytes($Value)
+    }
+    catch {
+        throw "Installed tool closure contains a non-UTF-8 relative path: '$Value'."
+    }
+}
+
 function Get-DirectoryClosureIdentity {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     $root = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-    $entries = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)) {
-        $relative = $file.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/')
-        $entries += [pscustomobject][ordered]@{
-            path = $relative
-            sha256 = Get-FileSha256 -Path $file.FullName
+    $rootItem = Get-Item -Force -LiteralPath $root -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed tool closure root must be a regular non-reparse directory: $root"
+    }
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Installed tool closure contains a reparse point: $($item.FullName)"
         }
+        if ($item.PSIsContainer) { continue }
+        if ($item -isnot [IO.FileInfo]) {
+            throw "Installed tool closure contains a non-regular filesystem entry: $($item.FullName)"
+        }
+        $relative = $item.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+        Assert-ResolverSafeRelativePath -Value $relative
+        if (-not $ordinalPaths.Add($relative)) {
+            throw "Installed tool closure contains a duplicate path: '$relative'."
+        }
+        $nfc = $relative.Normalize([Text.NormalizationForm]::FormC)
+        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+            throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
+        }
+        $nfcPaths[$nfc] = $relative
+        $asciiCase = Get-ResolverAsciiCaseFold -Value $nfc
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+            throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
+        }
+        $asciiCasePaths[$asciiCase] = $relative
+        [void]$entries.Add([pscustomobject][ordered]@{
+                path = $relative
+                sha256 = Get-FileSha256 -Path $item.FullName
+            })
     }
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
     }
-    $canonical = ($entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in $entries) {
+        $insertAt = 0
+        while ($insertAt -lt $ordered.Count -and
+            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
+            $insertAt++
+        }
+        [void]$ordered.Insert($insertAt, $entry)
+    }
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         $closureHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
@@ -603,7 +674,31 @@ function Get-DirectoryClosureIdentity {
     }
     return [ordered]@{
         sha256 = $closureHash
-        entries = $entries
+        entries = $ordered.ToArray()
+    }
+}
+
+function Get-ResolverLauncherDigest {
+    param([Parameter(Mandatory = $true)] $Launcher)
+
+    $lines = @('launcherType=validation-launcher-v1')
+    foreach ($name in @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+        $propertyValue = if ($Launcher -is [System.Collections.IDictionary]) {
+            if ($Launcher.Contains($name)) { $Launcher[$name] } else { $null }
+        }
+        else {
+            $property = $Launcher.PSObject.Properties[$name]
+            if ($null -eq $property) { $null } else { $property.Value }
+        }
+        $value = if ($null -eq $propertyValue) { 'null' } else { [string]$propertyValue }
+        $lines += "$name=$value"
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes(($lines -join "`n") + "`n"))) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
     }
 }
 
@@ -2492,6 +2587,7 @@ function Resolve-Pester {
         executableSha256 = if ($null -eq $modulePath) { $null } else { Get-FileSha256 -Path $modulePath }
         dependencyClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
         dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $moduleClosure)
+        installedClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
     }
 }
 
@@ -2786,6 +2882,7 @@ function Resolve-SkillValidator {
                 executableSha256 = $executableSha256
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
+                installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 goRuntimeVersion = $goRuntimeVersion
                 goRuntimeSource = $trustedGoRuntimeSource
                 goRuntimePath = $goCommand
@@ -3130,6 +3227,24 @@ else {
     }
 
     $toolPolicy = $policy.tools.$ToolName
+    $launcher = [pscustomobject][ordered]@{
+        kind = 'direct-executable'
+        shimPath = $null
+        shimSha256 = $null
+        payloadPath = $null
+        payloadSha256 = $null
+        runtimePath = $null
+        runtimeSha256 = $null
+    }
+    if ($ToolName -ceq 'skill-tools') {
+        $launcher.kind = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'windows-cmd-shim' } else { 'unix-node-shim' }
+        $launcher.shimPath = $resolved.executablePath
+        $launcher.shimSha256 = $resolved.executableSha256
+        $launcher.payloadPath = $resolved.entryPointPath
+        $launcher.payloadSha256 = $resolved.entryPointSha256
+        $launcher.runtimePath = $resolved.nodePath
+        $launcher.runtimeSha256 = $resolved.nodeSha256
+    }
     $result = [ordered]@{
         schemaVersion = 1
         resolutionRunId = $script:ResolverRunId
@@ -3145,8 +3260,11 @@ else {
         installRoot = $resolved.installRoot
         executablePath = $resolved.executablePath
         executableSha256 = $resolved.executableSha256
+        installedClosureSha256 = $resolved.installedClosureSha256
         dependencyClosureSha256 = $resolved.dependencyClosureSha256
         dependencyClosure = $resolved.dependencyClosure
+        launcher = $launcher
+        launcherDigestSha256 = Get-ResolverLauncherDigest -Launcher $launcher
     }
     if ($ToolName -eq 'pester') {
         $result.modulePath = $resolved.modulePath
