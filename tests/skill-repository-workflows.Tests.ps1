@@ -394,6 +394,50 @@ jobs:
 '@
             },
             @{
+                Name = 'release-workflow-unrelated-list-item'
+                RelativePath = '.github/workflows/release-unrelated-list.yml'
+                Text = @'
+name: Release with unrelated list item
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    steps:
+      - canonical-validation
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-opaque-local-helper'
+                RelativePath = '.github/workflows/release-opaque-helper.yml'
+                Text = @'
+name: Release with opaque local helper
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    needs: canonical-validation
+    steps:
+      - run: ./ship
+'@
+                Files = @(
+                    @{
+                        RelativePath = 'ship'
+                        Text = "gh release create `$env:GITHUB_REF_NAME`n"
+                    }
+                )
+            },
+            @{
                 Name = 'compatibility-independent-validation'
                 RelativePath = '.github/workflows/compatibility-independent.yml'
                 Text = @'
@@ -412,6 +456,11 @@ jobs:
             $root = Join-Path $TestDrive ("entry-point-negative-{0}" -f $case.Name)
             New-ConsumerEntryPointFixture -Root $root
             Write-TestUtf8File -Path (Join-Path $root $case.RelativePath) -Text $case.Text
+            if ($case.ContainsKey('Files')) {
+                foreach ($file in @($case.Files)) {
+                    Write-TestUtf8File -Path (Join-Path $root $file.RelativePath) -Text $file.Text
+                }
+            }
             $errorMessage = $null
             try {
                 Assert-AuthorityConsumerEntryPointContract `
@@ -420,7 +469,7 @@ jobs:
                     -Policy $policy | Out-Null
             }
             catch { $errorMessage = $_.Exception.Message }
-            Assert-Match $errorMessage 'entry-point contract|alternate|canonical' "Consumer entry-point case '$($case.Name)' must fail closed."
+            Assert-Match $errorMessage 'entry-point contract|alternate|canonical|opaque|release' "Consumer entry-point case '$($case.Name)' must fail closed."
         }
 
         $compatibilityRoot = Join-Path $TestDrive 'entry-point-compatibility-status'
@@ -454,8 +503,10 @@ jobs:
     steps:
       - run: ./scripts/Validate.ps1
   release:
-    needs: canonical-validation
+    needs:
+      - canonical-validation
     steps:
+      - canonical-validation
       - run: gh release create $env:GITHUB_REF_NAME
 '@
         Assert-True (Assert-AuthorityConsumerEntryPointContract `

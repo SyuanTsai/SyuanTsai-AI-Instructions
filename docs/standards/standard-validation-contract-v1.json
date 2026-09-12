@@ -23,8 +23,8 @@
     { "order": 6, "id": "conditional-semantic-scan", "condition": "when-triggered", "barrier": "explicit-consent-and-candidate-bound-evidence" },
     { "order": 7, "id": "ai-review", "condition": "lifecycle-evidence", "barrier": "candidate-bound-review-evidence" },
     { "order": 8, "id": "human-approval", "condition": "lifecycle-evidence", "barrier": "independent-human-approval" },
-    { "order": 9, "id": "publish-or-install", "condition": "approved-release-or-authorized-install", "barrier": "runner-does-not-perform-unapproved-side-effect" },
-    { "order": 10, "id": "post-install-verification", "condition": "after-install", "barrier": "installed-inventory-and-integrity" }
+    { "order": 9, "id": "publish-or-install", "condition": "approved-release-or-authorized-install", "barrier": "candidate-bound-trusted-supervisor-signed-authorized-result" },
+    { "order": 10, "id": "post-install-verification", "condition": "after-install", "barrier": "candidate-bound-trusted-supervisor-signed-installed-inventory-and-integrity" }
   ],
   "terminalStates": [
     { "state": "PASS", "exitCode": 0, "meaning": "Validation passed; releaseEligible is false for development harnesses and validation-only runs." },
@@ -57,6 +57,6 @@
     "semantic": "explicit-provider-scope-purpose-consent-required-when-triggered",
     "aiReviewCannotReplaceHumanApproval": true,
     "humanApproval": "candidate-bound-trusted-supervisor-signed-rsa-attestation",
-    "publishInstall": "evidence-only-and-explicitly-authorized"
+    "publishInstall": "candidate-bound-trusted-supervisor-signed-lifecycle-attestation"
   }
 }

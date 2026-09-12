@@ -37,6 +37,32 @@
     "failure": { "$ref": "#/$defs/failure" },
     "artifacts": { "$ref": "#/$defs/artifacts" }
   },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "PASS" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode"], "properties": { "exitCode": { "const": 0 } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "BLOCKED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 10 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "FAILED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 20 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "INVALID" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 30 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "CANCELLED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 40 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "releaseEligible": { "const": true } }, "required": ["releaseEligible"] },
+      "then": { "type": "object", "required": ["state", "exitCode"], "properties": { "state": { "const": "PASS" }, "exitCode": { "const": 0 } } }
+    }
+  ],
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "candidate": {

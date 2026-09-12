@@ -305,6 +305,93 @@ $result | ConvertTo-Json -Depth 10 -Compress
             }
             finally { $rsa.Dispose() }
         }
+
+        function Get-TestLifecycleAttestationPayload {
+            param(
+                [Parameter(Mandatory = $true)][string] $ReceiptType,
+                [Parameter(Mandatory = $true)][hashtable] $Fields
+            )
+            $orderedNames = @($Fields.Keys | Sort-Object)
+            return (@("receiptType=$ReceiptType" + ($orderedNames | ForEach-Object { "$_=$([string]$Fields[$_])" })) -join "`n")
+        }
+
+        function Write-TestLifecycleEvidence {
+            param(
+                [Parameter(Mandatory = $true)][string] $Path,
+                [Parameter(Mandatory = $true)][ValidateSet('publish-install', 'post-install')][string] $EvidenceType,
+                [Parameter(Mandatory = $true)][string] $CandidateId,
+                [Parameter(Mandatory = $true)][System.Security.Cryptography.RSACryptoServiceProvider] $Rsa
+            )
+
+            $issuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+            if ($EvidenceType -ceq 'publish-install') {
+                $releaseIdentity = 'release-example'
+                $fields = @{
+                    authorization = 'True'
+                    candidateId = $CandidateId
+                    evidenceType = $EvidenceType
+                    issuedAt = $issuedAt
+                    releaseIdentity = $releaseIdentity
+                    status = 'authorized'
+                }
+                $attestation = [ordered]@{
+                    schemaVersion = 1
+                    attestationType = 'trusted-supervisor-publish-install-v1'
+                    candidateId = $CandidateId
+                    evidenceType = $EvidenceType
+                    status = 'authorized'
+                    authorization = $true
+                    releaseIdentity = $releaseIdentity
+                    issuedAt = $issuedAt
+                    signature = $null
+                }
+                $evidence = [ordered]@{
+                    schemaVersion = 1
+                    evidenceType = $EvidenceType
+                    candidateId = $CandidateId
+                    status = 'authorized'
+                    authorization = $true
+                    releaseIdentity = $releaseIdentity
+                    attestation = $attestation
+                }
+            }
+            else {
+                $inventory = @('skill-alpha', 'skill-beta')
+                $inventoryText = [string]::Join(';', $inventory)
+                $fields = @{
+                    candidateId = $CandidateId
+                    evidenceType = $EvidenceType
+                    installedInventory = $inventoryText
+                    issuedAt = $issuedAt
+                    postInstallIntegrity = 'True'
+                    status = 'passed'
+                }
+                $attestation = [ordered]@{
+                    schemaVersion = 1
+                    attestationType = 'trusted-supervisor-post-install-v1'
+                    candidateId = $CandidateId
+                    evidenceType = $EvidenceType
+                    status = 'passed'
+                    installedInventory = $inventory
+                    postInstallIntegrity = $true
+                    issuedAt = $issuedAt
+                    signature = $null
+                }
+                $evidence = [ordered]@{
+                    schemaVersion = 1
+                    evidenceType = $EvidenceType
+                    candidateId = $CandidateId
+                    status = 'passed'
+                    installedInventory = $inventory
+                    postInstallIntegrity = $true
+                    attestation = $attestation
+                }
+            }
+            $receiptType = "$EvidenceType-v1"
+            $payload = Get-TestLifecycleAttestationPayload -ReceiptType $receiptType -Fields $fields
+            $evidence.attestation.signature = [Convert]::ToBase64String($Rsa.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($payload), 'SHA256'))
+            Write-TestUtf8File -Path $Path -Text ($evidence | ConvertTo-Json -Depth 20)
+        }
     }
 
     # Scenario: The public contract must be machine-readable before a consumer can adopt it.
@@ -319,16 +406,24 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $stages.Count 10 'Validation contract must expose exactly ten stages.'
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
+        Assert-Equal $contract.consent.publishInstall 'candidate-bound-trusted-supervisor-signed-lifecycle-attestation' 'Publish/install lifecycle evidence must require a trusted attestation.'
+        Assert-Match ([string]$contract.stages[8].barrier) 'trusted-supervisor-signed' 'Publish/install stage must require trusted signed evidence.'
+        Assert-Match ([string]$contract.stages[9].barrier) 'trusted-supervisor-signed' 'Post-install stage must require trusted signed evidence.'
         $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-adapter-v1.schema.json') | ConvertFrom-Json
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
         Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
+        Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'The evidence schema must bind every terminal state to its exit code and release eligibility.'
+        $evidenceSchemaText = $evidenceSchema | ConvertTo-Json -Depth 20 -Compress
+        Assert-Match $evidenceSchemaText '"if".*"state".*"then".*"exitCode"' 'The evidence schema must express conditional terminal state/exit-code relationships.'
+        Assert-Match $evidenceSchemaText '"releaseEligible".*"const":false|"releaseEligible".*"const":true' 'The evidence schema must express release eligibility constraints.'
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-False ($runnerSource -match '\[string\]\s+\$TrustedToolRoot\s*=\s*\(Split-Path\s+-Parent\s+\$PSScriptRoot\)') 'The runner must not evaluate PSScriptRoot in a parameter default before script initialization.'
         Assert-Match $runnerSource 'if\s*\(\[string\]::IsNullOrWhiteSpace\(\$TrustedToolRoot\)\)' 'The runner must derive its default trusted tool root after parameter binding.'
         Assert-Match $runnerSource 'Assert-AuthorityConsumerEntryPointContract' 'The runner must enforce the central consumer entry-point contract.'
         Assert-Match $runnerSource 'Assert-StandardValidationSnapshotUnchanged' 'The runner must revalidate the candidate snapshot around child execution.'
         Assert-Match $runnerSource 'Assert-StandardValidationHumanApprovalEvidence' 'Human approval must be authenticated by the runner.'
+        Assert-Match $runnerSource 'Assert-StandardValidationLifecycleEvidence' 'Publish/install and post-install evidence must be authenticated by the runner.'
         Assert-Match $runnerSource 'CandidateArchivePath|CandidateAcquisitionEvidencePath' 'Production acquisition must bind the candidate to an acquired immutable archive.'
         Assert-Match $runnerSource 'AuthorityRevision|AuthorityArchivePath|AuthoritySnapshotEvidencePath' 'Authority evidence must bind to an immutable authority snapshot.'
         Assert-Match $runnerSource 'Assert-StandardValidationCandidateAcquisition|Assert-StandardValidationAuthoritySnapshot' 'The runner must verify source and authority acquisition bindings before validation.'
@@ -564,6 +659,22 @@ jobs:
         Assert-Match $tamperedResult.Output 'signature verification failed' 'The failure must identify signature verification failure.'
         Assert-Equal (@($tamperedResult.Evidence.stages | Where-Object id -eq 'human-approval')[0].status) 'blocked' 'A tampered approval signature must block the lifecycle.'
 
+        $forgedLifecycleFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'forged-lifecycle-evidence')
+        $forgedLifecycleAdapterSha = Get-StandardValidationFileSha256 -Path $forgedLifecycleFixture.Adapter -Context 'test adapter'
+        $forgedLifecycleInventory = Get-StandardValidationInventory -Root $forgedLifecycleFixture.Candidate -Context 'test candidate'
+        $forgedLifecycleContentSha = Get-StandardValidationInventorySha256 -Inventory $forgedLifecycleInventory
+        $forgedLifecycleCandidateId = Get-StandardValidationTextSha256 -Value ("https://example.com/example/skills.git`n$('a' * 40)`n$('b' * 40)`nlocal`n$forgedLifecycleContentSha`n$forgedLifecycleAdapterSha`n")
+        $forgedLifecycleAiEvidence = Join-Path $forgedLifecycleFixture.Root 'ai-review.json'
+        $forgedLifecycleHumanEvidence = Join-Path $forgedLifecycleFixture.Root 'human-approval.json'
+        $forgedLifecyclePublishEvidence = Join-Path $forgedLifecycleFixture.Root 'publish-install.json'
+        Write-TestUtf8File -Path $forgedLifecycleAiEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'ai-review'; candidateId = $forgedLifecycleCandidateId; status = 'passed'; decision = 'PASS'; reviewFindings = @(); findingDisposition = @() } | ConvertTo-Json -Depth 10)
+        Write-TestHumanApprovalEvidence -Fixture $forgedLifecycleFixture -Path $forgedLifecycleHumanEvidence -CandidateId $forgedLifecycleCandidateId
+        Write-TestUtf8File -Path $forgedLifecyclePublishEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'publish-install'; candidateId = $forgedLifecycleCandidateId; status = 'authorized'; authorization = $true; releaseIdentity = 'release-example' } | ConvertTo-Json -Depth 10)
+        $forgedLifecycleResult = Invoke-RunnerFixture -Fixture $forgedLifecycleFixture -CompleteLifecycle -AiReviewEvidencePath $forgedLifecycleAiEvidence -HumanApprovalEvidencePath $forgedLifecycleHumanEvidence -PublishInstallEvidencePath $forgedLifecyclePublishEvidence
+        Assert-Equal $forgedLifecycleResult.Evidence.state 'BLOCKED' 'Self-asserted publish/install fields must not satisfy the lifecycle barrier.'
+        Assert-Match $forgedLifecycleResult.Output 'attestation|trusted|signature' 'The failure must identify the missing trusted lifecycle attestation.'
+        Assert-Equal (@($forgedLifecycleResult.Evidence.stages | Where-Object id -eq 'publish-or-install')[0].status) 'blocked' 'Unattested publish/install evidence must block the lifecycle.'
+
         $fullFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'full-lifecycle')
         $fullAdapterSha = Get-StandardValidationFileSha256 -Path $fullFixture.Adapter -Context 'test adapter'
         $fullInventory = Get-StandardValidationInventory -Root $fullFixture.Candidate -Context 'test candidate'
@@ -575,8 +686,13 @@ jobs:
         $fullPostEvidence = Join-Path $fullFixture.Root 'post-install.json'
         Write-TestUtf8File -Path $fullAiEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'ai-review'; candidateId = $fullCandidateId; status = 'passed'; decision = 'PASS'; reviewFindings = @(); findingDisposition = @() } | ConvertTo-Json -Depth 10)
         Write-TestHumanApprovalEvidence -Fixture $fullFixture -Path $fullHumanEvidence -CandidateId $fullCandidateId
-        Write-TestUtf8File -Path $fullPublishEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'publish-install'; candidateId = $fullCandidateId; status = 'authorized'; authorization = $true; releaseIdentity = 'release-example' } | ConvertTo-Json -Depth 10)
-        Write-TestUtf8File -Path $fullPostEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'post-install'; candidateId = $fullCandidateId; status = 'passed'; installedInventory = @('skill-alpha', 'skill-beta'); postInstallIntegrity = $true } | ConvertTo-Json -Depth 10)
+        $lifecycleRsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            Write-TestUtf8File -Path (Join-Path $fullFixture.TrustedTools 'trusted-supervisor-public-key.xml') -Text $lifecycleRsa.ToXmlString($false)
+            Write-TestLifecycleEvidence -Path $fullPublishEvidence -EvidenceType 'publish-install' -CandidateId $fullCandidateId -Rsa $lifecycleRsa
+            Write-TestLifecycleEvidence -Path $fullPostEvidence -EvidenceType 'post-install' -CandidateId $fullCandidateId -Rsa $lifecycleRsa
+        }
+        finally { $lifecycleRsa.Dispose() }
         $fullResult = Invoke-RunnerFixture -Fixture $fullFixture -CompleteLifecycle -AiReviewEvidencePath $fullAiEvidence -HumanApprovalEvidencePath $fullHumanEvidence -PublishInstallEvidencePath $fullPublishEvidence -PostInstallEvidencePath $fullPostEvidence
         Assert-Equal $fullResult.Evidence.state 'PASS' 'Complete lifecycle evidence should pass the development behavior fixture.'
         Assert-False ([bool]$fullResult.Evidence.releaseEligible) 'Development harness evidence must never be release-eligible.'

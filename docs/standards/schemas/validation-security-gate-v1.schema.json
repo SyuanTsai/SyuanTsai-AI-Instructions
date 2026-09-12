@@ -127,14 +127,14 @@
               "type": "object",
               "properties": {
                 "id": { "const": "publish-or-install" },
-                "evidence": { "const": ["releaseIdentity", "publishOrInstallResult", "authorization"] }
+                "evidence": { "const": ["releaseIdentity", "publishOrInstallResult", "authorization", "attestation"] }
               }
             },
             {
               "type": "object",
               "properties": {
                 "id": { "const": "post-install-verification" },
-                "evidence": { "const": ["installedInventory", "installedManifest", "postInstallIntegrity"] }
+                "evidence": { "const": ["installedInventory", "installedManifest", "postInstallIntegrity", "attestation"] }
               }
             }
           ]

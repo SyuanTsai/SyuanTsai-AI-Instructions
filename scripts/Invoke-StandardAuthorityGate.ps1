@@ -359,8 +359,8 @@ function Assert-AuthorityValidationSecurityGate {
         [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered'; evidence=@('triggerDecision', 'semanticReport', 'semanticCompleteness') },
         [ordered]@{ order=7; id='ai-review'; name='AI Review'; condition='always'; evidence=@('reviewFindings', 'findingDisposition', 'reviewedCandidate') },
         [ordered]@{ order=8; id='human-approval'; name='Human Approval'; condition='always'; evidence=@('approver', 'approvalTimestamp', 'approvedCandidate') },
-        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install'; evidence=@('releaseIdentity', 'publishOrInstallResult', 'authorization') },
-        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install'; evidence=@('installedInventory', 'installedManifest', 'postInstallIntegrity') }
+        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install'; evidence=@('releaseIdentity', 'publishOrInstallResult', 'authorization', 'attestation') },
+        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install'; evidence=@('installedInventory', 'installedManifest', 'postInstallIntegrity', 'attestation') }
     )
     $stages = Get-AuthorityRequiredProperty -Object $Policy -Name 'stages' -Context 'Validation/security gate policy'
     if ($stages -isnot [array] -or @($stages).Count -ne $expectedStages.Count) {
@@ -840,7 +840,16 @@ function Test-AuthorityConsumerReleaseAffectingCommand {
     param([Parameter(Mandatory = $true)][string] $Text)
 
     $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?)(?![A-Za-z0-9_.-])'
-    return [regex]::IsMatch($Text, $releasePattern)
+    return [regex]::IsMatch($Text, $releasePattern) -or (Test-AuthorityConsumerOpaqueReleaseHelper -Text $Text)
+}
+
+function Test-AuthorityConsumerOpaqueReleaseHelper {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    # A local helper can hide the actual publish command and its failure behavior. Until a
+    # trusted helper manifest/inspection contract exists, classify these dispatches as unsafe.
+    $opaqueHelperPattern = '(?im)(?<![A-Za-z0-9_.-])(?:(?:\.[/\\])|(?:[A-Za-z0-9_.-]+[/\\])+)(?:ship|release|publish|deploy)(?:\.(?:ps1|psm1|py|js|sh|cmd|bat|exe))?(?![A-Za-z0-9_.-])'
+    return [regex]::IsMatch($Text, $opaqueHelperPattern)
 }
 
 function Test-AuthorityConsumerFailureSuppression {
@@ -915,9 +924,54 @@ function Test-AuthorityConsumerJobNeedsCanonical {
         [Parameter(Mandatory = $true)][string] $CanonicalJobId
     )
 
-    $escapedId = [regex]::Escape($CanonicalJobId)
-    return ([regex]::IsMatch($JobText, "(?im)^\s*needs\s*:\s*(?:\[[^\]]*\b$escapedId\b[^\]]*\]|$escapedId(?:\s|$))") -or
-        [regex]::IsMatch($JobText, "(?im)^\s*-\s*$escapedId\s*$"))
+    $normalized = $JobText.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $jobIndent = $null
+    $needsLineIndex = -1
+    $needsIndent = -1
+    $needsCount = 0
+    $needsValueRaw = $null
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        if ($null -eq $jobIndent) {
+            $jobIndent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+            continue
+        }
+        $needsMatch = [regex]::Match($line, '^(?<indent>[ \t]*)needs\s*:\s*(?<value>.*)$')
+        if (-not $needsMatch.Success -or $needsMatch.Groups['indent'].Value.Length -ne ([int]$jobIndent + 2)) { continue }
+        $needsCount++
+        if ($needsCount -eq 1) {
+            $needsLineIndex = $index
+            $needsIndent = $needsMatch.Groups['indent'].Value.Length
+            $needsValueRaw = $needsMatch.Groups['value'].Value
+        }
+    }
+    if ($needsCount -ne 1) { return $false }
+
+    $canonicalValues = @($CanonicalJobId, "'$CanonicalJobId'", ('"' + $CanonicalJobId + '"'))
+    $needsValue = (Remove-AuthorityConsumerShellComments -Line ([string]$needsValueRaw)).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($needsValue)) {
+        if ($needsValue.StartsWith('[', [StringComparison]::Ordinal) -and $needsValue.EndsWith(']', [StringComparison]::Ordinal)) {
+            foreach ($item in @($needsValue.Substring(1, $needsValue.Length - 2) -split ',')) {
+                if ($canonicalValues -ccontains ([string]$item).Trim()) { return $true }
+            }
+        }
+        return $canonicalValues -ccontains $needsValue
+    }
+
+    for ($index = $needsLineIndex + 1; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+        if ($indent -le $needsIndent) { break }
+        if ($indent -ne ($needsIndent + 2)) { return $false }
+        $itemMatch = [regex]::Match($line, '^[ \t]*-\s*(?<value>.*)$')
+        if (-not $itemMatch.Success) { return $false }
+        $item = (Remove-AuthorityConsumerShellComments -Line $itemMatch.Groups['value'].Value).Trim()
+        if ($canonicalValues -ccontains $item) { return $true }
+    }
+    return $false
 }
 
 function Assert-AuthorityConsumerReleaseFailurePropagation {
@@ -928,6 +982,9 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
     )
 
     $executableText = Get-AuthorityConsumerExecutableText -Text $Text
+    if (Test-AuthorityConsumerOpaqueReleaseHelper -Text $executableText) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' invokes an opaque local release helper; inspect the helper or fail closed."
+    }
     if (-not (Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText)) { return }
     if (Test-AuthorityConsumerFailureSuppression -Text $Text) {
         throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation."
@@ -1096,6 +1153,9 @@ function Assert-AuthorityConsumerEntryPointContract {
             $hookExecutableText = Get-AuthorityConsumerScriptText -Text $hookText
             $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative
             $hookReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $hookExecutableText
+            if (Test-AuthorityConsumerOpaqueReleaseHelper -Text $hookExecutableText) {
+                throw "BLOCK: release-affecting hook '$($hookFile.FullName)' invokes an opaque local release helper; inspect the helper or fail closed."
+            }
             if ($hookReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
                 (Test-AuthorityConsumerFailureSuppression -Text $hookText)) {
                 throw "BLOCK: release-affecting hook '$($hookFile.FullName)' suppresses canonical or release failure propagation."

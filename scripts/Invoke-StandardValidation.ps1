@@ -251,7 +251,7 @@ function Get-StandardValidationSelectedFilesSha256 {
 
 function Get-StandardValidationSignedReceiptPayload {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1')][string] $ReceiptType,
+        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1', 'publish-install-v1', 'post-install-v1')][string] $ReceiptType,
         [Parameter(Mandatory = $true)][hashtable] $Fields
     )
 
@@ -1463,6 +1463,154 @@ function Assert-StandardValidationHumanApprovalEvidence {
     finally { $rsa.Dispose() }
 }
 
+function Assert-StandardValidationLifecycleTimestamp {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $issuedAt = Convert-StandardValidationApprovalTimestamp -Value $Value -Name 'issuedAt' -Context $Context
+    if ($issuedAt -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,7})?(Z|\+00:00)$') {
+        throw "BLOCKED|$Context issuedAt must be an ISO-8601 UTC timestamp."
+    }
+    $parsedTimestamp = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($issuedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsedTimestamp) -or
+        $parsedTimestamp.Offset -ne [TimeSpan]::Zero) {
+        throw "BLOCKED|$Context issuedAt is not a valid UTC timestamp."
+    }
+    if ($parsedTimestamp -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
+        throw "BLOCKED|$Context issuedAt is in the future."
+    }
+    return $issuedAt
+}
+
+function Assert-StandardValidationLifecycleEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)][ValidateSet('publish-install', 'post-install')][string] $ExpectedType,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $expectedProperties = if ($ExpectedType -ceq 'publish-install') {
+        @('schemaVersion', 'evidenceType', 'candidateId', 'status', 'authorization', 'releaseIdentity', 'attestation')
+    }
+    else {
+        @('schemaVersion', 'evidenceType', 'candidateId', 'status', 'installedInventory', 'postInstallIntegrity', 'attestation')
+    }
+    Assert-StandardValidationExactPropertySet -Object $Evidence -Expected $expectedProperties -Context $Context
+
+    $schemaVersion = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'schemaVersion' -Context $Context
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'evidenceType' -Context $Context) -cne $ExpectedType -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'candidateId' -Context $Context) -cne $CandidateId) {
+        throw "BLOCKED|$Context is not bound to this candidate and evidence type."
+    }
+
+    $attestation = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'attestation' -Context $Context
+    $attestationProperties = if ($ExpectedType -ceq 'publish-install') {
+        @('schemaVersion', 'attestationType', 'candidateId', 'evidenceType', 'status', 'authorization', 'releaseIdentity', 'issuedAt', 'signature')
+    }
+    else {
+        @('schemaVersion', 'attestationType', 'candidateId', 'evidenceType', 'status', 'installedInventory', 'postInstallIntegrity', 'issuedAt', 'signature')
+    }
+    Assert-StandardValidationExactPropertySet -Object $attestation -Expected $attestationProperties -Context "$Context attestation"
+
+    $attestationSchemaVersion = Get-StandardValidationRequiredProperty -Object $attestation -Name 'schemaVersion' -Context "$Context attestation"
+    $expectedAttestationType = "trusted-supervisor-$ExpectedType-v1"
+    if (($attestationSchemaVersion -isnot [int] -and $attestationSchemaVersion -isnot [long]) -or [int64]$attestationSchemaVersion -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'attestationType' -Context "$Context attestation") -cne $expectedAttestationType -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'candidateId' -Context "$Context attestation") -cne $CandidateId -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'evidenceType' -Context "$Context attestation") -cne $ExpectedType) {
+        throw "BLOCKED|$Context trusted supervisor attestation is not bound to this candidate and evidence type."
+    }
+
+    $issuedAt = Assert-StandardValidationLifecycleTimestamp `
+        -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'issuedAt' -Context "$Context attestation") `
+        -Context "$Context attestation"
+    $fields = @{
+        candidateId = $CandidateId
+        evidenceType = $ExpectedType
+        issuedAt = $issuedAt
+    }
+
+    if ($ExpectedType -ceq 'publish-install') {
+        $status = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'status' -Context $Context
+        $authorization = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'authorization' -Context $Context
+        if ($status -isnot [string] -or [string]$status -cne 'authorized' -or $authorization -isnot [bool] -or -not [bool]$authorization) {
+            throw "BLOCKED|$Context must contain a typed authorized publish/install result."
+        }
+        $releaseIdentity = Assert-StandardValidationApprovalScalar `
+            -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'releaseIdentity' -Context $Context) `
+            -Name 'releaseIdentity' `
+            -Context $Context
+        $attestationStatus = Get-StandardValidationRequiredProperty -Object $attestation -Name 'status' -Context "$Context attestation"
+        $attestationAuthorization = Get-StandardValidationRequiredProperty -Object $attestation -Name 'authorization' -Context "$Context attestation"
+        $attestationReleaseIdentity = Assert-StandardValidationApprovalScalar `
+            -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'releaseIdentity' -Context "$Context attestation") `
+            -Name 'releaseIdentity' `
+            -Context "$Context attestation"
+        if ($attestationStatus -isnot [string] -or [string]$attestationStatus -cne [string]$status -or
+            $attestationAuthorization -isnot [bool] -or [bool]$attestationAuthorization -ne [bool]$authorization -or
+            $attestationReleaseIdentity -cne $releaseIdentity) {
+            throw "BLOCKED|$Context trusted supervisor attestation does not match the publish/install result."
+        }
+        $fields.authorization = [string]$authorization
+        $fields.releaseIdentity = $releaseIdentity
+        $fields.status = [string]$status
+    }
+    else {
+        $status = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'status' -Context $Context
+        $postInstallIntegrity = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'postInstallIntegrity' -Context $Context
+        if ($status -isnot [string] -or [string]$status -cne 'passed' -or
+            $postInstallIntegrity -isnot [bool] -or -not [bool]$postInstallIntegrity) {
+            throw "BLOCKED|$Context must contain a typed passed post-install result."
+        }
+        $inventory = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'installedInventory' -Context $Context
+        if ($inventory -isnot [array] -or @($inventory).Count -eq 0) {
+            throw "BLOCKED|$Context installedInventory must be a non-empty array."
+        }
+        $inventoryValues = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($item in @($inventory)) {
+            $inventoryValue = Assert-StandardValidationApprovalScalar -Value $item -Name 'installedInventory item' -Context $Context
+            [void]$inventoryValues.Add($inventoryValue)
+        }
+        $attestationStatus = Get-StandardValidationRequiredProperty -Object $attestation -Name 'status' -Context "$Context attestation"
+        $attestationIntegrity = Get-StandardValidationRequiredProperty -Object $attestation -Name 'postInstallIntegrity' -Context "$Context attestation"
+        $attestationInventory = Get-StandardValidationRequiredProperty -Object $attestation -Name 'installedInventory' -Context "$Context attestation"
+        if ($attestationStatus -isnot [string] -or [string]$attestationStatus -cne [string]$status -or
+            $attestationIntegrity -isnot [bool] -or [bool]$attestationIntegrity -ne [bool]$postInstallIntegrity -or
+            $attestationInventory -isnot [array] -or @($attestationInventory).Count -ne $inventoryValues.Count) {
+            throw "BLOCKED|$Context trusted supervisor attestation does not match the post-install result."
+        }
+        for ($index = 0; $index -lt $inventoryValues.Count; $index++) {
+            $attestationInventoryValue = Assert-StandardValidationApprovalScalar `
+                -Value @($attestationInventory)[$index] `
+                -Name 'installedInventory item' `
+                -Context "$Context attestation"
+            if ($attestationInventoryValue -cne $inventoryValues[$index]) {
+                throw "BLOCKED|$Context trusted supervisor attestation inventory does not match the post-install result."
+            }
+        }
+        $fields.installedInventory = [string]::Join(';', $inventoryValues.ToArray())
+        $fields.postInstallIntegrity = [string]$postInstallIntegrity
+        $fields.status = [string]$status
+    }
+
+    $trustedKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'trusted-supervisor-public-key.xml') -Context "$Context trusted public key"
+    Assert-StandardValidationOutsideRoot -Path $trustedKeyPath -Root $CandidateRoot -Context "$Context trusted public key"
+    Assert-StandardValidationOutsideRoot -Path $trustedKeyPath -Root $ArtifactsRoot -Context "$Context trusted public key"
+    Assert-StandardValidationSignedReceipt `
+        -Receipt $attestation `
+        -ReceiptType "$ExpectedType-v1" `
+        -Fields $fields `
+        -TrustedToolRoot $TrustedToolRoot `
+        -Context "$Context attestation"
+}
+
 function Assert-StandardValidationImportedEvidence {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -1517,15 +1665,25 @@ function Assert-StandardValidationImportedEvidence {
          $null -eq (Get-StandardValidationProperty -Object $evidence -Name 'findingDisposition'))) {
         throw 'BLOCKED|AI review evidence is missing review findings or disposition.'
     }
-    if ($ExpectedType -ceq 'publish-install' -and
-        ((Get-StandardValidationProperty -Object $evidence -Name 'authorization') -ne $true -or
-         [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $evidence -Name 'releaseIdentity')))) {
-        throw 'BLOCKED|Publish/install evidence does not prove explicit authorization and release identity.'
-    }
-    if ($ExpectedType -ceq 'post-install' -and
-        ($null -eq (Get-StandardValidationProperty -Object $evidence -Name 'installedInventory') -or
-         (Get-StandardValidationProperty -Object $evidence -Name 'postInstallIntegrity') -ne $true)) {
-        throw 'BLOCKED|Post-install evidence is missing installed inventory or integrity verification.'
+    if ($ExpectedType -in @('publish-install', 'post-install')) {
+        try {
+            Assert-StandardValidationLifecycleEvidence `
+                -Evidence $evidence `
+                -ExpectedType $ExpectedType `
+                -CandidateId $CandidateId `
+                -TrustedToolRoot $TrustedToolRoot `
+                -CandidateRoot $CandidateRoot `
+                -ArtifactsRoot $ArtifactsRoot `
+                -Context $Context
+        }
+        catch {
+            $lifecycleMessage = [string]$_.Exception.Message
+            $lifecycleSeparator = $lifecycleMessage.IndexOf('|')
+            if ($lifecycleSeparator -gt 0 -and $lifecycleMessage.Substring(0, $lifecycleSeparator) -in @('BLOCKED', 'INVALID', 'FAILED')) {
+                $lifecycleMessage = $lifecycleMessage.Substring($lifecycleSeparator + 1)
+            }
+            throw "BLOCKED|$lifecycleMessage"
+        }
     }
     return ,$evidence
 }

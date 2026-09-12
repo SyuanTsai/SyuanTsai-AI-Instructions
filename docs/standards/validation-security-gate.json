@@ -72,7 +72,7 @@
       "name": "Publish / Install",
       "condition": "approved-release-or-authorized-install",
       "failureAction": "BLOCK",
-      "evidence": ["releaseIdentity", "publishOrInstallResult", "authorization"]
+      "evidence": ["releaseIdentity", "publishOrInstallResult", "authorization", "attestation"]
     },
     {
       "order": 10,
@@ -80,7 +80,7 @@
       "name": "Post-install Verification",
       "condition": "after-install",
       "failureAction": "BLOCK",
-      "evidence": ["installedInventory", "installedManifest", "postInstallIntegrity"]
+      "evidence": ["installedInventory", "installedManifest", "postInstallIntegrity", "attestation"]
     }
   ],
   "security": {

@@ -2818,8 +2818,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
             ,@('reviewFindings', 'findingDisposition', 'reviewedCandidate')
             ,@('approver', 'approvalTimestamp', 'approvedCandidate')
-            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization')
-            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity')
+            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization', 'attestation')
+            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity', 'attestation')
         )
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
@@ -2897,6 +2897,64 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $runner 'Assert-StandardValidationToolEnvelope' 'Central runner must validate actual tool output envelopes.'
         Assert-Match $runner 'SemanticConsent' 'Central runner must expose explicit semantic consent.'
         Assert-Match $runner 'CompleteLifecycle' 'Central runner must keep release lifecycle evidence separate from validation-only runs.'
+
+        $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationEvidenceSchemaPath | ConvertFrom-Json
+        Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'Validation evidence schema must declare all terminal-state consistency rules.'
+        . $runnerPath `
+            -CandidateRoot (Join-Path $TestDrive 'schema-candidate') `
+            -AdapterPath (Join-Path $TestDrive 'schema-adapter.json') `
+            -ArtifactsRoot (Join-Path $TestDrive 'schema-artifacts') `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -DefineFunctionsOnly
+        $schemaStages = @(1..10 | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    order = $_
+                    id = "schema-stage-$_"
+                    condition = 'always'
+                    status = 'not-applicable'
+                    startedAt = $null
+                    endedAt = $null
+                    events = @()
+                }
+            })
+        $schemaEvidence = New-StandardValidationCandidateEvidence `
+            -RunId ([guid]::NewGuid()) `
+            -State 'PASS' `
+            -ExitCode 0 `
+            -ReleaseEligible $false `
+            -Stages $schemaStages `
+            -ArtifactRoot 'unavailable' `
+            -LockPath 'unavailable' |
+            ConvertTo-Json -Depth 50 |
+            ConvertFrom-Json
+        Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
+        foreach ($terminal in @(
+            @{ state = 'PASS'; exitCode = 0; releaseEligible = $true },
+            @{ state = 'BLOCKED'; exitCode = 10; releaseEligible = $false },
+            @{ state = 'FAILED'; exitCode = 20; releaseEligible = $false },
+            @{ state = 'INVALID'; exitCode = 30; releaseEligible = $false },
+            @{ state = 'CANCELLED'; exitCode = 40; releaseEligible = $false }
+        )) {
+            $consistent = Copy-TestJsonObject -Value $schemaEvidence
+            $consistent.state = $terminal.state
+            $consistent.exitCode = $terminal.exitCode
+            $consistent.releaseEligible = $terminal.releaseEligible
+            Assert-AuthoritySchemaInstance -Value $consistent -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message "A consistent '$($terminal.state)' validation evidence envelope must be schema-valid."
+        }
+        foreach ($contradiction in @(
+            @{ Name = 'blocked-with-zero'; state = 'BLOCKED'; exitCode = 0; releaseEligible = $false },
+            @{ Name = 'pass-with-failure-code'; state = 'PASS'; exitCode = 20; releaseEligible = $false },
+            @{ Name = 'failed-release-eligible'; state = 'FAILED'; exitCode = 20; releaseEligible = $true },
+            @{ Name = 'blocked-release-eligible'; state = 'BLOCKED'; exitCode = 10; releaseEligible = $true }
+        )) {
+            $contradictory = Copy-TestJsonObject -Value $schemaEvidence
+            $contradictory.state = $contradiction.state
+            $contradictory.exitCode = $contradiction.exitCode
+            $contradictory.releaseEligible = $contradiction.releaseEligible
+            Assert-AuthoritySchemaInstance -Value $contradictory -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $false -Message "Contradictory '$($contradiction.Name)' validation evidence must fail schema validation."
+        }
     }
 
     # Scenario: A consumer adds a renamed workflow, hook, or public command that runs a component validator directly.
