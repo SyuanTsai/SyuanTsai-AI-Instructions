@@ -45,13 +45,18 @@
     "staticBeforeRepositoryTests": true,
     "candidateCodeBeforeStatic": false,
     "finalEvidenceWrite": "atomic-create-only",
+    "finalEvidenceReservation": "supervisor-owned-exclusive-handle-before-child-processes; fail-on-substitution",
+    "childEnvironment": "clear-inherited-environment; copy-approved-os-runtime-and-STANDARD_VALIDATION-namespace-only",
+    "semanticTrigger": "effective-trigger-is-caller-addition-OR-typed-analyzer-requirement; record-trigger-decision",
     "timeoutOrCleanupFailure": "non-pass"
   },
   "evidence": {
     "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256"],
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
-    "unknownOrMissing": "fail-closed"
+    "unknownOrMissing": "fail-closed",
+    "aiReview": "typed-passed-PASS-decision; reviewedCandidate-bound; reviewFindings-and-findingDisposition-count-match; canonical-severity-mapping",
+    "trustAnchors": ["docs/standards/trust-anchors/trusted-supervisor-public-key.xml", "docs/standards/trust-anchors/human-approval-public-key.xml"]
   },
   "consent": {
     "semantic": "explicit-provider-scope-purpose-consent-required-when-triggered",

@@ -435,6 +435,40 @@ function Assert-AuthorityValidationSecurityGate {
         Assert-AuthorityExactString -Value $semantics[$index] -Expected $expectedSemantics[$index] -Context "Validation/security gate pass/block semantics $($index + 1)"
     }
 
+    $childEnvironment = Get-AuthorityRequiredProperty -Object $security -Name 'childProcessEnvironment' -Context 'Validation/security gate child environment policy'
+    Assert-AuthorityJsonPropertySet -Object $childEnvironment -Expected @('inheritance', 'allowed', 'forbidden') -Context 'Validation/security gate child environment policy'
+    Assert-AuthorityExactString -Value $childEnvironment.inheritance -Expected 'clear-before-launch' -Context 'Validation/security gate child environment inheritance'
+    Assert-AuthorityExactStringSequence -Value $childEnvironment.allowed -Expected @('approved-os-runtime', 'STANDARD_VALIDATION_*') -Context 'Validation/security gate child environment allowlist'
+    Assert-AuthorityExactString -Value $childEnvironment.forbidden -Expected 'arbitrary-inherited-secrets' -Context 'Validation/security gate child environment forbidden surface'
+
+    $outputReservation = Get-AuthorityRequiredProperty -Object $security -Name 'outputReservation' -Context 'Validation/security gate output reservation policy'
+    Assert-AuthorityJsonPropertySet -Object $outputReservation -Expected @('requiredBeforeChildProcess', 'ownership', 'substitutionAction') -Context 'Validation/security gate output reservation policy'
+    Assert-AuthorityExactBoolean -Value $outputReservation.requiredBeforeChildProcess -Expected $true -Context 'Validation/security gate output reservation requirement'
+    Assert-AuthorityExactString -Value $outputReservation.ownership -Expected 'supervisor-exclusive-handle' -Context 'Validation/security gate output reservation ownership'
+    Assert-AuthorityExactString -Value $outputReservation.substitutionAction -Expected 'BLOCK' -Context 'Validation/security gate output reservation substitution action'
+
+    $semanticTrigger = Get-AuthorityRequiredProperty -Object $security -Name 'semanticTrigger' -Context 'Validation/security gate semantic trigger policy'
+    Assert-AuthorityJsonPropertySet -Object $semanticTrigger -Expected @('analyzerProperty', 'effectiveDecision', 'recorded') -Context 'Validation/security gate semantic trigger policy'
+    Assert-AuthorityExactString -Value $semanticTrigger.analyzerProperty -Expected 'semanticRequired' -Context 'Validation/security gate analyzer semantic trigger property'
+    Assert-AuthorityExactString -Value $semanticTrigger.effectiveDecision -Expected 'callerRequested-OR-analyzerRequired' -Context 'Validation/security gate effective semantic trigger'
+    Assert-AuthorityExactBoolean -Value $semanticTrigger.recorded -Expected $true -Context 'Validation/security gate semantic trigger recording'
+
+    $aiReview = Get-AuthorityRequiredProperty -Object $security -Name 'aiReview' -Context 'Validation/security gate AI review policy'
+    Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy') -Context 'Validation/security gate AI review policy'
+    Assert-AuthorityExactString -Value $aiReview.status -Expected 'passed' -Context 'Validation/security gate AI review status'
+    Assert-AuthorityExactString -Value $aiReview.decision -Expected 'PASS' -Context 'Validation/security gate AI review decision'
+    Assert-AuthorityExactString -Value $aiReview.candidateBinding -Expected 'reviewedCandidate' -Context 'Validation/security gate AI review candidate binding'
+    Assert-AuthorityExactStringSequence -Value $aiReview.arrayFields -Expected @('reviewFindings', 'findingDisposition') -Context 'Validation/security gate AI review arrays'
+    Assert-AuthorityExactBoolean -Value $aiReview.equalCounts -Expected $true -Context 'Validation/security gate AI review count binding'
+    Assert-AuthorityExactString -Value $aiReview.severityPolicy -Expected 'central' -Context 'Validation/security gate AI review severity policy'
+
+    $trustAnchors = Get-AuthorityRequiredProperty -Object $security -Name 'trustAnchors' -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @('root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes') -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityExactString -Value $trustAnchors.root -Expected 'docs/standards/trust-anchors' -Context 'Validation/security gate trust-anchor root'
+    Assert-AuthorityExactString -Value $trustAnchors.supervisorPublicKey -Expected 'trusted-supervisor-public-key.xml' -Context 'Validation/security gate supervisor trust anchor'
+    Assert-AuthorityExactString -Value $trustAnchors.humanApprovalPublicKey -Expected 'human-approval-public-key.xml' -Context 'Validation/security gate human-approval trust anchor'
+    Assert-AuthorityExactBoolean -Value $trustAnchors.pinnedHashes -Expected $true -Context 'Validation/security gate pinned trust-anchor hashes'
+
     Assert-AuthorityEntryPointPolicy -Contract (Get-AuthorityRequiredProperty `
         -Object $Policy `
         -Name 'entryPointContract' `
@@ -839,7 +873,10 @@ function Test-AuthorityConsumerCompatibilityLane {
 function Test-AuthorityConsumerReleaseAffectingCommand {
     param([Parameter(Mandatory = $true)][string] $Text)
 
-    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?)(?![A-Za-z0-9_.-])'
+    # Action delegates are executable release surfaces too. Their behavior is
+    # opaque to this repository, so they must still be structurally bound to
+    # the canonical validator before the release job can run.
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
     return [regex]::IsMatch($Text, $releasePattern) -or (Test-AuthorityConsumerOpaqueReleaseHelper -Text $Text)
 }
 
@@ -1013,7 +1050,7 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
         $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
         if ($releaseJob.id -ceq $canonicalJob.id) {
             $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
-            $releaseMatch = [regex]::Match($releaseExecutableText, '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b)(?![A-Za-z0-9_.-])')
+            $releaseMatch = [regex]::Match($releaseExecutableText, '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])')
             if (-not $canonicalMatch.Success -or -not $releaseMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
                 throw "BLOCK: release-affecting workflow '$WorkflowPath' must run the canonical validator before its release command in job '$($releaseJob.id)'."
             }

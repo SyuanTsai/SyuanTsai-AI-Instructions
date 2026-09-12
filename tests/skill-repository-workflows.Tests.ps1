@@ -438,6 +438,19 @@ jobs:
                 )
             },
             @{
+                Name = 'release-workflow-opaque-action-delegate'
+                RelativePath = '.github/workflows/release-opaque-action.yml'
+                Text = @'
+name: Release with opaque action delegate
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - uses: acme/ship@0123456789012345678901234567890123456789
+'@
+            },
+            @{
                 Name = 'compatibility-independent-validation'
                 RelativePath = '.github/workflows/compatibility-independent.yml'
                 Text = @'

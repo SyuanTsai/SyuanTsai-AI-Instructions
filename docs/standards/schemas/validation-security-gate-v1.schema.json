@@ -164,7 +164,12 @@
         "unknownSeverity",
         "severity",
         "aiReviewCannotReplaceHumanApproval",
-        "samePassBlockSemantics"
+        "samePassBlockSemantics",
+        "childProcessEnvironment",
+        "outputReservation",
+        "semanticTrigger",
+        "aiReview",
+        "trustAnchors"
       ],
       "properties": {
         "scannerFailure": {
@@ -199,7 +204,76 @@
           "items": {
             "enum": ["local", "pre-push", "ci"]
           }
+        },
+        "childProcessEnvironment": {
+          "$ref": "#/$defs/childProcessEnvironment"
+        },
+        "outputReservation": {
+          "$ref": "#/$defs/outputReservation"
+        },
+        "semanticTrigger": {
+          "$ref": "#/$defs/semanticTrigger"
+        },
+        "aiReview": {
+          "$ref": "#/$defs/aiReview"
+        },
+        "trustAnchors": {
+          "$ref": "#/$defs/trustAnchors"
         }
+      }
+    },
+    "childProcessEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inheritance", "allowed", "forbidden"],
+      "properties": {
+        "inheritance": { "const": "clear-before-launch" },
+        "allowed": { "const": ["approved-os-runtime", "STANDARD_VALIDATION_*"] },
+        "forbidden": { "const": "arbitrary-inherited-secrets" }
+      }
+    },
+    "outputReservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredBeforeChildProcess", "ownership", "substitutionAction"],
+      "properties": {
+        "requiredBeforeChildProcess": { "const": true },
+        "ownership": { "const": "supervisor-exclusive-handle" },
+        "substitutionAction": { "const": "BLOCK" }
+      }
+    },
+    "semanticTrigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analyzerProperty", "effectiveDecision", "recorded"],
+      "properties": {
+        "analyzerProperty": { "const": "semanticRequired" },
+        "effectiveDecision": { "const": "callerRequested-OR-analyzerRequired" },
+        "recorded": { "const": true }
+      }
+    },
+    "aiReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "decision", "candidateBinding", "arrayFields", "equalCounts", "severityPolicy"],
+      "properties": {
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "candidateBinding": { "const": "reviewedCandidate" },
+        "arrayFields": { "const": ["reviewFindings", "findingDisposition"] },
+        "equalCounts": { "const": true },
+        "severityPolicy": { "const": "central" }
+      }
+    },
+    "trustAnchors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "supervisorPublicKey", "humanApprovalPublicKey", "pinnedHashes"],
+      "properties": {
+        "root": { "const": "docs/standards/trust-anchors" },
+        "supervisorPublicKey": { "const": "trusted-supervisor-public-key.xml" },
+        "humanApprovalPublicKey": { "const": "human-approval-public-key.xml" },
+        "pinnedHashes": { "const": true }
       }
     },
     "entryPointContract": {

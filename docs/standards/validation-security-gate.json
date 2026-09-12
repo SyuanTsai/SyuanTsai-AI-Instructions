@@ -111,7 +111,36 @@
       }
     ],
     "aiReviewCannotReplaceHumanApproval": true,
-    "samePassBlockSemantics": ["local", "pre-push", "ci"]
+    "samePassBlockSemantics": ["local", "pre-push", "ci"],
+    "childProcessEnvironment": {
+      "inheritance": "clear-before-launch",
+      "allowed": ["approved-os-runtime", "STANDARD_VALIDATION_*"],
+      "forbidden": "arbitrary-inherited-secrets"
+    },
+    "outputReservation": {
+      "requiredBeforeChildProcess": true,
+      "ownership": "supervisor-exclusive-handle",
+      "substitutionAction": "BLOCK"
+    },
+    "semanticTrigger": {
+      "analyzerProperty": "semanticRequired",
+      "effectiveDecision": "callerRequested-OR-analyzerRequired",
+      "recorded": true
+    },
+    "aiReview": {
+      "status": "passed",
+      "decision": "PASS",
+      "candidateBinding": "reviewedCandidate",
+      "arrayFields": ["reviewFindings", "findingDisposition"],
+      "equalCounts": true,
+      "severityPolicy": "central"
+    },
+    "trustAnchors": {
+      "root": "docs/standards/trust-anchors",
+      "supervisorPublicKey": "trusted-supervisor-public-key.xml",
+      "humanApprovalPublicKey": "human-approval-public-key.xml",
+      "pinnedHashes": true
+    }
   },
   "entryPointContract": {
     "canonicalExecution": {

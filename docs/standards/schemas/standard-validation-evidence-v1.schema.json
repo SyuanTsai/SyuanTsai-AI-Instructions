@@ -117,7 +117,7 @@
     "authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "binding"],
+      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "trustAnchors", "binding"],
       "properties": {
         "repository": { "type": "string", "format": "uri" },
         "runnerPath": { "type": "string", "minLength": 1 },
@@ -130,7 +130,23 @@
         "authorityGateSha256": { "$ref": "#/$defs/sha256" },
         "resolverPath": { "type": "string", "minLength": 1 },
         "resolverSha256": { "$ref": "#/$defs/sha256" },
+        "trustAnchors": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/trustAnchor" }
+        },
         "binding": { "$ref": "#/$defs/authorityBinding" }
+      }
+    },
+    "trustAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "sha256"],
+      "properties": {
+        "id": { "enum": ["supervisor", "humanApproval"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "acquisition": {
@@ -193,7 +209,19 @@
         "startedAt": { "type": ["string", "null"] },
         "endedAt": { "type": ["string", "null"] },
         "reason": { "type": ["string", "null"] },
+        "triggerDecision": { "anyOf": [{ "$ref": "#/$defs/triggerDecision" }, { "type": "null" }] },
         "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+      }
+    },
+    "triggerDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callerRequested", "analyzerRequired", "analyzerSources", "effectiveTriggered"],
+      "properties": {
+        "callerRequested": { "type": "boolean" },
+        "analyzerRequired": { "type": "boolean" },
+        "analyzerSources": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "effectiveTriggered": { "type": "boolean" }
       }
     },
     "event": {

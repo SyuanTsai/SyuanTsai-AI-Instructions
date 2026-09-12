@@ -72,6 +72,18 @@ $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationRepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:StandardValidationAuthorityRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+$script:StandardValidationTrustAnchorDefinitions = [ordered]@{
+    supervisor = [ordered]@{
+        relativePath = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'
+        fileName = 'trusted-supervisor-public-key.xml'
+        sha256 = '4d550851f43405920156f40c9fc648d99a69dd73efc200f6968d8a837e7fbf27'
+    }
+    humanApproval = [ordered]@{
+        relativePath = 'docs/standards/trust-anchors/human-approval-public-key.xml'
+        fileName = 'human-approval-public-key.xml'
+        sha256 = '1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b'
+    }
+}
 
 function Get-StandardValidationProperty {
     param(
@@ -242,6 +254,49 @@ function Assert-StandardValidationRegularFile {
     }
 }
 
+function Get-StandardValidationTrustAnchorPath {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('supervisor', 'humanApproval')][string] $KeyId,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot
+    )
+
+    $definition = $script:StandardValidationTrustAnchorDefinitions[$KeyId]
+    if ($null -eq $definition) { throw "BLOCKED|Unknown validation trust anchor '$KeyId'." }
+    $rootFull = Get-StandardValidationFullPath -Path $TrustAnchorRoot -Context 'validation trust-anchor root'
+    $path = Get-StandardValidationFullPath -Path (Join-Path $rootFull ([string]$definition.fileName)) -Context "$KeyId validation trust anchor"
+    # Production callers pass the immutable authority trust-anchor directory. A
+    # caller-selected TrustedToolRoot is only used by the development harness;
+    # the fixed authority path is additionally pinned to the checked-in hash.
+    $fixedRoot = Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'immutable validation trust-anchor root'
+    if ([string]::Equals($rootFull, $fixedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Assert-StandardValidationRegularFile -Path $path -Context "$KeyId validation trust anchor"
+        $actual = Get-StandardValidationFileSha256 -Path $path -Context "$KeyId validation trust anchor"
+        if ($actual -cne [string]$definition.sha256) {
+            throw "BLOCKED|$KeyId validation trust anchor hash is not the immutable approved value."
+        }
+    }
+    return $path
+}
+
+function Get-StandardValidationTrustAnchorEvidence {
+    $anchors = @()
+    foreach ($keyId in @('supervisor', 'humanApproval')) {
+        $definition = $script:StandardValidationTrustAnchorDefinitions[$keyId]
+        $path = Join-Path $script:StandardValidationRepositoryRoot ([string]$definition.relativePath)
+        Assert-StandardValidationRegularFile -Path $path -Context "$keyId validation trust anchor"
+        $sha256 = Get-StandardValidationFileSha256 -Path $path -Context "$keyId validation trust anchor"
+        if ($sha256 -cne [string]$definition.sha256) {
+            throw "INVALID|$keyId validation trust anchor hash is not the immutable approved value."
+        }
+        $anchors += [ordered]@{
+            id = $keyId
+            path = [string]$definition.relativePath
+            sha256 = $sha256
+        }
+    }
+    return ,$anchors
+}
+
 function Get-StandardValidationSelectedFilesSha256 {
     param([Parameter(Mandatory = $true)] $Files)
 
@@ -264,7 +319,7 @@ function Assert-StandardValidationSignedReceipt {
         [Parameter(Mandatory = $true)] $Receipt,
         [Parameter(Mandatory = $true)][string] $ReceiptType,
         [Parameter(Mandatory = $true)][hashtable] $Fields,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
@@ -273,7 +328,7 @@ function Assert-StandardValidationSignedReceipt {
         [string]$signature -notmatch '^[A-Za-z0-9+/]+={0,2}$' -or ([string]$signature).Length % 4 -ne 0) {
         throw "BLOCKED|$Context signature is not valid base64."
     }
-    $publicKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'trusted-supervisor-public-key.xml') -Context "$Context trusted public key"
+    $publicKeyPath = Get-StandardValidationTrustAnchorPath -KeyId 'supervisor' -TrustAnchorRoot $TrustAnchorRoot
     Assert-StandardValidationRegularFile -Path $publicKeyPath -Context "$Context trusted public key"
     $publicKeyXml = Get-Content -Raw -Encoding UTF8 -LiteralPath $publicKeyPath
     if ([string]::IsNullOrWhiteSpace($publicKeyXml) -or
@@ -385,7 +440,7 @@ function Assert-StandardValidationCandidateAcquisition {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $CandidateArchivePath,
         [Parameter(Mandatory = $true)][string] $CandidateAcquisitionEvidencePath,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $StagingRoot,
         [Parameter(Mandatory = $true)][string] $ExpectedSourceRepository,
@@ -433,7 +488,7 @@ function Assert-StandardValidationCandidateAcquisition {
         baseRevision = [string]$receipt.baseRevision; contentSha256 = [string]$receipt.contentSha256; eventName = [string]$receipt.eventName
         sourceRepository = [string]$receipt.sourceRepository; sourceRevision = [string]$receipt.sourceRevision
     }
-    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'candidate-acquisition-v1' -Fields $payloadFields -TrustedToolRoot $TrustedToolRoot -Context $Context
+    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'candidate-acquisition-v1' -Fields $payloadFields -TrustAnchorRoot $TrustAnchorRoot -Context $Context
     $archiveResult = Get-StandardValidationArchiveInventory -ArchivePath $archiveFull -ExtractionRoot $StagingRoot -ArchivePrefix ([string]$receipt.archivePrefix) -Context $Context
     $candidateInventory = Get-StandardValidationInventory -Root $CandidateRoot -Context 'candidate acquisition target'
     $archiveContentSha256 = Get-StandardValidationInventorySha256 -Inventory $archiveResult.inventory
@@ -456,7 +511,7 @@ function Assert-StandardValidationAuthoritySnapshot {
         [Parameter(Mandatory = $true)][string] $AuthorityRevision,
         [Parameter(Mandatory = $true)][string] $AuthorityArchivePath,
         [Parameter(Mandatory = $true)][string] $AuthoritySnapshotEvidencePath,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $StagingRoot,
         [Parameter(Mandatory = $true)][string] $Context
@@ -490,7 +545,9 @@ function Assert-StandardValidationAuthoritySnapshot {
         'docs/standards/standard-validation-contract-v1.json',
         'docs/standards/validation-security-gate.json',
         'scripts/Invoke-StandardAuthorityGate.ps1',
-        'scripts/Resolve-StandardValidationTool.ps1'
+        'scripts/Resolve-StandardValidationTool.ps1',
+        'docs/standards/trust-anchors/trusted-supervisor-public-key.xml',
+        'docs/standards/trust-anchors/human-approval-public-key.xml'
     )
     if ($receipt.selectedFiles -isnot [array] -or @($receipt.selectedFiles).Count -ne $expectedFiles.Count) { throw "BLOCKED|$Context selected file inventory is incomplete." }
     $selected = @()
@@ -506,7 +563,7 @@ function Assert-StandardValidationAuthoritySnapshot {
         archivePrefix = [string]$receipt.archivePrefix; archiveSha256 = [string]$receipt.archiveSha256; archiveUrl = [string]$receipt.archiveUrl
         repository = [string]$receipt.repository; revision = [string]$receipt.revision; selectedFilesSha256 = [string]$receipt.snapshotInventorySha256
     }
-    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'authority-snapshot-v1' -Fields $payloadFields -TrustedToolRoot $TrustedToolRoot -Context $Context
+    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'authority-snapshot-v1' -Fields $payloadFields -TrustAnchorRoot $TrustAnchorRoot -Context $Context
     $archiveHash = Get-StandardValidationFileSha256 -Path $archiveFull -Context "$Context archive"
     if ($archiveHash -cne [string]$receipt.archiveSha256) { throw "FAILED|$Context authority archive hash changed or was not provider-verified." }
     $archiveResult = Get-StandardValidationArchiveInventory -ArchivePath $archiveFull -ExtractionRoot $StagingRoot -ArchivePrefix ([string]$receipt.archivePrefix) -Context $Context
@@ -863,6 +920,7 @@ function New-StandardValidationStages {
             startedAt = $null
             endedAt = $null
             reason = $null
+            triggerDecision = $null
             events = @()
         }
     }
@@ -1010,6 +1068,44 @@ function Stop-StandardValidationProcessTree {
     return (-not $rootAlive -and $remaining.Count -eq 0)
 }
 
+function Get-StandardValidationChildEnvironment {
+    param([Parameter(Mandatory = $true)][hashtable] $Environment)
+
+    # ProcessStartInfo starts with the supervisor's entire environment. Clear it
+    # and copy only the small OS/runtime surface required to launch a trusted
+    # tool, plus the runner's explicitly namespaced variables. In particular,
+    # credentials and transport/configuration variables are never inherited by
+    # candidate-controlled child code.
+    $safeInheritedNames = @(
+        'PATH', 'Path', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'OS',
+        'TEMP', 'TMP', 'TMPDIR', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE',
+        'PROCESSOR_IDENTIFIER', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
+        'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)',
+        'COMMONPROGRAMW6432', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME',
+        'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DOTNET_ROOT',
+        'DOTNET_ROOT_X64', 'LD_LIBRARY_PATH', 'XDG_RUNTIME_DIR'
+    )
+    $childEnvironment = [ordered]@{}
+    foreach ($name in $safeInheritedNames) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($null -ne $value) { $childEnvironment[$name] = [string]$value }
+    }
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        $name = [string]$entry.Key
+        if ($name -match '^STANDARD_VALIDATION_[A-Za-z0-9_]+$') {
+            $childEnvironment[$name] = [string]$entry.Value
+        }
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $name = [string]$entry.Key
+        if ($name -notmatch '^STANDARD_VALIDATION_[A-Za-z0-9_]+$') {
+            throw "INVALID|Validation child environment key '$name' is outside the runner namespace."
+        }
+        $childEnvironment[$name] = [string]$entry.Value
+    }
+    return $childEnvironment
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -1044,15 +1140,9 @@ function Invoke-StandardValidationProcess {
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
-        foreach ($entry in $Environment.GetEnumerator()) {
+        $startInfo.EnvironmentVariables.Clear()
+        foreach ($entry in (Get-StandardValidationChildEnvironment -Environment $Environment).GetEnumerator()) {
             $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
-        }
-        foreach ($credentialName in @(
-            'GITHUB_TOKEN', 'GH_TOKEN', 'JIRA_API_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN',
-            'PYPI_TOKEN', 'TWINE_PASSWORD', 'AZURE_DEVOPS_EXT_PAT', 'AWS_ACCESS_KEY_ID',
-            'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'CODEX_API_KEY'
-        )) {
-            [void]$startInfo.EnvironmentVariables.Remove($credentialName)
         }
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $startInfo
@@ -1115,6 +1205,107 @@ function Invoke-StandardValidationProcess {
         stdout = [string]$stdout
         stderr = [string]$stderr
         cleanedUp = [bool]$cleanedUp
+    }
+}
+
+function New-StandardValidationOutputReservation {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context 'OutputPath'
+    $parent = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
+    $token = 'standard-validation-output-reservation-v1:' + [guid]::NewGuid().ToString('N')
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($token + [Environment]::NewLine)
+    try {
+        $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+        }
+        catch {
+            $stream.Dispose()
+            throw
+        }
+        return [pscustomobject][ordered]@{ path = $fullPath; token = $token; stream = $stream }
+    }
+    catch [System.IO.IOException] {
+        throw 'INVALID|OutputPath could not be reserved exclusively; it already exists or was substituted concurrently.'
+    }
+}
+
+function Assert-StandardValidationOutputReservation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][string] $Token,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Stream.SafeFileHandle.IsClosed -or -not $Stream.CanRead -or -not $Stream.CanWrite) {
+        throw "FAILED|$Context output reservation handle is no longer valid."
+    }
+    $tokenBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Token + [Environment]::NewLine)
+    if ($Stream.Length -ne $tokenBytes.Length) {
+        throw "FAILED|$Context output reservation was modified before finalization."
+    }
+    $position = $Stream.Position
+    try {
+        $Stream.Position = 0
+        $actualBytes = New-Object byte[] $tokenBytes.Length
+        $read = $Stream.Read($actualBytes, 0, $actualBytes.Length)
+        if ($read -ne $tokenBytes.Length -or
+            [Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($tokenBytes)) {
+            throw "FAILED|$Context output reservation contents were substituted."
+        }
+    }
+    finally { $Stream.Position = $position }
+
+    Assert-StandardValidationRegularFile -Path $Path -Context "$Context output reservation"
+    $pathItem = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if ([int64]$pathItem.Length -ne [int64]$tokenBytes.Length) {
+        throw "FAILED|$Context output reservation path was modified before finalization."
+    }
+    # Windows denies a second open while FileShare.None is held. Unix-like
+    # systems use advisory sharing, so also compare the path bytes there to
+    # detect unlink/replace or an in-place tamper by a child process.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        try {
+            $pathBytes = [System.IO.File]::ReadAllBytes($Path)
+            if ([Convert]::ToBase64String($pathBytes) -cne [Convert]::ToBase64String($tokenBytes)) {
+                throw "FAILED|$Context output reservation path was substituted."
+            }
+        }
+        catch [System.IO.IOException] {
+            throw "FAILED|$Context output reservation path could not be revalidated."
+        }
+    }
+}
+
+function Write-StandardValidationJsonReserved {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
+        [Parameter(Mandatory = $true)][string] $Token,
+        [Parameter(Mandatory = $true)] $Value
+    )
+
+    Assert-StandardValidationOutputReservation -Path $Path -Stream $Stream -Token $Token -Context 'Final evidence'
+    $json = $Value | ConvertTo-Json -Depth 100
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($json + [Environment]::NewLine)
+    $Stream.SetLength(0)
+    $Stream.Position = 0
+    $Stream.Write($bytes, 0, $bytes.Length)
+    $Stream.Flush()
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        try {
+            $pathBytes = [System.IO.File]::ReadAllBytes($Path)
+            if ([Convert]::ToBase64String($pathBytes) -cne [Convert]::ToBase64String($bytes)) {
+                throw 'FAILED|Final evidence output path was substituted while writing.'
+            }
+        }
+        catch [System.IO.IOException] {
+            throw 'FAILED|Final evidence output path could not be revalidated after writing.'
+        }
     }
 }
 
@@ -1208,6 +1399,72 @@ function Assert-StandardValidationFindings {
     return $requiresHuman
 }
 
+function Get-StandardValidationSemanticRequirement {
+    param([Parameter(Mandatory = $true)] $Envelope, [Parameter(Mandatory = $true)][string] $Context)
+
+    $value = Get-StandardValidationProperty -Object $Envelope -Name 'semanticRequired'
+    if ($null -eq $value) { return $false }
+    if ($value -isnot [bool]) { throw "FAILED|$Context semanticRequired must be a typed boolean when present." }
+    return [bool]$value
+}
+
+function Assert-StandardValidationAiReviewEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationExactPropertySet -Object $Evidence -Expected @(
+        'schemaVersion', 'evidenceType', 'candidateId', 'status', 'decision',
+        'reviewedCandidate', 'reviewFindings', 'findingDisposition'
+    ) -Context $Context
+    $schemaVersion = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'schemaVersion' -Context $Context
+    $evidenceType = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'evidenceType' -Context $Context
+    $evidenceCandidate = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'candidateId' -Context $Context
+    $status = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'status' -Context $Context
+    $decision = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'decision' -Context $Context
+    $reviewedCandidate = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'reviewedCandidate' -Context $Context
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        $evidenceType -isnot [string] -or [string]$evidenceType -cne 'ai-review' -or
+        $evidenceCandidate -isnot [string] -or [string]$evidenceCandidate -cne $CandidateId -or
+        $status -isnot [string] -or [string]$status -cne 'passed' -or
+        $decision -isnot [string] -or [string]$decision -cne 'PASS' -or
+        $reviewedCandidate -isnot [string] -or [string]$reviewedCandidate -cne $CandidateId) {
+        throw "BLOCKED|$Context must report a typed PASS decision for this reviewed candidate."
+    }
+    $reviewFindings = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'reviewFindings' -Context $Context
+    $findingDisposition = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'findingDisposition' -Context $Context
+    if ($reviewFindings -isnot [array] -or $findingDisposition -isnot [array]) {
+        throw "BLOCKED|$Context reviewFindings and findingDisposition must both be arrays."
+    }
+    if (@($reviewFindings).Count -ne @($findingDisposition).Count) {
+        throw "BLOCKED|$Context reviewFindings and findingDisposition must have matching counts."
+    }
+    $canonicalFindings = @()
+    foreach ($finding in @($reviewFindings)) {
+        if ($null -eq $finding -or $finding -is [array]) {
+            throw "BLOCKED|$Context contains a malformed review finding."
+        }
+        $severityValue = Get-StandardValidationProperty -Object $finding -Name 'severity'
+        if ($severityValue -isnot [string] -or [string]$severityValue -notin @('critical', 'high', 'medium', 'low', 'informational')) {
+            throw "BLOCKED|$Context contains a review finding with a non-canonical severity."
+        }
+        # Reduce the external review shape to the same canonical finding
+        # envelope used by package/static/semantic evidence before applying the
+        # central severity policy. Disposition never downgrades severity.
+        $canonicalFindings += [pscustomobject][ordered]@{ severity = [string]$severityValue }
+    }
+    foreach ($disposition in @($findingDisposition)) {
+        if ($null -eq $disposition -or $disposition -is [array] -or $disposition -is [string] -or $disposition -is [ValueType]) {
+            throw "BLOCKED|$Context contains a malformed finding disposition."
+        }
+    }
+    return [bool](Assert-StandardValidationFindings `
+            -Envelope ([pscustomobject][ordered]@{ findings = @($canonicalFindings) }) `
+            -Context $Context)
+}
+
 function Invoke-StandardValidationCommandAndRecord {
     param(
         [Parameter(Mandatory = $true)] $CommandSpec,
@@ -1227,7 +1484,10 @@ function Invoke-StandardValidationCommandAndRecord {
         [Parameter(Mandatory = $true)][string] $AdapterPath,
         [Parameter(Mandatory = $true)][string] $ExpectedAdapterSha256,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
-        [string] $CancellationPath
+        [string] $CancellationPath,
+        [System.IO.FileStream] $OutputReservationStream,
+        [string] $OutputReservationPath,
+        [string] $OutputReservationToken
     )
 
     $eventId = [guid]::NewGuid().ToString()
@@ -1251,6 +1511,7 @@ function Invoke-StandardValidationCommandAndRecord {
         STANDARD_VALIDATION_SKILL_ROOT = if ([string]::IsNullOrWhiteSpace($SkillId)) { '' } else { Join-Path $SkillsRoot $SkillId }
         STANDARD_VALIDATION_SKILL_INVENTORY_SHA256 = if ([string]::IsNullOrWhiteSpace($SkillInventorySha256)) { '' } else { $SkillInventorySha256 }
         STANDARD_VALIDATION_EVENT_ID = $eventId
+        STANDARD_VALIDATION_OUTPUT_PATH = if ([string]::IsNullOrWhiteSpace($OutputReservationPath)) { '' } else { $OutputReservationPath }
     }
     $processResult = Invoke-StandardValidationProcess `
         -Command ([string]$CommandSpec.command) `
@@ -1259,6 +1520,13 @@ function Invoke-StandardValidationCommandAndRecord {
         -Environment $environment `
         -TimeoutSeconds $TimeoutSeconds `
         -CancellationPath $CancellationPath
+    if ($null -ne $OutputReservationStream) {
+        Assert-StandardValidationOutputReservation `
+            -Path $OutputReservationPath `
+            -Stream $OutputReservationStream `
+            -Token $OutputReservationToken `
+            -Context "$StageId/$ToolId"
+    }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
@@ -1326,6 +1594,12 @@ function Assert-StandardValidationApprovalScalar {
     return [string]$Value
 }
 
+function Convert-StandardValidationStringArrayToCanonicalJson {
+    param([Parameter(Mandatory = $true)][string[]] $Values)
+
+    return (ConvertTo-Json -InputObject ([object[]]$Values) -Compress -Depth 10)
+}
+
 function Convert-StandardValidationApprovalTimestamp {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -1362,7 +1636,7 @@ function Assert-StandardValidationHumanApprovalEvidence {
     param(
         [Parameter(Mandatory = $true)] $Evidence,
         [Parameter(Mandatory = $true)][string] $CandidateId,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $Context
@@ -1418,7 +1692,7 @@ function Assert-StandardValidationHumanApprovalEvidence {
         throw "BLOCKED|$Context attestation signature is not valid base64."
     }
 
-    $publicKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'human-approval-public-key.xml') -Context "$Context trusted public key"
+    $publicKeyPath = Get-StandardValidationTrustAnchorPath -KeyId 'humanApproval' -TrustAnchorRoot $TrustAnchorRoot
     Assert-StandardValidationOutsideRoot -Path $publicKeyPath -Root $CandidateRoot -Context "$Context trusted public key"
     Assert-StandardValidationOutsideRoot -Path $publicKeyPath -Root $ArtifactsRoot -Context "$Context trusted public key"
     if (-not (Test-Path -LiteralPath $publicKeyPath -PathType Leaf)) {
@@ -1489,7 +1763,7 @@ function Assert-StandardValidationLifecycleEvidence {
         [Parameter(Mandatory = $true)] $Evidence,
         [Parameter(Mandatory = $true)][ValidateSet('publish-install', 'post-install')][string] $ExpectedType,
         [Parameter(Mandatory = $true)][string] $CandidateId,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $Context
@@ -1595,19 +1869,19 @@ function Assert-StandardValidationLifecycleEvidence {
                 throw "BLOCKED|$Context trusted supervisor attestation inventory does not match the post-install result."
             }
         }
-        $fields.installedInventory = [string]::Join(';', $inventoryValues.ToArray())
+        $fields.installedInventory = Convert-StandardValidationStringArrayToCanonicalJson -Values $inventoryValues.ToArray()
         $fields.postInstallIntegrity = [string]$postInstallIntegrity
         $fields.status = [string]$status
     }
 
-    $trustedKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'trusted-supervisor-public-key.xml') -Context "$Context trusted public key"
+    $trustedKeyPath = Get-StandardValidationTrustAnchorPath -KeyId 'supervisor' -TrustAnchorRoot $TrustAnchorRoot
     Assert-StandardValidationOutsideRoot -Path $trustedKeyPath -Root $CandidateRoot -Context "$Context trusted public key"
     Assert-StandardValidationOutsideRoot -Path $trustedKeyPath -Root $ArtifactsRoot -Context "$Context trusted public key"
     Assert-StandardValidationSignedReceipt `
         -Receipt $attestation `
         -ReceiptType "$ExpectedType-v1" `
         -Fields $fields `
-        -TrustedToolRoot $TrustedToolRoot `
+        -TrustAnchorRoot $TrustAnchorRoot `
         -Context "$Context attestation"
 }
 
@@ -1616,7 +1890,7 @@ function Assert-StandardValidationImportedEvidence {
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $ExpectedType,
         [Parameter(Mandatory = $true)][string] $CandidateId,
-        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $Context
@@ -1646,7 +1920,7 @@ function Assert-StandardValidationImportedEvidence {
             Assert-StandardValidationHumanApprovalEvidence `
                 -Evidence $evidence `
                 -CandidateId $CandidateId `
-                -TrustedToolRoot $TrustedToolRoot `
+                -TrustAnchorRoot $TrustAnchorRoot `
                 -CandidateRoot $CandidateRoot `
                 -ArtifactsRoot $ArtifactsRoot `
                 -Context $Context
@@ -1660,10 +1934,8 @@ function Assert-StandardValidationImportedEvidence {
             throw "BLOCKED|$humanMessage"
         }
     }
-    if ($ExpectedType -ceq 'ai-review' -and
-        ($null -eq (Get-StandardValidationProperty -Object $evidence -Name 'reviewFindings') -or
-         $null -eq (Get-StandardValidationProperty -Object $evidence -Name 'findingDisposition'))) {
-        throw 'BLOCKED|AI review evidence is missing review findings or disposition.'
+    if ($ExpectedType -ceq 'ai-review') {
+        [void](Assert-StandardValidationAiReviewEvidence -Evidence $evidence -CandidateId $CandidateId -Context $Context)
     }
     if ($ExpectedType -in @('publish-install', 'post-install')) {
         try {
@@ -1671,7 +1943,7 @@ function Assert-StandardValidationImportedEvidence {
                 -Evidence $evidence `
                 -ExpectedType $ExpectedType `
                 -CandidateId $CandidateId `
-                -TrustedToolRoot $TrustedToolRoot `
+                -TrustAnchorRoot $TrustAnchorRoot `
                 -CandidateRoot $CandidateRoot `
                 -ArtifactsRoot $ArtifactsRoot `
                 -Context $Context
@@ -1750,6 +2022,7 @@ function Assert-StandardValidationContractFiles {
         authorityGateSha256 = Get-StandardValidationFileSha256 -Path $authorityGatePath -Context 'canonical authority gate'
         resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'
         resolverSha256 = Get-StandardValidationFileSha256 -Path $resolverPath -Context 'central tool resolver'
+        trustAnchors = Get-StandardValidationTrustAnchorEvidence
     }
     return [pscustomobject][ordered]@{ contract = $contract; contractPath = $contractPath; policy = $policy; policyPath = $policyPath; authority = $authority }
 }
@@ -1818,7 +2091,7 @@ function New-StandardValidationCandidateEvidence {
         releaseEligible = $ReleaseEligible
         candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); archiveSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid'); acquisition = [ordered]@{ status = 'unverified'; verified = $false; sourceRepository = 'unavailable'; sourceRevision = 'unavailable'; baseRevision = 'unavailable'; eventName = 'invalid'; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); contentSha256 = $null; evidencePath = $null; evidenceSha256 = ('0' * 64) } } } else { $Candidate }
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
-        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
+        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
         stages = $Stages
         artifacts = [ordered]@{
             root = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { 'unavailable' } else { $ArtifactRoot }
@@ -1880,7 +2153,10 @@ function Invoke-StandardValidationRun {
     $finalWritten = $false
     $artifactRootFull = $null
     $trustedToolRootFull = $null
+    $trustAnchorRootFull = $null
     $outputFull = $null
+    $outputReservationStream = $null
+    $outputReservationToken = $null
     $originalCandidateRoot = $null
     $adapterFull = $null
     $expectedCandidateContentSha256 = $null
@@ -1892,6 +2168,8 @@ function Invoke-StandardValidationRun {
     $contractResult = $null
     $authorityEvidence = $null
     $requiresHumanReview = $false
+    $analyzerSemanticRequired = $false
+    $semanticRequiredSources = New-Object 'System.Collections.Generic.List[string]'
     $authorityBinding = $null
 
     try {
@@ -1907,6 +2185,12 @@ function Invoke-StandardValidationRun {
         $adapterFull = Get-StandardValidationFullPath -Path $AdapterPath -Context 'AdapterPath'
         $artifactRootFull = Get-StandardValidationFullPath -Path $ArtifactsRoot -Context 'ArtifactsRoot'
         $trustedToolRootFull = Get-StandardValidationFullPath -Path $TrustedToolRoot -Context 'TrustedToolRoot'
+        $trustAnchorRootFull = if ($DevelopmentHarness) {
+            $trustedToolRootFull
+        }
+        else {
+            Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'immutable validation trust-anchor root'
+        }
         if (-not (Test-Path -LiteralPath $originalCandidateRoot -PathType Container)) { throw 'INVALID|CandidateRoot is not a directory.' }
         if (-not (Test-Path -LiteralPath $adapterFull -PathType Leaf)) { throw 'INVALID|AdapterPath is not a file.' }
         if (-not (Test-Path -LiteralPath $trustedToolRootFull -PathType Container)) { throw 'INVALID|TrustedToolRoot is not a directory.' }
@@ -1928,6 +2212,14 @@ function Invoke-StandardValidationRun {
         if (Test-Path -LiteralPath $outputFull -PathType Leaf) {
             throw 'INVALID|OutputPath already exists; evidence is create-only and cannot be overwritten.'
         }
+        $outputReservation = New-StandardValidationOutputReservation -Path $outputFull
+        $outputReservationStream = $outputReservation.stream
+        $outputReservationToken = [string]$outputReservation.token
+        if (-not $DevelopmentHarness) {
+            foreach ($keyId in @('supervisor', 'humanApproval')) {
+                [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $trustAnchorRootFull)
+            }
+        }
         if ($DevelopmentHarness) {
             $authorityBinding = [ordered]@{
                 status = 'unverified-development-harness'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null
@@ -1945,7 +2237,7 @@ function Invoke-StandardValidationRun {
                 -AuthorityRevision $AuthorityRevision `
                 -AuthorityArchivePath $AuthorityArchivePath `
                 -AuthoritySnapshotEvidencePath $AuthoritySnapshotEvidencePath `
-                -TrustedToolRoot $trustedToolRootFull `
+                -TrustAnchorRoot $trustAnchorRootFull `
                 -ArtifactsRoot $artifactRootFull `
                 -StagingRoot (Join-Path $artifactRootFull 'acquisition/authority-archive') `
                 -Context 'authority snapshot'
@@ -1984,7 +2276,7 @@ function Invoke-StandardValidationRun {
                 -CandidateRoot $originalCandidateRoot `
                 -CandidateArchivePath $CandidateArchivePath `
                 -CandidateAcquisitionEvidencePath $CandidateAcquisitionEvidencePath `
-                -TrustedToolRoot $trustedToolRootFull `
+                -TrustAnchorRoot $trustAnchorRootFull `
                 -ArtifactsRoot $artifactRootFull `
                 -StagingRoot (Join-Path $artifactRootFull 'acquisition/candidate-archive') `
                 -ExpectedSourceRepository $SourceRepository `
@@ -2077,9 +2369,16 @@ function Invoke-StandardValidationRun {
             -AdapterPath $adapterFull `
             -ExpectedAdapterSha256 $expectedAdapterSha256 `
             -TimeoutSeconds $TimeoutSeconds `
-            -CancellationPath $CancellationPath
+            -CancellationPath $CancellationPath `
+            -OutputReservationStream $outputReservationStream `
+            -OutputReservationPath $outputFull `
+            -OutputReservationToken $outputReservationToken
         $stage.events += $invocation.event
         $requiresHumanReview = [bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context 'package adapter')
+        if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context 'package adapter') {
+            $analyzerSemanticRequired = $true
+            [void]$semanticRequiredSources.Add('package-validation/package-adapter')
+        }
         foreach ($skill in @($adapterResult.skills.records)) {
             foreach ($toolName in @('skillValidator', 'skillTools')) {
                 $toolId = if ($toolName -ceq 'skillValidator') { 'skill-validator' } else { 'skill-tools' }
@@ -2100,9 +2399,16 @@ function Invoke-StandardValidationRun {
                     -AdapterPath $adapterFull `
                     -ExpectedAdapterSha256 $expectedAdapterSha256 `
                     -TimeoutSeconds $TimeoutSeconds `
-                    -CancellationPath $CancellationPath
+                    -CancellationPath $CancellationPath `
+                    -OutputReservationStream $outputReservationStream `
+                    -OutputReservationPath $outputFull `
+                    -OutputReservationToken $outputReservationToken
                 $stage.events += $invocation.event
                 if ([bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context "$toolName/$($skill.id)")) { $requiresHumanReview = $true }
+                if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context "$toolName/$($skill.id)") {
+                    $analyzerSemanticRequired = $true
+                    [void]$semanticRequiredSources.Add("package-validation/$toolId/$($skill.id)")
+                }
             }
         }
         Complete-StandardValidationStage -Stage $stage -Status passed
@@ -2126,7 +2432,10 @@ function Invoke-StandardValidationRun {
             -AdapterPath $adapterFull `
             -ExpectedAdapterSha256 $expectedAdapterSha256 `
             -TimeoutSeconds $TimeoutSeconds `
-            -CancellationPath $CancellationPath
+            -CancellationPath $CancellationPath `
+            -OutputReservationStream $outputReservationStream `
+            -OutputReservationPath $outputFull `
+            -OutputReservationToken $outputReservationToken
         $stage.events += $invocation.event
         if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'scannerIdentity') -ne 'development-fixture-static-analyzer' -and
             [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'scannerIdentity'))) {
@@ -2140,6 +2449,10 @@ function Invoke-StandardValidationRun {
             throw 'FAILED|Static analyzer did not cover every active Skill.'
         }
         if ([bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context 'Static analyzer')) { $requiresHumanReview = $true }
+        if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context 'Static analyzer') {
+            $analyzerSemanticRequired = $true
+            [void]$semanticRequiredSources.Add('skillspector-static/staticAnalyzer')
+        }
         Complete-StandardValidationStage -Stage $stage -Status passed
         Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
 
@@ -2161,15 +2474,25 @@ function Invoke-StandardValidationRun {
                 -AdapterPath $adapterFull `
                 -ExpectedAdapterSha256 $expectedAdapterSha256 `
                 -TimeoutSeconds $TimeoutSeconds `
-                -CancellationPath $CancellationPath
+                -CancellationPath $CancellationPath `
+                -OutputReservationStream $outputReservationStream `
+                -OutputReservationPath $outputFull `
+                -OutputReservationToken $outputReservationToken
             $stage.events += $invocation.event
         }
         Complete-StandardValidationStage -Stage $stage -Status passed
         Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
 
         $stage = Get-StandardValidationStage -Stages $stages -Id 'conditional-semantic-scan'
-        if (-not $SemanticTriggered) {
-            Complete-StandardValidationStage -Stage $stage -Status 'not-applicable' -Reason 'Semantic trigger was not present.'
+        $effectiveSemanticTriggered = [bool]($SemanticTriggered -or $analyzerSemanticRequired)
+        $stage.triggerDecision = [ordered]@{
+            callerRequested = [bool]$SemanticTriggered
+            analyzerRequired = [bool]$analyzerSemanticRequired
+            analyzerSources = @($semanticRequiredSources.ToArray())
+            effectiveTriggered = $effectiveSemanticTriggered
+        }
+        if (-not $effectiveSemanticTriggered) {
+            Complete-StandardValidationStage -Stage $stage -Status 'not-applicable' -Reason 'Canonical analyzer envelopes did not require semantic analysis and the caller did not add a trigger.'
         }
         elseif (-not $SemanticConsent) {
             Start-StandardValidationStage -Stage $stage
@@ -2196,7 +2519,7 @@ function Invoke-StandardValidationRun {
                 -Path $semanticFullPath `
                 -ExpectedType 'semantic' `
                 -CandidateId $candidateId `
-                -TrustedToolRoot $trustedToolRootFull `
+                -TrustAnchorRoot $trustAnchorRootFull `
                 -CandidateRoot $originalCandidateRoot `
                 -ArtifactsRoot $artifactRootFull `
                 -Context 'semantic evidence'
@@ -2234,11 +2557,15 @@ function Invoke-StandardValidationRun {
                 -Path $laterEvidencePath `
                 -ExpectedType ([string]$later.type) `
                 -CandidateId $candidateId `
-                -TrustedToolRoot $trustedToolRootFull `
+                -TrustAnchorRoot $trustAnchorRootFull `
                 -CandidateRoot $originalCandidateRoot `
                 -ArtifactsRoot $artifactRootFull `
                 -Context "$($later.id) evidence"
             $stage.events += [pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); stageId = $stage.id; toolId = "imported-$($later.type)"; skillId = $null; candidateId = $candidateId; commandSha256 = Get-StandardValidationFileSha256 -Path $laterEvidencePath -Context "$($later.id) evidence"; exitCode = 0; status = 'passed'; outputSha256 = Get-StandardValidationFileSha256 -Path $laterEvidencePath -Context "$($later.id) evidence"; outputPath = $laterEvidencePath; cleanedUp = $true }
+            if ($later.type -ceq 'ai-review' -and
+                [bool](Assert-StandardValidationAiReviewEvidence -Evidence $imported -CandidateId $candidateId -Context 'ai-review evidence')) {
+                $requiresHumanReview = $true
+            }
             Complete-StandardValidationStage -Stage $stage -Status passed
             Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
         }
@@ -2295,7 +2622,63 @@ function Invoke-StandardValidationRun {
             -FailureMessage $failureMessage `
             -ArtifactRoot $artifactRootFull `
             -LockPath $lockPath
-        if ($null -ne $outputFull -and -not $finalWritten -and -not (Test-Path -LiteralPath $outputFull -PathType Leaf)) {
+        if ($null -ne $outputReservationStream -and -not $finalWritten) {
+            try {
+                Assert-StandardValidationOutputReservation `
+                    -Path $outputFull `
+                    -Stream $outputReservationStream `
+                    -Token $outputReservationToken `
+                    -Context 'Final evidence'
+                Write-StandardValidationJsonReserved `
+                    -Path $outputFull `
+                    -Stream $outputReservationStream `
+                    -Token $outputReservationToken `
+                    -Value $finalEvidence
+                $finalWritten = $true
+            }
+            catch {
+                $state = 'FAILED'
+                $failureState = 'FAILED'
+                $failureMessage = "Final evidence reservation or write failed: $($_.Exception.Message)"
+                $releaseEligible = $false
+                $finalEvidence = New-StandardValidationCandidateEvidence `
+                    -RunId $runId `
+                    -State $state `
+                    -ExitCode ([int]$script:StandardValidationExitCodes[$state]) `
+                    -ReleaseEligible $false `
+                    -Candidate $candidateEvidence `
+                    -Adapter $adapterEvidence `
+                    -Authority $authorityEvidence `
+                    -Stages $stages `
+                    -FailureState $failureState `
+                    -FailureMessage $failureMessage `
+                    -ArtifactRoot $artifactRootFull `
+                    -LockPath $lockPath
+                try {
+                    $outputReservationStream.Dispose()
+                    $outputReservationStream = $null
+                    if ([System.IO.File]::Exists($outputFull)) {
+                        [System.IO.File]::Delete($outputFull)
+                    }
+                    $replacementReservation = New-StandardValidationOutputReservation -Path $outputFull
+                    $outputReservationStream = $replacementReservation.stream
+                    $outputReservationToken = [string]$replacementReservation.token
+                    Write-StandardValidationJsonReserved `
+                        -Path $outputFull `
+                        -Stream $outputReservationStream `
+                        -Token $outputReservationToken `
+                        -Value $finalEvidence
+                    $finalWritten = $true
+                }
+                catch {
+                    $finalWritten = $false
+                }
+            }
+        }
+        elseif ($null -ne $outputFull -and -not $finalWritten -and -not (Test-Path -LiteralPath $outputFull -PathType Leaf)) {
+            # Failures that occur before the reservation can be established may
+            # still emit create-only evidence, but never overwrite an existing
+            # path owned by a previous execution.
             try {
                 [void](Write-StandardValidationJsonCreate -Path $outputFull -Value $finalEvidence)
                 $finalWritten = $true
@@ -2320,6 +2703,10 @@ function Invoke-StandardValidationRun {
                         -LockPath $lockPath
                 }
             }
+        }
+        if ($null -ne $outputReservationStream) {
+            $outputReservationStream.Dispose()
+            $outputReservationStream = $null
         }
     }
     return $finalEvidence
