@@ -125,7 +125,9 @@
       "hookRoots": [".git/hooks", ".githooks"],
       "publicCommandFiles": ["README.md", "RELEASING.md", "RELEASE.md", "docs/RELEASE.md", "docs/RELEASING.md"],
       "mustRouteTo": "canonical-validator",
-      "alternateGateAction": "BLOCK"
+      "alternateGateAction": "BLOCK",
+      "requiresFailurePropagation": true,
+      "forbiddenFailureSuppression": ["|| true", "|| :", "continue-on-error: true", "if: always()"]
     },
     "componentScripts": {
       "mayExist": true,

@@ -9,7 +9,12 @@ param(
     [Parameter(Mandatory = $true)][string] $BaseRevision,
     [ValidateSet('local', 'pre-push', 'pull_request', 'push', 'workflow_dispatch')]
     [string] $EventName = 'local',
+    [string] $CandidateArchivePath,
+    [string] $CandidateAcquisitionEvidencePath,
     [string] $CandidateArchiveSha256,
+    [string] $AuthorityRevision,
+    [string] $AuthorityArchivePath,
+    [string] $AuthoritySnapshotEvidencePath,
     [int] $TimeoutSeconds = 300,
     [string] $CancellationPath,
     [string] $TrustedToolRoot,
@@ -223,6 +228,305 @@ function Get-StandardValidationJson {
         return Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
     }
     catch { throw "INVALID|$Context is not parseable JSON: $($_.Exception.Message)" }
+}
+
+function Assert-StandardValidationRegularFile {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "INVALID|$Context file is missing: $Path"
+    }
+    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "INVALID|$Context must be a regular non-reparse file: $Path"
+    }
+}
+
+function Get-StandardValidationSelectedFilesSha256 {
+    param([Parameter(Mandatory = $true)] $Files)
+
+    $canonical = (@($Files | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+    return Get-StandardValidationTextSha256 -Value $canonical
+}
+
+function Get-StandardValidationSignedReceiptPayload {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1')][string] $ReceiptType,
+        [Parameter(Mandatory = $true)][hashtable] $Fields
+    )
+
+    $orderedNames = @($Fields.Keys | Sort-Object)
+    return (@("receiptType=$ReceiptType" + ($orderedNames | ForEach-Object { "$_=$([string]$Fields[$_])" })) -join "`n")
+}
+
+function Assert-StandardValidationSignedReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $ReceiptType,
+        [Parameter(Mandatory = $true)][hashtable] $Fields,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $signature = Get-StandardValidationRequiredProperty -Object $Receipt -Name 'signature' -Context $Context
+    if ($signature -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$signature) -or
+        [string]$signature -notmatch '^[A-Za-z0-9+/]+={0,2}$' -or ([string]$signature).Length % 4 -ne 0) {
+        throw "BLOCKED|$Context signature is not valid base64."
+    }
+    $publicKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'trusted-supervisor-public-key.xml') -Context "$Context trusted public key"
+    Assert-StandardValidationRegularFile -Path $publicKeyPath -Context "$Context trusted public key"
+    $publicKeyXml = Get-Content -Raw -Encoding UTF8 -LiteralPath $publicKeyPath
+    if ([string]::IsNullOrWhiteSpace($publicKeyXml) -or
+        $publicKeyXml -notmatch '(?is)^\s*<RSAKeyValue>\s*<Modulus>[^<]+</Modulus>\s*<Exponent>[^<]+</Exponent>\s*</RSAKeyValue>\s*$' -or
+        $publicKeyXml -match '(?i)<D(?:\s|>)') {
+        throw "BLOCKED|$Context trusted public key must be an RSA XML public key."
+    }
+    $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider
+    try {
+        try { $rsa.FromXmlString($publicKeyXml) }
+        catch { throw "BLOCKED|$Context trusted public key could not be parsed as RSA XML: $($_.Exception.Message)" }
+        $signatureBytes = $null
+        try { $signatureBytes = [Convert]::FromBase64String([string]$signature) }
+        catch { throw "BLOCKED|$Context signature is not valid base64." }
+        $payload = Get-StandardValidationSignedReceiptPayload -ReceiptType $ReceiptType -Fields $Fields
+        $payloadBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($payload)
+        if (-not $rsa.VerifyData($payloadBytes, 'SHA256', $signatureBytes)) {
+            throw "BLOCKED|$Context trusted supervisor signature verification failed."
+        }
+    }
+    finally { $rsa.Dispose() }
+}
+
+function Assert-StandardValidationArchivePrefix {
+    param([AllowEmptyString()][string] $Value, [Parameter(Mandatory = $true)][string] $Context)
+
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    Assert-StandardValidationSafeRelativePath -Value $Value -Context $Context
+}
+
+function Assert-StandardValidationImmutableArchiveUrl {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourceRepository,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $ArchiveUrl,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $sourceUri = $null
+    $archiveUri = $null
+    if (-not [Uri]::TryCreate($SourceRepository, [UriKind]::Absolute, [ref]$sourceUri) -or
+        -not [Uri]::TryCreate($ArchiveUrl, [UriKind]::Absolute, [ref]$archiveUri) -or
+        $sourceUri.Scheme -cne 'https' -or $archiveUri.Scheme -cne 'https' -or
+        -not [string]::IsNullOrEmpty($archiveUri.Query) -or -not [string]::IsNullOrEmpty($archiveUri.Fragment)) {
+        throw "BLOCKED|$Context archive URL must be an HTTPS immutable URL without query or fragment."
+    }
+    $revisionMarker = '/' + $SourceRevision
+    if ($archiveUri.AbsolutePath.IndexOf($revisionMarker, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "BLOCKED|$Context archive URL must contain the exact immutable source revision."
+    }
+    $sourcePath = ($sourceUri.AbsolutePath.TrimEnd('/') -replace '(?i)\.git$', '')
+    $archiveHostAccepted = [string]::Equals($sourceUri.Host, $archiveUri.Host, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals(('codeload.' + $sourceUri.Host), $archiveUri.Host, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $archiveHostAccepted -or -not $archiveUri.AbsolutePath.StartsWith($sourcePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "BLOCKED|$Context archive URL is not bound to the source repository."
+    }
+}
+
+function Get-StandardValidationArchiveInventory {
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $ExtractionRoot,
+        [AllowEmptyString()][string] $ArchivePrefix,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationRegularFile -Path $ArchivePath -Context $Context
+    [void](New-Item -ItemType Directory -Path $ExtractionRoot -Force)
+    $archive = $null
+    try {
+        try { $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath) }
+        catch { throw "INVALID|$Context must be a readable ZIP archive: $($_.Exception.Message)" }
+        $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($entry in @($archive.Entries)) {
+            $entryName = ([string]$entry.FullName).Replace('\\', '/')
+            if ([string]::IsNullOrWhiteSpace($entryName) -or $entryName.EndsWith('/')) { continue }
+            if ($entryName.StartsWith('/') -or $entryName -match '^[A-Za-z]:/' -or
+                $entryName -match '(^|/)\.\.?(/|$)') {
+                throw "INVALID|$Context contains an unsafe archive entry '$entryName'."
+            }
+            $relative = $entryName
+            if (-not [string]::IsNullOrEmpty($ArchivePrefix)) {
+                $prefix = $ArchivePrefix.TrimEnd('/') + '/'
+                if (-not $relative.StartsWith($prefix, [StringComparison]::Ordinal)) {
+                    throw "INVALID|$Context archive entry '$entryName' is outside the signed archive prefix."
+                }
+                $relative = $relative.Substring($prefix.Length)
+            }
+            if ([string]::IsNullOrWhiteSpace($relative)) { continue }
+            Assert-StandardValidationSafeRelativePath -Value $relative -Context "$Context archive path"
+            if (-not $paths.Add($relative)) { throw "INVALID|$Context contains duplicate archive path '$relative'." }
+            $unixMode = ([int64]$entry.ExternalAttributes -shr 16) -band 0xF000
+            if ($unixMode -eq 0xA000) { throw "INVALID|$Context contains a symbolic-link archive entry '$entryName'." }
+        }
+        try { [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $ExtractionRoot) }
+        catch { throw "INVALID|$Context could not be safely extracted: $($_.Exception.Message)" }
+    }
+    finally { if ($null -ne $archive) { $archive.Dispose() } }
+    $contentRoot = if ([string]::IsNullOrEmpty($ArchivePrefix)) { $ExtractionRoot } else { Join-Path $ExtractionRoot $ArchivePrefix }
+    if (-not (Test-Path -LiteralPath $contentRoot -PathType Container)) { throw "INVALID|$Context signed archive prefix is missing after extraction." }
+    return [pscustomobject][ordered]@{
+        root = $contentRoot
+        inventory = @(Get-StandardValidationInventory -Root $contentRoot -Context "$Context extracted archive")
+    }
+}
+
+function Assert-StandardValidationCandidateAcquisition {
+    param(
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateArchivePath,
+        [Parameter(Mandatory = $true)][string] $CandidateAcquisitionEvidencePath,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $StagingRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSourceRepository,
+        [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
+        [Parameter(Mandatory = $true)][string] $ExpectedBaseRevision,
+        [Parameter(Mandatory = $true)][string] $ExpectedEventName,
+        [Parameter(Mandatory = $true)][string] $CandidateArchiveSha256,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $archiveFull = Get-StandardValidationFullPath -Path $CandidateArchivePath -Context "$Context archive"
+    $evidenceFull = Get-StandardValidationFullPath -Path $CandidateAcquisitionEvidencePath -Context "$Context evidence"
+    Assert-StandardValidationOutsideRoot -Path $archiveFull -Root $CandidateRoot -Context "$Context archive"
+    Assert-StandardValidationOutsideRoot -Path $archiveFull -Root $ArtifactsRoot -Context "$Context archive"
+    Assert-StandardValidationOutsideRoot -Path $evidenceFull -Root $CandidateRoot -Context "$Context evidence"
+    Assert-StandardValidationOutsideRoot -Path $evidenceFull -Root $ArtifactsRoot -Context "$Context evidence"
+    Assert-StandardValidationRegularFile -Path $evidenceFull -Context "$Context evidence"
+    $receipt = Get-StandardValidationJson -Path $evidenceFull -Context $Context
+    Assert-StandardValidationExactPropertySet -Object $receipt -Expected @('schemaVersion', 'evidenceType', 'status', 'sourceRepository', 'sourceRevision', 'baseRevision', 'eventName', 'archiveUrl', 'archivePrefix', 'archiveSha256', 'contentSha256', 'signature') -Context $Context
+    if ($receipt.schemaVersion -ne 1 -or [string]$receipt.evidenceType -cne 'candidate-acquisition' -or [string]$receipt.status -cne 'acquired') {
+        throw "BLOCKED|$Context is not a successful candidate acquisition receipt."
+    }
+    foreach ($pair in @(
+        @{ Name = 'sourceRepository'; Value = $ExpectedSourceRepository },
+        @{ Name = 'sourceRevision'; Value = $ExpectedSourceRevision },
+        @{ Name = 'baseRevision'; Value = $ExpectedBaseRevision },
+        @{ Name = 'eventName'; Value = $ExpectedEventName }
+    )) {
+        if ([string]$receipt.($pair.Name) -cne [string]$pair.Value) { throw "BLOCKED|$Context is bound to a different $($pair.Name)." }
+    }
+    Assert-StandardValidationSourceRepository -Value ([string]$receipt.sourceRepository)
+    Assert-StandardValidationRevision -Value ([string]$receipt.sourceRevision) -Context "$Context sourceRevision"
+    Assert-StandardValidationRevision -Value ([string]$receipt.baseRevision) -Context "$Context baseRevision"
+    Assert-StandardValidationArchivePrefix -Value ([string]$receipt.archivePrefix) -Context "$Context archivePrefix"
+    Assert-StandardValidationSha256 -Value $receipt.archiveSha256 -Context "$Context archiveSha256"
+    Assert-StandardValidationSha256 -Value $receipt.contentSha256 -Context "$Context contentSha256"
+    Assert-StandardValidationSha256 -Value $CandidateArchiveSha256 -Context 'CandidateArchiveSha256'
+    if ([string]$receipt.archiveSha256 -cne $CandidateArchiveSha256) { throw "BLOCKED|$Context archive hash does not match the invocation." }
+    if ($receipt.archivePrefix -isnot [string] -or $receipt.archiveUrl -isnot [string]) { throw "BLOCKED|$Context archivePrefix and archiveUrl must be explicit strings." }
+    Assert-StandardValidationImmutableArchiveUrl -SourceRepository ([string]$receipt.sourceRepository) -SourceRevision ([string]$receipt.sourceRevision) -ArchiveUrl ([string]$receipt.archiveUrl) -Context $Context
+    $archiveHash = Get-StandardValidationFileSha256 -Path $archiveFull -Context "$Context archive"
+    if ($archiveHash -cne [string]$receipt.archiveSha256) { throw "FAILED|$Context acquired archive hash changed or was not provider-verified." }
+    $payloadFields = @{
+        archivePrefix = [string]$receipt.archivePrefix; archiveSha256 = [string]$receipt.archiveSha256; archiveUrl = [string]$receipt.archiveUrl
+        baseRevision = [string]$receipt.baseRevision; contentSha256 = [string]$receipt.contentSha256; eventName = [string]$receipt.eventName
+        sourceRepository = [string]$receipt.sourceRepository; sourceRevision = [string]$receipt.sourceRevision
+    }
+    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'candidate-acquisition-v1' -Fields $payloadFields -TrustedToolRoot $TrustedToolRoot -Context $Context
+    $archiveResult = Get-StandardValidationArchiveInventory -ArchivePath $archiveFull -ExtractionRoot $StagingRoot -ArchivePrefix ([string]$receipt.archivePrefix) -Context $Context
+    $candidateInventory = Get-StandardValidationInventory -Root $CandidateRoot -Context 'candidate acquisition target'
+    $archiveContentSha256 = Get-StandardValidationInventorySha256 -Inventory $archiveResult.inventory
+    $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
+    if ($archiveContentSha256 -cne [string]$receipt.contentSha256 -or $candidateContentSha256 -cne [string]$receipt.contentSha256 -or
+        $archiveContentSha256 -cne $candidateContentSha256) {
+        throw 'BLOCKED|Candidate root does not match the signed provider-acquired archive tree.'
+    }
+    return [pscustomobject][ordered]@{
+        verified = $true; status = 'verified'; evidencePath = $evidenceFull; evidenceSha256 = Get-StandardValidationFileSha256 -Path $evidenceFull -Context "$Context evidence"
+        archivePath = $archiveFull; archiveUrl = [string]$receipt.archiveUrl; archiveSha256 = [string]$receipt.archiveSha256
+        sourceRepository = [string]$receipt.sourceRepository; sourceRevision = [string]$receipt.sourceRevision; baseRevision = [string]$receipt.baseRevision; eventName = [string]$receipt.eventName
+        contentSha256 = [string]$receipt.contentSha256; archivePrefix = [string]$receipt.archivePrefix
+    }
+}
+
+function Assert-StandardValidationAuthoritySnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $AuthorityRevision,
+        [Parameter(Mandatory = $true)][string] $AuthorityArchivePath,
+        [Parameter(Mandatory = $true)][string] $AuthoritySnapshotEvidencePath,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $StagingRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationRevision -Value $AuthorityRevision -Context 'AuthorityRevision'
+    $archiveFull = Get-StandardValidationFullPath -Path $AuthorityArchivePath -Context "$Context archive"
+    $evidenceFull = Get-StandardValidationFullPath -Path $AuthoritySnapshotEvidencePath -Context "$Context evidence"
+    foreach ($path in @($archiveFull, $evidenceFull)) {
+        Assert-StandardValidationOutsideRoot -Path $path -Root $RepositoryRoot -Context "$Context external artifact"
+        Assert-StandardValidationOutsideRoot -Path $path -Root $ArtifactsRoot -Context "$Context external artifact"
+    }
+    Assert-StandardValidationRegularFile -Path $evidenceFull -Context "$Context evidence"
+    $receipt = Get-StandardValidationJson -Path $evidenceFull -Context $Context
+    Assert-StandardValidationExactPropertySet -Object $receipt -Expected @('schemaVersion', 'evidenceType', 'status', 'repository', 'revision', 'archiveUrl', 'archivePrefix', 'archiveSha256', 'snapshotInventorySha256', 'selectedFiles', 'signature') -Context $Context
+    if ($receipt.schemaVersion -ne 1 -or [string]$receipt.evidenceType -cne 'authority-snapshot' -or [string]$receipt.status -cne 'acquired') {
+        throw "BLOCKED|$Context is not a successful authority snapshot receipt."
+    }
+    if ([string]$receipt.repository -cne $script:StandardValidationAuthorityRepository -or [string]$receipt.revision -cne $AuthorityRevision) {
+        throw "BLOCKED|$Context is not bound to the fixed central authority revision."
+    }
+    if ([string]$receipt.archiveUrl -notmatch ("^https://(?:github\\.com/SyuanTsai/SyuanTsai-AI-Instructions/archive/{0}\\.zip|codeload\\.github\\.com/SyuanTsai/SyuanTsai-AI-Instructions/zip/{0})$" -f [regex]::Escape($AuthorityRevision))) {
+        throw "BLOCKED|$Context archive URL is not an immutable central-authority URL."
+    }
+    if ($receipt.archivePrefix -isnot [string]) { throw "BLOCKED|$Context archivePrefix must be an explicit string." }
+    Assert-StandardValidationArchivePrefix -Value ([string]$receipt.archivePrefix) -Context "$Context archivePrefix"
+    Assert-StandardValidationSha256 -Value $receipt.archiveSha256 -Context "$Context archiveSha256"
+    Assert-StandardValidationSha256 -Value $receipt.snapshotInventorySha256 -Context "$Context snapshotInventorySha256"
+    $expectedFiles = @(
+        'scripts/Invoke-StandardValidation.ps1',
+        'docs/standards/standard-validation-contract-v1.json',
+        'docs/standards/validation-security-gate.json',
+        'scripts/Invoke-StandardAuthorityGate.ps1',
+        'scripts/Resolve-StandardValidationTool.ps1'
+    )
+    if ($receipt.selectedFiles -isnot [array] -or @($receipt.selectedFiles).Count -ne $expectedFiles.Count) { throw "BLOCKED|$Context selected file inventory is incomplete." }
+    $selected = @()
+    for ($index = 0; $index -lt $expectedFiles.Count; $index++) {
+        $entry = $receipt.selectedFiles[$index]
+        Assert-StandardValidationExactPropertySet -Object $entry -Expected @('path', 'sha256') -Context "$Context selected file $($index + 1)"
+        if ([string]$entry.path -cne $expectedFiles[$index]) { throw "BLOCKED|$Context selected file order or path is not canonical." }
+        Assert-StandardValidationSha256 -Value $entry.sha256 -Context "$Context selected file $($entry.path)"
+        $selected += [pscustomobject][ordered]@{ path = [string]$entry.path; sha256 = [string]$entry.sha256 }
+    }
+    if ((Get-StandardValidationSelectedFilesSha256 -Files $selected) -cne [string]$receipt.snapshotInventorySha256) { throw "BLOCKED|$Context selected file inventory is not self-consistent." }
+    $payloadFields = @{
+        archivePrefix = [string]$receipt.archivePrefix; archiveSha256 = [string]$receipt.archiveSha256; archiveUrl = [string]$receipt.archiveUrl
+        repository = [string]$receipt.repository; revision = [string]$receipt.revision; selectedFilesSha256 = [string]$receipt.snapshotInventorySha256
+    }
+    Assert-StandardValidationSignedReceipt -Receipt $receipt -ReceiptType 'authority-snapshot-v1' -Fields $payloadFields -TrustedToolRoot $TrustedToolRoot -Context $Context
+    $archiveHash = Get-StandardValidationFileSha256 -Path $archiveFull -Context "$Context archive"
+    if ($archiveHash -cne [string]$receipt.archiveSha256) { throw "FAILED|$Context authority archive hash changed or was not provider-verified." }
+    $archiveResult = Get-StandardValidationArchiveInventory -ArchivePath $archiveFull -ExtractionRoot $StagingRoot -ArchivePrefix ([string]$receipt.archivePrefix) -Context $Context
+    foreach ($entry in $selected) {
+        $currentPath = Join-Path $RepositoryRoot $entry.path
+        Assert-StandardValidationRegularFile -Path $currentPath -Context "$Context current selected file"
+        if ((Get-StandardValidationFileSha256 -Path $currentPath -Context "$Context current selected file") -cne $entry.sha256) {
+            throw "FAILED|$Context current authority file changed: $($entry.path)"
+        }
+        $archivePath = Join-Path $archiveResult.root $entry.path
+        if ((Get-StandardValidationFileSha256 -Path $archivePath -Context "$Context archive selected file") -cne $entry.sha256) {
+            throw "BLOCKED|$Context archive selected file does not match the signed authority snapshot: $($entry.path)"
+        }
+    }
+    return [pscustomobject][ordered]@{
+        verified = $true; status = 'verified'; repository = [string]$receipt.repository; revision = [string]$receipt.revision
+        archivePath = $archiveFull; archiveUrl = [string]$receipt.archiveUrl; archivePrefix = [string]$receipt.archivePrefix; archiveSha256 = [string]$receipt.archiveSha256
+        snapshotEvidencePath = $evidenceFull; snapshotEvidenceSha256 = Get-StandardValidationFileSha256 -Path $evidenceFull -Context "$Context evidence"
+        snapshotInventorySha256 = [string]$receipt.snapshotInventorySha256; selectedFiles = $selected
+    }
 }
 
 function Assert-StandardValidationSafeRelativePath {
@@ -602,6 +906,110 @@ function ConvertTo-StandardValidationProcessArguments {
     return ($quoted -join ' ')
 }
 
+function Get-StandardValidationDescendantProcessIds {
+    param([Parameter(Mandatory = $true)][int] $RootProcessId)
+
+    $relations = @()
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        try {
+            $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{ ProcessId = [int]$_.ProcessId; ParentProcessId = [int]$_.ParentProcessId }
+                })
+        }
+        catch { $relations = @() }
+    }
+    elseif (Test-Path -LiteralPath '/proc' -PathType Container) {
+        foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue)) {
+            if ($directory.Name -notmatch '^[0-9]+$') { continue }
+            $statPath = Join-Path $directory.FullName 'stat'
+            try {
+                $stat = [IO.File]::ReadAllText($statPath)
+                if ($stat -match '^\s*(?<pid>[0-9]+)\s+\(.*\)\s+\S\s+(?<ppid>[0-9]+)\s+') {
+                    $relations += [pscustomobject]@{ ProcessId = [int]$Matches.pid; ParentProcessId = [int]$Matches.ppid }
+                }
+            }
+            catch { }
+        }
+    }
+    $childrenByParent = @{}
+    foreach ($relation in @($relations)) {
+        $parent = [int]$relation.ParentProcessId
+        if (-not $childrenByParent.ContainsKey($parent)) { $childrenByParent[$parent] = New-Object 'System.Collections.Generic.List[int]' }
+        [void]$childrenByParent[$parent].Add([int]$relation.ProcessId)
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $pending = New-Object 'System.Collections.Generic.Queue[int]'
+    [void]$pending.Enqueue($RootProcessId)
+    $result = New-Object 'System.Collections.Generic.List[int]'
+    while ($pending.Count -gt 0) {
+        $parent = $pending.Dequeue()
+        if (-not $childrenByParent.ContainsKey($parent)) { continue }
+        foreach ($child in @($childrenByParent[$parent])) {
+            if ($child -eq $RootProcessId -or -not $seen.Add($child)) { continue }
+            [void]$result.Add($child)
+            [void]$pending.Enqueue($child)
+        }
+    }
+    return @($result.ToArray())
+}
+
+function Stop-StandardValidationProcessTree {
+    param(
+        [Parameter(Mandatory = $true)][int] $RootProcessId,
+        [System.Diagnostics.Process] $RootProcess,
+        [int[]] $KnownProcessIds = @(),
+        [Parameter(Mandatory = $true)][int] $WaitMilliseconds
+    )
+
+    $known = New-Object 'System.Collections.Generic.HashSet[int]'
+    [void]$known.Add($RootProcessId)
+    foreach ($processId in @($KnownProcessIds)) { [void]$known.Add([int]$processId) }
+    foreach ($processId in @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)) { [void]$known.Add([int]$processId) }
+    $cleanupAttempted = $false
+    try {
+        if ($null -ne $RootProcess) {
+            try {
+                if (-not $RootProcess.HasExited) {
+                    $RootProcess.Kill($true)
+                    $cleanupAttempted = $true
+                }
+            }
+            catch {
+                try { if (-not $RootProcess.HasExited) { $RootProcess.Kill(); $cleanupAttempted = $true } } catch { }
+            }
+        }
+    }
+    catch { }
+    foreach ($processId in @($known | Where-Object { $_ -ne $RootProcessId } | Sort-Object -Descending)) {
+        try {
+            $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+            try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
+        }
+        catch { }
+    }
+    if ($null -ne $RootProcess) { try { [void]$RootProcess.WaitForExit([Math]::Max(0, $WaitMilliseconds)) } catch { } }
+    $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $WaitMilliseconds))
+    do {
+        $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
+        foreach ($processId in $remaining) {
+            try {
+                $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+                try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
+            }
+            catch { }
+        }
+        $rootAlive = $false
+        if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
+        if (-not $rootAlive -and $remaining.Count -eq 0) { return $true }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Milliseconds 50
+    } while ($true)
+    $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
+    $rootAlive = $false
+    if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
+    return (-not $rootAlive -and $remaining.Count -eq 0)
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -619,6 +1027,8 @@ function Invoke-StandardValidationProcess {
     $stderr = ''
     $cleanedUp = $true
     $process = $null
+    $rootProcessId = $null
+    $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
     try {
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
             return [pscustomobject][ordered]@{
@@ -660,32 +1070,32 @@ function Invoke-StandardValidationProcess {
                 status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true
             }
         }
+        $rootProcessId = [int]$process.Id
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
         $terminationStatus = $null
         while (-not $process.HasExited) {
+            foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
             if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
                 $terminationStatus = 'cancelled'
-                try { $process.Kill() } catch { }
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000)
                 break
             }
             if ((Get-Date) -gt $deadline) {
                 $terminationStatus = 'timeout'
-                try { $process.Kill() } catch { }
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000)
                 break
             }
             Start-Sleep -Milliseconds 50
         }
         if ($null -ne $terminationStatus) {
-            try { [void]$process.WaitForExit(5000) } catch { }
-            if (-not $process.HasExited) {
-                $cleanedUp = $false
-                try { $process.Kill() } catch { }
-                try { [void]$process.WaitForExit(1000) } catch { }
-            }
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000
         }
-        else { $process.WaitForExit() }
+        else {
+            $process.WaitForExit()
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 1000
+        }
         try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch { $stdout = '' }
         try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { $stderr = '' }
         if ($process.HasExited) { $exitCode = $process.ExitCode }
@@ -1203,6 +1613,25 @@ function Assert-StandardValidationAuthorityUnchanged {
             throw "FAILED|$($check.context) changed during validation."
         }
     }
+    $binding = Get-StandardValidationProperty -Object $Authority -Name 'binding'
+    if ($null -ne $binding -and [bool](Get-StandardValidationProperty -Object $binding -Name 'verified')) {
+        $archivePath = [string](Get-StandardValidationProperty -Object $binding -Name 'archivePath')
+        $evidencePath = [string](Get-StandardValidationProperty -Object $binding -Name 'snapshotEvidencePath')
+        $archiveExpected = [string](Get-StandardValidationProperty -Object $binding -Name 'archiveSha256')
+        $evidenceExpected = [string](Get-StandardValidationProperty -Object $binding -Name 'snapshotEvidenceSha256')
+        if ((Get-StandardValidationFileSha256 -Path $archivePath -Context 'authority archive revalidation') -cne $archiveExpected) {
+            throw 'FAILED|Authority archive changed during validation.'
+        }
+        if ((Get-StandardValidationFileSha256 -Path $evidencePath -Context 'authority snapshot evidence revalidation') -cne $evidenceExpected) {
+            throw 'FAILED|Authority snapshot evidence changed during validation.'
+        }
+        foreach ($entry in @((Get-StandardValidationProperty -Object $binding -Name 'selectedFiles'))) {
+            $selectedPath = Join-Path $script:StandardValidationRepositoryRoot ([string]$entry.path)
+            if ((Get-StandardValidationFileSha256 -Path $selectedPath -Context 'authority selected file revalidation') -cne [string]$entry.sha256) {
+                throw "FAILED|Authority selected file changed during validation: $($entry.path)"
+            }
+        }
+    }
 }
 
 function New-StandardValidationCandidateEvidence {
@@ -1229,9 +1658,9 @@ function New-StandardValidationCandidateEvidence {
         state = $State
         exitCode = $ExitCode
         releaseEligible = $ReleaseEligible
-        candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid') } } else { $Candidate }
+        candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); archiveSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid'); acquisition = [ordered]@{ status = 'unverified'; verified = $false; sourceRepository = 'unavailable'; sourceRevision = 'unavailable'; baseRevision = 'unavailable'; eventName = 'invalid'; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); contentSha256 = $null; evidencePath = $null; evidenceSha256 = ('0' * 64) } } } else { $Candidate }
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
-        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64) } } else { $Authority }
+        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
         stages = $Stages
         artifacts = [ordered]@{
             root = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { 'unavailable' } else { $ArtifactRoot }
@@ -1254,7 +1683,12 @@ function Invoke-StandardValidationRun {
         [Parameter(Mandatory = $true)][string] $SourceRevision,
         [Parameter(Mandatory = $true)][string] $BaseRevision,
         [Parameter(Mandatory = $true)][string] $EventName,
+        [string] $CandidateArchivePath,
+        [string] $CandidateAcquisitionEvidencePath,
         [string] $CandidateArchiveSha256,
+        [string] $AuthorityRevision,
+        [string] $AuthorityArchivePath,
+        [string] $AuthoritySnapshotEvidencePath,
         [int] $TimeoutSeconds = 300,
         [string] $CancellationPath,
         [string] $TrustedToolRoot,
@@ -1294,11 +1728,13 @@ function Invoke-StandardValidationRun {
     $expectedCandidateContentSha256 = $null
     $expectedAdapterSha256 = $null
     $candidateInventory = $null
+    $candidateAcquisition = $null
     $adapter = $null
     $adapterResult = $null
     $contractResult = $null
     $authorityEvidence = $null
     $requiresHumanReview = $false
+    $authorityBinding = $null
 
     try {
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
@@ -1334,8 +1770,31 @@ function Invoke-StandardValidationRun {
         if (Test-Path -LiteralPath $outputFull -PathType Leaf) {
             throw 'INVALID|OutputPath already exists; evidence is create-only and cannot be overwritten.'
         }
+        if ($DevelopmentHarness) {
+            $authorityBinding = [ordered]@{
+                status = 'unverified-development-harness'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null
+                archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null
+                snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @()
+            }
+        }
+        else {
+            if ([string]::IsNullOrWhiteSpace($AuthorityRevision) -or [string]::IsNullOrWhiteSpace($AuthorityArchivePath) -or
+                [string]::IsNullOrWhiteSpace($AuthoritySnapshotEvidencePath)) {
+                throw 'INVALID|Production validation requires AuthorityRevision, AuthorityArchivePath, and AuthoritySnapshotEvidencePath.'
+            }
+            $authorityBinding = Assert-StandardValidationAuthoritySnapshot `
+                -RepositoryRoot (Split-Path -Parent $PSScriptRoot) `
+                -AuthorityRevision $AuthorityRevision `
+                -AuthorityArchivePath $AuthorityArchivePath `
+                -AuthoritySnapshotEvidencePath $AuthoritySnapshotEvidencePath `
+                -TrustedToolRoot $trustedToolRootFull `
+                -ArtifactsRoot $artifactRootFull `
+                -StagingRoot (Join-Path $artifactRootFull 'acquisition/authority-archive') `
+                -Context 'authority snapshot'
+        }
         $contractResult = Assert-StandardValidationContractFiles -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
         $authorityEvidence = $contractResult.authority
+        $authorityEvidence.binding = $authorityBinding
         $script:StandardValidationAuthorityEvidence = $authorityEvidence
         $adapter = Get-StandardValidationJson -Path $adapterFull -Context 'standard validation adapter'
         $adapterResult = Assert-StandardValidationAdapter `
@@ -1351,8 +1810,37 @@ function Invoke-StandardValidationRun {
         catch {
             throw "BLOCKED|Consumer entry-point contract failed: $($_.Exception.Message)"
         }
+        if ($DevelopmentHarness) {
+            $candidateAcquisition = [ordered]@{
+                status = 'unverified-development-harness'; verified = $false; sourceRepository = $SourceRepository; sourceRevision = $SourceRevision
+                baseRevision = $BaseRevision; eventName = $EventName; archivePath = $null; archiveUrl = $null; archiveSha256 = if ($CandidateArchiveSha256) { $CandidateArchiveSha256 } else { ('0' * 64) }
+                archivePrefix = $null; contentSha256 = $null; evidencePath = $null; evidenceSha256 = ('0' * 64)
+            }
+        }
+        else {
+            if ([string]::IsNullOrWhiteSpace($CandidateArchivePath) -or [string]::IsNullOrWhiteSpace($CandidateAcquisitionEvidencePath) -or
+                [string]::IsNullOrWhiteSpace($CandidateArchiveSha256)) {
+                throw 'INVALID|Production validation requires CandidateArchivePath, CandidateAcquisitionEvidencePath, and CandidateArchiveSha256.'
+            }
+            $candidateAcquisition = Assert-StandardValidationCandidateAcquisition `
+                -CandidateRoot $originalCandidateRoot `
+                -CandidateArchivePath $CandidateArchivePath `
+                -CandidateAcquisitionEvidencePath $CandidateAcquisitionEvidencePath `
+                -TrustedToolRoot $trustedToolRootFull `
+                -ArtifactsRoot $artifactRootFull `
+                -StagingRoot (Join-Path $artifactRootFull 'acquisition/candidate-archive') `
+                -ExpectedSourceRepository $SourceRepository `
+                -ExpectedSourceRevision $SourceRevision `
+                -ExpectedBaseRevision $BaseRevision `
+                -ExpectedEventName $EventName `
+                -CandidateArchiveSha256 $CandidateArchiveSha256 `
+                -Context 'candidate acquisition'
+        }
         $candidateInventory = Get-StandardValidationInventory -Root $originalCandidateRoot -Context 'candidate'
         $expectedCandidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
+        if (-not $DevelopmentHarness -and [string]$candidateAcquisition.contentSha256 -cne $expectedCandidateContentSha256) {
+            throw 'BLOCKED|Candidate acquisition receipt content identity does not match the candidate root.'
+        }
         $expectedAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter'
         $candidateId = Get-StandardValidationTextSha256 -Value (
             "$SourceRepository`n$SourceRevision`n$BaseRevision`n$EventName`n$expectedCandidateContentSha256`n$expectedAdapterSha256`n$CandidateArchiveSha256"
@@ -1364,6 +1852,8 @@ function Invoke-StandardValidationRun {
             eventName = $EventName
             candidateId = $candidateId
             contentSha256 = $expectedCandidateContentSha256
+            archiveSha256 = [string]$candidateAcquisition.archiveSha256
+            acquisition = $candidateAcquisition
             inventory = $candidateInventory
             activeSkills = @($adapterResult.skills.ids)
         }
@@ -1688,7 +2178,12 @@ $result = Invoke-StandardValidationRun `
     -SourceRevision $SourceRevision `
     -BaseRevision $BaseRevision `
     -EventName $EventName `
+    -CandidateArchivePath $CandidateArchivePath `
+    -CandidateAcquisitionEvidencePath $CandidateAcquisitionEvidencePath `
     -CandidateArchiveSha256 $CandidateArchiveSha256 `
+    -AuthorityRevision $AuthorityRevision `
+    -AuthorityArchivePath $AuthorityArchivePath `
+    -AuthoritySnapshotEvidencePath $AuthoritySnapshotEvidencePath `
     -TimeoutSeconds $TimeoutSeconds `
     -CancellationPath $CancellationPath `
     -TrustedToolRoot $TrustedToolRoot `

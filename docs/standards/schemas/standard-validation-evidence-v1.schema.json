@@ -42,13 +42,14 @@
     "candidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "inventory", "activeSkills"],
+      "required": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "archiveSha256", "acquisition", "inventory", "activeSkills"],
       "properties": {
         "sourceRepository": { "type": "string", "format": "uri" },
         "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "baseRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "eventName": { "type": "string", "minLength": 1 },
         "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "acquisition": { "$ref": "#/$defs/acquisition" },
         "candidateId": { "$ref": "#/$defs/sha256" },
         "contentSha256": { "$ref": "#/$defs/sha256" },
         "inventory": {
@@ -90,7 +91,7 @@
     "authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256"],
+      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "binding"],
       "properties": {
         "repository": { "type": "string", "format": "uri" },
         "runnerPath": { "type": "string", "minLength": 1 },
@@ -102,7 +103,56 @@
         "authorityGatePath": { "type": "string", "minLength": 1 },
         "authorityGateSha256": { "$ref": "#/$defs/sha256" },
         "resolverPath": { "type": "string", "minLength": 1 },
-        "resolverSha256": { "$ref": "#/$defs/sha256" }
+        "resolverSha256": { "$ref": "#/$defs/sha256" },
+        "binding": { "$ref": "#/$defs/authorityBinding" }
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "verified", "sourceRepository", "sourceRevision", "baseRevision", "eventName", "archivePath", "archiveUrl", "archivePrefix", "archiveSha256", "contentSha256", "evidencePath", "evidenceSha256"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "verified": { "type": "boolean" },
+        "sourceRepository": { "type": ["string", "null"] },
+        "sourceRevision": { "type": ["string", "null"] },
+        "baseRevision": { "type": ["string", "null"] },
+        "eventName": { "type": ["string", "null"] },
+        "archivePath": { "type": ["string", "null"] },
+        "archiveUrl": { "type": ["string", "null"] },
+        "archivePrefix": { "type": ["string", "null"] },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "evidencePath": { "type": ["string", "null"] },
+        "evidenceSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "authorityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "verified", "repository", "revision", "archivePath", "archiveUrl", "archivePrefix", "archiveSha256", "snapshotEvidencePath", "snapshotEvidenceSha256", "snapshotInventorySha256", "selectedFiles"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "verified": { "type": "boolean" },
+        "repository": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"] },
+        "archivePath": { "type": ["string", "null"] },
+        "archiveUrl": { "type": ["string", "null"] },
+        "archivePrefix": { "type": ["string", "null"] },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "snapshotEvidencePath": { "type": ["string", "null"] },
+        "snapshotEvidenceSha256": { "$ref": "#/$defs/sha256" },
+        "snapshotInventorySha256": { "$ref": "#/$defs/sha256" },
+        "selectedFiles": { "type": "array", "items": { "$ref": "#/$defs/selectedFile" } }
+      }
+    },
+    "selectedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "stage": {

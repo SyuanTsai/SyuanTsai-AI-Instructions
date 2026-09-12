@@ -228,13 +228,15 @@
         "releaseAffectingSurfaces": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["workflowGlob", "hookRoots", "publicCommandFiles", "mustRouteTo", "alternateGateAction"],
+          "required": ["workflowGlob", "hookRoots", "publicCommandFiles", "mustRouteTo", "alternateGateAction", "requiresFailurePropagation", "forbiddenFailureSuppression"],
           "properties": {
             "workflowGlob": { "const": ".github/workflows/*.{yml,yaml}" },
             "hookRoots": { "const": [".git/hooks", ".githooks"] },
             "publicCommandFiles": { "const": ["README.md", "RELEASING.md", "RELEASE.md", "docs/RELEASE.md", "docs/RELEASING.md"] },
             "mustRouteTo": { "const": "canonical-validator" },
-            "alternateGateAction": { "const": "BLOCK" }
+            "alternateGateAction": { "const": "BLOCK" },
+            "requiresFailurePropagation": { "const": true },
+            "forbiddenFailureSuppression": { "const": ["|| true", "|| :", "continue-on-error: true", "if: always()"] }
           }
         },
         "componentScripts": {

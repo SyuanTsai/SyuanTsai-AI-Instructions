@@ -2925,6 +2925,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-ExactStringSequence $contract.releaseAffectingSurfaces.publicCommandFiles @('README.md', 'RELEASING.md', 'RELEASE.md', 'docs/RELEASE.md', 'docs/RELEASING.md') 'Public release command inventory must cover the documented entry-point files.'
         Assert-Equal $contract.releaseAffectingSurfaces.mustRouteTo 'canonical-validator' 'Release-affecting surfaces must route to the canonical validator.'
         Assert-Equal $contract.releaseAffectingSurfaces.alternateGateAction 'BLOCK' 'Consumer alternate gates must block closed.'
+        Assert-True ([bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) 'Release-affecting surfaces must preserve canonical failure propagation.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.forbiddenFailureSuppression @('|| true', '|| :', 'continue-on-error: true', 'if: always()') 'Release-affecting surfaces must reject failure suppression.'
         Assert-True ([bool]$contract.componentScripts.mayExist) 'Component/diagnostic scripts must remain allowed.'
         Assert-False ([bool]$contract.componentScripts.mayBeTopLevelReleaseGate) 'Component scripts must not become public release gates.'
         Assert-True ([bool]$contract.compatibilityLane.allowed) 'Compatibility lanes must remain available for explicit legacy coverage.'

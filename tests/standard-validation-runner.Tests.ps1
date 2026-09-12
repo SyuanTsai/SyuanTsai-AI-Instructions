@@ -329,6 +329,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Assert-AuthorityConsumerEntryPointContract' 'The runner must enforce the central consumer entry-point contract.'
         Assert-Match $runnerSource 'Assert-StandardValidationSnapshotUnchanged' 'The runner must revalidate the candidate snapshot around child execution.'
         Assert-Match $runnerSource 'Assert-StandardValidationHumanApprovalEvidence' 'Human approval must be authenticated by the runner.'
+        Assert-Match $runnerSource 'CandidateArchivePath|CandidateAcquisitionEvidencePath' 'Production acquisition must bind the candidate to an acquired immutable archive.'
+        Assert-Match $runnerSource 'AuthorityRevision|AuthorityArchivePath|AuthoritySnapshotEvidencePath' 'Authority evidence must bind to an immutable authority snapshot.'
+        Assert-Match $runnerSource 'Assert-StandardValidationCandidateAcquisition|Assert-StandardValidationAuthoritySnapshot' 'The runner must verify source and authority acquisition bindings before validation.'
+        Assert-Match $runnerSource 'Get-StandardValidationDescendantProcessIds|Kill\(\$true\)' 'Child cleanup must account for the complete owned process tree.'
     }
 
     # Scenario: A production adapter attempts to execute a payload through a generic interpreter.
@@ -339,8 +343,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $adapter.mode = 'production'
         Write-TestUtf8File -Path $fixture.Adapter -Text ($adapter | ConvertTo-Json -Depth 20)
         $result = Invoke-RunnerFixture -Fixture $fixture -DevelopmentHarness:$false
-        Assert-Equal $result.Evidence.state 'INVALID' 'Production adapters must reject generic interpreter commands.'
-        Assert-Match $result.Output 'generic interpreter|direct executable' 'The invalid result must explain the interpreter boundary.'
+        Assert-Equal $result.Evidence.state 'INVALID' 'Production adapters must reject incomplete or unsafe acquisition before execution.'
+        Assert-Match $result.Output 'generic interpreter|direct executable|Production validation requires' 'The invalid result must explain the production boundary.'
         Assert-False (Test-Path -LiteralPath $fixture.Log -PathType Leaf) 'A rejected interpreter payload must not execute package validation.'
     }
 

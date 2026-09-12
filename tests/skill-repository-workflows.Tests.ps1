@@ -360,6 +360,40 @@ jobs:
 '@
             },
             @{
+                Name = 'release-workflow-suppresses-canonical-failure'
+                RelativePath = '.github/workflows/release-suppressed.yml'
+                Text = @'
+name: Release with suppressed validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: ./scripts/Validate.ps1 || true
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-with-unbound-validation'
+                RelativePath = '.github/workflows/release-unbound.yml'
+                Text = @'
+name: Release with unbound validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    steps:
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
                 Name = 'compatibility-independent-validation'
                 RelativePath = '.github/workflows/compatibility-independent.yml'
                 Text = @'
@@ -405,6 +439,29 @@ jobs:
                 -RepositoryRoot $compatibilityRoot `
                 -CanonicalValidatorPath 'scripts/Validate.ps1' `
                 -Policy $policy) 'A compatibility status job may depend on and mirror the canonical result.'
+
+        $releaseBoundRoot = Join-Path $TestDrive 'entry-point-release-bound'
+        [void](New-Item -ItemType Directory -Path $releaseBoundRoot -Force)
+        Write-TestUtf8File -Path (Join-Path $releaseBoundRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $releaseBoundRoot '.github/workflows/release-bound.yml') -Text @'
+name: Release with bound validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    needs: canonical-validation
+    steps:
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $releaseBoundRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A release job must be allowed when it depends on the canonical validation job.'
 
         $duplicateRoot = Join-Path $TestDrive 'entry-point-duplicate-event'
         New-ConsumerEntryPointFixture -Root $duplicateRoot

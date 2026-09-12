@@ -530,7 +530,8 @@ function Assert-AuthorityEntryPointPolicy {
         -Name 'releaseAffectingSurfaces' `
         -Context 'Validation/security gate entry-point contract'
     Assert-AuthorityJsonPropertySet -Object $surfaces -Expected @(
-        'workflowGlob', 'hookRoots', 'publicCommandFiles', 'mustRouteTo', 'alternateGateAction'
+        'workflowGlob', 'hookRoots', 'publicCommandFiles', 'mustRouteTo', 'alternateGateAction',
+        'requiresFailurePropagation', 'forbiddenFailureSuppression'
     ) -Context 'Entry-point release-affecting surface policy'
     Assert-AuthorityExactString -Value $surfaces.workflowGlob -Expected '.github/workflows/*.{yml,yaml}' -Context 'Entry-point workflow inventory'
     Assert-AuthorityExactStringSequence -Value $surfaces.hookRoots -Expected @('.git/hooks', '.githooks') -Context 'Entry-point hook inventory'
@@ -539,6 +540,10 @@ function Assert-AuthorityEntryPointPolicy {
     ) -Context 'Entry-point public command inventory'
     Assert-AuthorityExactString -Value $surfaces.mustRouteTo -Expected 'canonical-validator' -Context 'Entry-point release routing'
     Assert-AuthorityExactString -Value $surfaces.alternateGateAction -Expected 'BLOCK' -Context 'Entry-point alternate gate action'
+    Assert-AuthorityExactBoolean -Value $surfaces.requiresFailurePropagation -Expected $true -Context 'Entry-point failure propagation'
+    Assert-AuthorityExactStringSequence -Value $surfaces.forbiddenFailureSuppression -Expected @(
+        '|| true', '|| :', 'continue-on-error: true', 'if: always()'
+    ) -Context 'Entry-point failure suppression inventory'
 
     $componentScripts = Get-AuthorityRequiredProperty `
         -Object $Contract `
@@ -838,6 +843,130 @@ function Test-AuthorityConsumerReleaseAffectingCommand {
     return [regex]::IsMatch($Text, $releasePattern)
 }
 
+function Test-AuthorityConsumerFailureSuppression {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $suppressionPatterns = @(
+        '(?i)\|\|\s*(?:true|:|echo|printf|write-output|write-host|exit\s+0)\b',
+        '(?im)^\s*continue-on-error\s*:\s*(?!false\b)\S+',
+        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?(?:always|failure|cancelled)\s*\(\)',
+        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?!\s*cancelled\s*\(\)'
+    )
+    foreach ($pattern in $suppressionPatterns) {
+        if ([regex]::IsMatch($Text, $pattern)) { return $true }
+    }
+    return $false
+}
+
+function Get-AuthorityConsumerWorkflowJobs {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $jobsLineIndex = -1
+    $jobsIndent = -1
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^(?<indent>\s*)jobs\s*:\s*(?:#.*)?$') {
+            $jobsLineIndex = $index
+            $jobsIndent = $Matches.indent.Length
+            break
+        }
+    }
+    if ($jobsLineIndex -lt 0) { return @() }
+
+    $jobs = New-Object 'System.Collections.Generic.List[object]'
+    $current = $null
+    for ($index = $jobsLineIndex + 1; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^\s*')).Value.Length
+        if ($indent -le $jobsIndent) { break }
+        if ($line -match '^(?<jobIndent>\s{1,})(?<jobId>[A-Za-z0-9_.-]+)\s*:\s*(?:#.*)?$' -and
+            $Matches.jobIndent.Length -eq ($jobsIndent + 2)) {
+            if ($null -ne $current) {
+                $current.endIndex = $index - 1
+                [void]$jobs.Add($current)
+            }
+            $current = [pscustomobject][ordered]@{
+                id = [string]$Matches.jobId
+                startIndex = $index
+                endIndex = $null
+                text = $null
+            }
+        }
+    }
+    if ($null -ne $current) {
+        $current.endIndex = $lines.Count - 1
+        [void]$jobs.Add($current)
+    }
+    foreach ($job in $jobs.ToArray()) {
+        $jobLines = New-Object 'System.Collections.Generic.List[string]'
+        for ($index = [int]$job.startIndex; $index -le [int]$job.endIndex; $index++) {
+            [void]$jobLines.Add([string]$lines[$index])
+        }
+        $job.text = [string]::Join("`n", $jobLines.ToArray())
+    }
+    return $jobs.ToArray()
+}
+
+function Test-AuthorityConsumerJobNeedsCanonical {
+    param(
+        [Parameter(Mandatory = $true)][string] $JobText,
+        [Parameter(Mandatory = $true)][string] $CanonicalJobId
+    )
+
+    $escapedId = [regex]::Escape($CanonicalJobId)
+    return ([regex]::IsMatch($JobText, "(?im)^\s*needs\s*:\s*(?:\[[^\]]*\b$escapedId\b[^\]]*\]|$escapedId(?:\s|$))") -or
+        [regex]::IsMatch($JobText, "(?im)^\s*-\s*$escapedId\s*$"))
+}
+
+function Assert-AuthorityConsumerReleaseFailurePropagation {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorkflowPath,
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $executableText = Get-AuthorityConsumerExecutableText -Text $Text
+    if (-not (Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText)) { return }
+    if (Test-AuthorityConsumerFailureSuppression -Text $Text) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation."
+    }
+
+    $jobs = @(Get-AuthorityConsumerWorkflowJobs -Text $Text)
+    if ($jobs.Count -eq 0) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' has no structurally inspectable jobs for canonical failure propagation."
+    }
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $canonicalJobs = @()
+    $releaseJobs = @()
+    foreach ($job in $jobs) {
+        $jobExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$job.text)
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $jobExecutableText -CanonicalRelativePath $CanonicalRelativePath
+        $release = Test-AuthorityConsumerReleaseAffectingCommand -Text $jobExecutableText
+        if ($canonicalCount -gt 0) { $canonicalJobs += $job }
+        if ($release) { $releaseJobs += $job }
+    }
+    if ($canonicalJobs.Count -ne 1 -or $releaseJobs.Count -eq 0) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' must structurally bind its release job to exactly one canonical job."
+    }
+
+    $canonicalJob = $canonicalJobs[0]
+    foreach ($releaseJob in $releaseJobs) {
+        $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
+        if ($releaseJob.id -ceq $canonicalJob.id) {
+            $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
+            $releaseMatch = [regex]::Match($releaseExecutableText, '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b)(?![A-Za-z0-9_.-])')
+            if (-not $canonicalMatch.Success -or -not $releaseMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
+                throw "BLOCK: release-affecting workflow '$WorkflowPath' must run the canonical validator before its release command in job '$($releaseJob.id)'."
+            }
+        }
+        elseif (-not (Test-AuthorityConsumerJobNeedsCanonical -JobText ([string]$releaseJob.text) -CanonicalJobId ([string]$canonicalJob.id))) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' release job '$($releaseJob.id)' must depend on canonical job '$($canonicalJob.id)'."
+        }
+    }
+}
+
 function Assert-AuthorityConsumerEntryPointContract {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -904,6 +1033,12 @@ function Assert-AuthorityConsumerEntryPointContract {
             -CanonicalRelativePath $canonicalRelative
         $compatibilityDeclared = Test-AuthorityConsumerCompatibilityMarker -Text $text
         $releaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText
+        if ($releaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) {
+            Assert-AuthorityConsumerReleaseFailurePropagation `
+                -WorkflowPath $relativePath `
+                -Text $text `
+                -CanonicalRelativePath $canonicalRelative
+        }
         if ($compatibilityDeclared -and $canonicalCount -eq 0 -and -not $compatibility) {
             throw "BLOCK: compatibility workflow '$relativePath' must depend on the canonical result and only mirror its status."
         }
@@ -961,6 +1096,10 @@ function Assert-AuthorityConsumerEntryPointContract {
             $hookExecutableText = Get-AuthorityConsumerScriptText -Text $hookText
             $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative
             $hookReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $hookExecutableText
+            if ($hookReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
+                (Test-AuthorityConsumerFailureSuppression -Text $hookText)) {
+                throw "BLOCK: release-affecting hook '$($hookFile.FullName)' suppresses canonical or release failure propagation."
+            }
             if ($hookReleaseAffecting -and $hookCanonicalCount -ne 1) {
                 throw "BLOCK: consumer entry-point contract found a release-affecting hook that does not execute the canonical validator exactly once: '$hookFile'."
             }
@@ -985,6 +1124,10 @@ function Assert-AuthorityConsumerEntryPointContract {
         $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
         $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicText -CanonicalRelativePath $canonicalRelative
         $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicText
+        if ($publicReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
+            (Test-AuthorityConsumerFailureSuppression -Text $publicText)) {
+            throw "BLOCK: release-affecting public command '$publicRelativePath' suppresses canonical or release failure propagation."
+        }
         $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
         if ($publicReleaseAffecting -and $publicCanonicalCount -ne 1) {
             throw "BLOCK: consumer entry-point contract found a public release command without exactly one canonical validator invocation: '$publicRelativePath'."
