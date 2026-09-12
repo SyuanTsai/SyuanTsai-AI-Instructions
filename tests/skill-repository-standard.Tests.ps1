@@ -2959,7 +2959,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 [pscustomobject][ordered]@{
                     order = $_
                     id = $schemaStageIds[$_ - 1]
-                    condition = 'always'
+                    condition = @(
+                        'always'
+                        'always'
+                        'always'
+                        'always'
+                        'always'
+                        'when-triggered'
+                        'lifecycle-evidence'
+                        'lifecycle-evidence'
+                        'approved-release-or-authorized-install'
+                        'after-install'
+                    )[$_ - 1]
                     status = 'not-applicable'
                     startedAt = $null
                     endedAt = $null
