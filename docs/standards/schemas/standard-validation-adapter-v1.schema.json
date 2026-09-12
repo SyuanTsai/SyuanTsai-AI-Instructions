@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Standard validation consumer adapter v1",
-  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks.",
+  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks. Production command specifications must identify directly executable trusted tools; generic interpreters and script payloads are development-harness-only.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,6 +10,7 @@
     "mode",
     "skillsRoot",
     "activeSkills",
+    "canonicalValidatorPath",
     "packageAdapter",
     "skillValidator",
     "skillTools",
@@ -34,6 +35,12 @@
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
       }
     },
+    "canonicalValidatorPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))(?![A-Za-z]:)[A-Za-z0-9._/-]+$",
+      "description": "Candidate-relative path to the one canonical validator entry point. The trusted supervisor inventories release-affecting entry points and invokes this path as the canonical consumer gate."
+    },
     "packageAdapter": { "$ref": "#/$defs/commandSpec" },
     "skillValidator": { "$ref": "#/$defs/commandSpec" },
     "skillTools": { "$ref": "#/$defs/commandSpec" },
@@ -54,7 +61,7 @@
         "command": {
           "type": "string",
           "minLength": 1,
-          "description": "Absolute path to a run-resolved trusted executable or interpreter; it must not be under CandidateRoot."
+          "description": "Absolute path to a run-resolved trusted executable; it must not be under CandidateRoot. Generic interpreters or script payloads are permitted only for development-harness adapters, never production."
         },
         "arguments": {
           "type": "array",

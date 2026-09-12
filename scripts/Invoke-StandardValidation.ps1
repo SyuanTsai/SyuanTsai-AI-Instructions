@@ -314,6 +314,19 @@ function Assert-StandardValidationCandidateUnchanged {
     }
 }
 
+function Assert-StandardValidationSnapshotUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][string] $SnapshotRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSnapshotContentSha256
+    )
+
+    $currentInventory = Get-StandardValidationInventory -Root $SnapshotRoot -Context 'candidate snapshot revalidation'
+    $currentContentSha256 = Get-StandardValidationInventorySha256 -Inventory $currentInventory
+    if ($currentContentSha256 -cne $ExpectedSnapshotContentSha256) {
+        throw 'FAILED|Candidate snapshot changed during validation.'
+    }
+}
+
 function Assert-StandardValidationCommandSpec {
     param(
         [Parameter(Mandatory = $true)] $Spec,
@@ -354,10 +367,26 @@ function Assert-StandardValidationCommandSpec {
         }
     }
     $commandName = [System.IO.Path]::GetFileName($commandPath).ToLowerInvariant()
-    if ($commandName -in @('pwsh', 'pwsh.exe', 'powershell', 'powershell.exe', 'bash', 'bash.exe', 'sh', 'sh.exe', 'cmd', 'cmd.exe')) {
+    $genericInterpreterNames = @(
+        'pwsh', 'pwsh.exe', 'powershell', 'powershell.exe',
+        'bash', 'bash.exe', 'sh', 'sh.exe', 'cmd', 'cmd.exe',
+        'node', 'node.exe', 'nodejs', 'nodejs.exe',
+        'python', 'python.exe', 'python3', 'python3.exe',
+        'perl', 'perl.exe', 'ruby', 'ruby.exe', 'php', 'php.exe'
+    )
+    if ($commandName -in $genericInterpreterNames) {
         if (@($arguments | Where-Object { [string]$_ -in @('-Command', '-EncodedCommand', '/c', '-c') }).Count -gt 0) {
             throw "INVALID|$Context may not use an inline command interpreter before the central barriers."
         }
+        if (-not $DevelopmentHarness) {
+            throw "INVALID|$Context production adapters may not use a generic interpreter; provide a directly executable trusted tool."
+        }
+    }
+    if (-not $DevelopmentHarness -and [System.IO.Path]::GetExtension($commandPath).ToLowerInvariant() -in @(
+            '.ps1', '.psm1', '.psd1', '.sh', '.bash', '.cmd', '.bat', '.py', '.pyc', '.js', '.mjs', '.cjs',
+            '.pl', '.rb', '.php'
+        )) {
+        throw "INVALID|$Context production adapters may not execute a script payload as the command."
     }
     if (-not $DevelopmentHarness) {
         $allowedRoots = @($TrustedToolRoot, $ArtifactsRoot, $PSScriptRoot, $PSHOME)
@@ -453,7 +482,7 @@ function Assert-StandardValidationAdapter {
 
     Assert-StandardValidationExactPropertySet -Object $Adapter -Expected @(
         'schemaVersion', 'adapter', 'mode', 'skillsRoot', 'activeSkills',
-        'packageAdapter', 'skillValidator', 'skillTools', 'staticAnalyzer', 'repositoryTests'
+        'canonicalValidatorPath', 'packageAdapter', 'skillValidator', 'skillTools', 'staticAnalyzer', 'repositoryTests'
     ) -Context 'standard validation adapter'
     if ((Get-StandardValidationRequiredProperty -Object $Adapter -Name 'schemaVersion' -Context 'adapter') -ne 1 -or
         [string](Get-StandardValidationRequiredProperty -Object $Adapter -Name 'adapter' -Context 'adapter') -cne 'standard-validation-adapter-v1') {
@@ -464,6 +493,16 @@ function Assert-StandardValidationAdapter {
         ($DevelopmentHarness -and [string]$mode -cne 'development-harness') -or
         (-not $DevelopmentHarness -and [string]$mode -cne 'production')) {
         throw 'INVALID|adapter mode does not match the selected supervisor mode.'
+    }
+    $canonicalValidatorPath = [string](Get-StandardValidationRequiredProperty -Object $Adapter -Name 'canonicalValidatorPath' -Context 'adapter canonicalValidatorPath')
+    Assert-StandardValidationSafeRelativePath -Value $canonicalValidatorPath -Context 'adapter canonicalValidatorPath'
+    $canonicalValidatorFullPath = Get-StandardValidationFullPath -Path (Join-Path $CandidateRoot $canonicalValidatorPath) -Context 'adapter canonicalValidatorPath'
+    if (-not (Test-Path -LiteralPath $canonicalValidatorFullPath -PathType Leaf)) {
+        throw "INVALID|adapter canonicalValidatorPath does not identify a repository file: $canonicalValidatorPath"
+    }
+    $canonicalValidatorItem = Get-Item -Force -LiteralPath $canonicalValidatorFullPath -ErrorAction Stop
+    if (($canonicalValidatorItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'INVALID|adapter canonicalValidatorPath must not be a reparse point.'
     }
     $skills = Get-StandardValidationSkillSet `
         -CandidateRoot $CandidateRoot `
@@ -502,6 +541,7 @@ function Assert-StandardValidationAdapter {
     }
     return [pscustomobject][ordered]@{
         mode = [string]$mode
+        canonicalValidatorPath = $canonicalValidatorPath
         skills = $skills
         commands = $commands
         repositoryTests = $testCommands
@@ -769,6 +809,7 @@ function Invoke-StandardValidationCommandAndRecord {
         [string] $SkillInventorySha256,
         [string[]] $ExpectedActiveSkills,
         [Parameter(Mandatory = $true)][string] $SnapshotRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSnapshotContentSha256,
         [Parameter(Mandatory = $true)][string] $SkillsRoot,
         [Parameter(Mandatory = $true)][string] $ActiveSkillsText,
         [Parameter(Mandatory = $true)][string] $OriginalCandidateRoot,
@@ -788,6 +829,7 @@ function Invoke-StandardValidationCommandAndRecord {
     if ([string]$CommandSpec.commandSha256 -cne $commandSha256Before) {
         throw "FAILED|$StageId/$ToolId command changed after adapter resolution."
     }
+    Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     $environment = @{
         STANDARD_VALIDATION_STAGE_ID = $StageId
         STANDARD_VALIDATION_TOOL_ID = $ToolId
@@ -807,6 +849,7 @@ function Invoke-StandardValidationCommandAndRecord {
         -Environment $environment `
         -TimeoutSeconds $TimeoutSeconds `
         -CancellationPath $CancellationPath
+    Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
     }
@@ -860,11 +903,164 @@ function Invoke-StandardValidationCommandAndRecord {
     return [pscustomobject][ordered]@{ event = $event; envelope = $envelope }
 }
 
+function Assert-StandardValidationApprovalScalar {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value) -or [string]$Value -match '[\x00-\x1F\x7F]') {
+        throw "BLOCKED|$Context '$Name' must be a non-empty scalar without control characters."
+    }
+    return [string]$Value
+}
+
+function Convert-StandardValidationApprovalTimestamp {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -is [string]) {
+        return Assert-StandardValidationApprovalScalar -Value $Value -Name $Name -Context $Context
+    }
+    # Windows PowerShell 5.1 ConvertFrom-Json coerces ISO UTC strings to DateTime.
+    # Preserve the canonical round-trip form only when that coercion retained UTC.
+    if ($Value -is [DateTime] -and $Value.Kind -eq [DateTimeKind]::Utc) {
+        return $Value.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    throw "BLOCKED|$Context '$Name' must be an ISO-8601 UTC timestamp string."
+}
+
+function Get-StandardValidationHumanApprovalPayload {
+    param(
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $ApprovalId,
+        [Parameter(Mandatory = $true)][string] $Approver,
+        [Parameter(Mandatory = $true)][string] $ApprovalTimestamp,
+        [Parameter(Mandatory = $true)][string] $ReviewDisposition,
+        [Parameter(Mandatory = $true)][string] $HostId,
+        [Parameter(Mandatory = $true)][string] $ActorId
+    )
+
+    return "candidateId=$CandidateId`napprovalId=$ApprovalId`napprover=$Approver`napprovalTimestamp=$ApprovalTimestamp`nreviewDisposition=$ReviewDisposition`nhostId=$HostId`nactorId=$ActorId"
+}
+
+function Assert-StandardValidationHumanApprovalEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationExactPropertySet -Object $Evidence -Expected @(
+        'schemaVersion', 'evidenceType', 'candidateId', 'status', 'approvalId', 'approver',
+        'approvalTimestamp', 'reviewDisposition', 'attestation'
+    ) -Context $Context
+    if ((Get-StandardValidationRequiredProperty -Object $Evidence -Name 'schemaVersion' -Context $Context) -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'evidenceType' -Context $Context) -cne 'human-approval' -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'candidateId' -Context $Context) -cne $CandidateId -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'status' -Context $Context) -cne 'approved') {
+        throw "BLOCKED|$Context is not an approved evidence result bound to this candidate."
+    }
+
+    $approvalId = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'approvalId' -Context $Context) -Name 'approvalId' -Context $Context
+    $approver = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'approver' -Context $Context) -Name 'approver' -Context $Context
+    $approvalTimestamp = Convert-StandardValidationApprovalTimestamp -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'approvalTimestamp' -Context $Context) -Name 'approvalTimestamp' -Context $Context
+    $reviewDisposition = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'reviewDisposition' -Context $Context) -Name 'reviewDisposition' -Context $Context
+    if ($reviewDisposition -cne 'approved') { throw "BLOCKED|$Context reviewDisposition must be approved." }
+
+    if ($approvalTimestamp -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,7})?(Z|\+00:00)$') {
+        throw "BLOCKED|$Context approvalTimestamp must be an ISO-8601 UTC timestamp."
+    }
+    $parsedTimestamp = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($approvalTimestamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsedTimestamp) -or
+        $parsedTimestamp.Offset -ne [TimeSpan]::Zero) {
+        throw "BLOCKED|$Context approvalTimestamp is not a valid UTC timestamp."
+    }
+    if ($parsedTimestamp -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
+        throw "BLOCKED|$Context approvalTimestamp is in the future."
+    }
+
+    $attestation = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'attestation' -Context $Context
+    Assert-StandardValidationExactPropertySet -Object $attestation -Expected @(
+        'schemaVersion', 'attestationType', 'candidateId', 'approvalId', 'hostId', 'actorId',
+        'issuedAt', 'reviewDisposition', 'signature'
+    ) -Context "$Context attestation"
+    if ((Get-StandardValidationRequiredProperty -Object $attestation -Name 'schemaVersion' -Context "$Context attestation") -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'attestationType' -Context "$Context attestation") -cne 'trusted-supervisor-human-approval-v1' -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'candidateId' -Context "$Context attestation") -cne $CandidateId -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'approvalId' -Context "$Context attestation") -cne $approvalId -or
+        [string](Get-StandardValidationRequiredProperty -Object $attestation -Name 'reviewDisposition' -Context "$Context attestation") -cne 'approved') {
+        throw "BLOCKED|$Context trusted supervisor attestation is not bound to the approved candidate."
+    }
+    $hostId = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'hostId' -Context "$Context attestation") -Name 'hostId' -Context "$Context attestation"
+    $actorId = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'actorId' -Context "$Context attestation") -Name 'actorId' -Context "$Context attestation"
+    $issuedAt = Convert-StandardValidationApprovalTimestamp -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'issuedAt' -Context "$Context attestation") -Name 'issuedAt' -Context "$Context attestation"
+    if ($issuedAt -cne $approvalTimestamp) { throw "BLOCKED|$Context attestation issuedAt does not match approvalTimestamp." }
+    $signature = Assert-StandardValidationApprovalScalar -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'signature' -Context "$Context attestation") -Name 'signature' -Context "$Context attestation"
+    if ($signature -notmatch '^[A-Za-z0-9+/]+={0,2}$' -or ($signature.Length % 4) -ne 0) {
+        throw "BLOCKED|$Context attestation signature is not valid base64."
+    }
+
+    $publicKeyPath = Get-StandardValidationFullPath -Path (Join-Path $TrustedToolRoot 'human-approval-public-key.xml') -Context "$Context trusted public key"
+    Assert-StandardValidationOutsideRoot -Path $publicKeyPath -Root $CandidateRoot -Context "$Context trusted public key"
+    Assert-StandardValidationOutsideRoot -Path $publicKeyPath -Root $ArtifactsRoot -Context "$Context trusted public key"
+    if (-not (Test-Path -LiteralPath $publicKeyPath -PathType Leaf)) {
+        throw "BLOCKED|$Context trusted supervisor human-approval public key is missing."
+    }
+    $publicKeyItem = Get-Item -Force -LiteralPath $publicKeyPath -ErrorAction Stop
+    if (($publicKeyItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "BLOCKED|$Context trusted human-approval public key must not be a reparse point."
+    }
+    $publicKeyXml = Get-Content -Raw -Encoding UTF8 -LiteralPath $publicKeyPath
+    if ([string]::IsNullOrWhiteSpace($publicKeyXml) -or
+        $publicKeyXml -notmatch '(?is)^\s*<RSAKeyValue>\s*<Modulus>[^<]+</Modulus>\s*<Exponent>[^<]+</Exponent>\s*</RSAKeyValue>\s*$' -or
+        $publicKeyXml -match '(?i)<D(?:\s|>)') {
+        throw "BLOCKED|$Context trusted public key must be an RSA XML public key."
+    }
+
+    $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider
+    try {
+        try { $rsa.FromXmlString($publicKeyXml) }
+        catch { throw "BLOCKED|$Context trusted public key could not be parsed as RSA XML: $($_.Exception.Message)" }
+        $parameters = $rsa.ExportParameters($false)
+        if ($null -eq $parameters.Modulus -or $parameters.Modulus.Length -eq 0 -or
+            $null -eq $parameters.Exponent -or $parameters.Exponent.Length -eq 0) {
+            throw "BLOCKED|$Context trusted public key does not contain an RSA public key."
+        }
+        $signatureBytes = $null
+        try { $signatureBytes = [Convert]::FromBase64String($signature) }
+        catch { throw "BLOCKED|$Context attestation signature is not valid base64." }
+        $payload = Get-StandardValidationHumanApprovalPayload `
+            -CandidateId $CandidateId `
+            -ApprovalId $approvalId `
+            -Approver $approver `
+            -ApprovalTimestamp $approvalTimestamp `
+            -ReviewDisposition $reviewDisposition `
+            -HostId $hostId `
+            -ActorId $actorId
+        $payloadBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($payload)
+        if (-not $rsa.VerifyData($payloadBytes, 'SHA256', $signatureBytes)) {
+            throw "BLOCKED|$Context trusted supervisor signature verification failed."
+        }
+    }
+    finally { $rsa.Dispose() }
+}
+
 function Assert-StandardValidationImportedEvidence {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $ExpectedType,
         [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
@@ -887,10 +1083,24 @@ function Assert-StandardValidationImportedEvidence {
             }
         }
     }
-    if ($ExpectedType -ceq 'human-approval' -and
-        ([string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $evidence -Name 'approver')) -or
-         [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $evidence -Name 'approvalTimestamp')))) {
-        throw 'BLOCKED|Human approval evidence is missing the approver or approval timestamp.'
+    if ($ExpectedType -ceq 'human-approval') {
+        try {
+            Assert-StandardValidationHumanApprovalEvidence `
+                -Evidence $evidence `
+                -CandidateId $CandidateId `
+                -TrustedToolRoot $TrustedToolRoot `
+                -CandidateRoot $CandidateRoot `
+                -ArtifactsRoot $ArtifactsRoot `
+                -Context $Context
+        }
+        catch {
+            $humanMessage = [string]$_.Exception.Message
+            $humanSeparator = $humanMessage.IndexOf('|')
+            if ($humanSeparator -gt 0 -and $humanMessage.Substring(0, $humanSeparator) -in @('BLOCKED', 'INVALID', 'FAILED')) {
+                $humanMessage = $humanMessage.Substring($humanSeparator + 1)
+            }
+            throw "BLOCKED|$humanMessage"
+        }
     }
     if ($ExpectedType -ceq 'ai-review' -and
         ($null -eq (Get-StandardValidationProperty -Object $evidence -Name 'reviewFindings') -or
@@ -1020,7 +1230,7 @@ function New-StandardValidationCandidateEvidence {
         exitCode = $ExitCode
         releaseEligible = $ReleaseEligible
         candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid') } } else { $Candidate }
-        adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
+        adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
         authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64) } } else { $Authority }
         stages = $Stages
         artifacts = [ordered]@{
@@ -1077,6 +1287,7 @@ function Invoke-StandardValidationRun {
     $lockCreated = $false
     $finalWritten = $false
     $artifactRootFull = $null
+    $trustedToolRootFull = $null
     $outputFull = $null
     $originalCandidateRoot = $null
     $adapterFull = $null
@@ -1101,12 +1312,17 @@ function Invoke-StandardValidationRun {
         $originalCandidateRoot = Get-StandardValidationFullPath -Path $CandidateRoot -Context 'CandidateRoot'
         $adapterFull = Get-StandardValidationFullPath -Path $AdapterPath -Context 'AdapterPath'
         $artifactRootFull = Get-StandardValidationFullPath -Path $ArtifactsRoot -Context 'ArtifactsRoot'
+        $trustedToolRootFull = Get-StandardValidationFullPath -Path $TrustedToolRoot -Context 'TrustedToolRoot'
         if (-not (Test-Path -LiteralPath $originalCandidateRoot -PathType Container)) { throw 'INVALID|CandidateRoot is not a directory.' }
         if (-not (Test-Path -LiteralPath $adapterFull -PathType Leaf)) { throw 'INVALID|AdapterPath is not a file.' }
+        if (-not (Test-Path -LiteralPath $trustedToolRootFull -PathType Container)) { throw 'INVALID|TrustedToolRoot is not a directory.' }
         Assert-StandardValidationDistinctRoots -First $originalCandidateRoot -Second $artifactRootFull -Context 'CandidateRoot and ArtifactsRoot'
+        Assert-StandardValidationOutsideRoot -Path $trustedToolRootFull -Root $originalCandidateRoot -Context 'TrustedToolRoot'
+        Assert-StandardValidationOutsideRoot -Path $trustedToolRootFull -Root $artifactRootFull -Context 'TrustedToolRoot'
         Assert-StandardValidationOutsideRoot -Path $adapterFull -Root $originalCandidateRoot -Context 'AdapterPath'
         Assert-StandardValidationOutsideRoot -Path $adapterFull -Root $artifactRootFull -Context 'AdapterPath'
         Assert-StandardValidationNoReparsePoints -Root $adapterFull -Context 'adapter'
+        Assert-StandardValidationNoReparsePoints -Root $trustedToolRootFull -Context 'TrustedToolRoot'
         Assert-StandardValidationOutsideRoot -Path $artifactRootFull -Root (Split-Path -Parent $PSScriptRoot) -Context 'ArtifactsRoot'
         [void](New-Item -ItemType Directory -Path $artifactRootFull -Force)
         Assert-StandardValidationNoReparsePoints -Root $artifactRootFull -Context 'ArtifactsRoot'
@@ -1126,8 +1342,15 @@ function Invoke-StandardValidationRun {
             -Adapter $adapter `
             -CandidateRoot $originalCandidateRoot `
             -ArtifactsRoot $artifactRootFull `
-            -TrustedToolRoot (Get-StandardValidationFullPath -Path $TrustedToolRoot -Context 'TrustedToolRoot') `
+            -TrustedToolRoot $trustedToolRootFull `
             -DevelopmentHarness $DevelopmentHarness
+        try {
+            . $contractResult.authority.authorityGatePath -DefineFunctionsOnly
+            [void](Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $originalCandidateRoot -CanonicalValidatorPath $adapterResult.canonicalValidatorPath -Policy $contractResult.policy)
+        }
+        catch {
+            throw "BLOCKED|Consumer entry-point contract failed: $($_.Exception.Message)"
+        }
         $candidateInventory = Get-StandardValidationInventory -Root $originalCandidateRoot -Context 'candidate'
         $expectedCandidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
         $expectedAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter'
@@ -1148,6 +1371,7 @@ function Invoke-StandardValidationRun {
             schemaVersion = 1
             sha256 = $expectedAdapterSha256
             mode = $adapterResult.mode
+            canonicalValidatorPath = $adapterResult.canonicalValidatorPath
             skillsRoot = $adapterResult.skills.relative
             activeSkills = @($adapterResult.skills.ids)
         }
@@ -1197,6 +1421,7 @@ function Invoke-StandardValidationRun {
             -CandidateId $candidateId `
             -ExpectedActiveSkills $adapterResult.skills.ids `
             -SnapshotRoot $snapshotRoot `
+            -ExpectedSnapshotContentSha256 $expectedCandidateContentSha256 `
             -SkillsRoot $snapshotSkillsRoot `
             -ActiveSkillsText $activeSkillsText `
             -OriginalCandidateRoot $originalCandidateRoot `
@@ -1219,6 +1444,7 @@ function Invoke-StandardValidationRun {
                     -SkillId $skill.id `
                     -SkillInventorySha256 $skill.inventorySha256 `
                     -SnapshotRoot $snapshotRoot `
+                    -ExpectedSnapshotContentSha256 $expectedCandidateContentSha256 `
                     -SkillsRoot $snapshotSkillsRoot `
                     -ActiveSkillsText $activeSkillsText `
                     -OriginalCandidateRoot $originalCandidateRoot `
@@ -1244,6 +1470,7 @@ function Invoke-StandardValidationRun {
             -CandidateId $candidateId `
             -ExpectedActiveSkills $adapterResult.skills.ids `
             -SnapshotRoot $snapshotRoot `
+            -ExpectedSnapshotContentSha256 $expectedCandidateContentSha256 `
             -SkillsRoot $snapshotSkillsRoot `
             -ActiveSkillsText $activeSkillsText `
             -OriginalCandidateRoot $originalCandidateRoot `
@@ -1278,6 +1505,7 @@ function Invoke-StandardValidationRun {
                 -ToolId $test.id `
                 -CandidateId $candidateId `
                 -SnapshotRoot $snapshotRoot `
+                -ExpectedSnapshotContentSha256 $expectedCandidateContentSha256 `
                 -SkillsRoot $snapshotSkillsRoot `
                 -ActiveSkillsText $activeSkillsText `
                 -OriginalCandidateRoot $originalCandidateRoot `
@@ -1316,7 +1544,14 @@ function Invoke-StandardValidationRun {
             $semanticFullPath = Get-StandardValidationFullPath -Path $SemanticEvidencePath -Context 'semantic evidence'
             Assert-StandardValidationOutsideRoot -Path $semanticFullPath -Root $originalCandidateRoot -Context 'semantic evidence'
             Assert-StandardValidationOutsideRoot -Path $semanticFullPath -Root $artifactRootFull -Context 'semantic evidence'
-            $semantic = Assert-StandardValidationImportedEvidence -Path $semanticFullPath -ExpectedType 'semantic' -CandidateId $candidateId -Context 'semantic evidence'
+            $semantic = Assert-StandardValidationImportedEvidence `
+                -Path $semanticFullPath `
+                -ExpectedType 'semantic' `
+                -CandidateId $candidateId `
+                -TrustedToolRoot $trustedToolRootFull `
+                -CandidateRoot $originalCandidateRoot `
+                -ArtifactsRoot $artifactRootFull `
+                -Context 'semantic evidence'
             if ([string]$semantic.provider -cne $SemanticProvider -or [string]$semantic.purpose -cne $SemanticPurpose -or [string]$semantic.scope -cne $SemanticScope) {
                 throw 'BLOCKED|Semantic evidence consent metadata does not match the invocation.'
             }
@@ -1347,7 +1582,14 @@ function Invoke-StandardValidationRun {
             $laterEvidencePath = Get-StandardValidationFullPath -Path ([string]$later.path) -Context "$($later.id) evidence"
             Assert-StandardValidationOutsideRoot -Path $laterEvidencePath -Root $originalCandidateRoot -Context "$($later.id) evidence"
             Assert-StandardValidationOutsideRoot -Path $laterEvidencePath -Root $artifactRootFull -Context "$($later.id) evidence"
-            $imported = Assert-StandardValidationImportedEvidence -Path $laterEvidencePath -ExpectedType ([string]$later.type) -CandidateId $candidateId -Context "$($later.id) evidence"
+            $imported = Assert-StandardValidationImportedEvidence `
+                -Path $laterEvidencePath `
+                -ExpectedType ([string]$later.type) `
+                -CandidateId $candidateId `
+                -TrustedToolRoot $trustedToolRootFull `
+                -CandidateRoot $originalCandidateRoot `
+                -ArtifactsRoot $artifactRootFull `
+                -Context "$($later.id) evidence"
             $stage.events += [pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); stageId = $stage.id; toolId = "imported-$($later.type)"; skillId = $null; candidateId = $candidateId; commandSha256 = Get-StandardValidationFileSha256 -Path $laterEvidencePath -Context "$($later.id) evidence"; exitCode = 0; status = 'passed'; outputSha256 = Get-StandardValidationFileSha256 -Path $laterEvidencePath -Context "$($later.id) evidence"; outputPath = $laterEvidencePath; cleanedUp = $true }
             Complete-StandardValidationStage -Stage $stage -Status passed
             Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage

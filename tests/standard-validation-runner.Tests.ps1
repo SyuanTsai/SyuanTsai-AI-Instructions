@@ -50,7 +50,7 @@ Describe 'Standard validation runner contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [string[]] $SkillIds = @('alpha', 'beta'),
-                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout')]
+                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate')]
                 [string] $Behavior = 'pass'
             )
 
@@ -64,6 +64,8 @@ Describe 'Standard validation runner contract' {
             [void](New-Item -ItemType Directory -Path $tools -Force)
             [void](New-Item -ItemType Directory -Path $artifacts -Force)
             [void](New-Item -ItemType Directory -Path (Join-Path $candidate 'skills') -Force)
+            [void](New-Item -ItemType Directory -Path (Join-Path $candidate 'scripts') -Force)
+            Write-TestUtf8File -Path (Join-Path $candidate 'scripts/Invoke-StandardValidation.ps1') -Text '# canonical validation entry point fixture`n'
             foreach ($skillId in $SkillIds) {
                 $skillRoot = Join-Path $candidate ("skills/$skillId")
                 [void](New-Item -ItemType Directory -Path $skillRoot -Force)
@@ -122,6 +124,10 @@ if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
 if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
     [IO.File]::WriteAllText($env:STANDARD_VALIDATION_FIXTURE_SENTINEL, 'repository-test-ran', (New-Object Text.UTF8Encoding($false)))
 }
+if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'snapshot-mutate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+    $targetSkill = @($skills | Select-Object -First 1)[0]
+    Add-Content -LiteralPath (Join-Path $env:STANDARD_VALIDATION_CANDIDATE_ROOT ("skills/$targetSkill/SKILL.md")) -Value 'mutated-by-package-fixture' -Encoding UTF8
+}
 $result | ConvertTo-Json -Depth 10 -Compress
 '@
             Write-TestUtf8File -Path $toolScript -Text $toolScriptText
@@ -132,6 +138,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 mode = 'development-harness'
                 skillsRoot = 'skills'
                 activeSkills = @($SkillIds)
+                canonicalValidatorPath = 'scripts/Invoke-StandardValidation.ps1'
                 packageAdapter = [ordered]@{
                     command = $script:PowerShellPath
                     arguments = @('-NoProfile', '-File', $toolScript)
@@ -164,6 +171,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 Candidate = $candidate
                 Adapter = $adapterPath
                 Artifacts = $artifacts
+                TrustedTools = $tools
                 Output = $output
                 Log = $log
                 Sentinel = $sentinel
@@ -178,6 +186,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [switch] $SemanticTriggered,
                 [switch] $SemanticConsent,
                 [switch] $CompleteLifecycle,
+                [bool] $DevelopmentHarness = $true,
                 [string] $AiReviewEvidencePath,
                 [string] $HumanApprovalEvidencePath,
                 [string] $PublishInstallEvidencePath,
@@ -197,8 +206,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 '-BaseRevision', ('b' * 40),
                 '-EventName', 'local',
                 '-TimeoutSeconds', [string]$TimeoutSeconds,
-                '-DevelopmentHarness'
+                '-TrustedToolRoot', $Fixture.TrustedTools
             )
+            if ($DevelopmentHarness) { $arguments += '-DevelopmentHarness' }
             if ($SemanticTriggered) { $arguments += '-SemanticTriggered' }
             if ($SemanticConsent) { $arguments += '-SemanticConsent' }
             if ($CompleteLifecycle) { $arguments += '-CompleteLifecycle' }
@@ -239,6 +249,62 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 Evidence = $evidence
             }
         }
+
+        function Get-TestHumanApprovalPayload {
+            param(
+                [Parameter(Mandatory = $true)][string] $CandidateId,
+                [Parameter(Mandatory = $true)][string] $ApprovalId,
+                [Parameter(Mandatory = $true)][string] $Approver,
+                [Parameter(Mandatory = $true)][string] $ApprovalTimestamp,
+                [Parameter(Mandatory = $true)][string] $ReviewDisposition,
+                [Parameter(Mandatory = $true)][string] $HostId,
+                [Parameter(Mandatory = $true)][string] $ActorId
+            )
+            return "candidateId=$CandidateId`napprovalId=$ApprovalId`napprover=$Approver`napprovalTimestamp=$ApprovalTimestamp`nreviewDisposition=$ReviewDisposition`nhostId=$HostId`nactorId=$ActorId"
+        }
+
+        function Write-TestHumanApprovalEvidence {
+            param(
+                [Parameter(Mandatory = $true)] $Fixture,
+                [Parameter(Mandatory = $true)][string] $Path,
+                [Parameter(Mandatory = $true)][string] $CandidateId
+            )
+            $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                Write-TestUtf8File -Path (Join-Path $Fixture.TrustedTools 'human-approval-public-key.xml') -Text $rsa.ToXmlString($false)
+                $approvalId = 'approval-001'
+                $approver = 'human@example.test'
+                $approvalTimestamp = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+                $reviewDisposition = 'approved'
+                $hostId = 'test-host'
+                $actorId = 'test-actor'
+                $payload = Get-TestHumanApprovalPayload -CandidateId $CandidateId -ApprovalId $approvalId -Approver $approver -ApprovalTimestamp $approvalTimestamp -ReviewDisposition $reviewDisposition -HostId $hostId -ActorId $actorId
+                $signature = [Convert]::ToBase64String($rsa.SignData([Text.Encoding]::UTF8.GetBytes($payload), 'SHA256'))
+                $evidence = [ordered]@{
+                    schemaVersion = 1
+                    evidenceType = 'human-approval'
+                    candidateId = $CandidateId
+                    status = 'approved'
+                    approvalId = $approvalId
+                    approver = $approver
+                    approvalTimestamp = $approvalTimestamp
+                    reviewDisposition = $reviewDisposition
+                    attestation = [ordered]@{
+                        schemaVersion = 1
+                        attestationType = 'trusted-supervisor-human-approval-v1'
+                        candidateId = $CandidateId
+                        approvalId = $approvalId
+                        hostId = $hostId
+                        actorId = $actorId
+                        issuedAt = $approvalTimestamp
+                        reviewDisposition = $reviewDisposition
+                        signature = $signature
+                    }
+                }
+                Write-TestUtf8File -Path $Path -Text ($evidence | ConvertTo-Json -Depth 20)
+            }
+            finally { $rsa.Dispose() }
+        }
     }
 
     # Scenario: The public contract must be machine-readable before a consumer can adopt it.
@@ -253,9 +319,29 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $stages.Count 10 'Validation contract must expose exactly ten stages.'
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
+        $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-adapter-v1.schema.json') | ConvertFrom-Json
+        $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
+        Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
+        Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-False ($runnerSource -match '\[string\]\s+\$TrustedToolRoot\s*=\s*\(Split-Path\s+-Parent\s+\$PSScriptRoot\)') 'The runner must not evaluate PSScriptRoot in a parameter default before script initialization.'
         Assert-Match $runnerSource 'if\s*\(\[string\]::IsNullOrWhiteSpace\(\$TrustedToolRoot\)\)' 'The runner must derive its default trusted tool root after parameter binding.'
+        Assert-Match $runnerSource 'Assert-AuthorityConsumerEntryPointContract' 'The runner must enforce the central consumer entry-point contract.'
+        Assert-Match $runnerSource 'Assert-StandardValidationSnapshotUnchanged' 'The runner must revalidate the candidate snapshot around child execution.'
+        Assert-Match $runnerSource 'Assert-StandardValidationHumanApprovalEvidence' 'Human approval must be authenticated by the runner.'
+    }
+
+    # Scenario: A production adapter attempts to execute a payload through a generic interpreter.
+    # Purpose: Prevent an untrusted -File/-c payload from becoming a pre-Static trusted command.
+    It 'InterT05_rejects_generic_interpreter_payloads_in_production_adapters' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'production-interpreter')
+        $adapter = Get-Content -Raw -Encoding UTF8 -LiteralPath $fixture.Adapter | ConvertFrom-Json
+        $adapter.mode = 'production'
+        Write-TestUtf8File -Path $fixture.Adapter -Text ($adapter | ConvertTo-Json -Depth 20)
+        $result = Invoke-RunnerFixture -Fixture $fixture -DevelopmentHarness:$false
+        Assert-Equal $result.Evidence.state 'INVALID' 'Production adapters must reject generic interpreter commands.'
+        Assert-Match $result.Output 'generic interpreter|direct executable' 'The invalid result must explain the interpreter boundary.'
+        Assert-False (Test-Path -LiteralPath $fixture.Log -PathType Leaf) 'A rejected interpreter payload must not execute package validation.'
     }
 
     # Scenario: A harmless development adapter exposes two active Skills to the central runner.
@@ -289,6 +375,17 @@ $result | ConvertTo-Json -Depth 10 -Compress
             Assert-False (Test-Path -LiteralPath $fixture.Sentinel -PathType Leaf) "Repository tests must not run after Static '$behavior'."
             Assert-Equal @($result.Evidence.stages | Where-Object id -eq 'repository-tests' | Select-Object -ExpandProperty status) 'not-run' "Repository tests must be marked not-run after Static '$behavior'."
         }
+    }
+
+    # Scenario: A package validator writes into the candidate snapshot exposed to child processes.
+    # Purpose: Detect snapshot drift after every child and fail before the next barrier can consume it.
+    It 'InterT25_fails_closed_when_a_child_mutates_the_candidate_snapshot' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'snapshot-mutate') -Behavior 'snapshot-mutate'
+        $result = Invoke-RunnerFixture -Fixture $fixture
+        Assert-Equal $result.Evidence.state 'FAILED' 'A child-mutated candidate snapshot must fail validation.'
+        Assert-Match $result.Output 'snapshot.*changed|snapshot.*drift' 'The failure must identify candidate snapshot drift.'
+        Assert-False (@($result.Evidence.stages | Where-Object id -eq 'skillspector-static' | Select-Object -ExpandProperty status) -contains 'passed') 'Snapshot drift must not reach Static.'
+        Assert-False (Test-Path -LiteralPath $fixture.Sentinel -PathType Leaf) 'Snapshot drift must not dispatch repository tests.'
     }
 
     # Scenario: A candidate adds a Skill after the adapter was authored.
@@ -369,6 +466,25 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-False (@($missingResult.Evidence.stages | Where-Object id -eq 'skillspector-static' | Select-Object -ExpandProperty status) -contains 'passed') 'Missing tool output must not reach Static.'
     }
 
+    # Scenario: A candidate adds a workflow that invokes an alternate validation script.
+    # Purpose: Ensure the runner applies the central consumer entry-point inventory before package validation.
+    It 'InterT75_blocks_alternate_consumer_entry_points_before_package_validation' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'alternate-entry-point')
+        Write-TestUtf8File -Path (Join-Path $fixture.Candidate '.github/workflows/alternate-validation.yml') -Text @'
+name: Alternate validation
+on:
+  pull_request:
+jobs:
+  alternate:
+    steps:
+      - run: ./scripts/alternate-validation.ps1
+'@
+        $result = Invoke-RunnerFixture -Fixture $fixture
+        Assert-Equal $result.Evidence.state 'BLOCKED' 'An alternate consumer validation entry point must block the run.'
+        Assert-Match $result.Output 'entry-point|canonical' 'The failure must identify the canonical entry-point contract.'
+        Assert-False (Test-Path -LiteralPath $fixture.Log -PathType Leaf) 'Entry-point contract failure must occur before package validation.'
+    }
+
     # Scenario: Adapter configuration is duplicated or requests a mode inconsistent with the trusted supervisor.
     # Purpose: Keep consumer configuration and execution mode as fail-closed inputs rather than policy overrides.
     It 'InterT80_rejects_duplicate_active_skills_and_mode_trust_mismatch' {
@@ -413,6 +529,37 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal (@($aiOnlyResult.Evidence.stages | Where-Object id -eq 'ai-review')[0].status) 'passed' 'AI review evidence should be recorded independently before the block.'
         Assert-Equal (@($aiOnlyResult.Evidence.stages | Where-Object id -eq 'human-approval')[0].status) 'blocked' 'Missing human approval must block the lifecycle.'
 
+        $forgedFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'forged-human-approval')
+        $forgedAdapterSha = Get-StandardValidationFileSha256 -Path $forgedFixture.Adapter -Context 'test adapter'
+        $forgedInventory = Get-StandardValidationInventory -Root $forgedFixture.Candidate -Context 'test candidate'
+        $forgedContentSha = Get-StandardValidationInventorySha256 -Inventory $forgedInventory
+        $forgedCandidateId = Get-StandardValidationTextSha256 -Value ("https://example.com/example/skills.git`n$('a' * 40)`n$('b' * 40)`nlocal`n$forgedContentSha`n$forgedAdapterSha`n")
+        $forgedAiEvidence = Join-Path $forgedFixture.Root 'ai-review.json'
+        $forgedHumanEvidence = Join-Path $forgedFixture.Root 'human-approval.json'
+        Write-TestUtf8File -Path $forgedAiEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'ai-review'; candidateId = $forgedCandidateId; status = 'passed'; decision = 'PASS'; reviewFindings = @(); findingDisposition = @() } | ConvertTo-Json -Depth 10)
+        Write-TestUtf8File -Path $forgedHumanEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'human-approval'; candidateId = $forgedCandidateId; status = 'approved'; approver = 'human@example.test'; approvalTimestamp = '2026-09-11T00:00:00Z' } | ConvertTo-Json -Depth 10)
+        $forgedResult = Invoke-RunnerFixture -Fixture $forgedFixture -CompleteLifecycle -AiReviewEvidencePath $forgedAiEvidence -HumanApprovalEvidencePath $forgedHumanEvidence
+        Assert-Equal $forgedResult.Evidence.state 'BLOCKED' 'Self-asserted human approval fields must not satisfy the approval barrier.'
+        Assert-Match $forgedResult.Output 'attestation|trusted|signature' 'The failure must identify the missing trusted approval attestation.'
+        Assert-Equal (@($forgedResult.Evidence.stages | Where-Object id -eq 'human-approval')[0].status) 'blocked' 'Unattested human approval must block the lifecycle.'
+
+        $tamperedFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'tampered-human-approval')
+        $tamperedAdapterSha = Get-StandardValidationFileSha256 -Path $tamperedFixture.Adapter -Context 'test adapter'
+        $tamperedInventory = Get-StandardValidationInventory -Root $tamperedFixture.Candidate -Context 'test candidate'
+        $tamperedContentSha = Get-StandardValidationInventorySha256 -Inventory $tamperedInventory
+        $tamperedCandidateId = Get-StandardValidationTextSha256 -Value ("https://example.com/example/skills.git`n$('a' * 40)`n$('b' * 40)`nlocal`n$tamperedContentSha`n$tamperedAdapterSha`n")
+        $tamperedAiEvidence = Join-Path $tamperedFixture.Root 'ai-review.json'
+        $tamperedHumanEvidence = Join-Path $tamperedFixture.Root 'human-approval.json'
+        Write-TestUtf8File -Path $tamperedAiEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'ai-review'; candidateId = $tamperedCandidateId; status = 'passed'; decision = 'PASS'; reviewFindings = @(); findingDisposition = @() } | ConvertTo-Json -Depth 10)
+        Write-TestHumanApprovalEvidence -Fixture $tamperedFixture -Path $tamperedHumanEvidence -CandidateId $tamperedCandidateId
+        $tamperedText = Get-Content -Raw -Encoding UTF8 -LiteralPath $tamperedHumanEvidence
+        $tamperedText = $tamperedText -replace '("signature"\s*:\s*")[^"]+("\s*})', '$1AAAA$2'
+        Write-TestUtf8File -Path $tamperedHumanEvidence -Text $tamperedText
+        $tamperedResult = Invoke-RunnerFixture -Fixture $tamperedFixture -CompleteLifecycle -AiReviewEvidencePath $tamperedAiEvidence -HumanApprovalEvidencePath $tamperedHumanEvidence
+        Assert-Equal $tamperedResult.Evidence.state 'BLOCKED' 'A tampered human approval signature must not pass the approval barrier.'
+        Assert-Match $tamperedResult.Output 'signature verification failed' 'The failure must identify signature verification failure.'
+        Assert-Equal (@($tamperedResult.Evidence.stages | Where-Object id -eq 'human-approval')[0].status) 'blocked' 'A tampered approval signature must block the lifecycle.'
+
         $fullFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'full-lifecycle')
         $fullAdapterSha = Get-StandardValidationFileSha256 -Path $fullFixture.Adapter -Context 'test adapter'
         $fullInventory = Get-StandardValidationInventory -Root $fullFixture.Candidate -Context 'test candidate'
@@ -423,7 +570,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $fullPublishEvidence = Join-Path $fullFixture.Root 'publish-install.json'
         $fullPostEvidence = Join-Path $fullFixture.Root 'post-install.json'
         Write-TestUtf8File -Path $fullAiEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'ai-review'; candidateId = $fullCandidateId; status = 'passed'; decision = 'PASS'; reviewFindings = @(); findingDisposition = @() } | ConvertTo-Json -Depth 10)
-        Write-TestUtf8File -Path $fullHumanEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'human-approval'; candidateId = $fullCandidateId; status = 'approved'; approver = 'human@example.test'; approvalTimestamp = '2026-09-11T00:00:00Z' } | ConvertTo-Json -Depth 10)
+        Write-TestHumanApprovalEvidence -Fixture $fullFixture -Path $fullHumanEvidence -CandidateId $fullCandidateId
         Write-TestUtf8File -Path $fullPublishEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'publish-install'; candidateId = $fullCandidateId; status = 'authorized'; authorization = $true; releaseIdentity = 'release-example' } | ConvertTo-Json -Depth 10)
         Write-TestUtf8File -Path $fullPostEvidence -Text ([ordered]@{ schemaVersion = 1; evidenceType = 'post-install'; candidateId = $fullCandidateId; status = 'passed'; installedInventory = @('skill-alpha', 'skill-beta'); postInstallIntegrity = $true } | ConvertTo-Json -Depth 10)
         $fullResult = Invoke-RunnerFixture -Fixture $fullFixture -CompleteLifecycle -AiReviewEvidencePath $fullAiEvidence -HumanApprovalEvidencePath $fullHumanEvidence -PublishInstallEvidencePath $fullPublishEvidence -PostInstallEvidencePath $fullPostEvidence
