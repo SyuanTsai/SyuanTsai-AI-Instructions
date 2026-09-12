@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Standard validation evidence v1",
+  "description": "Candidate-bound evidence envelope emitted by the central validation runner. A report is not a pass unless its event, identity, process result, and coverage are all present.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidence",
+    "contract",
+    "runId",
+    "state",
+    "exitCode",
+    "candidate",
+    "adapter",
+    "authority",
+    "stages",
+    "releaseEligible"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "evidence": { "const": "standard-validation-evidence-v1" },
+    "contract": { "const": "standard-validation-contract-v1" },
+    "runId": { "type": "string", "format": "uuid" },
+    "state": { "enum": ["PASS", "BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
+    "exitCode": { "type": "integer", "enum": [0, 10, 20, 30, 40] },
+    "releaseEligible": { "type": "boolean" },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "authority": { "$ref": "#/$defs/authority" },
+    "stages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/stage" }
+    },
+    "failure": { "$ref": "#/$defs/failure" },
+    "artifacts": { "$ref": "#/$defs/artifacts" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "inventory", "activeSkills"],
+      "properties": {
+        "sourceRepository": { "type": "string", "format": "uri" },
+        "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "baseRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "eventName": { "type": "string", "minLength": 1 },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "inventory": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/inventoryEntry" }
+        },
+        "activeSkills": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "inventoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "length"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "length": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "sha256", "mode", "skillsRoot", "activeSkills"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "mode": { "enum": ["production", "development-harness"] },
+        "skillsRoot": { "type": "string", "minLength": 1 },
+        "activeSkills": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "runnerPath": { "type": "string", "minLength": 1 },
+        "runnerSha256": { "$ref": "#/$defs/sha256" },
+        "contractPath": { "type": "string", "minLength": 1 },
+        "contractSha256": { "$ref": "#/$defs/sha256" },
+        "policyPath": { "type": "string", "minLength": 1 },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "authorityGatePath": { "type": "string", "minLength": 1 },
+        "authorityGateSha256": { "$ref": "#/$defs/sha256" },
+        "resolverPath": { "type": "string", "minLength": 1 },
+        "resolverSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "id", "condition", "status", "startedAt", "endedAt", "events"],
+      "properties": {
+        "order": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "id": { "type": "string", "minLength": 1 },
+        "condition": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["passed", "failed", "blocked", "cancelled", "not-run", "not-applicable"] },
+        "startedAt": { "type": ["string", "null"] },
+        "endedAt": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "stageId", "toolId", "candidateId", "commandSha256", "exitCode", "status", "outputSha256", "outputPath", "cleanedUp"],
+      "properties": {
+        "eventId": { "type": "string", "format": "uuid" },
+        "stageId": { "type": "string", "minLength": 1 },
+        "toolId": { "type": "string", "minLength": 1 },
+        "skillId": { "type": ["string", "null"] },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "commandSha256": { "$ref": "#/$defs/sha256" },
+        "exitCode": { "type": "integer" },
+        "status": { "enum": ["passed", "failed", "startup-failed", "timeout", "cancelled", "cleanup-failed", "invalid-output"] },
+        "outputSha256": { "$ref": "#/$defs/sha256" },
+        "outputPath": { "type": "string", "minLength": 1 },
+        "cleanedUp": { "type": "boolean" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "message"],
+      "properties": {
+        "state": { "enum": ["BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "lockPath"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "lockPath": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

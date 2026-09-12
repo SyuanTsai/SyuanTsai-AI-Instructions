@@ -288,6 +288,10 @@ Component／diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為公開 re
 
 Protected PR、trusted push 與 `workflow_dispatch` **MAY** 使用不同 trigger adapter，但每個 adapter **MUST** 使用相同 canonical validator、candidate binding、stage ordering 與 local/pre-push/CI pass/block semantics；同一 event/candidate **MUST NOT** 執行兩次 canonical validation。
 
+中央 validation runner contract [`standard-validation-contract-v1.json`](standard-validation-contract-v1.json) 是 consumer 可直接使用的共用執行層；其 declarative adapter 必須符合 [`standard-validation-adapter-v1.schema.json`](schemas/standard-validation-adapter-v1.schema.json)，只能宣告 candidate-relative active Skill root、完整 active Skill set、已解析且受信任的工具命令與 repository-test dispatch，**MUST NOT** 宣告 stage order、severity、exception、approval 或 pre-Static hook。`scripts/Invoke-StandardValidation.ps1` **MUST** 以 read-only candidate snapshot 執行：Controlled Acquisition／Integrity 後，Package Validation（adapter、skill-validator、每個 active Skill 的 skill-tools）**MUST** 全部產生 candidate-bound actual process/output evidence，才可進入 SkillSpector Static；Static 失敗或 analyzer coverage 不完整時 **MUST NOT** dispatch candidate repository tests。Evidence 必須符合 [`standard-validation-evidence-v1.schema.json`](schemas/standard-validation-evidence-v1.schema.json)；未完成的 semantic consent、AI review、human approval、publish/install 或 post-install evidence **MUST** 保持 `BLOCKED`、`not-applicable` 或 `not-run` 的明確狀態，不得以十個 stage ID 或格式正確的 SHA 文字冒充完成。
+
+Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` **MUST** 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 protected-base 的 `Invoke-StandardAuthorityGate.ps1` authority regression，也不得自行提升 trusted base。
+
 Canonical entry **MUST**：
 
 - 可由 developer local、pre-push（若存在）與 CI 呼叫；

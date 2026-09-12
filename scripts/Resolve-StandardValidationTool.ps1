@@ -13,10 +13,43 @@ param(
 
     [string] $ExpectedGoRuntimeVersion,
 
+    [string] $RunId,
+
+    [string] $GoCommandPath,
+
     [string] $OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
+
+$script:ResolverRunId = if ([string]::IsNullOrWhiteSpace($RunId)) {
+    [guid]::NewGuid().ToString('N')
+}
+else {
+    [string]$RunId
+}
+if ($script:ResolverRunId -notmatch '^[0-9a-f]{32}$') {
+    throw 'Resolver RunId must be a lowercase 32-character hexadecimal value.'
+}
+$script:ResolverResolvedAtUtc = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+$script:ResolverExecutionContext = [ordered]@{
+    os = switch ([Environment]::OSVersion.Platform) {
+        ([PlatformID]::Win32NT) { 'windows'; break }
+        ([PlatformID]::Unix) { 'unix'; break }
+        ([PlatformID]::MacOSX) { 'osx'; break }
+        default { 'other'; break }
+    }
+    architecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        [string]$env:PROCESSOR_ARCHITEW6432
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITECTURE)) {
+        [string]$env:PROCESSOR_ARCHITECTURE
+    }
+    else {
+        'unknown'
+    }
+}
+$script:ResolverExecutionContext.architecture = ([string]$script:ResolverExecutionContext.architecture).ToLowerInvariant()
 
 $trustedSources = [ordered]@{
     'skillspector' = 'NVIDIA/SkillSpector'
@@ -405,6 +438,39 @@ function Assert-Command {
     $resolvedPath = [IO.Path]::GetFullPath($path)
     if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
         throw "Required native command '$Name' does not exist at '$resolvedPath'."
+    }
+    return $resolvedPath
+}
+
+function Assert-NativeCommandPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+        throw "The resolved native command path for '$Name' must be absolute."
+    }
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    $item = Get-Item -Force -LiteralPath $resolvedPath -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer -and
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The resolved native command path for '$Name' must be a regular file: '$resolvedPath'."
+    }
+    if ($null -eq $item -or -not $item.PSIsContainer) {
+        $expectedNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            @($Name, "$Name.exe")
+        }
+        else {
+            @($Name)
+        }
+        $fileName = [IO.Path]::GetFileName($resolvedPath)
+        if (@($expectedNames | Where-Object { [string]::Equals([string]$_, $fileName, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+            throw "The resolved native command path for '$Name' has an unexpected file name: '$resolvedPath'."
+        }
+    }
+    if ($null -eq $item -or $item.PSIsContainer) {
+        throw "The resolved native command path for '$Name' must be a regular file: '$resolvedPath'."
     }
     return $resolvedPath
 }
@@ -2026,6 +2092,7 @@ function Invoke-WithApprovedGoEnvironment {
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
         [Parameter(Mandatory = $true)] $DistributionPolicy,
         [string] $InstallBinPath,
+        [string] $GoCommandPath,
         [scriptblock] $EnvironmentProbe,
         [Parameter(Mandatory = $true)][scriptblock] $Action
     )
@@ -2091,7 +2158,12 @@ function Invoke-WithApprovedGoEnvironment {
         ))
         $goCommand = $null
         if ($null -eq $EnvironmentProbe) {
-            $goCommand = Assert-Command -Name 'go'
+            $goCommand = if ([string]::IsNullOrWhiteSpace($GoCommandPath)) {
+                Assert-Command -Name 'go'
+            }
+            else {
+                Assert-NativeCommandPath -Path $GoCommandPath -Name 'go'
+            }
             $effectiveJson = (Invoke-CheckedCommand -Command $goCommand -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
             $effective = $effectiveJson | ConvertFrom-Json
         }
@@ -2621,7 +2693,8 @@ function Resolve-SkillValidator {
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)] $ToolPolicy,
         [string] $RequestedInstallRoot,
-        [string] $ExpectedGoRuntimeVersion
+        [string] $ExpectedGoRuntimeVersion,
+        [string] $GoCommandPath
     )
 
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
@@ -2640,7 +2713,7 @@ function Resolve-SkillValidator {
     $installBinPath = if ($ShouldInstall) { Join-Path $toolInstallPath 'bin' } else { $null }
 
     try {
-        return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
+        return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -GoCommandPath $GoCommandPath -Action {
             param($goCommand, $effectiveBinPath)
 
             $approvedRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
@@ -2651,10 +2724,19 @@ function Resolve-SkillValidator {
             if ($null -eq $approvedRuntimeFunction -or $approvedRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
                 throw 'The approved Go runtime evidence authenticator function is unavailable.'
             }
+            $goVersionOutput = @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version'))
             $goRuntimeVersion = & $approvedRuntimeFunction `
-                -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
+                -VersionOutput $goVersionOutput `
                 -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion) `
                 -ExpectedRuntimeVersion $ExpectedGoRuntimeVersion
+            $goVersionMatch = [regex]::Match(
+                [string]$goVersionOutput[0],
+                '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) (?<os>[^\s]+)/(?<architecture>[^\s]+)$'
+            )
+            if (-not $goVersionMatch.Success) {
+                throw 'Approved Go runtime evidence did not expose a stable OS/architecture identity.'
+            }
+            $goRuntimeSha256 = Get-FileSha256 -Path $goCommand
 
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
@@ -2706,6 +2788,11 @@ function Resolve-SkillValidator {
                 dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
                 goRuntimeVersion = $goRuntimeVersion
                 goRuntimeSource = $trustedGoRuntimeSource
+                goRuntimePath = $goCommand
+                goRuntimeSha256 = $goRuntimeSha256
+                goRuntimeVersionOutput = $goVersionOutput
+                goRuntimeOs = [string]$goVersionMatch.Groups['os'].Value
+                goRuntimeArchitecture = [string]$goVersionMatch.Groups['architecture'].Value
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
                 temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
@@ -2998,6 +3085,9 @@ $policy = Get-Policy -Path $PolicyPath
 if ($ValidatePolicyOnly) {
     $result = [ordered]@{
         schemaVersion = 1
+        resolutionRunId = $script:ResolverRunId
+        resolvedAtUtc = $script:ResolverResolvedAtUtc
+        executionContext = $script:ResolverExecutionContext
         policy = [string]$policy.policy
         sourceTrust = [ordered]@{
             enforcement = [string]$policy.sourceTrust.enforcement
@@ -3031,7 +3121,8 @@ else {
                 -ShouldInstall ([bool]$Install) `
                 -ToolPolicy $policy.tools.'skill-validator' `
                 -RequestedInstallRoot $InstallRoot `
-                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion
+                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion `
+                -GoCommandPath $GoCommandPath
         }
         'skillspector' {
             Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot
@@ -3041,6 +3132,9 @@ else {
     $toolPolicy = $policy.tools.$ToolName
     $result = [ordered]@{
         schemaVersion = 1
+        resolutionRunId = $script:ResolverRunId
+        resolvedAtUtc = $script:ResolverResolvedAtUtc
+        executionContext = $script:ResolverExecutionContext
         toolName = $ToolName
         source = [string]$toolPolicy.source
         channel = [string]$toolPolicy.channel
@@ -3072,6 +3166,11 @@ else {
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.goRuntimeVersion = [string]$resolved.goRuntimeVersion
         $result.goRuntimeSource = [string]$resolved.goRuntimeSource
+        $result.goRuntimePath = [string]$resolved.goRuntimePath
+        $result.goRuntimeSha256 = [string]$resolved.goRuntimeSha256
+        $result.goRuntimeVersionOutput = $resolved.goRuntimeVersionOutput
+        $result.goRuntimeOs = [string]$resolved.goRuntimeOs
+        $result.goRuntimeArchitecture = [string]$resolved.goRuntimeArchitecture
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
         $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation

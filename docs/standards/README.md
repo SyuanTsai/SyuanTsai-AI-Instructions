@@ -18,9 +18,14 @@
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
+- Central validation runner: `scripts/Invoke-StandardValidation.ps1`
+- Central runner contract: `docs/standards/standard-validation-contract-v1.json`
+- Consumer adapter schema: `docs/standards/schemas/standard-validation-adapter-v1.schema.json`
+- Candidate evidence schema: `docs/standards/schemas/standard-validation-evidence-v1.schema.json`
 - Standard authority regression: `tests/skill-repository-standard.Tests.ps1`
 - Workflow authority regression: `tests/skill-repository-workflows.Tests.ps1`
 - Resolver-hardening authority regression: `tests/standard-validation-resolver-hardening.Tests.ps1`
+- Central runner behavior regression: `tests/standard-validation-runner.Tests.ps1`
 - Tracking: Jira `SYP-167`
 
 ## Scope
@@ -49,6 +54,10 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 - repository-specific extension / adapter / exception policy。
 - upstream Agent Skills / Agent Plugins interoperability and adapter boundary。
 
+中央 validation runner contract (`standard-validation-contract-v1.json`) 是 consumer 可直接使用的共用執行層；consumer adapter 只能宣告 candidate-relative active Skill root、完整 active Skill set、已解析且受信任的工具命令與 repository-test dispatch，MUST NOT 宣告 stage order、severity、exception、approval 或 pre-Static hook。`scripts/Invoke-StandardValidation.ps1` MUST 以 read-only candidate snapshot 執行：Controlled Acquisition／Integrity 後，Package Validation（adapter、skill-validator、每個 active Skill 的 skill-tools）MUST 全部產生 candidate-bound actual process/output evidence，才可進入 SkillSpector Static；Static 失敗或 analyzer coverage 不完整時 MUST NOT dispatch candidate repository tests。未完成的 semantic consent、AI review、human approval、publish/install 或 post-install evidence MUST 保持 `BLOCKED`、`not-applicable` 或 `not-run` 的明確狀態，不得以十個 stage ID 或格式正確的 SHA 文字冒充完成。
+
+Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` MUST 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 `Invoke-StandardAuthorityGate.ps1` 的 protected-base authority regression，也不得自行提升 trusted base。
+
 ## Normative language
 
 - **MUST / MUST NOT**：conformance 必須遵守，違反即不符合 Standard v1。
@@ -64,10 +73,11 @@ Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilo
 6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
 7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
 8. `scripts/Invoke-StandardAuthorityGate.ps1` 是 workflow 共用的 executable authority adapter；`.github/workflows/standards-conformance.yml` 與 `.github/workflows/pr8-powershell-validation.yml` 的 Ruleset-required Linux Composition job 必須呼叫同一 gate、執行相同的三個 authority regression suites、live resolver receipt checks 與 formal tool execution，且不得各自重建 resolver／tool execution sequence。
-9. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1` 共同保護 Standard、merge-blocking workflow 與 resolver supply-chain contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
-10. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。
-11. `Skill-Knowledge-Content`、`Skill-Code-Collaboration`、`Skill-Darktide-Translate`、`Skill-Atlassian-Ecosystem` 依 SYP-156～159 做 conformance migration。
-12. 舊文件若與 Standard v1 衝突，以本目錄為準；歷史文件應保留歷史語意並加上 superseded notice，不得重寫歷史。
+9. `scripts/Invoke-StandardValidation.ps1` 是 consumer-facing central orchestration contract 的唯一 runner；其 adapter、evidence schema 與 behavior regression 必須在同一 protected-base authority path 驗證，且 runner 的 development harness 不得成為 release approval。
+10. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 與 `tests/standard-validation-runner.Tests.ps1` 共同保護 Standard、merge-blocking workflow、resolver supply-chain 與 central runner contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
+11. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。
+12. `Skill-Knowledge-Content`、`Skill-Code-Collaboration`、`Skill-Darktide-Translate`、`Skill-Atlassian-Ecosystem` 依 SYP-156～159 做 conformance migration。
+13. 舊文件若與 Standard v1 衝突，以本目錄為準；歷史文件應保留歷史語意並加上 superseded notice，不得重寫歷史。
 
 Conformant source repository 不得直接信任 mutable branch 或未驗證 copy。Canonical validator 必須在執行 authority-derived policy 前取得並驗證一個 immutable authority snapshot，記錄 authority repository、full commit、bundle SHA-256 與實際使用的 Standard/policy/schema/resolver file inventory/hash。只記錄 `v1` 不足以重現 conformance。
 

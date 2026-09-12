@@ -641,6 +641,40 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
         }
     }
 
+    # Scenario: A canonical run resolves its Go runtime through the trusted setup supervisor.
+    # Purpose: Bind the resolver receipt to the same run, host platform, and runtime identity instead of an ambient PATH lookup.
+    It 'UnitT71_records_run_bound_platform_identity_in_the_policy_receipt' {
+        $outputPath = Join-Path $TestDrive 'run-bound-policy.json'
+        $runId = 'a' * 32
+        & $script:ResolverPath -ValidatePolicyOnly -RunId $runId -OutputPath $outputPath | Out-Null
+        $rawReceipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $outputPath
+        $receipt = $rawReceipt | ConvertFrom-Json
+
+        Assert-Equal $receipt.resolutionRunId $runId 'The resolver receipt must bind to the caller supplied run id.'
+        Assert-Match $rawReceipt '"resolvedAtUtc"\s*:\s*"[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z"' 'The resolver receipt must serialize a UTC resolution timestamp.'
+        Assert-True ($null -ne $receipt.executionContext) 'The resolver receipt must record execution platform identity.'
+        Assert-Match $receipt.executionContext.os '^(windows|unix|osx|other)$' 'The resolver receipt must record a normalized execution OS.'
+        Assert-Match $receipt.executionContext.architecture '^[a-z0-9_-]+$' 'The resolver receipt must record a normalized execution architecture.'
+    }
+
+    # Scenario: The host has an old or shadowed Go executable while setup-go acquired the approved latest stable runtime.
+    # Purpose: Require the authority workflow and resolver to bind the explicit setup-go executable path and its hash.
+    It 'UnitT72_binds_the_setup_go_executable_path_into_the_canonical_resolver_call' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1')
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+        $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+
+        Assert-Match $resolver '\[string\]\s*\$GoCommandPath' 'The resolver must accept the run-resolved Go executable path.'
+        Assert-Match $resolver 'goRuntimePath' 'The skill-validator receipt must record the resolved Go executable path.'
+        Assert-Match $resolver 'goRuntimeSha256' 'The skill-validator receipt must record the resolved Go executable hash.'
+        Assert-Match $gate 'GoCommandPath' 'The authority gate must pass the setup-resolved Go executable path to the resolver.'
+        Assert-Match $workflow 'STANDARD_GO_COMMAND_PATH' 'The standards workflow must export the setup-resolved Go executable path.'
+        Assert-Match $workflow '-GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'The standards workflow must bind the setup-resolved Go path.'
+        Assert-Match $requiredWorkflow 'STANDARD_GO_COMMAND_PATH' 'The required workflow must export the setup-resolved Go executable path.'
+        Assert-Match $requiredWorkflow '-GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'The required workflow must bind the setup-resolved Go path.'
+    }
+
     # Scenario: Caller-supplied output paths are written by two independent resolver/adapter processes.
     # Purpose: Require the same exclusive atomic-create contract for both public JSON report writers.
     It 'UnitT90_requires_exclusive_atomic_creation_for_caller_output_paths' {

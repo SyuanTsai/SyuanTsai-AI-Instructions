@@ -7,6 +7,8 @@ param(
 
     [string] $ExpectedGoRuntimeVersion = $env:STANDARD_GO_RUNTIME_VERSION,
 
+    [string] $GoCommandPath = $env:STANDARD_GO_COMMAND_PATH,
+
     [switch] $DefineFunctionsOnly
 )
 
@@ -43,6 +45,78 @@ function Get-AuthorityRequiredProperty {
         throw "$Context is missing required property '$Name'."
     }
     return ,$property.Value
+}
+
+function Assert-AuthorityRunReceiptContext {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $ExpectedRunId,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($ExpectedRunId -notmatch '^[0-9a-f]{32}$') {
+        throw "$Context expected run id is malformed."
+    }
+    $actualRunId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'resolutionRunId' -Context $Context
+    if ($actualRunId -isnot [string] -or [string]$actualRunId -cne $ExpectedRunId) {
+        throw "$Context is bound to a different authority run."
+    }
+
+    $resolvedAtUtc = Get-AuthorityRequiredProperty -Object $Receipt -Name 'resolvedAtUtc' -Context $Context
+    if ($resolvedAtUtc -is [DateTime]) {
+        if ($resolvedAtUtc.Kind -ne [DateTimeKind]::Utc) {
+            throw "$Context resolvedAtUtc is not UTC."
+        }
+    }
+    elseif ($resolvedAtUtc -is [DateTimeOffset]) {
+        if ($resolvedAtUtc.Offset -ne [TimeSpan]::Zero) {
+            throw "$Context resolvedAtUtc is not UTC."
+        }
+    }
+    elseif ($resolvedAtUtc -is [string] -and
+        [string]$resolvedAtUtc -match '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$') {
+        # The JSON reader on Windows PowerShell materializes ISO timestamps as
+        # DateTime; retain a string fallback for callers that preserve JSON text.
+    }
+    else {
+        throw "$Context resolvedAtUtc is missing or not a UTC timestamp."
+    }
+
+    $receiptExecutionContext = Get-AuthorityRequiredProperty -Object $Receipt -Name 'executionContext' -Context $Context
+    $executionOs = Get-AuthorityRequiredProperty -Object $receiptExecutionContext -Name 'os' -Context "$Context executionContext"
+    $executionArchitecture = Get-AuthorityRequiredProperty -Object $receiptExecutionContext -Name 'architecture' -Context "$Context executionContext"
+    if ($executionOs -isnot [string] -or [string]$executionOs -notmatch '^(windows|unix|osx|other)$' -or
+        $executionArchitecture -isnot [string] -or [string]$executionArchitecture -notmatch '^[a-z0-9_-]+$') {
+        throw "$Context executionContext is malformed."
+    }
+    return $true
+}
+
+function New-AuthorityRunOwnedToolRoot {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunId
+    )
+
+    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'Authority tool root requires a lowercase 32-character run id.'
+    }
+
+    # The authority evidence tree can be nested below a long checkout or CI
+    # artifact path. Keep formal tool installations in a compact, run-owned
+    # sibling under the OS temp root so Python venv/ensurepip deep paths do not
+    # fail on Windows hosts without Long Paths enabled.
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $tempRoot ("svt-tools-{0}" -f $RunId)))
+    if ($toolRoot.Length -ge 128) {
+        throw "Authority tool root is too long for the Windows Python venv path budget: $toolRoot"
+    }
+    [void](New-Item -ItemType Directory -Path $toolRoot -ErrorAction Stop)
+    $toolRootItem = Get-Item -Force -LiteralPath $toolRoot -ErrorAction Stop
+    if (-not $toolRootItem.PSIsContainer -or
+        ($toolRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Authority tool root must be a new non-reparse directory: $toolRoot"
+    }
+    return $toolRoot
 }
 
 function Assert-AuthorityUpstreamAdapterReport {
@@ -961,8 +1035,13 @@ function Assert-InstalledAuthorityToolReceipt {
         [Parameter(Mandatory = $true)] $Receipt,
         [Parameter(Mandatory = $true)][string] $ToolName,
         [Parameter(Mandatory = $true)][string] $ExpectedSource,
-        [Parameter(Mandatory = $true)][string] $InstallRoot
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [string] $ExpectedRunId
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRunId)) {
+        Assert-AuthorityRunReceiptContext -Receipt $Receipt -ExpectedRunId $ExpectedRunId -Context "$ToolName receipt" | Out-Null
+    }
 
     $schemaVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'schemaVersion' -Context "$ToolName receipt"
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1) {
@@ -1012,8 +1091,66 @@ function Assert-InstalledAuthorityToolReceipt {
     return $executablePath
 }
 
+function Assert-AuthoritySkillValidatorRuntimeReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $GoCommandPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedGoRuntimeVersion,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $receiptGoPath = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimePath' -Context $Context
+    $receiptGoSha256 = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeSha256' -Context $Context
+    $validatedGoPath = Assert-AuthorityFileIdentity `
+        -PathValue $receiptGoPath `
+        -Sha256Value $receiptGoSha256 `
+        -Context "$Context Go runtime"
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [StringComparison]::Ordinal
+    }
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($validatedGoPath),
+        [IO.Path]::GetFullPath($GoCommandPath),
+        $pathComparison
+    )) {
+        throw "$Context Go runtime path does not match the setup-resolved executable."
+    }
+
+    $versionOutput = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeVersionOutput' -Context $Context
+    if ($versionOutput -isnot [array] -or @($versionOutput).Count -ne 1) {
+        throw "$Context Go runtime version output must contain exactly one line."
+    }
+    $versionMatch = [regex]::Match(
+        [string]@($versionOutput)[0],
+        '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) (?<os>[^\s]+)/(?<architecture>[^\s]+)$'
+    )
+    if (-not $versionMatch.Success -or
+        [string]$versionMatch.Groups['version'].Value -cne $ExpectedGoRuntimeVersion) {
+        throw "$Context Go runtime version output is not the expected stable runtime."
+    }
+    $receiptVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeVersion' -Context $Context
+    $receiptOs = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeOs' -Context $Context
+    $receiptArchitecture = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeArchitecture' -Context $Context
+    if ($receiptVersion -isnot [string] -or [string]$receiptVersion -cne $ExpectedGoRuntimeVersion -or
+        $receiptOs -isnot [string] -or [string]$receiptOs -cne [string]$versionMatch.Groups['os'].Value -or
+        $receiptArchitecture -isnot [string] -or [string]$receiptArchitecture -cne [string]$versionMatch.Groups['architecture'].Value) {
+        throw "$Context Go runtime identity does not match its exact version output."
+    }
+    return $validatedGoPath
+}
+
 function Assert-AuthorityPolicyReceipt {
-    param([Parameter(Mandatory = $true)] $Receipt)
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [string] $ExpectedRunId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRunId)) {
+        Assert-AuthorityRunReceiptContext -Receipt $Receipt -ExpectedRunId $ExpectedRunId -Context 'Validation policy receipt' | Out-Null
+    }
 
     $schemaVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'schemaVersion' -Context 'Validation policy receipt'
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1) {
@@ -1808,10 +1945,33 @@ if ([string]::IsNullOrWhiteSpace($expectedGoRuntimeVersion) -or
     $expectedGoRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
     throw 'The authority gate requires STANDARD_GO_RUNTIME_VERSION from the setup-go run-resolved latest stable runtime.'
 }
+$goCommandPath = [string]$GoCommandPath
+if ([string]::IsNullOrWhiteSpace($goCommandPath)) {
+    $goApplications = @(Get-Command -Name 'go' -CommandType Application -ErrorAction SilentlyContinue)
+    if ($goApplications.Count -ne 1) {
+        throw 'The authority gate requires one run-resolved Go executable path from setup-go.'
+    }
+    $goCommandPath = if ($null -ne $goApplications[0].PSObject.Properties['Path']) {
+        [string]$goApplications[0].Path
+    }
+    else {
+        [string]$goApplications[0].Source
+    }
+}
+if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) {
+    throw 'The authority gate requires an absolute run-resolved Go executable path.'
+}
+$goCommandPath = [IO.Path]::GetFullPath($goCommandPath)
+$goCommandItem = Get-Item -Force -LiteralPath $goCommandPath -ErrorAction SilentlyContinue
+if ($null -eq $goCommandItem -or $goCommandItem.PSIsContainer -or
+    ($goCommandItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The authority gate requires a regular run-resolved Go executable: $goCommandPath"
+}
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
 )
 foreach ($requiredPath in @($validationSecurityGatePath, $upstreamAdapterPolicyPath, $upstreamAdapterValidatorPath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -1833,9 +1993,8 @@ if (-not $artifactsItem.PSIsContainer -or
 
 $runId = [guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $artifactsRootPath "standard-authority-$runId"
-$installRoot = Join-Path $runRoot 'tools'
+$installRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
 $fixtureRoot = Join-Path $runRoot 'fixture/standard-validation-fixture'
-[void](New-Item -ItemType Directory -Path $installRoot -Force)
 [void](New-Item -ItemType Directory -Path $fixtureRoot -Force)
 
 $fixtureText = @'
@@ -1890,9 +2049,9 @@ finally {
 }
 
 $policyReceiptPath = Join-Path $runRoot 'policy.json'
-& $resolverPath -ValidatePolicyOnly -OutputPath $policyReceiptPath | Out-Host
+& $resolverPath -ValidatePolicyOnly -RunId $runId -OutputPath $policyReceiptPath | Out-Host
 $policyReceipt = Read-AuthorityJson -Path $policyReceiptPath -Context 'Validation policy resolver'
-Assert-AuthorityPolicyReceipt -Receipt $policyReceipt
+Assert-AuthorityPolicyReceipt -Receipt $policyReceipt -ExpectedRunId $runId
 
 $expectedSources = [ordered]@{
     'skillspector' = 'NVIDIA/SkillSpector'
@@ -1910,11 +2069,13 @@ foreach ($entry in $expectedSources.GetEnumerator()) {
         -ToolName $entry.Key `
         -Install `
         -InstallRoot $installRoot `
+        -RunId $runId `
         -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
+        -GoCommandPath $goCommandPath `
         -OutputPath $receiptPath | Out-Host
     $receipt = Read-AuthorityJson -Path $receiptPath -Context "$($entry.Key) resolver"
     $executablePaths[$entry.Key] = Assert-InstalledAuthorityToolReceipt `
-        -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot
+        -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot -ExpectedRunId $runId
     $receipts[$entry.Key] = $receipt
     if ($entry.Key -ceq 'skillspector') {
         Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -Force -ErrorAction SilentlyContinue
@@ -2038,6 +2199,11 @@ if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorRece
 if ($skillValidatorRuntimeVersion -cne $expectedGoRuntimeVersion) {
     throw "skill-validator receipt Go runtime '$skillValidatorRuntimeVersion' does not match the setup-go run-resolved latest stable runtime '$expectedGoRuntimeVersion'."
 }
+Assert-AuthoritySkillValidatorRuntimeReceipt `
+    -Receipt $skillValidatorReceipt `
+    -GoCommandPath $goCommandPath `
+    -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
+    -Context 'skill-validator receipt' | Out-Null
 
 $skillToolsReceipt = $receipts.'skill-tools'
 if ($skillToolsReceipt.registry -isnot [string] -or
@@ -2338,6 +2504,9 @@ $summary = [ordered]@{
         policyPath = 'docs/standards/validation-security-gate.json'
         policySha256 = $validationSecurityGatePolicySha256
         stageIds = @($validationSecurityGate.stages | ForEach-Object { [string]$_.id })
+        executionScope = 'protected-authority-fixture-regression'
+        productionCandidateRunnerInvoked = $false
+        tenStageCompletionClaim = $false
     }
     fixture = [ordered]@{
         id = 'standard-validation-fixture'

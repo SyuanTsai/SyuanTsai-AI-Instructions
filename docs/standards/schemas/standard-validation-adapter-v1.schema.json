@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Standard validation consumer adapter v1",
+  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "adapter",
+    "mode",
+    "skillsRoot",
+    "activeSkills",
+    "packageAdapter",
+    "skillValidator",
+    "skillTools",
+    "staticAnalyzer",
+    "repositoryTests"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "adapter": { "const": "standard-validation-adapter-v1" },
+    "mode": { "enum": ["production", "development-harness"] },
+    "skillsRoot": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))(?![A-Za-z]:)[A-Za-z0-9._/-]+$"
+    },
+    "activeSkills": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      }
+    },
+    "packageAdapter": { "$ref": "#/$defs/commandSpec" },
+    "skillValidator": { "$ref": "#/$defs/commandSpec" },
+    "skillTools": { "$ref": "#/$defs/commandSpec" },
+    "staticAnalyzer": { "$ref": "#/$defs/commandSpec" },
+    "repositoryTests": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/testSpec" }
+    }
+  },
+  "$defs": {
+    "commandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "arguments"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to a run-resolved trusted executable or interpreter; it must not be under CandidateRoot."
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "testSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "arguments"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

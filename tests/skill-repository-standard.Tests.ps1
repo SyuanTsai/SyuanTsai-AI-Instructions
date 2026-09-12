@@ -15,6 +15,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:UpstreamAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\upstream-adapter-v1.schema.json'
         $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
         $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
+        $script:StandardValidationAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-adapter-v1.schema.json'
+        $script:StandardValidationEvidenceSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-evidence-v1.schema.json'
+        $script:StandardValidationContractPath = Join-Path $script:StandardsRoot 'standard-validation-contract-v1.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -1104,6 +1107,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver 'executableSha256 = \$resolved\.executableSha256' 'Every tool receipt must project its exact executable hash.'
     }
 
+    It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $runId = [guid]::NewGuid().ToString('N')
+        $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
+        try {
+            Assert-True (Test-Path -LiteralPath $toolRoot -PathType Container) 'Authority tools must be created in a run-owned directory.'
+            Assert-False ((Get-Item -Force -LiteralPath $toolRoot).Attributes -band [System.IO.FileAttributes]::ReparsePoint) 'Authority tool root must not be a reparse point.'
+            Assert-True ($toolRoot.Length -lt 128) 'Authority tool root must leave path-length headroom for Python venv and pip files.'
+            Assert-Match $toolRoot ('svt-tools-' + $runId) 'Authority tool root must bind to the current run id.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $toolRoot) {
+                Remove-Item -LiteralPath $toolRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        Assert-Match $gate 'New-AuthorityRunOwnedToolRoot' 'Authority gate must allocate its formal tool root through the short-path helper.'
+    }
+
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
         $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RequiredPowerShellWorkflowPath
@@ -1111,7 +1135,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
-        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
+        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
         Assert-Match $workflow "'scripts/Resolve-PythonWheelClosure\.py'" 'Python helper changes must trigger the standalone authority workflow.'
         Assert-NotMatch $workflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Standards workflow must not maintain a divergent inline resolver sequence.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
@@ -1119,7 +1143,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
         Assert-Match $requiredWorkflow '(?ms)^permissions:\r?\n  contents: read\r?\n\r?\njobs:' 'Required workflow token permissions must be explicitly read-only.'
         Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
-        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
+        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
         Assert-NotMatch $requiredWorkflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Required context must not maintain a divergent inline resolver sequence.'
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
@@ -1137,8 +1161,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate "(?s)trustedGoRuntimeVersion'.*?-Expected 'latest-stable'" 'Shared gate must bind the policy receipt to the latest stable Go runtime rule.'
         Assert-Match $gate '\$skillValidatorRuntimeVersion' 'Shared gate must validate the stable Go runtime selected for the run.'
         Assert-Match $gate 'skillValidatorRuntimeIdentityPattern' 'Shared gate must require the selected Go runtime in the resolved identity.'
-        Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
-        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with setup-go runtime evidence.'
+        Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -RunId \$runId -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
+        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-RunId \$runId `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-GoCommandPath \$goCommandPath `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with run-bound setup-go runtime evidence.'
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
@@ -1544,6 +1568,48 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Policy coercion '$($case.Path)' must fail closed."
         }
+    }
+
+    # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.
+    # Purpose: Bind the skill-validator receipt to the exact setup-go executable, bytes, version output and authority run.
+    It 'UnitT33a_requires_run_bound_skill_validator_runtime_identity' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $runId = 'b' * 32
+        $goPath = Join-Path $TestDrive 'go.exe'
+        Write-TestUtf8File -Path $goPath -Text 'approved go executable fixture'
+        $goSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $goPath).Hash.ToLowerInvariant()
+        $receipt = [pscustomobject][ordered]@{
+            resolutionRunId=$runId
+            resolvedAtUtc=[DateTime]::UtcNow
+            executionContext=[pscustomobject][ordered]@{ os='windows'; architecture='amd64' }
+            goRuntimePath=$goPath
+            goRuntimeSha256=$goSha256
+            goRuntimeVersion='1.27.1'
+            goRuntimeVersionOutput=@('go version go1.27.1 windows/amd64')
+            goRuntimeOs='windows'
+            goRuntimeArchitecture='amd64'
+        }
+
+        Assert-AuthorityRunReceiptContext -Receipt $receipt -ExpectedRunId $runId -Context 'skill-validator receipt'
+        Assert-AuthoritySkillValidatorRuntimeReceipt `
+            -Receipt $receipt `
+            -GoCommandPath $goPath `
+            -ExpectedGoRuntimeVersion '1.27.1' `
+            -Context 'skill-validator receipt'
+
+        $tampered = Copy-TestJsonObject -Value $receipt
+        $tampered.goRuntimeSha256 = ('c' * 64)
+        $errorMessage = $null
+        try {
+            Assert-AuthoritySkillValidatorRuntimeReceipt `
+                -Receipt $tampered `
+                -GoCommandPath $goPath `
+                -ExpectedGoRuntimeVersion '1.27.1' `
+                -Context 'skill-validator receipt'
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'changed after resolution|hash' 'A changed Go runtime receipt must fail closed.'
     }
 
     # Scenario: Pester 4 and Pester 6 expose different result shapes, and required counts can arrive as coercible text.
@@ -2810,6 +2876,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
         Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
+    }
+
+    # Scenario: The central runner contract changes without a versioned adapter/evidence boundary.
+    # Purpose: Keep consumer declarations thin and make the production runner's barrier semantics machine-readable.
+    It 'UnitT92_binds_the_central_runner_to_versioned_adapter_evidence_and_barriers' {
+        foreach ($path in @($script:StandardValidationAdapterSchemaPath, $script:StandardValidationEvidenceSchemaPath, $script:StandardValidationContractPath)) {
+            Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Missing central runner contract file '$path'."
+            $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        }
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardValidation.ps1'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+        Assert-Equal $contract.contract 'standard-validation-contract-v1' 'Central runner contract identity changed.'
+        Assert-Equal @($contract.stages).Count 10 'Central runner contract must retain all ten canonical stages.'
+        Assert-True ([bool]$contract.execution.packageBeforeStatic) 'Package tools must be a Static prerequisite.'
+        Assert-True ([bool]$contract.execution.staticBeforeRepositoryTests) 'Static must be a repository-test prerequisite.'
+        Assert-False ([bool]$contract.execution.candidateCodeBeforeStatic) 'Candidate code must not execute before Static.'
+        Assert-Match $runner 'Invoke-StandardValidationProcess' 'Central runner must record actual child process execution.'
+        Assert-Match $runner 'Assert-StandardValidationToolEnvelope' 'Central runner must validate actual tool output envelopes.'
+        Assert-Match $runner 'SemanticConsent' 'Central runner must expose explicit semantic consent.'
+        Assert-Match $runner 'CompleteLifecycle' 'Central runner must keep release lifecycle evidence separate from validation-only runs.'
     }
 
     # Scenario: A consumer adds a renamed workflow, hook, or public command that runs a component validator directly.
