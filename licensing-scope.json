@@ -312,6 +312,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/trust-anchors/human-approval-public-key.xml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/trust-anchors/trusted-supervisor-public-key.xml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/upstream-interoperability.md",
       "license": "Apache-2.0"
     },

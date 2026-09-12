@@ -85,6 +85,137 @@ $script:StandardValidationTrustAnchorDefinitions = [ordered]@{
     }
 }
 
+if ([Environment]::OSVersion.Platform -in @([PlatformID]::Win32NT, [PlatformID]::Unix)) {
+    if ($null -eq ('StandardValidationProcessControlNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class StandardValidationProcessControlNative
+{
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInformationClass = 9;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        ref JobObjectExtendedLimitInformation information,
+        uint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int processId, int signal);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getpgid(int processId);
+
+    public static IntPtr CreateKillOnCloseJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed.");
+        }
+        JobObjectExtendedLimitInformation information = new JobObjectExtendedLimitInformation();
+        information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+        if (!SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformationClass,
+            ref information,
+            (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformation))))
+        {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error, "SetInformationJobObject failed.");
+        }
+        return job;
+    }
+
+    public static bool TryAssignProcessToJobObject(IntPtr job, IntPtr process)
+    {
+        return AssignProcessToJobObject(job, process);
+    }
+
+    public static bool TryTerminateJobObject(IntPtr job, uint exitCode)
+    {
+        return TerminateJobObject(job, exitCode);
+    }
+
+    public static bool TryCloseHandle(IntPtr handle)
+    {
+        return CloseHandle(handle);
+    }
+
+    public static int GetProcessGroupId(int processId)
+    {
+        return getpgid(processId);
+    }
+
+    public static bool TryKillProcessGroup(int processGroupId, int signal)
+    {
+        return kill(-processGroupId, signal) == 0;
+    }
+
+    public static bool IsProcessGroupAlive(int processGroupId)
+    {
+        int result = kill(-processGroupId, 0);
+        if (result == 0) return true;
+        return Marshal.GetLastWin32Error() != 3; // ESRCH means the group is gone.
+    }
+}
+'@
+    }
+}
+
 function Get-StandardValidationProperty {
     param(
         [Parameter(Mandatory = $true)] $Object,
@@ -1016,6 +1147,8 @@ function Stop-StandardValidationProcessTree {
         [Parameter(Mandatory = $true)][int] $RootProcessId,
         [System.Diagnostics.Process] $RootProcess,
         [int[]] $KnownProcessIds = @(),
+        [int] $ProcessGroupId = 0,
+        [IntPtr] $JobHandle = [IntPtr]::Zero,
         [Parameter(Mandatory = $true)][int] $WaitMilliseconds
     )
 
@@ -1024,6 +1157,22 @@ function Stop-StandardValidationProcessTree {
     foreach ($processId in @($KnownProcessIds)) { [void]$known.Add([int]$processId) }
     foreach ($processId in @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)) { [void]$known.Add([int]$processId) }
     $cleanupAttempted = $false
+    if ($JobHandle -ne [IntPtr]::Zero) {
+        try {
+            if ([StandardValidationProcessControlNative]::TryTerminateJobObject($JobHandle, 1)) {
+                $cleanupAttempted = $true
+            }
+        }
+        catch { }
+    }
+    if ($ProcessGroupId -gt 0) {
+        try {
+            if ([StandardValidationProcessControlNative]::TryKillProcessGroup($ProcessGroupId, 9)) {
+                $cleanupAttempted = $true
+            }
+        }
+        catch { }
+    }
     try {
         if ($null -ne $RootProcess) {
             try {
@@ -1058,14 +1207,74 @@ function Stop-StandardValidationProcessTree {
         }
         $rootAlive = $false
         if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
-        if (-not $rootAlive -and $remaining.Count -eq 0) { return $true }
+        $processGroupAlive = $false
+        if ($ProcessGroupId -gt 0) {
+            try { $processGroupAlive = [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId) }
+            catch { $processGroupAlive = $true }
+        }
+        if (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive) { return $true }
         if ((Get-Date) -ge $deadline) { break }
         Start-Sleep -Milliseconds 50
     } while ($true)
     $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
     $rootAlive = $false
     if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
-    return (-not $rootAlive -and $remaining.Count -eq 0)
+    $processGroupAlive = $false
+    if ($ProcessGroupId -gt 0) {
+        try { $processGroupAlive = [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId) }
+        catch { $processGroupAlive = $true }
+    }
+    return (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive)
+}
+
+function Get-StandardValidationUnixProcessGroupLauncher {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
+    foreach ($candidate in @('/usr/bin/setsid', '/bin/setsid')) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
+            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                return [string]$item.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Get-StandardValidationWindowsBootstrapHost {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    $hostName = if ([string]$PSVersionTable.PSEdition -ceq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
+    if ([string]::IsNullOrWhiteSpace([string]$PSHOME)) {
+        throw 'The current PowerShell host path is unavailable for owned Windows process bootstrap.'
+    }
+    $hostPath = Get-StandardValidationFullPath -Path (Join-Path $PSHOME $hostName) -Context 'Windows process bootstrap host'
+    Assert-StandardValidationRegularFile -Path $hostPath -Context 'Windows process bootstrap host'
+    return $hostPath
+}
+
+function Get-StandardValidationWindowsBootstrapCode {
+    return @'
+$ErrorActionPreference = 'Stop'
+$targetCommand = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_COMMAND
+$argumentJson = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS
+$releasePath = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH
+if ([string]::IsNullOrWhiteSpace($targetCommand) -or [string]::IsNullOrWhiteSpace($releasePath)) {
+    throw 'Owned Windows process bootstrap received incomplete target metadata.'
+}
+$targetArguments = @()
+if (-not [string]::IsNullOrWhiteSpace($argumentJson)) {
+    $parsedArguments = ConvertFrom-Json -InputObject $argumentJson
+    if ($null -ne $parsedArguments) {
+        foreach ($item in @($parsedArguments)) {
+            if ($item -isnot [string]) { throw 'Owned Windows process bootstrap arguments must be strings.' }
+            $targetArguments += [string]$item
+        }
+    }
+}
+while (-not [IO.File]::Exists($releasePath)) { Start-Sleep -Milliseconds 10 }
+& $targetCommand @targetArguments
+if ($null -eq $LASTEXITCODE) { exit 0 }
+exit ([int]$LASTEXITCODE)
+'@
 }
 
 function Get-StandardValidationChildEnvironment {
@@ -1083,7 +1292,7 @@ function Get-StandardValidationChildEnvironment {
         'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)',
         'COMMONPROGRAMW6432', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME',
         'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DOTNET_ROOT',
-        'DOTNET_ROOT_X64', 'LD_LIBRARY_PATH', 'XDG_RUNTIME_DIR'
+        'DOTNET_ROOT_X64', 'LD_LIBRARY_PATH', 'XDG_RUNTIME_DIR', 'PSExecutionPolicyPreference'
     )
     $childEnvironment = [ordered]@{}
     foreach ($name in $safeInheritedNames) {
@@ -1124,6 +1333,12 @@ function Invoke-StandardValidationProcess {
     $cleanedUp = $true
     $process = $null
     $rootProcessId = $null
+    $jobHandle = [IntPtr]::Zero
+    $jobClosed = $true
+    $processGroupId = 0
+    $processGroupLaunch = $false
+    $windowsBootstrapLaunch = $false
+    $windowsBootstrapReleasePath = $null
     $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
     try {
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
@@ -1132,16 +1347,57 @@ function Invoke-StandardValidationProcess {
                 status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true
             }
         }
+        $launchCommand = $Command
+        $launchArguments = @($Arguments)
+        $launchEnvironment = @{}
+        foreach ($entry in $Environment.GetEnumerator()) { $launchEnvironment[[string]$entry.Key] = [string]$entry.Value }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            try {
+                $jobHandle = [StandardValidationProcessControlNative]::CreateKillOnCloseJob()
+                $jobClosed = $false
+                $bootstrapHost = Get-StandardValidationWindowsBootstrapHost
+                $windowsBootstrapReleasePath = Join-Path $WorkingDirectory ("process-bootstrap-{0}.signal" -f ([guid]::NewGuid().ToString('N')))
+                if (Test-Path -LiteralPath $windowsBootstrapReleasePath) {
+                    throw 'The owned Windows process bootstrap signal path already exists.'
+                }
+                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = $Command
+                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = if (@($Arguments).Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress }
+                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $windowsBootstrapReleasePath
+                $bootstrapCode = Get-StandardValidationWindowsBootstrapCode
+                $encodedBootstrapCode = [Convert]::ToBase64String(([Text.Encoding]::Unicode).GetBytes($bootstrapCode))
+                $launchCommand = $bootstrapHost
+                $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedBootstrapCode)
+                $windowsBootstrapLaunch = $true
+            }
+            catch {
+                return [pscustomobject][ordered]@{
+                    startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true
+                }
+            }
+        }
+        elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            $unixLauncher = Get-StandardValidationUnixProcessGroupLauncher
+            if ([string]::IsNullOrWhiteSpace([string]$unixLauncher)) {
+                return [pscustomobject][ordered]@{
+                    startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
+                    status = 'startup-failed'; stdout = ''; stderr = 'No trusted setsid launcher is available for an owned Unix process group.'; cleanedUp = $true
+                }
+            }
+            $launchCommand = [string]$unixLauncher
+            $launchArguments = @($Command) + @($Arguments)
+            $processGroupLaunch = $true
+        }
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $Command
-        $startInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments $Arguments
+        $startInfo.FileName = $launchCommand
+        $startInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments $launchArguments
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.EnvironmentVariables.Clear()
-        foreach ($entry in (Get-StandardValidationChildEnvironment -Environment $Environment).GetEnumerator()) {
+        foreach ($entry in (Get-StandardValidationChildEnvironment -Environment $launchEnvironment).GetEnumerator()) {
             $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
         }
         $process = New-Object System.Diagnostics.Process
@@ -1161,41 +1417,146 @@ function Invoke-StandardValidationProcess {
             }
         }
         $rootProcessId = [int]$process.Id
+        $protectionSetupFailed = $false
+        $terminationStatus = $null
+        if ($jobHandle -ne [IntPtr]::Zero) {
+            try {
+                if (-not [StandardValidationProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
+                    throw 'AssignProcessToJobObject returned false.'
+                }
+            }
+            catch {
+                $protectionSetupFailed = $true
+                $terminationStatus = 'startup-failed'
+                $stderr = "Could not assign the validator to the owned Windows job object: $($_.Exception.Message)"
+                $cleanedUp = Stop-StandardValidationProcessTree `
+                    -RootProcessId $rootProcessId `
+                    -RootProcess $process `
+                    -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
+                    -JobHandle $jobHandle `
+                    -WaitMilliseconds 5000
+            }
+            if (-not $protectionSetupFailed -and $windowsBootstrapLaunch) {
+                try {
+                    $releaseBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('release' + [Environment]::NewLine)
+                    $releaseStream = [IO.File]::Open(
+                        $windowsBootstrapReleasePath,
+                        [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::None
+                    )
+                    try {
+                        $releaseStream.Write($releaseBytes, 0, $releaseBytes.Length)
+                        $releaseStream.Flush()
+                    }
+                    finally { $releaseStream.Dispose() }
+                }
+                catch {
+                    $protectionSetupFailed = $true
+                    $terminationStatus = 'startup-failed'
+                    $stderr = "Could not release the owned Windows process bootstrap: $($_.Exception.Message)"
+                    $cleanedUp = Stop-StandardValidationProcessTree `
+                        -RootProcessId $rootProcessId `
+                        -RootProcess $process `
+                        -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
+                        -JobHandle $jobHandle `
+                        -WaitMilliseconds 5000
+                }
+            }
+        }
+        elseif ($processGroupLaunch) {
+            try {
+                $processGroupId = [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId)
+                if ($processGroupId -ne $rootProcessId) {
+                    throw "setsid did not create a process group owned by PID $rootProcessId (actual group $processGroupId)."
+                }
+            }
+            catch {
+                $alreadyExited = $false
+                try { $alreadyExited = [bool]$process.HasExited } catch { }
+                if (-not $alreadyExited) {
+                    $protectionSetupFailed = $true
+                    $terminationStatus = 'startup-failed'
+                    $stderr = "Could not establish the owned Unix process group: $($_.Exception.Message)"
+                    $cleanedUp = Stop-StandardValidationProcessTree `
+                        -RootProcessId $rootProcessId `
+                        -RootProcess $process `
+                        -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
+                        -ProcessGroupId $processGroupId `
+                        -WaitMilliseconds 5000
+                }
+                else {
+                    $processGroupId = 0
+                }
+            }
+        }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
-        $terminationStatus = $null
-        while (-not $process.HasExited) {
+        while (-not $protectionSetupFailed -and -not $process.HasExited) {
             foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
             if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
                 $terminationStatus = 'cancelled'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000)
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -WaitMilliseconds 5000)
                 break
             }
             if ((Get-Date) -gt $deadline) {
                 $terminationStatus = 'timeout'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000)
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -WaitMilliseconds 5000)
                 break
             }
             Start-Sleep -Milliseconds 50
         }
-        if ($null -ne $terminationStatus) {
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 5000
+        if ($protectionSetupFailed) {
+            # The failed protection setup was already terminated above; keep a
+            # second cleanup pass to catch descendants spawned during startup.
+            $cleanedUp = $cleanedUp -and (Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -WaitMilliseconds 5000)
+        }
+        elseif ($null -ne $terminationStatus) {
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -WaitMilliseconds 5000
         }
         else {
             $process.WaitForExit()
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -WaitMilliseconds 1000
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -WaitMilliseconds 1000
         }
         try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch { $stdout = '' }
         try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { $stderr = '' }
         if ($process.HasExited) { $exitCode = $process.ExitCode }
-        if (-not $cleanedUp) { $status = 'cleanup-failed' }
+        if (-not $cleanedUp) {
+            $status = 'cleanup-failed'
+            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = 'The owned validator process group or descendant process tree did not fully terminate.' }
+        }
+        elseif ($protectionSetupFailed) { $status = 'startup-failed' }
         elseif ($null -ne $terminationStatus) { $status = $terminationStatus }
         elseif ($exitCode -eq 0) { $status = 'passed' }
         else { $status = 'failed' }
     }
     finally {
+        $jobHandleBeforeClose = $jobHandle
+        if ($jobHandle -ne [IntPtr]::Zero) {
+            try {
+                $jobCloseResult = [StandardValidationProcessControlNative]::TryCloseHandle($jobHandle)
+                $jobClosed = [bool]$jobCloseResult
+                if (-not $jobClosed) { $stderr = "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." }
+            }
+            catch { $jobClosed = $false; $stderr = "The owned Windows job object could not be closed safely: $($_.Exception.Message)" }
+            $jobHandle = [IntPtr]::Zero
+        }
         if ($null -ne $process) { $process.Dispose() }
+        if (-not [string]::IsNullOrWhiteSpace([string]$windowsBootstrapReleasePath) -and
+            [IO.File]::Exists($windowsBootstrapReleasePath)) {
+            try { [IO.File]::Delete($windowsBootstrapReleasePath) }
+            catch {
+                $cleanedUp = $false
+                $status = 'cleanup-failed'
+                if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = "The owned Windows process bootstrap signal could not be removed: $($_.Exception.Message)" }
+            }
+        }
+        if (-not $jobClosed) {
+            $cleanedUp = $false
+            $status = 'cleanup-failed'
+            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = "The owned Windows job object could not be closed safely (handle=$($jobHandleBeforeClose.ToInt64()))." }
+        }
     }
     return [pscustomobject][ordered]@{
         startedAt = $startedAt
