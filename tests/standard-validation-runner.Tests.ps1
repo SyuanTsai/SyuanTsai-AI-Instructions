@@ -582,6 +582,11 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
         Assert-Match ([string]$contract.execution.productionCommandPolicy) 'signed-resolver-receipt' 'Production commands must carry a trusted signed resolver receipt.'
+        Assert-Equal ([string]$contract.execution.productionToolRoles.packageAdapter) 'package-adapter' 'The package adapter slot must have a fixed canonical tool role.'
+        Assert-Equal ([string]$contract.execution.productionToolRoles.skillValidator) 'skill-validator' 'The skill-validator slot must have a fixed canonical tool role.'
+        Assert-Equal ([string]$contract.execution.productionToolRoles.skillTools) 'skill-tools' 'The skill-tools slot must have a fixed canonical tool role.'
+        Assert-Equal ([string]$contract.execution.productionToolRoles.staticAnalyzer) 'skillspector' 'The static analyzer slot must have a fixed canonical tool role.'
+        Assert-Equal ([string]$contract.execution.productionToolRoles.repositoryTests) 'pester' 'The repository-test slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.inventoryEncoding.line) '<path>\t<raw-file-sha256>\n' 'Canonical inventory hashing must exclude file length and use raw-file hashes.'
         Assert-Match ([string]$contract.execution.installedClosure) 'in-root-unix-symlink-target-identities' 'Installed tool closure must bind approved in-root Unix symlink targets.'
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
@@ -617,6 +622,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'
         Assert-Match $runnerSource 'Assert-StandardValidationAiReviewEvidence' 'AI review evidence must use the central typed review policy.'
         Assert-Match $runnerSource 'Assert-StandardValidationToolReceipt' 'Production command provenance must use a signed resolver receipt.'
+        Assert-Match $runnerSource 'ExpectedToolName' 'Production command provenance must bind to the expected adapter-slot tool role.'
+        Assert-Match $runnerSource 'Get-StandardValidationExpectedToolName' 'Every adapter slot must resolve through the central canonical tool-role map.'
+        Assert-Match $runnerSource 'Assert-StandardValidationCanonicalRootPath' 'Root containment checks must use canonical existing filesystem components.'
+        Assert-Match $runnerSource 'symlinked or reparse-point ancestor' 'Symlinked root ancestors must fail closed before artifact creation.'
         Assert-Match $runnerSource 'Assert-StandardValidationLauncherFileIdentity' 'Production package launchers must revalidate safe Unix launcher symlinks through the central helper.'
         Assert-Match $runnerSource 'Get-StandardValidationSafeUnixSymlinkEntry' 'Production installed closures must validate Unix symlink targets centrally.'
         Assert-Match $runnerSource 'Assert-StandardValidationSemanticEvidence' 'Semantic evidence must be authenticated and complete.'
@@ -630,6 +639,64 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $reservationIndex = $runnerSource.IndexOf('$outputReservation = New-StandardValidationOutputReservation', [StringComparison]::Ordinal)
         $contractResolverIndex = $runnerSource.IndexOf('$contractResult = Assert-StandardValidationContractFiles', [StringComparison]::Ordinal)
         Assert-True ($reservationIndex -ge 0 -and $contractResolverIndex -ge 0 -and $reservationIndex -lt $contractResolverIndex) 'Final output reservation must precede authority contract resolver child processes.'
+    }
+
+    # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
+    # or reaches the artifact root through a symlinked ancestor.
+    # Purpose: Keep tool-role provenance and checkout-external artifact boundaries authoritative.
+    It 'InterT07_rejects_cross_slot_receipts_and_symlinked_root_ancestors' {
+        $functionRoot = Join-Path $TestDrive 'central-boundary-functions'
+        [void](New-Item -ItemType Directory -Path $functionRoot -Force)
+        . $script:RunnerPath `
+            -CandidateRoot (Join-Path $functionRoot 'candidate') `
+            -AdapterPath (Join-Path $functionRoot 'adapter.json') `
+            -ArtifactsRoot (Join-Path $functionRoot 'artifacts') `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $functionRoot `
+            -DefineFunctionsOnly
+
+        $wrongRoleRejected = $false
+        try {
+            Assert-StandardValidationToolReceipt `
+                -Provenance ([pscustomobject][ordered]@{
+                    toolName = 'skill-validator'
+                    receiptPath = [IO.Path]::GetFullPath((Join-Path $functionRoot 'missing-receipt.json'))
+                    receiptSha256 = ('0' * 64)
+                }) `
+                -CommandPath (Join-Path $functionRoot 'missing-command') `
+                -CandidateRoot (Join-Path $functionRoot 'candidate') `
+                -ArtifactsRoot (Join-Path $functionRoot 'artifacts') `
+                -TrustAnchorRoot $functionRoot `
+                -RunId ([guid]::NewGuid()) `
+                -ExpectedToolName 'skill-tools' `
+                -Context 'cross-slot receipt' | Out-Null
+        }
+        catch {
+            $wrongRoleRejected = $true
+            Assert-Match $_.Exception.Message 'expected canonical tool role' 'A receipt from another adapter slot must be rejected before receipt I/O.'
+        }
+        Assert-True $wrongRoleRejected 'A cross-slot resolver receipt must never be accepted.'
+
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return }
+        $symlinkRoot = Join-Path $TestDrive 'symlinked-artifact-ancestor'
+        $targetRoot = Join-Path $symlinkRoot 'target'
+        $aliasRoot = Join-Path $symlinkRoot 'alias'
+        [void](New-Item -ItemType Directory -Path $targetRoot -Force)
+        [void](New-Item -ItemType SymbolicLink -Path $aliasRoot -Target $targetRoot)
+        $symlinkRejected = $false
+        try {
+            Assert-StandardValidationCanonicalRootPath `
+                -Path (Join-Path $aliasRoot 'output') `
+                -Context 'symlinked artifact root' | Out-Null
+        }
+        catch {
+            $symlinkRejected = $true
+            Assert-Match $_.Exception.Message 'symlinked or reparse-point ancestor' 'A symlinked artifact-root ancestor must be rejected.'
+        }
+        Assert-True $symlinkRejected 'An artifact root reached through a symlinked ancestor must fail closed.'
     }
 
     # Scenario: A production adapter attempts to execute a payload through a generic interpreter.

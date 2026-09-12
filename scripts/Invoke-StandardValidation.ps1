@@ -86,6 +86,13 @@ $script:StandardValidationTrustAnchorDefinitions = [ordered]@{
         sha256 = '1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b'
     }
 }
+$script:StandardValidationToolRoleByAdapterSlot = [ordered]@{
+    packageAdapter = 'package-adapter'
+    skillValidator = 'skill-validator'
+    skillTools = 'skill-tools'
+    staticAnalyzer = 'skillspector'
+    repositoryTests = 'pester'
+}
 
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     if ($null -eq ('StandardValidationProcessControlNative' -as [type])) {
@@ -317,6 +324,63 @@ function Get-StandardValidationFullPath {
 
     try { return [System.IO.Path]::GetFullPath($Path) }
     catch { throw "INVALID|$Context is not a valid path: $($_.Exception.Message)" }
+}
+
+function Test-StandardValidationReparseItem {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    $isReparse = (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    if (-not $isReparse -and $Item.PSObject.Properties.Name -contains 'LinkType' -and
+        -not [string]::IsNullOrWhiteSpace([string]$Item.LinkType)) {
+        $isReparse = $true
+    }
+    if (-not $isReparse -and $Item.PSObject.Properties.Name -contains 'Target' -and
+        $null -ne $Item.Target -and @($Item.Target).Count -gt 0) {
+        $isReparse = $true
+    }
+    return [bool]$isReparse
+}
+
+function Assert-StandardValidationCanonicalRootPath {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    }
+    else { [System.StringComparison]::Ordinal }
+    $current = $fullPath
+    while ($true) {
+        $item = $null
+        try { $item = Get-Item -Force -LiteralPath $current -ErrorAction Stop }
+        catch [System.Management.Automation.ItemNotFoundException] { }
+        catch [System.IO.FileNotFoundException] { }
+        catch [System.IO.DirectoryNotFoundException] { }
+        catch { throw "INVALID|$Context path component could not be inspected: $($_.Exception.Message)" }
+        if ($null -ne $item -and (Test-StandardValidationReparseItem -Item $item)) {
+            throw "INVALID|$Context contains a symlinked or reparse-point ancestor: $current"
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or [string]::Equals($parent, $current, $comparison)) {
+            break
+        }
+        $current = $parent
+    }
+    # Every existing path component was inspected as a filesystem object. With
+    # no reparse component, this full path is the canonical identity used by
+    # the root containment checks below; missing leaf components are created
+    # only after their existing ancestors have passed this gate.
+    return $fullPath
+}
+
+function Get-StandardValidationExpectedToolName {
+    param([Parameter(Mandatory = $true)][string] $AdapterSlot)
+
+    $expected = $script:StandardValidationToolRoleByAdapterSlot[$AdapterSlot]
+    if ($expected -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$expected)) {
+        throw "INVALID|No canonical validation tool role is defined for adapter slot '$AdapterSlot'."
+    }
+    return [string]$expected
 }
 
 function Test-StandardValidationPathWithin {
@@ -670,9 +734,13 @@ function Assert-StandardValidationToolReceipt {
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][guid] $RunId,
+        [Parameter(Mandatory = $true)][string] $ExpectedToolName,
         [Parameter(Mandatory = $true)][string] $Context
     )
 
+    if ([string]::IsNullOrWhiteSpace($ExpectedToolName)) {
+        throw "INVALID|$Context has no expected canonical tool role."
+    }
     Assert-StandardValidationExactPropertySet -Object $Provenance -Expected @('toolName', 'receiptPath', 'receiptSha256') -Context "$Context provenance"
     $toolName = Get-StandardValidationRequiredProperty -Object $Provenance -Name 'toolName' -Context "$Context provenance"
     $receiptPathValue = Get-StandardValidationRequiredProperty -Object $Provenance -Name 'receiptPath' -Context "$Context provenance"
@@ -681,6 +749,9 @@ function Assert-StandardValidationToolReceipt {
         $receiptPathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$receiptPathValue) -or
         -not [System.IO.Path]::IsPathRooted([string]$receiptPathValue)) {
         throw "INVALID|$Context provenance must identify an absolute signed resolver receipt."
+    }
+    if ([string]$toolName -cne $ExpectedToolName) {
+        throw "INVALID|$Context provenance tool '$toolName' does not match the expected canonical tool role '$ExpectedToolName'."
     }
     Assert-StandardValidationSha256 -Value $receiptSha256 -Context "$Context resolver receipt"
     $receiptPath = Get-StandardValidationFullPath -Path ([string]$receiptPathValue) -Context "$Context resolver receipt"
@@ -702,7 +773,7 @@ function Assert-StandardValidationToolReceipt {
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'evidenceType' -Context "$Context resolver receipt") -cne 'validation-tool-resolution' -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'status' -Context "$Context resolver receipt") -cne 'verified' -or
-        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'toolName' -Context "$Context resolver receipt") -cne [string]$toolName -or
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'toolName' -Context "$Context resolver receipt") -cne $ExpectedToolName -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'channel' -Context "$Context resolver receipt") -cne 'latest-stable') {
         throw "BLOCKED|$Context resolver receipt is not a verified latest-stable tool result."
     }
@@ -1297,11 +1368,11 @@ function Assert-StandardValidationNoReparsePoints {
     param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Context)
 
     $rootItem = Get-Item -LiteralPath $Root -ErrorAction Stop
-    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    if (Test-StandardValidationReparseItem -Item $rootItem) {
         throw "INVALID|$Context root must not be a reparse point."
     }
     foreach ($item in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction Stop)) {
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (Test-StandardValidationReparseItem -Item $item) {
             throw "INVALID|$Context contains a reparse point: $($item.FullName)"
         }
         if (-not $item.PSIsContainer -and $item -isnot [System.IO.FileInfo]) {
@@ -1477,6 +1548,7 @@ function Assert-StandardValidationCommandSpec {
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Parameter(Mandatory = $true)][guid] $RunId,
+        [Parameter(Mandatory = $true)][string] $ExpectedToolName,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
     )
 
@@ -1525,6 +1597,7 @@ function Assert-StandardValidationCommandSpec {
             -ArtifactsRoot $ArtifactsRoot `
             -TrustAnchorRoot $TrustAnchorRoot `
             -RunId $RunId `
+            -ExpectedToolName $ExpectedToolName `
             -Context $Context
         if ($commandIsReparse -and [string]$toolReceipt.launcher.kind -cne 'unix-node-shim') {
             throw "INVALID|$Context command symlink is not an attested Unix package launcher."
@@ -1669,6 +1742,7 @@ function Assert-StandardValidationAdapter {
         -DeclaredSkills (Get-StandardValidationRequiredProperty -Object $Adapter -Name 'activeSkills' -Context 'adapter')
     $commands = [ordered]@{}
     foreach ($name in @('packageAdapter', 'skillValidator', 'skillTools', 'staticAnalyzer')) {
+        $expectedToolName = Get-StandardValidationExpectedToolName -AdapterSlot $name
         $commands[$name] = Assert-StandardValidationCommandSpec `
             -Spec (Get-StandardValidationRequiredProperty -Object $Adapter -Name $name -Context "adapter $name") `
             -Context "adapter $name" `
@@ -1677,6 +1751,7 @@ function Assert-StandardValidationAdapter {
             -TrustedToolRoot $TrustedToolRoot `
             -TrustAnchorRoot $TrustAnchorRoot `
             -RunId $RunId `
+            -ExpectedToolName $expectedToolName `
             -DevelopmentHarness $DevelopmentHarness
     }
     $repositoryTests = Get-StandardValidationRequiredProperty -Object $Adapter -Name 'repositoryTests' -Context 'adapter repositoryTests'
@@ -1698,6 +1773,7 @@ function Assert-StandardValidationAdapter {
         else {
             [pscustomobject][ordered]@{ command = $test.command; arguments = $test.arguments; provenance = $test.provenance }
         }
+        $expectedToolName = Get-StandardValidationExpectedToolName -AdapterSlot 'repositoryTests'
         $testCommand = Assert-StandardValidationCommandSpec `
             -Spec $testSpec `
             -Context "adapter repository test '$testId'" `
@@ -1706,6 +1782,7 @@ function Assert-StandardValidationAdapter {
             -TrustedToolRoot $TrustedToolRoot `
             -TrustAnchorRoot $TrustAnchorRoot `
             -RunId $RunId `
+            -ExpectedToolName $expectedToolName `
             -DevelopmentHarness $DevelopmentHarness
         $testCommands += [pscustomobject][ordered]@{ id = [string]$testId; command = $testCommand }
     }
@@ -3490,6 +3567,18 @@ function Assert-StandardValidationContractFiles {
             throw 'INVALID|Central validation contract stage order is not canonical.'
         }
     }
+    $execution = Get-StandardValidationRequiredProperty -Object $contract -Name 'execution' -Context 'central validation contract'
+    $toolRoles = Get-StandardValidationRequiredProperty -Object $execution -Name 'productionToolRoles' -Context 'central validation contract'
+    Assert-StandardValidationExactPropertySet -Object $toolRoles -Expected @(
+        'packageAdapter', 'skillValidator', 'skillTools', 'staticAnalyzer', 'repositoryTests'
+    ) -Context 'central validation contract productionToolRoles'
+    foreach ($slot in @('packageAdapter', 'skillValidator', 'skillTools', 'staticAnalyzer', 'repositoryTests')) {
+        $contractToolName = Get-StandardValidationRequiredProperty -Object $toolRoles -Name $slot -Context "central validation contract productionToolRoles $slot"
+        if ($contractToolName -isnot [string] -or
+            [string]$contractToolName -cne (Get-StandardValidationExpectedToolName -AdapterSlot $slot)) {
+            throw "INVALID|Central validation contract production tool role for '$slot' is not canonical."
+        }
+    }
     $policyPath = Join-Path $RepositoryRoot 'docs/standards/validation-security-gate.json'
     $policy = Get-StandardValidationJson -Path $policyPath -Context 'canonical validation security gate'
     $authorityGatePath = Join-Path $RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
@@ -3745,15 +3834,17 @@ function Invoke-StandardValidationRun {
             Assert-StandardValidationSha256 -Value $CandidateArchiveSha256 -Context 'CandidateArchiveSha256'
         }
         if ([string]::IsNullOrWhiteSpace($TrustedToolRoot)) { $TrustedToolRoot = Split-Path -Parent $PSScriptRoot }
-        $originalCandidateRoot = Get-StandardValidationFullPath -Path $CandidateRoot -Context 'CandidateRoot'
-        $adapterFull = Get-StandardValidationFullPath -Path $AdapterPath -Context 'AdapterPath'
-        $artifactRootFull = Get-StandardValidationFullPath -Path $ArtifactsRoot -Context 'ArtifactsRoot'
-        $trustedToolRootFull = Get-StandardValidationFullPath -Path $TrustedToolRoot -Context 'TrustedToolRoot'
+        $originalCandidateRoot = Assert-StandardValidationCanonicalRootPath -Path $CandidateRoot -Context 'CandidateRoot'
+        $adapterFull = Assert-StandardValidationCanonicalRootPath -Path $AdapterPath -Context 'AdapterPath'
+        $artifactRootFull = Assert-StandardValidationCanonicalRootPath -Path $ArtifactsRoot -Context 'ArtifactsRoot'
+        $trustedToolRootFull = Assert-StandardValidationCanonicalRootPath -Path $TrustedToolRoot -Context 'TrustedToolRoot'
         $trustAnchorRootFull = if ($DevelopmentHarness) {
             $trustedToolRootFull
         }
         else {
-            Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'immutable validation trust-anchor root'
+            Assert-StandardValidationCanonicalRootPath `
+                -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') `
+                -Context 'immutable validation trust-anchor root'
         }
         if (-not (Test-Path -LiteralPath $originalCandidateRoot -PathType Container)) { throw 'INVALID|CandidateRoot is not a directory.' }
         if (-not (Test-Path -LiteralPath $adapterFull -PathType Leaf)) { throw 'INVALID|AdapterPath is not a file.' }

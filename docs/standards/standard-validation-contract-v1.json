@@ -39,6 +39,13 @@
     "artifactRoot": "checkout-external-run-owned",
     "candidateInput": "read-only-snapshot",
     "productionCommandPolicy": "direct-trusted-executable-or-resolver-attested-package-shim; candidate-independent-trusted-supervisor-signed-resolver-receipt; signed-installed-closure-and-launcher-payload-runtime-revalidated-before-and-after-every-child; generic-interpreters-and-unsigned-script-payloads-development-harness-only",
+    "productionToolRoles": {
+      "packageAdapter": "package-adapter",
+      "skillValidator": "skill-validator",
+      "skillTools": "skill-tools",
+      "staticAnalyzer": "skillspector",
+      "repositoryTests": "pester"
+    },
     "inventoryEncoding": {
       "line": "<path>\\t<raw-file-sha256>\\n",
       "sort": "ordinal",
