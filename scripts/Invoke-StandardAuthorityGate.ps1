@@ -1125,7 +1125,14 @@ function Test-AuthorityConsumerReleaseAffectingCommand {
     # opaque to this repository, so they must still be structurally bound to
     # the canonical validator before the release job can run.
     $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
-    return [regex]::IsMatch($Text, $releasePattern) -or (Test-AuthorityConsumerOpaqueReleaseHelper -Text $Text)
+    # gh api becomes a mutating request when fields/input are supplied, or
+    # when an explicit mutating method is selected. Treat every such API call
+    # as release-affecting so an authenticated mutation cannot hide from the
+    # canonical release gate, including repos/{owner}/{repo}/releases calls.
+    $githubApiMutationPattern = '(?im)(?<![A-Za-z0-9_.-])gh\s+api\b[^\r\n]*(?:\s-[fF](?:=|\s)|\s--(?:field|raw-field|input)(?:=|\s)|\s(?:-X|--method)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)'
+    return [regex]::IsMatch($Text, $releasePattern) -or
+        [regex]::IsMatch($Text, $githubApiMutationPattern) -or
+        (Test-AuthorityConsumerOpaqueReleaseHelper -Text $Text)
 }
 
 function Test-AuthorityConsumerOpaqueReleaseHelper {

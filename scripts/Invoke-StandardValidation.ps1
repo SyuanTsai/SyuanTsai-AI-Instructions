@@ -982,7 +982,11 @@ function Assert-StandardValidationImmutableArchiveUrl {
     $sourcePath = ($sourceUri.AbsolutePath.TrimEnd('/') -replace '(?i)\.git$', '')
     $archiveHostAccepted = [string]::Equals($sourceUri.Host, $archiveUri.Host, [StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals(('codeload.' + $sourceUri.Host), $archiveUri.Host, [StringComparison]::OrdinalIgnoreCase)
-    if (-not $archiveHostAccepted -or -not $archiveUri.AbsolutePath.StartsWith($sourcePath, [StringComparison]::OrdinalIgnoreCase)) {
+    $archivePath = $archiveUri.AbsolutePath.TrimEnd('/')
+    $sourcePathPrefix = $sourcePath.TrimEnd('/') + '/'
+    $archivePathBound = [string]::Equals($archivePath, $sourcePath, [StringComparison]::OrdinalIgnoreCase) -or
+        $archivePath.StartsWith($sourcePathPrefix, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $archiveHostAccepted -or -not $archivePathBound) {
         throw "BLOCKED|$Context archive URL is not bound to the source repository."
     }
 }

@@ -3095,6 +3095,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $matrix 'entry-point|alternate gate|canonical validation execution' 'Review matrix must record the entry-point boundary.'
         Assert-Match $gate 'Assert-AuthorityConsumerEntryPointContract' 'The executable authority must expose the consumer entry-point contract checker.'
 
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases -f tag_name=v1.0.0') 'A gh api release creation with fields must be release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases --method PATCH --raw-field name=v1.0.0') 'An explicit mutating gh api release request must be release-affecting.'
+        Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases') 'A read-only gh api release lookup must not be classified as a mutation.'
+
         $weakened = Copy-TestJsonObject -Value $policy
         $weakened.entryPointContract.canonicalExecution.maxPerEventCandidate = 2
         Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message 'A policy allowing two canonical executions per event/candidate must fail schema validation.'

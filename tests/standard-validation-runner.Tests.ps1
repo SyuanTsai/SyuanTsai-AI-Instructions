@@ -680,6 +680,25 @@ $result | ConvertTo-Json -Depth 10 -Compress
         }
         Assert-True $wrongRoleRejected 'A cross-slot resolver receipt must never be accepted.'
 
+        Assert-StandardValidationImmutableArchiveUrl `
+            -SourceRepository 'https://github.com/org/repo.git' `
+            -SourceRevision ('a' * 40) `
+            -ArchiveUrl ('https://github.com/org/repo/archive/' + ('a' * 40) + '.zip') `
+            -Context 'valid archive URL'
+        $wrongRepositoryRejected = $false
+        try {
+            Assert-StandardValidationImmutableArchiveUrl `
+                -SourceRepository 'https://github.com/org/repo.git' `
+                -SourceRevision ('a' * 40) `
+                -ArchiveUrl ('https://github.com/org/repository/archive/' + ('a' * 40) + '.zip') `
+                -Context 'wrong repository archive URL'
+        }
+        catch {
+            $wrongRepositoryRejected = $true
+            Assert-Match $_.Exception.Message 'not bound to the source repository' 'A repository-name prefix collision in an archive URL must be rejected.'
+        }
+        Assert-True $wrongRepositoryRejected 'An archive URL for a repository sharing the source-name prefix must fail closed.'
+
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return }
         $symlinkRoot = Join-Path $TestDrive 'symlinked-artifact-ancestor'
         $targetRoot = Join-Path $symlinkRoot 'target'
