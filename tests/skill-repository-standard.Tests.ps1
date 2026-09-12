@@ -3094,10 +3094,13 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $index 'entry-point|canonical validation execution' 'Standards index must expose the entry-point contract.'
         Assert-Match $matrix 'entry-point|alternate gate|canonical validation execution' 'Review matrix must record the entry-point boundary.'
         Assert-Match $gate 'Assert-AuthorityConsumerEntryPointContract' 'The executable authority must expose the consumer entry-point contract checker.'
+        Assert-Match $gate 'Get-AuthorityConsumerReleaseAffectingMatch -Text \$releaseExecutableText' 'Release ordering must use the same release-surface matcher as release detection.'
 
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases -f tag_name=v1.0.0') 'A gh api release creation with fields must be release-affecting.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases --method PATCH --raw-field name=v1.0.0') 'An explicit mutating gh api release request must be release-affecting.'
         Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases') 'A read-only gh api release lookup must not be classified as a mutation.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin v1.2.3') 'A direct tag refspec passed to git push must be release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin') 'An explicit git push whose ref type cannot be established must fail closed.'
 
         $weakened = Copy-TestJsonObject -Value $policy
         $weakened.entryPointContract.canonicalExecution.maxPerEventCandidate = 2

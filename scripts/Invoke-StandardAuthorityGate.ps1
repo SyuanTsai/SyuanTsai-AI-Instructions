@@ -1118,30 +1118,55 @@ function Test-AuthorityConsumerCompatibilityLane {
     return $true
 }
 
-function Test-AuthorityConsumerReleaseAffectingCommand {
-    param([Parameter(Mandatory = $true)][string] $Text)
-
-    # Action delegates are executable release surfaces too. Their behavior is
-    # opaque to this repository, so they must still be structurally bound to
-    # the canonical validator before the release job can run.
-    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
-    # gh api becomes a mutating request when fields/input are supplied, or
-    # when an explicit mutating method is selected. Treat every such API call
-    # as release-affecting so an authenticated mutation cannot hide from the
-    # canonical release gate, including repos/{owner}/{repo}/releases calls.
-    $githubApiMutationPattern = '(?im)(?<![A-Za-z0-9_.-])gh\s+api\b[^\r\n]*(?:\s-[fF](?:=|\s)|\s--(?:field|raw-field|input)(?:=|\s)|\s(?:-X|--method)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)'
-    return [regex]::IsMatch($Text, $releasePattern) -or
-        [regex]::IsMatch($Text, $githubApiMutationPattern) -or
-        (Test-AuthorityConsumerOpaqueReleaseHelper -Text $Text)
-}
-
-function Test-AuthorityConsumerOpaqueReleaseHelper {
+function Get-AuthorityConsumerOpaqueReleaseHelperMatch {
     param([Parameter(Mandatory = $true)][string] $Text)
 
     # A local helper can hide the actual publish command and its failure behavior. Until a
     # trusted helper manifest/inspection contract exists, classify these dispatches as unsafe.
     $opaqueHelperPattern = '(?im)(?<![A-Za-z0-9_.-])(?:(?:\.[/\\])|(?:[A-Za-z0-9_.-]+[/\\])+)(?:ship|release|publish|deploy)(?:\.(?:ps1|psm1|py|js|sh|cmd|bat|exe))?(?![A-Za-z0-9_.-])'
-    return [regex]::IsMatch($Text, $opaqueHelperPattern)
+    return [regex]::Match($Text, $opaqueHelperPattern)
+}
+
+function Test-AuthorityConsumerOpaqueReleaseHelper {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    return (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text).Success
+}
+
+function Get-AuthorityConsumerReleaseAffectingMatch {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    # Action delegates are executable release surfaces too. Their behavior is
+    # opaque to this repository, so they must still be structurally bound to
+    # the canonical validator before the release job can run.
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
+    # A non-option argument after git push may be a remote, a direct refspec,
+    # or a configured shorthand whose branch-vs-tag meaning cannot be proven
+    # from workflow text. Classify it as release-affecting and fail closed;
+    # this includes `git push origin v1.2.3`.
+    $gitPushAmbiguousRefspecPattern = '(?im)(?<![A-Za-z0-9_.-])git\s+push\b(?:(?:\s+--?[A-Za-z0-9][A-Za-z0-9-]*(?:=\S+)?|\s+--))*\s+(?!-)[^\s;&|]+'
+    # gh api becomes a mutating request when fields/input are supplied, or
+    # when an explicit mutating method is selected. Treat every such API call
+    # as release-affecting so an authenticated mutation cannot hide from the
+    # canonical release gate, including repos/{owner}/{repo}/releases calls.
+    $githubApiMutationPattern = '(?im)(?<![A-Za-z0-9_.-])gh\s+api\b[^\r\n]*(?:\s-[fF](?:=|\s)|\s--(?:field|raw-field|input)(?:=|\s)|\s(?:-X|--method)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)'
+
+    $candidateMatches = @(
+        [regex]::Match($Text, $releasePattern)
+        [regex]::Match($Text, $gitPushAmbiguousRefspecPattern)
+        [regex]::Match($Text, $githubApiMutationPattern)
+        (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text)
+    ) | Where-Object { $_.Success } | Sort-Object -Property Index
+    if (@($candidateMatches).Count -gt 0) {
+        return @($candidateMatches)[0]
+    }
+    return [regex]::Match('', '(?!)')
+}
+
+function Test-AuthorityConsumerReleaseAffectingCommand {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    return (Get-AuthorityConsumerReleaseAffectingMatch -Text $Text).Success
 }
 
 function Test-AuthorityConsumerFailureSuppression {
@@ -1305,7 +1330,7 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
         $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
         if ($releaseJob.id -ceq $canonicalJob.id) {
             $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
-            $releaseMatch = [regex]::Match($releaseExecutableText, '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+(?:tag\b|push\b[^\r\n]*(?:--tags?\b|refs/tags/))|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])')
+            $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $releaseExecutableText
             if (-not $canonicalMatch.Success -or -not $releaseMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
                 throw "BLOCK: release-affecting workflow '$WorkflowPath' must run the canonical validator before its release command in job '$($releaseJob.id)'."
             }
