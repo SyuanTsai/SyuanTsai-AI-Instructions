@@ -610,6 +610,81 @@ function Assert-ResolverSafeRelativePath {
     }
 }
 
+function Get-ResolverSymlinkTarget {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    foreach ($propertyName in @('LinkTarget', 'Target')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    throw "Installed tool closure cannot read the symbolic-link target: $($Item.FullName)"
+}
+
+function Get-ResolverSymlinkIdentitySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Target,
+        [Parameter(Mandatory = $true)][string] $ResolvedRelativeTarget
+    )
+
+    $canonical = "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-ResolverSafeDirectorySymlinkEntry {
+    param(
+        [Parameter(Mandatory = $true)] $Item,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+        throw "Installed tool closure contains an unsupported reparse point: $($Item.FullName)"
+    }
+    $target = Get-ResolverSymlinkTarget -Item $Item
+    if ($target -match '[\x00-\x1F\x7F]' -or $target.Contains('\') -or $target.Contains(':')) {
+        throw "Installed tool closure contains an unsafe symbolic-link target: '$target'."
+    }
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $parentFull = [IO.Path]::GetFullPath((Split-Path -Parent $Item.FullName))
+    try {
+        $targetFull = if ([IO.Path]::IsPathRooted($target)) {
+            [IO.Path]::GetFullPath($target)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $parentFull $target))
+        }
+    }
+    catch {
+        throw "Installed tool closure contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
+    }
+    $comparison = [StringComparison]::Ordinal
+    $rootPrefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if ([string]::Equals($targetFull, $rootFull, $comparison) -or
+        -not $targetFull.StartsWith($rootPrefix, $comparison)) {
+        throw "Installed tool closure symbolic-link target escapes the install root: '$target'."
+    }
+    $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
+    if (-not $targetItem.PSIsContainer -or
+        ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed tool closure symbolic-link target must be a non-reparse directory: '$target'."
+    }
+    $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $relativeTarget = $relativeTarget.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+    Assert-ResolverSafeRelativePath -Value $relativeTarget
+    return [pscustomobject][ordered]@{
+        path = $Item.FullName.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+        sha256 = Get-ResolverSymlinkIdentitySha256 -Target $target -ResolvedRelativeTarget $relativeTarget
+    }
+}
+
 function Get-DirectoryClosureIdentity {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -625,7 +700,26 @@ function Get-DirectoryClosureIdentity {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Installed tool closure contains a reparse point: $($item.FullName)"
+            # Unix Python venvs conventionally expose lib64 as a directory
+            # symlink. Keep that legitimate layout inside the signed closure;
+            # every other reparse shape remains rejected by the helper.
+            $symlinkEntry = Get-ResolverSafeDirectorySymlinkEntry -Item $item -Root $root
+            Assert-ResolverSafeRelativePath -Value ([string]$symlinkEntry.path)
+            if (-not $ordinalPaths.Add([string]$symlinkEntry.path)) {
+                throw "Installed tool closure contains a duplicate path: '$($symlinkEntry.path)'."
+            }
+            $nfcSymlinkPath = ([string]$symlinkEntry.path).Normalize([Text.NormalizationForm]::FormC)
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne [string]$symlinkEntry.path) {
+                throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$($symlinkEntry.path)'."
+            }
+            $nfcPaths[$nfcSymlinkPath] = [string]$symlinkEntry.path
+            $asciiCaseSymlinkPath = Get-ResolverAsciiCaseFold -Value $nfcSymlinkPath
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne [string]$symlinkEntry.path) {
+                throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$($symlinkEntry.path)'."
+            }
+            $asciiCasePaths[$asciiCaseSymlinkPath] = [string]$symlinkEntry.path
+            [void]$entries.Add($symlinkEntry)
+            continue
         }
         if ($item.PSIsContainer) { continue }
         if ($item -isnot [IO.FileInfo]) {

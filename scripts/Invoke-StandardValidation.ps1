@@ -692,7 +692,6 @@ function Assert-StandardValidationToolReceipt {
     if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
         throw "BLOCKED|$Context resolver install root is not present."
     }
-    Assert-StandardValidationNoReparsePoints -Root $installRoot -Context "$Context resolver install root"
     if (-not (Test-StandardValidationPathWithin -Path $executablePath -Root $installRoot -IncludeRoot)) {
         throw "BLOCKED|$Context resolver executable is outside its signed install root."
     }
@@ -823,7 +822,6 @@ function Assert-StandardValidationToolReceiptUnchanged {
             }
         }
     }
-    Assert-StandardValidationNoReparsePoints -Root ([string]$ToolReceipt.installRoot) -Context "$Context resolver install root"
 }
 
 function Assert-StandardValidationArchivePrefix {
@@ -1164,6 +1162,77 @@ function Assert-StandardValidationInventoryPathCollision {
     $AsciiCasePaths[$asciiCase] = $Value
 }
 
+function Get-StandardValidationSymlinkTarget {
+    param([Parameter(Mandatory = $true)] $Item, [Parameter(Mandatory = $true)][string] $Context)
+
+    foreach ($propertyName in @('LinkTarget', 'Target')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    throw "INVALID|$Context cannot read the symbolic-link target: $($Item.FullName)"
+}
+
+function Get-StandardValidationSymlinkIdentitySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Target,
+        [Parameter(Mandatory = $true)][string] $ResolvedRelativeTarget
+    )
+
+    return Get-StandardValidationTextSha256 -Value "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
+}
+
+function Get-StandardValidationSafeDirectorySymlinkEntry {
+    param(
+        [Parameter(Mandatory = $true)] $Item,
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+        throw "INVALID|$Context contains an unsupported reparse point: $($Item.FullName)"
+    }
+    $target = Get-StandardValidationSymlinkTarget -Item $Item -Context $Context
+    if ($target -match '[\x00-\x1F\x7F]' -or $target.Contains('\') -or $target.Contains(':')) {
+        throw "INVALID|$Context contains an unsafe symbolic-link target: '$target'."
+    }
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $parentFull = [IO.Path]::GetFullPath((Split-Path -Parent $Item.FullName))
+    try {
+        $targetFull = if ([IO.Path]::IsPathRooted($target)) {
+            [IO.Path]::GetFullPath($target)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $parentFull $target))
+        }
+    }
+    catch {
+        throw "INVALID|$Context contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
+    }
+    $rootPrefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if ([string]::Equals($targetFull, $rootFull, [StringComparison]::Ordinal) -or
+        -not $targetFull.StartsWith($rootPrefix, [StringComparison]::Ordinal)) {
+        throw "INVALID|$Context symbolic-link target escapes the install root: '$target'."
+    }
+    $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
+    if (-not $targetItem.PSIsContainer -or
+        ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "INVALID|$Context symbolic-link target must be a non-reparse directory: '$target'."
+    }
+    $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $relativeTarget = $relativeTarget.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+    Assert-StandardValidationSafeRelativePath -Value $relativeTarget -Context "$Context symbolic-link target"
+    $relative = $Item.FullName.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+    Assert-StandardValidationSafeRelativePath -Value $relative -Context "$Context inventory path"
+    return [pscustomobject][ordered]@{
+        path = $relative
+        sha256 = Get-StandardValidationSymlinkIdentitySha256 -Target $target -ResolvedRelativeTarget $relativeTarget
+    }
+}
+
 function Assert-StandardValidationNoReparsePoints {
     param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Context)
 
@@ -1232,8 +1301,52 @@ function Get-StandardValidationDirectoryClosureSha256 {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    $inventory = Get-StandardValidationInventory -Root $Root -Context $Context
-    return Get-StandardValidationInventorySha256 -Inventory $inventory
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $rootItem = Get-Item -Force -LiteralPath $fullRoot -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "INVALID|$Context root must be a regular non-reparse directory: $fullRoot"
+    }
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # Preserve the standard Unix venv directory-symlink layout while
+            # binding its target identity into the revalidated closure.
+            $symlinkEntry = Get-StandardValidationSafeDirectorySymlinkEntry -Item $item -Root $fullRoot -Context $Context
+            Assert-StandardValidationInventoryPathCollision `
+                -Value ([string]$symlinkEntry.path) `
+                -OrdinalPaths $ordinalPaths `
+                -NfcPaths $nfcPaths `
+                -AsciiCasePaths $asciiCasePaths `
+                -Context $Context
+            [void]$entries.Add($symlinkEntry)
+            continue
+        }
+        if ($item.PSIsContainer) { continue }
+        if ($item -isnot [IO.FileInfo]) {
+            throw "INVALID|$Context contains a non-regular filesystem entry: $($item.FullName)"
+        }
+        $relative = $item.FullName.Substring($fullRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+        Assert-StandardValidationSafeRelativePath -Value $relative -Context "$Context inventory path"
+        Assert-StandardValidationInventoryPathCollision `
+            -Value $relative `
+            -OrdinalPaths $ordinalPaths `
+            -NfcPaths $nfcPaths `
+            -AsciiCasePaths $asciiCasePaths `
+            -Context $Context
+        [void]$entries.Add([pscustomobject][ordered]@{
+                path = $relative
+                sha256 = Get-StandardValidationFileSha256 -Path $item.FullName -Context $Context
+            })
+    }
+    if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file or approved directory symlink." }
+    $ordered = Sort-StandardValidationInventory -Inventory $entries
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    return Get-StandardValidationTextSha256 -Value $canonical
 }
 
 function Sort-StandardValidationInventory {

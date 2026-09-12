@@ -337,6 +337,87 @@ function Get-AuthorityAsciiCaseFold {
     return $builder.ToString()
 }
 
+function Get-AuthoritySymlinkTarget {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    foreach ($propertyName in @('LinkTarget', 'Target')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    throw "Installed authority tool directory cannot read the symbolic-link target: $($Item.FullName)"
+}
+
+function Get-AuthoritySymlinkIdentitySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Target,
+        [Parameter(Mandatory = $true)][string] $ResolvedRelativeTarget
+    )
+
+    $canonical = "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash((New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-AuthoritySafeDirectorySymlinkEntry {
+    param(
+        [Parameter(Mandatory = $true)] $Item,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or -not $Item.PSIsContainer) {
+        throw "Installed authority tool directory contains an unsupported reparse point: $($Item.FullName)"
+    }
+    $target = Get-AuthoritySymlinkTarget -Item $Item
+    if ($target -match '[\x00-\x1F\x7F]' -or $target.Contains('\') -or $target.Contains(':')) {
+        throw "Installed authority tool directory contains an unsafe symbolic-link target: '$target'."
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $parentFull = [System.IO.Path]::GetFullPath((Split-Path -Parent $Item.FullName))
+    try {
+        $targetFull = if ([System.IO.Path]::IsPathRooted($target)) {
+            [System.IO.Path]::GetFullPath($target)
+        }
+        else {
+            [System.IO.Path]::GetFullPath((Join-Path $parentFull $target))
+        }
+    }
+    catch {
+        throw "Installed authority tool directory contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
+    }
+    Assert-AuthorityPathWithinRoot -Path $targetFull -Root $rootFull -Context 'Installed authority tool symbolic-link target'
+    $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
+    if (-not $targetItem.PSIsContainer -or
+        ($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed authority tool symbolic-link target must be a non-reparse directory: '$target'."
+    }
+    $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $relativeTarget = $relativeTarget.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+    if ([string]::IsNullOrEmpty($relativeTarget) -or $relativeTarget.StartsWith('/') -or $relativeTarget.Contains('\') -or
+        $relativeTarget.Contains(':') -or $relativeTarget -match '[\x00-\x1F\x7F]' -or
+        @($relativeTarget.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+        throw "Installed authority tool symbolic-link target has an unsafe relative path: '$relativeTarget'."
+    }
+    $relative = $Item.FullName.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $relative = $relative.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+    if ([string]::IsNullOrEmpty($relative) -or $relative.StartsWith('/') -or $relative.Contains('\') -or
+        $relative.Contains(':') -or $relative -match '[\x00-\x1F\x7F]' -or
+        @($relative.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+        throw "Installed authority tool directory contains an unsafe relative path: '$relative'."
+    }
+    return [pscustomobject][ordered]@{
+        path = $relative
+        sha256 = Get-AuthoritySymlinkIdentitySha256 -Target $target -ResolvedRelativeTarget $relativeTarget
+    }
+}
+
 function Get-AuthorityDirectoryClosureSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -355,7 +436,25 @@ function Get-AuthorityDirectoryClosureSha256 {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Installed authority tool directory contains a reparse point: $($item.FullName)"
+            # Unix Python venvs conventionally expose lib64 as a directory
+            # symlink; bind that target identity instead of dropping it.
+            $symlinkEntry = Get-AuthoritySafeDirectorySymlinkEntry -Item $item -Root $root
+            $relativeSymlinkPath = [string]$symlinkEntry.path
+            if (-not $ordinalPaths.Add($relativeSymlinkPath)) {
+                throw "Installed authority tool directory contains a duplicate path: '$relativeSymlinkPath'."
+            }
+            $nfcSymlinkPath = $relativeSymlinkPath.Normalize([System.Text.NormalizationForm]::FormC)
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne $relativeSymlinkPath) {
+                throw "Installed authority tool directory contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$relativeSymlinkPath'."
+            }
+            $nfcPaths[$nfcSymlinkPath] = $relativeSymlinkPath
+            $asciiCaseSymlinkPath = Get-AuthorityAsciiCaseFold -Value $nfcSymlinkPath
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne $relativeSymlinkPath) {
+                throw "Installed authority tool directory contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$relativeSymlinkPath'."
+            }
+            $asciiCasePaths[$asciiCaseSymlinkPath] = $relativeSymlinkPath
+            [void]$entries.Add($symlinkEntry)
+            continue
         }
         if ($item.PSIsContainer) { continue }
         if ($item -isnot [System.IO.FileInfo]) {
