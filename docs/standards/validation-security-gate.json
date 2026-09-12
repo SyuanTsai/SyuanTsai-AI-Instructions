@@ -127,6 +127,11 @@
       "effectiveDecision": "callerRequested-OR-analyzerRequired",
       "recorded": true
     },
+    "semanticEvidence": {
+      "authentication": "trusted-supervisor-signed-semantic-v1",
+      "requiredFields": ["provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256"],
+      "success": ["status=passed", "decision=PASS", "consentGranted=true", "analyzerCompleteness=complete", "findings=array", "findingsSha256=verified"]
+    },
     "aiReview": {
       "status": "passed",
       "decision": "PASS",
@@ -174,7 +179,9 @@
       "allowedEvents": ["pull_request", "push", "workflow_dispatch"],
       "mustShareCanonicalValidator": true,
       "mustShareCandidateBinding": true,
-      "duplicateEventCandidateExecution": false
+      "duplicateEventCandidateExecution": false,
+      "candidateKey": "event-only",
+      "overlappingFilterAction": "BLOCK"
     },
     "authorityWorkflowRoles": [
       {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Standard validation consumer adapter v1",
-  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks. Production command specifications must identify directly executable trusted tools; generic interpreters and script payloads are development-harness-only.",
+  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks. Production command specifications must identify directly executable tools and carry a trusted-supervisor-signed resolver receipt; generic interpreters and script payloads are development-harness-only.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -24,7 +24,7 @@
     "skillsRoot": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))(?![A-Za-z]:)[A-Za-z0-9._/-]+$"
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
     },
     "activeSkills": {
       "type": "array",
@@ -38,7 +38,7 @@
     "canonicalValidatorPath": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))(?![A-Za-z]:)[A-Za-z0-9._/-]+$",
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$",
       "description": "Candidate-relative path to the one canonical validator entry point. The trusted supervisor inventories release-affecting entry points and invokes this path as the canonical consumer gate."
     },
     "packageAdapter": { "$ref": "#/$defs/commandSpec" },
@@ -52,6 +52,25 @@
       "items": { "$ref": "#/$defs/testSpec" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "mode": { "const": "production" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "packageAdapter": { "required": ["provenance"] },
+          "skillValidator": { "required": ["provenance"] },
+          "skillTools": { "required": ["provenance"] },
+          "staticAnalyzer": { "required": ["provenance"] },
+          "repositoryTests": { "items": { "required": ["provenance"] } }
+        }
+      }
+    }
+  ],
   "$defs": {
     "commandSpec": {
       "type": "object",
@@ -66,6 +85,26 @@
         "arguments": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "provenance": { "$ref": "#/$defs/commandProvenance" }
+      }
+    },
+    "commandProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolName", "receiptPath", "receiptSha256"],
+      "properties": {
+        "toolName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receiptPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receiptSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
@@ -85,7 +124,8 @@
         "arguments": {
           "type": "array",
           "items": { "type": "string" }
-        }
+        },
+        "provenance": { "$ref": "#/$defs/commandProvenance" }
       }
     }
   }

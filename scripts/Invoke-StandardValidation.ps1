@@ -12,6 +12,7 @@ param(
     [string] $CandidateArchivePath,
     [string] $CandidateAcquisitionEvidencePath,
     [string] $CandidateArchiveSha256,
+    [string] $RunId,
     [string] $AuthorityRevision,
     [string] $AuthorityArchivePath,
     [string] $AuthoritySnapshotEvidencePath,
@@ -380,7 +381,8 @@ function Assert-StandardValidationRegularFile {
         throw "INVALID|$Context file is missing: $Path"
     }
     $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
-    if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "INVALID|$Context must be a regular non-reparse file: $Path"
     }
 }
@@ -431,13 +433,14 @@ function Get-StandardValidationTrustAnchorEvidence {
 function Get-StandardValidationSelectedFilesSha256 {
     param([Parameter(Mandatory = $true)] $Files)
 
-    $canonical = (@($Files | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+    $ordered = Sort-StandardValidationInventory -Inventory $Files
+    $canonical = (@($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
     return Get-StandardValidationTextSha256 -Value $canonical
 }
 
 function Get-StandardValidationSignedReceiptPayload {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1', 'publish-install-v1', 'post-install-v1')][string] $ReceiptType,
+        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1', 'publish-install-v1', 'post-install-v1', 'semantic-v1', 'validation-tool-v1')][string] $ReceiptType,
         [Parameter(Mandatory = $true)][hashtable] $Fields
     )
 
@@ -481,6 +484,147 @@ function Assert-StandardValidationSignedReceipt {
         }
     }
     finally { $rsa.Dispose() }
+}
+
+function Assert-StandardValidationToolReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Provenance,
+        [Parameter(Mandatory = $true)][string] $CommandPath,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][guid] $RunId,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationExactPropertySet -Object $Provenance -Expected @('toolName', 'receiptPath', 'receiptSha256') -Context "$Context provenance"
+    $toolName = Get-StandardValidationRequiredProperty -Object $Provenance -Name 'toolName' -Context "$Context provenance"
+    $receiptPathValue = Get-StandardValidationRequiredProperty -Object $Provenance -Name 'receiptPath' -Context "$Context provenance"
+    $receiptSha256 = Get-StandardValidationRequiredProperty -Object $Provenance -Name 'receiptSha256' -Context "$Context provenance"
+    if ($toolName -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$toolName) -or
+        $receiptPathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$receiptPathValue) -or
+        -not [System.IO.Path]::IsPathRooted([string]$receiptPathValue)) {
+        throw "INVALID|$Context provenance must identify an absolute signed resolver receipt."
+    }
+    Assert-StandardValidationSha256 -Value $receiptSha256 -Context "$Context resolver receipt"
+    $receiptPath = Get-StandardValidationFullPath -Path ([string]$receiptPathValue) -Context "$Context resolver receipt"
+    Assert-StandardValidationOutsideRoot -Path $receiptPath -Root $CandidateRoot -Context "$Context resolver receipt"
+    Assert-StandardValidationRegularFile -Path $receiptPath -Context "$Context resolver receipt"
+    $actualReceiptSha256 = Get-StandardValidationFileSha256 -Path $receiptPath -Context "$Context resolver receipt"
+    if ($actualReceiptSha256 -cne [string]$receiptSha256) {
+        throw "BLOCKED|$Context resolver receipt hash does not match the adapter binding."
+    }
+
+    $receipt = Get-StandardValidationJson -Path $receiptPath -Context "$Context resolver receipt"
+    Assert-StandardValidationExactPropertySet -Object $receipt -Expected @(
+        'schemaVersion', 'evidenceType', 'status', 'toolName', 'source', 'channel',
+        'resolvedVersion', 'resolvedIdentity', 'installRoot', 'executablePath',
+        'executableSha256', 'resolutionRunId', 'attestation'
+    ) -Context "$Context resolver receipt"
+    $schemaVersion = Get-StandardValidationRequiredProperty -Object $receipt -Name 'schemaVersion' -Context "$Context resolver receipt"
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'evidenceType' -Context "$Context resolver receipt") -cne 'validation-tool-resolution' -or
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'status' -Context "$Context resolver receipt") -cne 'verified' -or
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'toolName' -Context "$Context resolver receipt") -cne [string]$toolName -or
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'channel' -Context "$Context resolver receipt") -cne 'latest-stable') {
+        throw "BLOCKED|$Context resolver receipt is not a verified latest-stable tool result."
+    }
+    foreach ($name in @('source', 'resolvedVersion', 'resolvedIdentity', 'resolutionRunId')) {
+        $value = Get-StandardValidationRequiredProperty -Object $receipt -Name $name -Context "$Context resolver receipt"
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value) -or [string]$value -match '[\x00-\x1F\x7F]') {
+            throw "BLOCKED|$Context resolver receipt has an invalid '$name'."
+        }
+    }
+    $expectedResolutionRunId = $RunId.ToString('N')
+    if ([string]$receipt.resolutionRunId -cne $expectedResolutionRunId) {
+        throw "BLOCKED|$Context resolver receipt belongs to a different validation run."
+    }
+    $installRootValue = Get-StandardValidationRequiredProperty -Object $receipt -Name 'installRoot' -Context "$Context resolver receipt"
+    $executablePathValue = Get-StandardValidationRequiredProperty -Object $receipt -Name 'executablePath' -Context "$Context resolver receipt"
+    if ($installRootValue -isnot [string] -or $executablePathValue -isnot [string] -or
+        -not [System.IO.Path]::IsPathRooted([string]$installRootValue) -or
+        -not [System.IO.Path]::IsPathRooted([string]$executablePathValue)) {
+        throw "BLOCKED|$Context resolver receipt paths must be absolute."
+    }
+    $installRoot = Get-StandardValidationFullPath -Path ([string]$installRootValue) -Context "$Context resolver install root"
+    $executablePath = Get-StandardValidationFullPath -Path ([string]$executablePathValue) -Context "$Context resolver executable"
+    Assert-StandardValidationOutsideRoot -Path $installRoot -Root $CandidateRoot -Context "$Context resolver install root"
+    Assert-StandardValidationOutsideRoot -Path $installRoot -Root $ArtifactsRoot -Context "$Context resolver install root"
+    if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
+        throw "BLOCKED|$Context resolver install root is not present."
+    }
+    Assert-StandardValidationNoReparsePoints -Root $installRoot -Context "$Context resolver install root"
+    if (-not (Test-StandardValidationPathWithin -Path $executablePath -Root $installRoot -IncludeRoot)) {
+        throw "BLOCKED|$Context resolver executable is outside its signed install root."
+    }
+    if (-not [string]::Equals($executablePath, $CommandPath, $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }))) {
+        throw "BLOCKED|$Context command path does not match the signed resolver receipt."
+    }
+    Assert-StandardValidationSha256 -Value $receipt.executableSha256 -Context "$Context resolver executable"
+    if ((Get-StandardValidationFileSha256 -Path $executablePath -Context "$Context resolver executable") -cne [string]$receipt.executableSha256) {
+        throw "BLOCKED|$Context executable does not match its signed resolver identity."
+    }
+
+    $attestation = Get-StandardValidationRequiredProperty -Object $receipt -Name 'attestation' -Context "$Context resolver receipt"
+    Assert-StandardValidationExactPropertySet -Object $attestation -Expected @(
+        'schemaVersion', 'attestationType', 'toolName', 'source', 'channel', 'status',
+        'resolvedVersion', 'resolvedIdentity', 'installRoot', 'executablePath',
+        'executableSha256', 'resolutionRunId', 'issuedAt', 'signature'
+    ) -Context "$Context resolver attestation"
+    $attestationSchemaVersion = Get-StandardValidationRequiredProperty -Object $attestation -Name 'schemaVersion' -Context "$Context resolver attestation"
+    if (($attestationSchemaVersion -isnot [int] -and $attestationSchemaVersion -isnot [long]) -or [int64]$attestationSchemaVersion -ne 1 -or
+        [string]$attestation.attestationType -cne 'trusted-supervisor-validation-tool-v1' -or
+        [string]$attestation.toolName -cne [string]$receipt.toolName -or [string]$attestation.source -cne [string]$receipt.source -or
+        [string]$attestation.channel -cne [string]$receipt.channel -or [string]$attestation.status -cne [string]$receipt.status -or
+        [string]$attestation.resolvedVersion -cne [string]$receipt.resolvedVersion -or
+        [string]$attestation.resolvedIdentity -cne [string]$receipt.resolvedIdentity -or
+        [string]$attestation.installRoot -cne [string]$receipt.installRoot -or
+        [string]$attestation.executablePath -cne [string]$receipt.executablePath -or
+        [string]$attestation.executableSha256 -cne [string]$receipt.executableSha256 -or
+        [string]$attestation.resolutionRunId -cne [string]$receipt.resolutionRunId) {
+        throw "BLOCKED|$Context resolver attestation does not match the verified tool result."
+    }
+    $issuedAt = Assert-StandardValidationLifecycleTimestamp -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'issuedAt' -Context "$Context resolver attestation") -Context "$Context resolver attestation"
+    $fields = @{
+        channel = [string]$receipt.channel
+        executablePath = [string]$receipt.executablePath
+        executableSha256 = [string]$receipt.executableSha256
+        installRoot = [string]$receipt.installRoot
+        issuedAt = $issuedAt
+        resolvedIdentity = [string]$receipt.resolvedIdentity
+        resolvedVersion = [string]$receipt.resolvedVersion
+        resolutionRunId = [string]$receipt.resolutionRunId
+        source = [string]$receipt.source
+        status = [string]$receipt.status
+        toolName = [string]$receipt.toolName
+    }
+    Assert-StandardValidationSignedReceipt -Receipt $attestation -ReceiptType 'validation-tool-v1' -Fields $fields -TrustAnchorRoot $TrustAnchorRoot -Context "$Context resolver attestation"
+    return [pscustomobject][ordered]@{
+        path = $receiptPath
+        sha256 = [string]$receiptSha256
+        installRoot = $installRoot
+        executable = $executablePath
+        executableSha256 = [string]$receipt.executableSha256
+        toolName = [string]$receipt.toolName
+    }
+}
+
+function Assert-StandardValidationToolReceiptUnchanged {
+    param(
+        [Parameter(Mandatory = $true)] $ToolReceipt,
+        [Parameter(Mandatory = $true)][string] $CommandPath,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationRegularFile -Path ([string]$ToolReceipt.path) -Context "$Context resolver receipt"
+    if ((Get-StandardValidationFileSha256 -Path ([string]$ToolReceipt.path) -Context "$Context resolver receipt") -cne [string]$ToolReceipt.sha256) {
+        throw "FAILED|$Context signed resolver receipt changed during validation."
+    }
+    Assert-StandardValidationRegularFile -Path $CommandPath -Context "$Context command"
+    if ((Get-StandardValidationFileSha256 -Path $CommandPath -Context "$Context command") -cne [string]$ToolReceipt.executableSha256) {
+        throw "FAILED|$Context signed resolver executable changed during validation."
+    }
+    Assert-StandardValidationNoReparsePoints -Root ([string]$ToolReceipt.installRoot) -Context "$Context resolver install root"
 }
 
 function Assert-StandardValidationArchivePrefix {
@@ -527,18 +671,44 @@ function Get-StandardValidationArchiveInventory {
     )
 
     Assert-StandardValidationRegularFile -Path $ArchivePath -Context $Context
+    Assert-StandardValidationArchivePrefix -Value $ArchivePrefix -Context "$Context archivePrefix"
+    if ((Test-Path -LiteralPath $ExtractionRoot -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $ExtractionRoot -Force -ErrorAction Stop).Count -gt 0) {
+        throw "INVALID|$Context extraction root must be empty before archive extraction."
+    }
     [void](New-Item -ItemType Directory -Path $ExtractionRoot -Force)
     $archive = $null
     try {
         try { $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath) }
         catch { throw "INVALID|$Context must be a readable ZIP archive: $($_.Exception.Message)" }
         $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+        $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
         foreach ($entry in @($archive.Entries)) {
-            $entryName = ([string]$entry.FullName).Replace('\\', '/')
-            if ([string]::IsNullOrWhiteSpace($entryName) -or $entryName.EndsWith('/')) { continue }
-            if ($entryName.StartsWith('/') -or $entryName -match '^[A-Za-z]:/' -or
-                $entryName -match '(^|/)\.\.?(/|$)') {
+            $entryName = [string]$entry.FullName
+            if ([string]::IsNullOrEmpty($entryName)) { continue }
+            if ($entryName.IndexOf([char]92) -ge 0) {
+                throw "INVALID|$Context contains a backslash archive entry '$entryName'."
+            }
+            $isDirectory = $entryName.EndsWith('/')
+            $entryPath = $entryName.TrimEnd([char]'/')
+            if ([string]::IsNullOrEmpty($entryPath)) {
+                if ($isDirectory) { continue }
+                throw "INVALID|$Context contains an empty archive entry."
+            }
+            if ($entryPath.StartsWith('/') -or $entryPath.IndexOf([char]':') -ge 0 -or
+                $entryPath -match '(^|/)\.\.?(/|$)' -or $entryName.IndexOf('//') -ge 0) {
                 throw "INVALID|$Context contains an unsafe archive entry '$entryName'."
+            }
+            $unixMode = ([int64]$entry.ExternalAttributes -shr 16) -band [int64]0xF000
+            if ($isDirectory) {
+                if ($unixMode -ne 0 -and $unixMode -ne [int64]0x4000) {
+                    throw "INVALID|$Context contains a non-directory special archive entry '$entryName'."
+                }
+            }
+            elseif ($unixMode -ne 0 -and $unixMode -ne [int64]0x8000) {
+                throw "INVALID|$Context contains a non-regular archive entry '$entryName'."
             }
             $relative = $entryName
             if (-not [string]::IsNullOrEmpty($ArchivePrefix)) {
@@ -548,11 +718,17 @@ function Get-StandardValidationArchiveInventory {
                 }
                 $relative = $relative.Substring($prefix.Length)
             }
-            if ([string]::IsNullOrWhiteSpace($relative)) { continue }
+            $relative = $relative.TrimEnd([char]'/')
+            if ([string]::IsNullOrEmpty($relative)) { continue }
             Assert-StandardValidationSafeRelativePath -Value $relative -Context "$Context archive path"
+            if ($isDirectory) { continue }
             if (-not $paths.Add($relative)) { throw "INVALID|$Context contains duplicate archive path '$relative'." }
-            $unixMode = ([int64]$entry.ExternalAttributes -shr 16) -band 0xF000
-            if ($unixMode -eq 0xA000) { throw "INVALID|$Context contains a symbolic-link archive entry '$entryName'." }
+            Assert-StandardValidationInventoryPathCollision `
+                -Value $relative `
+                -OrdinalPaths $ordinalPaths `
+                -NfcPaths $nfcPaths `
+                -AsciiCasePaths $asciiCasePaths `
+                -Context "$Context archive path"
         }
         try { [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $ExtractionRoot) }
         catch { throw "INVALID|$Context could not be safely extracted: $($_.Exception.Message)" }
@@ -672,13 +848,17 @@ function Assert-StandardValidationAuthoritySnapshot {
     Assert-StandardValidationSha256 -Value $receipt.archiveSha256 -Context "$Context archiveSha256"
     Assert-StandardValidationSha256 -Value $receipt.snapshotInventorySha256 -Context "$Context snapshotInventorySha256"
     $expectedFiles = @(
-        'scripts/Invoke-StandardValidation.ps1',
+        'docs/standards/schemas/standard-validation-adapter-v1.schema.json',
+        'docs/standards/schemas/standard-validation-evidence-v1.schema.json',
+        'docs/standards/schemas/validation-security-gate-v1.schema.json',
         'docs/standards/standard-validation-contract-v1.json',
-        'docs/standards/validation-security-gate.json',
-        'scripts/Invoke-StandardAuthorityGate.ps1',
-        'scripts/Resolve-StandardValidationTool.ps1',
+        'docs/standards/trust-anchors/human-approval-public-key.xml',
         'docs/standards/trust-anchors/trusted-supervisor-public-key.xml',
-        'docs/standards/trust-anchors/human-approval-public-key.xml'
+        'docs/standards/validation-security-gate.json',
+        'docs/standards/validation-toolchain.json',
+        'scripts/Invoke-StandardAuthorityGate.ps1',
+        'scripts/Invoke-StandardValidation.ps1',
+        'scripts/Resolve-StandardValidationTool.ps1'
     )
     if ($receipt.selectedFiles -isnot [array] -or @($receipt.selectedFiles).Count -ne $expectedFiles.Count) { throw "BLOCKED|$Context selected file inventory is incomplete." }
     $selected = @()
@@ -720,12 +900,69 @@ function Assert-StandardValidationAuthoritySnapshot {
 function Assert-StandardValidationSafeRelativePath {
     param([Parameter(Mandatory = $true)][string] $Value, [Parameter(Mandatory = $true)][string] $Context)
 
-    if ([string]::IsNullOrWhiteSpace($Value) -or
-        $Value -match '\\' -or $Value -match '^[A-Za-z]:' -or $Value.StartsWith('/') -or
-        $Value -match '(^|/)\.\.?(/|$)' -or
-        $Value -notmatch '^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$') {
+    if ([string]::IsNullOrEmpty($Value) -or
+        $Value.IndexOf([char]92) -ge 0 -or $Value.IndexOf([char]':') -ge 0 -or $Value.StartsWith('/')) {
         throw "INVALID|$Context must be a safe repository-relative path."
     }
+    foreach ($character in $Value.ToCharArray()) {
+        $codePoint = [int][char]$character
+        if (($codePoint -ge 0 -and $codePoint -le 0x1F) -or $codePoint -eq 0x7F) {
+            throw "INVALID|$Context must not contain control characters."
+        }
+    }
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $roundTrip = $utf8.GetString($utf8.GetBytes($Value))
+        if ($roundTrip -cne $Value) { throw 'UTF-8 round-trip changed the path.' }
+    }
+    catch {
+        throw "INVALID|$Context must be a valid UTF-8 path: $($_.Exception.Message)"
+    }
+    $segments = $Value.Split('/')
+    if ($segments.Count -eq 0) { throw "INVALID|$Context must be a safe repository-relative path." }
+    foreach ($segment in $segments) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') {
+            throw "INVALID|$Context must not contain empty, dot, or dot-dot path segments."
+        }
+    }
+}
+
+function Get-StandardValidationAsciiCaseFold {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $codePoint = [int][char]$character
+        if ($codePoint -ge [int][char]'A' -and $codePoint -le [int][char]'Z') {
+            [void]$builder.Append([char]($codePoint + 32))
+        }
+        else { [void]$builder.Append($character) }
+    }
+    return $builder.ToString()
+}
+
+function Assert-StandardValidationInventoryPathCollision {
+    param(
+        [Parameter(Mandatory = $true)][string] $Value,
+        [Parameter(Mandatory = $true)] $OrdinalPaths,
+        [Parameter(Mandatory = $true)] $NfcPaths,
+        [Parameter(Mandatory = $true)] $AsciiCasePaths,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if (-not $OrdinalPaths.Add($Value)) {
+        throw "INVALID|$Context contains a duplicate path '$Value'."
+    }
+    $nfc = $Value.Normalize([System.Text.NormalizationForm]::FormC)
+    if ($NfcPaths.ContainsKey($nfc) -and [string]$NfcPaths[$nfc] -cne $Value) {
+        throw "INVALID|$Context contains Unicode-normalization-colliding paths '$($NfcPaths[$nfc])' and '$Value'."
+    }
+    $NfcPaths[$nfc] = $Value
+    $asciiCase = Get-StandardValidationAsciiCaseFold -Value $nfc
+    if ($AsciiCasePaths.ContainsKey($asciiCase) -and [string]$AsciiCasePaths[$asciiCase] -cne $Value) {
+        throw "INVALID|$Context contains ASCII-case-colliding paths '$($AsciiCasePaths[$asciiCase])' and '$Value'."
+    }
+    $AsciiCasePaths[$asciiCase] = $Value
 }
 
 function Assert-StandardValidationNoReparsePoints {
@@ -739,6 +976,9 @@ function Assert-StandardValidationNoReparsePoints {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "INVALID|$Context contains a reparse point: $($item.FullName)"
         }
+        if (-not $item.PSIsContainer -and $item -isnot [System.IO.FileInfo]) {
+            throw "INVALID|$Context contains a non-regular filesystem entry: $($item.FullName)"
+        }
     }
 }
 
@@ -751,12 +991,24 @@ function Get-StandardValidationInventory {
         [System.IO.Path]::AltDirectorySeparatorChar
     )
     $entries = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)) {
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($file in @(Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force -ErrorAction Stop)) {
+        if ($file -isnot [System.IO.FileInfo]) {
+            throw "INVALID|$Context contains a non-regular filesystem entry: $($file.FullName)"
+        }
         $relative = $file.FullName.Substring($fullRoot.Length).TrimStart(
             [System.IO.Path]::DirectorySeparatorChar,
             [System.IO.Path]::AltDirectorySeparatorChar
         ).Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
         Assert-StandardValidationSafeRelativePath -Value $relative -Context "$Context inventory path"
+        Assert-StandardValidationInventoryPathCollision `
+            -Value $relative `
+            -OrdinalPaths $ordinalPaths `
+            -NfcPaths $nfcPaths `
+            -AsciiCasePaths $asciiCasePaths `
+            -Context "$Context inventory path"
         $entries += [pscustomobject][ordered]@{
             path = $relative
             sha256 = (Get-StandardValidationFileSha256 -Path $file.FullName -Context $Context)
@@ -764,15 +1016,30 @@ function Get-StandardValidationInventory {
         }
     }
     if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file." }
-    return ,$entries
+    return ,(Sort-StandardValidationInventory -Inventory $entries)
 }
 
 function Get-StandardValidationInventorySha256 {
     param([Parameter(Mandatory = $true)] $Inventory)
 
-    $ordered = @($Inventory | Sort-Object path)
-    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`t$($_.length)`n" }) -join ''
+    $ordered = Sort-StandardValidationInventory -Inventory $Inventory
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     return Get-StandardValidationTextSha256 -Value $canonical
+}
+
+function Sort-StandardValidationInventory {
+    param([Parameter(Mandatory = $true)] $Inventory)
+
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in @($Inventory)) {
+        $insertAt = 0
+        while ($insertAt -lt $ordered.Count -and
+            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
+            $insertAt++
+        }
+        $ordered.Insert($insertAt, $entry)
+    }
+    return ,$ordered.ToArray()
 }
 
 function Copy-StandardValidationSnapshot {
@@ -826,10 +1093,13 @@ function Assert-StandardValidationCommandSpec {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][guid] $RunId,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
     )
 
-    Assert-StandardValidationExactPropertySet -Object $Spec -Expected @('command', 'arguments') -Context $Context
+    $expectedProperties = if ($DevelopmentHarness) { @('command', 'arguments') } else { @('command', 'arguments', 'provenance') }
+    Assert-StandardValidationExactPropertySet -Object $Spec -Expected $expectedProperties -Context $Context
     $command = Get-StandardValidationRequiredProperty -Object $Spec -Name 'command' -Context $Context
     if ($command -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$command)) {
         throw "INVALID|$Context command must be a non-empty path."
@@ -880,21 +1150,22 @@ function Assert-StandardValidationCommandSpec {
         )) {
         throw "INVALID|$Context production adapters may not execute a script payload as the command."
     }
+    $toolReceipt = $null
     if (-not $DevelopmentHarness) {
-        $allowedRoots = @($TrustedToolRoot, $ArtifactsRoot, $PSScriptRoot, $PSHOME)
-        $allowed = $false
-        foreach ($allowedRoot in $allowedRoots) {
-            if (Test-StandardValidationPathWithin -Path $commandPath -Root $allowedRoot -IncludeRoot) {
-                $allowed = $true
-                break
-            }
-        }
-        if (-not $allowed) { throw "INVALID|$Context command is outside the trusted tool roots." }
+        $toolReceipt = Assert-StandardValidationToolReceipt `
+            -Provenance (Get-StandardValidationRequiredProperty -Object $Spec -Name 'provenance' -Context $Context) `
+            -CommandPath $commandPath `
+            -CandidateRoot $CandidateRoot `
+            -ArtifactsRoot $ArtifactsRoot `
+            -TrustAnchorRoot $TrustAnchorRoot `
+            -RunId $RunId `
+            -Context $Context
     }
     return [pscustomobject][ordered]@{
         command = $commandPath
         arguments = @($arguments | ForEach-Object { [string]$_ })
         commandSha256 = Get-StandardValidationFileSha256 -Path $commandPath -Context "$Context command"
+        toolReceipt = $toolReceipt
     }
 }
 
@@ -969,6 +1240,8 @@ function Assert-StandardValidationAdapter {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][guid] $RunId,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
     )
 
@@ -1008,6 +1281,8 @@ function Assert-StandardValidationAdapter {
             -CandidateRoot $CandidateRoot `
             -ArtifactsRoot $ArtifactsRoot `
             -TrustedToolRoot $TrustedToolRoot `
+            -TrustAnchorRoot $TrustAnchorRoot `
+            -RunId $RunId `
             -DevelopmentHarness $DevelopmentHarness
     }
     $repositoryTests = Get-StandardValidationRequiredProperty -Object $Adapter -Name 'repositoryTests' -Context 'adapter repositoryTests'
@@ -1017,17 +1292,26 @@ function Assert-StandardValidationAdapter {
     $testIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $testCommands = @()
     foreach ($test in @($repositoryTests)) {
-        Assert-StandardValidationExactPropertySet -Object $test -Expected @('id', 'command', 'arguments') -Context 'adapter repository test'
+        $expectedTestProperties = if ($DevelopmentHarness) { @('id', 'command', 'arguments') } else { @('id', 'command', 'arguments', 'provenance') }
+        Assert-StandardValidationExactPropertySet -Object $test -Expected $expectedTestProperties -Context 'adapter repository test'
         $testId = Get-StandardValidationRequiredProperty -Object $test -Name 'id' -Context 'adapter repository test'
         if ($testId -isnot [string] -or [string]$testId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or -not $testIds.Add([string]$testId)) {
             throw 'INVALID|adapter repository test IDs must be unique safe values.'
         }
+        $testSpec = if ($DevelopmentHarness) {
+            [pscustomobject][ordered]@{ command = $test.command; arguments = $test.arguments }
+        }
+        else {
+            [pscustomobject][ordered]@{ command = $test.command; arguments = $test.arguments; provenance = $test.provenance }
+        }
         $testCommand = Assert-StandardValidationCommandSpec `
-            -Spec ([pscustomobject][ordered]@{ command = $test.command; arguments = $test.arguments }) `
+            -Spec $testSpec `
             -Context "adapter repository test '$testId'" `
             -CandidateRoot $CandidateRoot `
             -ArtifactsRoot $ArtifactsRoot `
             -TrustedToolRoot $TrustedToolRoot `
+            -TrustAnchorRoot $TrustAnchorRoot `
+            -RunId $RunId `
             -DevelopmentHarness $DevelopmentHarness
         $testCommands += [pscustomobject][ordered]@{ id = [string]$testId; command = $testCommand }
     }
@@ -1400,7 +1684,7 @@ function Get-StandardValidationChildEnvironment {
         'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)',
         'COMMONPROGRAMW6432', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME',
         'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DOTNET_ROOT',
-        'DOTNET_ROOT_X64', 'LD_LIBRARY_PATH', 'XDG_RUNTIME_DIR', 'PSExecutionPolicyPreference'
+        'DOTNET_ROOT_X64', 'XDG_RUNTIME_DIR', 'PSExecutionPolicyPreference'
     )
     $childEnvironment = [ordered]@{}
     foreach ($name in $safeInheritedNames) {
@@ -2014,6 +2298,12 @@ function Invoke-StandardValidationCommandAndRecord {
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
     }
+    if ($null -ne $CommandSpec.toolReceipt) {
+        Assert-StandardValidationToolReceiptUnchanged `
+            -ToolReceipt $CommandSpec.toolReceipt `
+            -CommandPath ([string]$CommandSpec.command) `
+            -Context "$StageId/$ToolId"
+    }
     $commandSha256Before = Get-StandardValidationFileSha256 -Path ([string]$CommandSpec.command) -Context "$StageId/$ToolId command"
     if ([string]$CommandSpec.commandSha256 -cne $commandSha256Before) {
         throw "FAILED|$StageId/$ToolId command changed after adapter resolution."
@@ -2049,6 +2339,12 @@ function Invoke-StandardValidationCommandAndRecord {
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
+    }
+    if ($null -ne $CommandSpec.toolReceipt) {
+        Assert-StandardValidationToolReceiptUnchanged `
+            -ToolReceipt $CommandSpec.toolReceipt `
+            -CommandPath ([string]$CommandSpec.command) `
+            -Context "$StageId/$ToolId"
     }
     $commandSha256After = Get-StandardValidationFileSha256 -Path ([string]$CommandSpec.command) -Context "$StageId/$ToolId command"
     if ($commandSha256After -cne $commandSha256Before) {
@@ -2404,6 +2700,135 @@ function Assert-StandardValidationLifecycleEvidence {
         -Context "$Context attestation"
 }
 
+function Convert-StandardValidationFindingsToCanonicalJson {
+    param(
+        [Parameter(Mandatory = $true)] $Findings,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Findings -isnot [array]) { throw "BLOCKED|$Context findings must be an array." }
+    $canonical = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($finding in @($Findings)) {
+        if ($null -eq $finding -or $finding -is [array] -or $finding -is [string] -or $finding -is [ValueType]) {
+            throw "BLOCKED|$Context findings must contain structured objects."
+        }
+        $actualNames = @($finding.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        $allowedNames = @('severity', 'fingerprint', 'ruleId', 'message', 'path')
+        $unexpected = @($actualNames | Where-Object { $allowedNames -notcontains $_ })
+        if ($unexpected.Count -gt 0) {
+            throw "BLOCKED|$Context finding contains unsupported properties: $($unexpected -join ',')."
+        }
+        $severity = Get-StandardValidationRequiredProperty -Object $finding -Name 'severity' -Context $Context
+        if ($severity -isnot [string] -or [string]$severity -notin @('critical', 'high', 'medium', 'low', 'informational')) {
+            throw "BLOCKED|$Context finding contains a non-canonical severity."
+        }
+        $canonicalFinding = [ordered]@{ severity = [string]$severity }
+        foreach ($name in @('fingerprint', 'ruleId', 'message', 'path')) {
+            $property = $finding.PSObject.Properties[$name]
+            if ($null -ne $property) {
+                if ($property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$property.Value) -or [string]$property.Value -match '[\x00-\x1F\x7F]') {
+                    throw "BLOCKED|$Context finding '$name' must be a non-empty scalar without control characters."
+                }
+                $canonicalFinding[$name] = [string]$property.Value
+            }
+        }
+        [void]$canonical.Add([pscustomobject]$canonicalFinding)
+    }
+    $json = if ($canonical.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([object[]]$canonical.ToArray()) -Compress -Depth 20 }
+    return [pscustomobject][ordered]@{
+        values = @($canonical.ToArray())
+        json = $json
+        sha256 = Get-StandardValidationTextSha256 -Value $json
+    }
+}
+
+function Assert-StandardValidationSemanticEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    Assert-StandardValidationExactPropertySet -Object $Evidence -Expected @(
+        'schemaVersion', 'evidenceType', 'candidateId', 'status', 'decision',
+        'provider', 'purpose', 'scope', 'consentGranted', 'analyzerIdentity',
+        'analyzerCompleteness', 'findings', 'findingsSha256', 'attestation'
+    ) -Context $Context
+    $schemaVersion = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'schemaVersion' -Context $Context
+    if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'evidenceType' -Context $Context) -cne 'semantic' -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'candidateId' -Context $Context) -cne $CandidateId -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'status' -Context $Context) -cne 'passed' -or
+        [string](Get-StandardValidationRequiredProperty -Object $Evidence -Name 'decision' -Context $Context) -cne 'PASS') {
+        throw "BLOCKED|$Context must report a typed PASS result for this candidate."
+    }
+    if ((Get-StandardValidationRequiredProperty -Object $Evidence -Name 'consentGranted' -Context $Context) -isnot [bool] -or
+        -not [bool]$Evidence.consentGranted -or
+        [string]$Evidence.analyzerCompleteness -cne 'complete') {
+        throw "BLOCKED|$Context must prove typed consent and complete analyzer coverage."
+    }
+    foreach ($name in @('provider', 'purpose', 'scope', 'analyzerIdentity')) {
+        [void](Assert-StandardValidationApprovalScalar `
+                -Value (Get-StandardValidationRequiredProperty -Object $Evidence -Name $name -Context $Context) `
+                -Name $name `
+                -Context $Context)
+    }
+    $canonicalFindings = Convert-StandardValidationFindingsToCanonicalJson `
+        -Findings (Get-StandardValidationRequiredProperty -Object $Evidence -Name 'findings' -Context $Context) `
+        -Context $Context
+    Assert-StandardValidationSha256 -Value $Evidence.findingsSha256 -Context "$Context findingsSha256"
+    if ([string]$Evidence.findingsSha256 -cne [string]$canonicalFindings.sha256) {
+        throw "BLOCKED|$Context findingsSha256 does not match the complete finding set."
+    }
+    $findingEnvelope = [pscustomobject][ordered]@{ findings = @($canonicalFindings.values) }
+    [void](Assert-StandardValidationFindings -Envelope $findingEnvelope -Context $Context)
+
+    $attestation = Get-StandardValidationRequiredProperty -Object $Evidence -Name 'attestation' -Context $Context
+    Assert-StandardValidationExactPropertySet -Object $attestation -Expected @(
+        'schemaVersion', 'attestationType', 'candidateId', 'evidenceType', 'status', 'decision',
+        'provider', 'purpose', 'scope', 'consentGranted', 'analyzerIdentity',
+        'analyzerCompleteness', 'findingsSha256', 'issuedAt', 'signature'
+    ) -Context "$Context attestation"
+    $attestationSchemaVersion = Get-StandardValidationRequiredProperty -Object $attestation -Name 'schemaVersion' -Context "$Context attestation"
+    if (($attestationSchemaVersion -isnot [int] -and $attestationSchemaVersion -isnot [long]) -or [int64]$attestationSchemaVersion -ne 1 -or
+        [string]$attestation.attestationType -cne 'trusted-supervisor-semantic-v1' -or
+        [string]$attestation.candidateId -cne $CandidateId -or [string]$attestation.evidenceType -cne 'semantic' -or
+        [string]$attestation.status -cne [string]$Evidence.status -or [string]$attestation.decision -cne [string]$Evidence.decision -or
+        [string]$attestation.provider -cne [string]$Evidence.provider -or [string]$attestation.purpose -cne [string]$Evidence.purpose -or
+        [string]$attestation.scope -cne [string]$Evidence.scope -or $attestation.consentGranted -isnot [bool] -or
+        [bool]$attestation.consentGranted -ne [bool]$Evidence.consentGranted -or
+        [string]$attestation.analyzerIdentity -cne [string]$Evidence.analyzerIdentity -or
+        [string]$attestation.analyzerCompleteness -cne [string]$Evidence.analyzerCompleteness -or
+        [string]$attestation.findingsSha256 -cne [string]$Evidence.findingsSha256) {
+        throw "BLOCKED|$Context attestation does not match the complete semantic result."
+    }
+    $issuedAt = Assert-StandardValidationLifecycleTimestamp `
+        -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'issuedAt' -Context "$Context attestation") `
+        -Context "$Context attestation"
+    $fields = @{
+        analyzerCompleteness = [string]$Evidence.analyzerCompleteness
+        analyzerIdentity = [string]$Evidence.analyzerIdentity
+        candidateId = $CandidateId
+        consentGranted = [string]$Evidence.consentGranted
+        decision = [string]$Evidence.decision
+        evidenceType = 'semantic'
+        findingsSha256 = [string]$Evidence.findingsSha256
+        issuedAt = $issuedAt
+        provider = [string]$Evidence.provider
+        purpose = [string]$Evidence.purpose
+        scope = [string]$Evidence.scope
+        status = [string]$Evidence.status
+    }
+    Assert-StandardValidationSignedReceipt `
+        -Receipt $attestation `
+        -ReceiptType 'semantic-v1' `
+        -Fields $fields `
+        -TrustAnchorRoot $TrustAnchorRoot `
+        -Context "$Context attestation"
+    return ,$Evidence
+}
+
 function Assert-StandardValidationImportedEvidence {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -2417,6 +2842,13 @@ function Assert-StandardValidationImportedEvidence {
 
     $evidence = Get-StandardValidationJson -Path $Path -Context $Context
     if ($evidence -is [array]) { throw "BLOCKED|$Context must be a JSON object." }
+    if ($ExpectedType -ceq 'semantic') {
+        return Assert-StandardValidationSemanticEvidence `
+            -Evidence $evidence `
+            -CandidateId $CandidateId `
+            -TrustAnchorRoot $TrustAnchorRoot `
+            -Context $Context
+    }
     if ((Get-StandardValidationProperty -Object $evidence -Name 'schemaVersion') -ne 1 -or
         [string](Get-StandardValidationProperty -Object $evidence -Name 'evidenceType') -cne $ExpectedType -or
         [string](Get-StandardValidationProperty -Object $evidence -Name 'candidateId') -cne $CandidateId) {
@@ -2424,16 +2856,6 @@ function Assert-StandardValidationImportedEvidence {
     }
     $status = [string](Get-StandardValidationProperty -Object $evidence -Name 'status')
     if ($status -notin @('passed', 'approved', 'authorized')) { throw "BLOCKED|$Context is not a successful evidence result." }
-    if ($ExpectedType -ceq 'semantic') {
-        if ((Get-StandardValidationProperty -Object $evidence -Name 'consentGranted') -ne $true) {
-            throw 'BLOCKED|Semantic evidence does not prove explicit consent.'
-        }
-        foreach ($name in @('provider', 'purpose', 'scope')) {
-            if ([string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $evidence -Name $name))) {
-                throw "BLOCKED|Semantic evidence is missing '$name'."
-            }
-        }
-    }
     if ($ExpectedType -ceq 'human-approval') {
         try {
             Assert-StandardValidationHumanApprovalEvidence `
@@ -2623,6 +3045,34 @@ function New-StandardValidationCandidateEvidence {
     return [pscustomobject]$result
 }
 
+function Assert-StandardValidationReleaseEligibility {
+    param(
+        [Parameter(Mandatory = $true)] $Candidate,
+        [Parameter(Mandatory = $true)] $Authority,
+        [Parameter(Mandatory = $true)] $Stages,
+        [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
+    )
+
+    if ($DevelopmentHarness) {
+        throw 'BLOCKED|Development harness validation is never release-eligible.'
+    }
+    $acquisition = Get-StandardValidationRequiredProperty -Object $Candidate -Name 'acquisition' -Context 'release eligibility candidate'
+    if ([string]$acquisition.status -cne 'verified' -or $acquisition.verified -isnot [bool] -or -not [bool]$acquisition.verified) {
+        throw 'BLOCKED|Release eligibility requires verified candidate acquisition.'
+    }
+    $binding = Get-StandardValidationRequiredProperty -Object $Authority -Name 'binding' -Context 'release eligibility authority'
+    if ([string]$binding.status -cne 'verified' -or $binding.verified -isnot [bool] -or -not [bool]$binding.verified) {
+        throw 'BLOCKED|Release eligibility requires verified authority binding.'
+    }
+    foreach ($stageId in @('ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
+        $matching = @($Stages | Where-Object { [string]$_.id -ceq $stageId })
+        if ($matching.Count -ne 1 -or [string]$matching[0].status -cne 'passed') {
+            throw "BLOCKED|Release eligibility requires the '$stageId' lifecycle stage to be passed."
+        }
+    }
+    return $true
+}
+
 function Invoke-StandardValidationRun {
     param(
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
@@ -2636,6 +3086,7 @@ function Invoke-StandardValidationRun {
         [string] $CandidateArchivePath,
         [string] $CandidateAcquisitionEvidencePath,
         [string] $CandidateArchiveSha256,
+        [string] $ValidationRunId,
         [string] $AuthorityRevision,
         [string] $AuthorityArchivePath,
         [string] $AuthoritySnapshotEvidencePath,
@@ -2692,6 +3143,14 @@ function Invoke-StandardValidationRun {
     $authorityBinding = $null
 
     try {
+        if (-not [string]::IsNullOrWhiteSpace($ValidationRunId)) {
+            $providedRunId = [guid]::Empty
+            if (-not [guid]::TryParseExact($ValidationRunId, 'N', [ref]$providedRunId) -or
+                $providedRunId.ToString('N') -cne $ValidationRunId) {
+                throw 'INVALID|RunId must be a lowercase 32-character hexadecimal value.'
+            }
+            $runId = $providedRunId
+        }
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
         Assert-StandardValidationSourceRepository -Value $SourceRepository
         Assert-StandardValidationRevision -Value $SourceRevision -Context 'SourceRevision'
@@ -2771,9 +3230,15 @@ function Invoke-StandardValidationRun {
             -CandidateRoot $originalCandidateRoot `
             -ArtifactsRoot $artifactRootFull `
             -TrustedToolRoot $trustedToolRootFull `
+            -TrustAnchorRoot $trustAnchorRootFull `
+            -RunId $runId `
             -DevelopmentHarness $DevelopmentHarness
         try {
-            . $contractResult.authority.authorityGatePath -DefineFunctionsOnly
+            $authorityGateFullPath = Get-StandardValidationFullPath `
+                -Path (Join-Path $script:StandardValidationRepositoryRoot ([string]$contractResult.authority.authorityGatePath)) `
+                -Context 'canonical authority gate'
+            Assert-StandardValidationRegularFile -Path $authorityGateFullPath -Context 'canonical authority gate'
+            . $authorityGateFullPath -DefineFunctionsOnly
             [void](Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $originalCandidateRoot -CanonicalValidatorPath $adapterResult.canonicalValidatorPath -Policy $contractResult.policy)
         }
         catch {
@@ -3045,6 +3510,7 @@ function Invoke-StandardValidationRun {
             if ([string]$semantic.provider -cne $SemanticProvider -or [string]$semantic.purpose -cne $SemanticPurpose -or [string]$semantic.scope -cne $SemanticScope) {
                 throw 'BLOCKED|Semantic evidence consent metadata does not match the invocation.'
             }
+            $stage.semanticEvidence = $semantic
             $stage.events += [pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); stageId = $stage.id; toolId = 'imported-semantic-evidence'; skillId = $null; candidateId = $candidateId; commandSha256 = Get-StandardValidationFileSha256 -Path $semanticFullPath -Context 'semantic evidence'; exitCode = 0; status = 'passed'; outputSha256 = Get-StandardValidationFileSha256 -Path $semanticFullPath -Context 'semantic evidence'; outputPath = $semanticFullPath; cleanedUp = $true }
             if ([bool](Assert-StandardValidationFindings -Envelope $semantic -Context 'semantic evidence')) { $requiresHumanReview = $true }
             Complete-StandardValidationStage -Stage $stage -Status passed
@@ -3091,7 +3557,14 @@ function Invoke-StandardValidationRun {
         if ($requiresHumanReview -and -not $CompleteLifecycle) {
             throw 'BLOCKED|A medium-severity finding requires human review before release.'
         }
-        if ($CompleteLifecycle -and -not $DevelopmentHarness) { $releaseEligible = $true }
+        if ($CompleteLifecycle -and -not $DevelopmentHarness) {
+            [void](Assert-StandardValidationReleaseEligibility `
+                    -Candidate $candidateEvidence `
+                    -Authority $authorityEvidence `
+                    -Stages $stages `
+                    -DevelopmentHarness $DevelopmentHarness)
+            $releaseEligible = $true
+        }
         Assert-StandardValidationAuthorityUnchanged -Authority $authorityEvidence
         $state = 'PASS'
         $failureState = $null
@@ -3245,6 +3718,7 @@ $result = Invoke-StandardValidationRun `
     -CandidateArchivePath $CandidateArchivePath `
     -CandidateAcquisitionEvidencePath $CandidateAcquisitionEvidencePath `
     -CandidateArchiveSha256 $CandidateArchiveSha256 `
+    -ValidationRunId $RunId `
     -AuthorityRevision $AuthorityRevision `
     -AuthorityArchivePath $AuthorityArchivePath `
     -AuthoritySnapshotEvidencePath $AuthoritySnapshotEvidencePath `

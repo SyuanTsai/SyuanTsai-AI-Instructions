@@ -60,10 +60,61 @@
     },
     {
       "if": { "type": "object", "properties": { "releaseEligible": { "const": true } }, "required": ["releaseEligible"] },
-      "then": { "type": "object", "required": ["state", "exitCode"], "properties": { "state": { "const": "PASS" }, "exitCode": { "const": 0 } } }
+      "then": {
+        "type": "object",
+        "required": ["state", "exitCode", "candidate", "adapter", "authority", "stages"],
+        "properties": {
+          "state": { "const": "PASS" },
+          "exitCode": { "const": 0 },
+          "adapter": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": { "mode": { "const": "production" } }
+          },
+          "candidate": {
+            "type": "object",
+            "required": ["acquisition"],
+            "properties": {
+              "acquisition": {
+                "type": "object",
+                "required": ["status", "verified"],
+                "properties": { "status": { "const": "verified" }, "verified": { "const": true } }
+              }
+            }
+          },
+          "authority": {
+            "type": "object",
+            "required": ["binding"],
+            "properties": {
+              "binding": {
+                "type": "object",
+                "required": ["status", "verified", "selectedFiles"],
+                "properties": {
+                  "status": { "const": "verified" },
+                  "verified": { "const": true },
+                  "selectedFiles": { "type": "array", "minItems": 11, "maxItems": 11, "items": { "$ref": "#/$defs/selectedFile" } }
+                }
+              }
+            }
+          },
+          "stages": {
+            "allOf": [
+              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "ai-review" }, "status": { "const": "passed" } } } },
+              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "human-approval" }, "status": { "const": "passed" } } } },
+              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "publish-or-install" }, "status": { "const": "passed" } } } },
+              { "contains": { "type": "object", "required": ["id", "status"], "properties": { "id": { "const": "post-install-verification" }, "status": { "const": "passed" } } } }
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
+    },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "candidate": {
       "type": "object",
@@ -96,7 +147,7 @@
       "additionalProperties": false,
       "required": ["path", "sha256", "length"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
         "sha256": { "$ref": "#/$defs/sha256" },
         "length": { "type": "integer", "minimum": 0 }
       }
@@ -109,8 +160,8 @@
         "schemaVersion": { "const": 1 },
         "sha256": { "$ref": "#/$defs/sha256" },
         "mode": { "enum": ["production", "development-harness"] },
-        "canonicalValidatorPath": { "type": "string", "minLength": 1 },
-        "skillsRoot": { "type": "string", "minLength": 1 },
+        "canonicalValidatorPath": { "$ref": "#/$defs/safeRelativePath" },
+        "skillsRoot": { "$ref": "#/$defs/safeRelativePath" },
         "activeSkills": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
       }
     },
@@ -120,15 +171,15 @@
       "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "trustAnchors", "binding"],
       "properties": {
         "repository": { "type": "string", "format": "uri" },
-        "runnerPath": { "type": "string", "minLength": 1 },
+        "runnerPath": { "$ref": "#/$defs/safeRelativePath" },
         "runnerSha256": { "$ref": "#/$defs/sha256" },
-        "contractPath": { "type": "string", "minLength": 1 },
+        "contractPath": { "$ref": "#/$defs/safeRelativePath" },
         "contractSha256": { "$ref": "#/$defs/sha256" },
-        "policyPath": { "type": "string", "minLength": 1 },
+        "policyPath": { "$ref": "#/$defs/safeRelativePath" },
         "policySha256": { "$ref": "#/$defs/sha256" },
-        "authorityGatePath": { "type": "string", "minLength": 1 },
+        "authorityGatePath": { "$ref": "#/$defs/safeRelativePath" },
         "authorityGateSha256": { "$ref": "#/$defs/sha256" },
-        "resolverPath": { "type": "string", "minLength": 1 },
+        "resolverPath": { "$ref": "#/$defs/safeRelativePath" },
         "resolverSha256": { "$ref": "#/$defs/sha256" },
         "trustAnchors": {
           "type": "array",
@@ -145,7 +196,7 @@
       "required": ["id", "path", "sha256"],
       "properties": {
         "id": { "enum": ["supervisor", "humanApproval"] },
-        "path": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
@@ -193,7 +244,7 @@
       "additionalProperties": false,
       "required": ["path", "sha256"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
@@ -210,6 +261,7 @@
         "endedAt": { "type": ["string", "null"] },
         "reason": { "type": ["string", "null"] },
         "triggerDecision": { "anyOf": [{ "$ref": "#/$defs/triggerDecision" }, { "type": "null" }] },
+        "semanticEvidence": { "anyOf": [{ "$ref": "#/$defs/semanticEvidence" }, { "type": "null" }] },
         "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
       }
     },
@@ -222,6 +274,61 @@
         "analyzerRequired": { "type": "boolean" },
         "analyzerSources": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "effectiveTriggered": { "type": "boolean" }
+      }
+    },
+    "semanticEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "evidenceType", "candidateId", "status", "decision", "provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256", "attestation"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "evidenceType": { "const": "semantic" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "provider": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 },
+        "consentGranted": { "const": true },
+        "analyzerIdentity": { "type": "string", "minLength": 1 },
+        "analyzerCompleteness": { "const": "complete" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/semanticFinding" } },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "attestation": { "$ref": "#/$defs/semanticAttestation" }
+      }
+    },
+    "semanticFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low", "informational"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "semanticAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attestationType", "candidateId", "evidenceType", "status", "decision", "provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findingsSha256", "issuedAt", "signature"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "attestationType": { "const": "trusted-supervisor-semantic-v1" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "evidenceType": { "const": "semantic" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "provider": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 },
+        "consentGranted": { "const": true },
+        "analyzerIdentity": { "type": "string", "minLength": 1 },
+        "analyzerCompleteness": { "const": "complete" },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
       }
     },
     "event": {

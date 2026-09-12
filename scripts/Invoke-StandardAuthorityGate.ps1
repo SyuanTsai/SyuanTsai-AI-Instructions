@@ -453,6 +453,16 @@ function Assert-AuthorityValidationSecurityGate {
     Assert-AuthorityExactString -Value $semanticTrigger.effectiveDecision -Expected 'callerRequested-OR-analyzerRequired' -Context 'Validation/security gate effective semantic trigger'
     Assert-AuthorityExactBoolean -Value $semanticTrigger.recorded -Expected $true -Context 'Validation/security gate semantic trigger recording'
 
+    $semanticEvidence = Get-AuthorityRequiredProperty -Object $security -Name 'semanticEvidence' -Context 'Validation/security gate semantic evidence policy'
+    Assert-AuthorityJsonPropertySet -Object $semanticEvidence -Expected @('authentication', 'requiredFields', 'success') -Context 'Validation/security gate semantic evidence policy'
+    Assert-AuthorityExactString -Value $semanticEvidence.authentication -Expected 'trusted-supervisor-signed-semantic-v1' -Context 'Validation/security gate semantic evidence authentication'
+    Assert-AuthorityExactStringSequence -Value $semanticEvidence.requiredFields -Expected @(
+        'provider', 'purpose', 'scope', 'consentGranted', 'analyzerIdentity', 'analyzerCompleteness', 'findings', 'findingsSha256'
+    ) -Context 'Validation/security gate semantic evidence required fields'
+    Assert-AuthorityExactStringSequence -Value $semanticEvidence.success -Expected @(
+        'status=passed', 'decision=PASS', 'consentGranted=true', 'analyzerCompleteness=complete', 'findings=array', 'findingsSha256=verified'
+    ) -Context 'Validation/security gate semantic evidence success conditions'
+
     $aiReview = Get-AuthorityRequiredProperty -Object $security -Name 'aiReview' -Context 'Validation/security gate AI review policy'
     Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy') -Context 'Validation/security gate AI review policy'
     Assert-AuthorityExactString -Value $aiReview.status -Expected 'passed' -Context 'Validation/security gate AI review status'
@@ -607,12 +617,15 @@ function Assert-AuthorityEntryPointPolicy {
         -Name 'triggerAdapters' `
         -Context 'Validation/security gate entry-point contract'
     Assert-AuthorityJsonPropertySet -Object $triggerAdapters -Expected @(
-        'allowedEvents', 'mustShareCanonicalValidator', 'mustShareCandidateBinding', 'duplicateEventCandidateExecution'
+        'allowedEvents', 'mustShareCanonicalValidator', 'mustShareCandidateBinding', 'duplicateEventCandidateExecution',
+        'candidateKey', 'overlappingFilterAction'
     ) -Context 'Entry-point trigger adapter policy'
     Assert-AuthorityExactStringSequence -Value $triggerAdapters.allowedEvents -Expected @('pull_request', 'push', 'workflow_dispatch') -Context 'Entry-point trigger adapter events'
     Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCanonicalValidator -Expected $true -Context 'Entry-point trigger adapter validator binding'
     Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCandidateBinding -Expected $true -Context 'Entry-point trigger adapter candidate binding'
     Assert-AuthorityExactBoolean -Value $triggerAdapters.duplicateEventCandidateExecution -Expected $false -Context 'Entry-point duplicate event execution'
+    Assert-AuthorityExactString -Value $triggerAdapters.candidateKey -Expected 'event-only' -Context 'Entry-point trigger adapter candidate key'
+    Assert-AuthorityExactString -Value $triggerAdapters.overlappingFilterAction -Expected 'BLOCK' -Context 'Entry-point overlapping trigger filter action'
 
     $roles = Get-AuthorityRequiredProperty `
         -Object $Contract `
@@ -716,14 +729,11 @@ function Get-AuthorityConsumerWorkflowCandidateKey {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines
     )
 
-    $normalizedLines = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($line in $Lines) {
-        $cleanLine = (Remove-AuthorityConsumerShellComments -Line ([string]$line)).Trim()
-        if ([string]::IsNullOrWhiteSpace($cleanLine)) { continue }
-        [void]$normalizedLines.Add(($cleanLine -replace '\s+', ' '))
-    }
-    $orderedLines = @($normalizedLines.ToArray() | Sort-Object)
-    return '{0}|{1}' -f $Event, ([string]::Join('|', $orderedLines))
+    # Trigger path/branch filters are not a proof of disjoint candidates: one
+    # change can match two normalized filter expressions. Use the event as the
+    # conservative candidate key so overlapping adapters fail closed instead
+    # of being treated as separate canonical executions.
+    return $Event
 }
 
 function Get-AuthorityConsumerWorkflowEvents {

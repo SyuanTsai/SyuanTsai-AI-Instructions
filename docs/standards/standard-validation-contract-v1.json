@@ -8,6 +8,7 @@
     "adapter": "-AdapterPath <versioned declarative adapter JSON>",
     "artifacts": "-ArtifactsRoot <checkout-external run-owned directory>",
     "identity": ["-SourceRepository", "-SourceRevision", "-BaseRevision", "-EventName", "-CandidateArchivePath", "-CandidateAcquisitionEvidencePath", "-CandidateArchiveSha256", "-AuthorityRevision", "-AuthorityArchivePath", "-AuthoritySnapshotEvidencePath"],
+    "runId": "-RunId <optional lowercase 32-character validation/resolver run id>",
     "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
     "developmentOnly": "-DevelopmentHarness",
     "lifecycle": "-CompleteLifecycle",
@@ -37,7 +38,14 @@
     "encoding": "UTF-8-no-BOM",
     "artifactRoot": "checkout-external-run-owned",
     "candidateInput": "read-only-snapshot",
-    "productionCommandPolicy": "direct-trusted-executable; generic-interpreters-and-script-payloads-development-harness-only",
+    "productionCommandPolicy": "direct-trusted-executable; candidate-independent-trusted-supervisor-signed-resolver-receipt; generic-interpreters-and-script-payloads-development-harness-only",
+    "inventoryEncoding": {
+      "line": "<path>\\t<raw-file-sha256>\\n",
+      "sort": "ordinal",
+      "entries": "all-regular-files",
+      "path": "valid-utf8-forward-slash-relative; reject-absolute-drive-unc-backslash-colon-control-empty-dot-dot; NFC-and-ASCII-case-collision-rejected",
+      "canonicalHash": "sha256-of-concatenated-lines; no-length-field"
+    },
     "snapshotRevalidation": "before-and-after-every-child-process",
     "canonicalEntryPoint": "adapter.canonicalValidatorPath-inventoried-and-invoked-by-central-contract",
     "maxExecutionsPerEventCandidate": 1,
@@ -56,10 +64,16 @@
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",
     "aiReview": "typed-passed-PASS-decision; reviewedCandidate-bound; reviewFindings-and-findingDisposition-count-match; canonical-severity-mapping",
+    "semanticEvidence": {
+      "required": ["candidateId", "status=passed", "decision=PASS", "provider", "purpose", "scope", "consentGranted=true", "analyzerIdentity", "analyzerCompleteness=complete", "findings", "findingsSha256", "trusted-supervisor-signed-attestation"]
+    },
+    "releaseEligibility": {
+      "trueOnlyWhen": ["state=PASS", "exitCode=0", "adapter.mode=production", "candidate.acquisition.status=verified", "candidate.acquisition.verified=true", "authority.binding.status=verified", "authority.binding.verified=true", "ai-review=passed", "human-approval=passed", "publish-or-install=passed", "post-install-verification=passed"]
+    },
     "trustAnchors": ["docs/standards/trust-anchors/trusted-supervisor-public-key.xml", "docs/standards/trust-anchors/human-approval-public-key.xml"]
   },
   "consent": {
-    "semantic": "explicit-provider-scope-purpose-consent-required-when-triggered",
+    "semantic": "explicit-provider-scope-purpose-consent-plus-complete-analyzer-findings-and-trusted-attestation-required-when-triggered",
     "aiReviewCannotReplaceHumanApproval": true,
     "humanApproval": "candidate-bound-trusted-supervisor-signed-rsa-attestation",
     "publishInstall": "candidate-bound-trusted-supervisor-signed-lifecycle-attestation"

@@ -424,6 +424,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $stages.Count 10 'Validation contract must expose exactly ten stages.'
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
+        Assert-Match ([string]$contract.execution.productionCommandPolicy) 'signed-resolver-receipt' 'Production commands must carry a trusted signed resolver receipt.'
+        Assert-Equal ([string]$contract.execution.inventoryEncoding.line) '<path>\t<raw-file-sha256>\n' 'Canonical inventory hashing must exclude file length and use raw-file hashes.'
+        Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
+        Assert-Match (($contract.evidence.releaseEligibility.trueOnlyWhen -join ';') ) 'post-install-verification=passed' 'Release eligibility must require the complete lifecycle.'
         Assert-Equal $contract.consent.publishInstall 'candidate-bound-trusted-supervisor-signed-lifecycle-attestation' 'Publish/install lifecycle evidence must require a trusted attestation.'
         Assert-Match ([string]$contract.stages[8].barrier) 'trusted-supervisor-signed' 'Publish/install stage must require trusted signed evidence.'
         Assert-Match ([string]$contract.stages[9].barrier) 'trusted-supervisor-signed' 'Post-install stage must require trusted signed evidence.'
@@ -450,6 +454,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'New-StandardValidationOutputReservation' 'The runner must reserve the final evidence path.'
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'
         Assert-Match $runnerSource 'Assert-StandardValidationAiReviewEvidence' 'AI review evidence must use the central typed review policy.'
+        Assert-Match $runnerSource 'Assert-StandardValidationToolReceipt' 'Production command provenance must use a signed resolver receipt.'
+        Assert-Match $runnerSource 'Assert-StandardValidationSemanticEvidence' 'Semantic evidence must be authenticated and complete.'
+        Assert-False ($runnerSource -match 'LD_LIBRARY_PATH') 'Dynamic loader overrides must not be inherited by child processes.'
         $reservationIndex = $runnerSource.IndexOf('$outputReservation = New-StandardValidationOutputReservation', [StringComparison]::Ordinal)
         $contractResolverIndex = $runnerSource.IndexOf('$contractResult = Assert-StandardValidationContractFiles', [StringComparison]::Ordinal)
         Assert-True ($reservationIndex -ge 0 -and $contractResolverIndex -ge 0 -and $reservationIndex -lt $contractResolverIndex) 'Final output reservation must precede authority contract resolver child processes.'

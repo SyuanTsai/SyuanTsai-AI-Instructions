@@ -168,6 +168,7 @@
         "childProcessEnvironment",
         "outputReservation",
         "semanticTrigger",
+        "semanticEvidence",
         "aiReview",
         "trustAnchors"
       ],
@@ -214,6 +215,9 @@
         "semanticTrigger": {
           "$ref": "#/$defs/semanticTrigger"
         },
+        "semanticEvidence": {
+          "$ref": "#/$defs/semanticEvidence"
+        },
         "aiReview": {
           "$ref": "#/$defs/aiReview"
         },
@@ -250,6 +254,16 @@
         "analyzerProperty": { "const": "semanticRequired" },
         "effectiveDecision": { "const": "callerRequested-OR-analyzerRequired" },
         "recorded": { "const": true }
+      }
+    },
+    "semanticEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authentication", "requiredFields", "success"],
+      "properties": {
+        "authentication": { "const": "trusted-supervisor-signed-semantic-v1" },
+        "requiredFields": { "const": ["provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256"] },
+        "success": { "const": ["status=passed", "decision=PASS", "consentGranted=true", "analyzerCompleteness=complete", "findings=array", "findingsSha256=verified"] }
       }
     },
     "aiReview": {
@@ -338,12 +352,14 @@
         "triggerAdapters": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["allowedEvents", "mustShareCanonicalValidator", "mustShareCandidateBinding", "duplicateEventCandidateExecution"],
+          "required": ["allowedEvents", "mustShareCanonicalValidator", "mustShareCandidateBinding", "duplicateEventCandidateExecution", "candidateKey", "overlappingFilterAction"],
           "properties": {
             "allowedEvents": { "const": ["pull_request", "push", "workflow_dispatch"] },
             "mustShareCanonicalValidator": { "const": true },
             "mustShareCandidateBinding": { "const": true },
-            "duplicateEventCandidateExecution": { "const": false }
+            "duplicateEventCandidateExecution": { "const": false },
+            "candidateKey": { "const": "event-only" },
+            "overlappingFilterAction": { "const": "BLOCK" }
           }
         },
         "authorityWorkflowRoles": {

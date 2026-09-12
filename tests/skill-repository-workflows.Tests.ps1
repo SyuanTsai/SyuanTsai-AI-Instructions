@@ -601,10 +601,15 @@ jobs:
     steps:
       - run: ./scripts/Validate.ps1
 '@
-        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+        $filterOverlapError = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
                 -RepositoryRoot $disjointCandidateRoot `
                 -CanonicalValidatorPath 'scripts/Validate.ps1' `
-                -Policy $policy) 'Disjoint branch candidates for the same event may each execute the canonical validator once.'
+                -Policy $policy | Out-Null
+        }
+        catch { $filterOverlapError = $_.Exception.Message }
+        Assert-Match $filterOverlapError 'duplicate|event/candidate|overlap' 'Different path or branch filters must not be treated as proof of disjoint canonical execution.'
 
         $roles = @($policy.entryPointContract.authorityWorkflowRoles)
         Assert-Equal $roles.Count 4 'The authority repository must explicitly classify all four legitimate workflow roles.'

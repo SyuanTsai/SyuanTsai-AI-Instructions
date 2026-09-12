@@ -2908,10 +2908,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             -SourceRevision ('a' * 40) `
             -BaseRevision ('b' * 40) `
             -DefineFunctionsOnly
+        $schemaStageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static', 'repository-tests', 'conditional-semantic-scan', 'ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')
         $schemaStages = @(1..10 | ForEach-Object {
                 [pscustomobject][ordered]@{
                     order = $_
-                    id = "schema-stage-$_"
+                    id = $schemaStageIds[$_ - 1]
                     condition = 'always'
                     status = 'not-applicable'
                     startedAt = $null
@@ -2941,6 +2942,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $consistent.state = $terminal.state
             $consistent.exitCode = $terminal.exitCode
             $consistent.releaseEligible = $terminal.releaseEligible
+            if ($terminal.releaseEligible) {
+                $consistent.adapter.mode = 'production'
+                $consistent.candidate.acquisition.status = 'verified'
+                $consistent.candidate.acquisition.verified = $true
+                $consistent.authority.binding.status = 'verified'
+                $consistent.authority.binding.verified = $true
+                $consistent.authority.binding.selectedFiles = @(1..11 | ForEach-Object {
+                        [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
+                    })
+                foreach ($lifecycleId in @('ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
+                    $lifecycleStage = @($consistent.stages | Where-Object { $_.id -eq $lifecycleId })
+                    if ($lifecycleStage.Count -eq 0) {
+                        $consistent.stages += [pscustomobject][ordered]@{
+                            order = 11
+                            id = $lifecycleId
+                            condition = 'lifecycle-evidence'
+                            status = 'passed'
+                            startedAt = $null
+                            endedAt = $null
+                            events = @()
+                        }
+                    }
+                    else { $lifecycleStage[0].status = 'passed' }
+                }
+            }
             Assert-AuthoritySchemaInstance -Value $consistent -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message "A consistent '$($terminal.state)' validation evidence envelope must be schema-valid."
         }
         foreach ($contradiction in @(
