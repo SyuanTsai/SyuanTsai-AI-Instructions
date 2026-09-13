@@ -639,6 +639,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'AuthorityRevision|AuthorityArchivePath|AuthoritySnapshotEvidencePath' 'Authority evidence must bind to an immutable authority snapshot.'
         Assert-Match $runnerSource 'Assert-StandardValidationCandidateAcquisition|Assert-StandardValidationAuthoritySnapshot' 'The runner must verify source and authority acquisition bindings before validation.'
         Assert-Match $runnerSource 'Get-StandardValidationDescendantProcessIds|Kill\(\$true\)' 'Child cleanup must account for the complete owned process tree.'
+        Assert-Match $runnerSource 'unshare|--pid|--fork|--kill-child' 'Unix child execution must use a kernel-enforced PID namespace boundary.'
+        Assert-Match $runnerSource 'Get-StandardValidationUnixPidNamespaceProcessIds|PidNamespaceRequired' 'Unix cleanup must verify the owned PID namespace is empty before passing an event.'
         Assert-Match $runnerSource 'EnvironmentVariables\.Clear\(\)' 'Child processes must not inherit the supervisor environment wholesale.'
         Assert-Match $runnerSource 'New-StandardValidationOutputReservation' 'The runner must reserve the final evidence path.'
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'

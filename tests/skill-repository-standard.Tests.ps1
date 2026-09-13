@@ -3101,6 +3101,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases') 'A read-only gh api release lookup must not be classified as a mutation.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin v1.2.3') 'A direct tag refspec passed to git push must be release-affecting.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin') 'An explicit git push whose ref type cannot be established must fail closed.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push --mirror') 'A mirror push must be release-affecting because it can publish tag refs.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: docker/build-push-action@0123456789012345678901234567890123456789`nwith:`n  push: true") 'A Docker build-push action must be release-affecting because its push input can publish an image.'
 
         $implicitSuccessJob = @'
