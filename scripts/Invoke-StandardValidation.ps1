@@ -74,6 +74,7 @@ $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 $script:StandardValidationUnixPidNamespaceCapability = $null
 $script:StandardValidationMaxReceiptAgeMinutes = 15
+$script:StandardValidationChildOutputQuotaCharacters = 1048576
 $script:StandardValidationRepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:StandardValidationAuthorityRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 $script:StandardValidationTrustAnchorDefinitions = [ordered]@{
@@ -265,6 +266,64 @@ public static class StandardValidationUnixProcessControlNative
 }
 '@
     }
+}
+
+if ($null -eq ('StandardValidationBoundedCapture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class StandardValidationBoundedCaptureResult
+{
+    public string Text { get; private set; }
+    public bool Exceeded { get; private set; }
+    public int CharacterCount { get; private set; }
+
+    public StandardValidationBoundedCaptureResult(string text, bool exceeded, int characterCount)
+    {
+        Text = text;
+        Exceeded = exceeded;
+        CharacterCount = characterCount;
+    }
+}
+
+public static class StandardValidationBoundedCapture
+{
+    public static Task<StandardValidationBoundedCaptureResult> Start(StreamReader reader, int quota)
+    {
+        if (reader == null) throw new ArgumentNullException("reader");
+        if (quota < 1) throw new ArgumentOutOfRangeException("quota");
+        return Task.Factory.StartNew(
+            () => Read(reader, quota),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+    }
+
+    private static StandardValidationBoundedCaptureResult Read(StreamReader reader, int quota)
+    {
+        var builder = new StringBuilder(Math.Min(quota, 4096));
+        var buffer = new char[4096];
+        var count = 0;
+        while (true)
+        {
+            var read = reader.Read(buffer, 0, buffer.Length);
+            if (read == 0) return new StandardValidationBoundedCaptureResult(builder.ToString(), false, count);
+            var remaining = quota - count;
+            if (read > remaining)
+            {
+                if (remaining > 0) builder.Append(buffer, 0, remaining);
+                return new StandardValidationBoundedCaptureResult(builder.ToString(), true, quota);
+            }
+            builder.Append(buffer, 0, read);
+            count += read;
+        }
+    }
+}
+'@
 }
 
 function Get-StandardValidationProperty {
@@ -851,7 +910,7 @@ function Assert-StandardValidationToolReceipt {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
-        [Parameter(Mandatory = $true)][guid] $RunId,
+        [Nullable[guid]] $RunId,
         [Parameter(Mandatory = $true)][string] $ExpectedToolName,
         [Parameter(Mandatory = $true)][string] $Context
     )
@@ -901,8 +960,12 @@ function Assert-StandardValidationToolReceipt {
             throw "BLOCKED|$Context resolver receipt has an invalid '$name'."
         }
     }
-    $expectedResolutionRunId = $RunId.ToString('N')
-    if ([string]$receipt.resolutionRunId -cne $expectedResolutionRunId) {
+    $receiptRunId = [guid]::Empty
+    if (-not [guid]::TryParseExact([string]$receipt.resolutionRunId, 'N', [ref]$receiptRunId) -or
+        $receiptRunId.ToString('N') -cne [string]$receipt.resolutionRunId) {
+        throw "BLOCKED|$Context resolver receipt has an invalid resolution run ID."
+    }
+    if ($null -ne $RunId -and $receiptRunId.ToString('N') -cne ([guid]$RunId).ToString('N')) {
         throw "BLOCKED|$Context resolver receipt belongs to a different validation run."
     }
     $resolvedAtUtc = Assert-StandardValidationFreshTimestamp `
@@ -1017,6 +1080,7 @@ function Assert-StandardValidationToolReceipt {
         launcher = $launcher
         launcherDigestSha256 = [string]$receipt.launcherDigestSha256
         toolName = [string]$receipt.toolName
+        runId = $receiptRunId
     }
 }
 
@@ -1642,7 +1706,11 @@ function Sort-StandardValidationInventory {
     param([Parameter(Mandatory = $true)] $Inventory)
 
     $ordered = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($entry in @($Inventory)) {
+    # Enumerate through the PowerShell pipeline so generic List[object]
+    # instances produced during directory-closure capture are treated as
+    # entries rather than as a single array-conversion operand.
+    $inventoryItems = @($Inventory | ForEach-Object { $_ })
+    foreach ($entry in $inventoryItems) {
         $insertAt = 0
         while ($insertAt -lt $ordered.Count -and
             [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
@@ -1705,7 +1773,7 @@ function Assert-StandardValidationCommandSpec {
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
-        [Parameter(Mandatory = $true)][guid] $RunId,
+        [Nullable[guid]] $RunId,
         [Parameter(Mandatory = $true)][string] $ExpectedToolName,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
     )
@@ -1866,7 +1934,7 @@ function Assert-StandardValidationAdapter {
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
-        [Parameter(Mandatory = $true)][guid] $RunId,
+        [Nullable[guid]] $RunId,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
     )
 
@@ -1951,6 +2019,39 @@ function Assert-StandardValidationAdapter {
         commands = $commands
         repositoryTests = $testCommands
     }
+}
+
+function Get-StandardValidationProductionRunId {
+    param(
+        [Parameter(Mandatory = $true)] $Adapter,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot
+    )
+
+    # The resolver signs resolutionRunId before the adapter reaches this
+    # function. Authenticate the package-adapter receipt first, then use its
+    # signed ID as the binding for the complete adapter. This keeps the
+    # production ID inside the trusted orchestration path without accepting a
+    # caller-selected value or comparing receipts with a freshly unrelated ID.
+    $packageSpec = Get-StandardValidationRequiredProperty -Object $Adapter -Name 'packageAdapter' -Context 'adapter packageAdapter'
+    $packageResult = Assert-StandardValidationCommandSpec `
+        -Spec $packageSpec `
+        -Context 'adapter packageAdapter run-id derivation' `
+        -CandidateRoot $CandidateRoot `
+        -ArtifactsRoot $ArtifactsRoot `
+        -TrustedToolRoot $TrustedToolRoot `
+        -TrustAnchorRoot $TrustAnchorRoot `
+        -RunId $null `
+        -ExpectedToolName (Get-StandardValidationExpectedToolName -AdapterSlot 'packageAdapter') `
+        -DevelopmentHarness:$false
+    if ($null -eq $packageResult.toolReceipt -or
+        $packageResult.toolReceipt.PSObject.Properties.Name -notcontains 'runId' -or
+        $packageResult.toolReceipt.runId -eq [guid]::Empty) {
+        throw 'BLOCKED|Production validation run ID could not be derived from the authenticated package-adapter resolver receipt.'
+    }
+    return [guid]$packageResult.toolReceipt.runId
 }
 
 function New-StandardValidationStages {
@@ -2558,6 +2659,7 @@ function Invoke-StandardValidationProcess {
     $exitCode = -1
     $stdout = ''
     $stderr = ''
+    $outputQuotaExceeded = $false
     $cleanedUp = $true
     $process = $null
     $rootProcessId = $null
@@ -2873,11 +2975,29 @@ function Invoke-StandardValidationProcess {
                 }
             }
         }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stdoutTask = [StandardValidationBoundedCapture]::Start(
+            $process.StandardOutput,
+            $script:StandardValidationChildOutputQuotaCharacters
+        )
+        $stderrTask = [StandardValidationBoundedCapture]::Start(
+            $process.StandardError,
+            $script:StandardValidationChildOutputQuotaCharacters
+        )
         $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
         while (-not $protectionSetupFailed -and -not $process.HasExited) {
             foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
+            $quotaStream = $null
+            if ($stdoutTask.IsCompleted) {
+                try { if ([bool]$stdoutTask.GetAwaiter().GetResult().Exceeded) { $quotaStream = 'stdout' } } catch { }
+            }
+            if ($null -eq $quotaStream -and $stderrTask.IsCompleted) {
+                try { if ([bool]$stderrTask.GetAwaiter().GetResult().Exceeded) { $quotaStream = 'stderr' } } catch { }
+            }
+            if ($null -ne $quotaStream) {
+                $terminationStatus = 'failed'
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
+                break
+            }
             if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
                 $terminationStatus = 'cancelled'
                 [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
@@ -2902,8 +3022,27 @@ function Invoke-StandardValidationProcess {
             $process.WaitForExit()
             $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 1000
         }
-        try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch { $stdout = '' }
-        try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { $stderr = '' }
+        $stdoutCaptureResult = $null
+        $stderrCaptureResult = $null
+        try {
+            $stdoutCaptureResult = $stdoutTask.GetAwaiter().GetResult()
+            $stdout = [string]$stdoutCaptureResult.Text
+        }
+        catch { $stdout = '' }
+        try {
+            $stderrCaptureResult = $stderrTask.GetAwaiter().GetResult()
+            $stderr = [string]$stderrCaptureResult.Text
+        }
+        catch { $stderr = '' }
+        $quotaStreams = @()
+        if ($null -ne $stdoutCaptureResult -and [bool]$stdoutCaptureResult.Exceeded) { $quotaStreams += 'stdout' }
+        if ($null -ne $stderrCaptureResult -and [bool]$stderrCaptureResult.Exceeded) { $quotaStreams += 'stderr' }
+        if ($quotaStreams.Count -gt 0) {
+            $outputQuotaExceeded = $true
+            if ($null -eq $terminationStatus) { $terminationStatus = 'failed' }
+            $quotaMessage = "Owned validator output capture quota exceeded for $($quotaStreams -join ' and ') (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)."
+            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = $quotaMessage } else { $stderr = "$stderr`n$quotaMessage" }
+        }
         if ($process.HasExited) { $exitCode = $process.ExitCode }
         if (-not $cleanedUp) {
             $status = 'cleanup-failed'
@@ -2957,6 +3096,7 @@ function Invoke-StandardValidationProcess {
         status = [string]$status
         stdout = [string]$stdout
         stderr = [string]$stderr
+        outputQuotaExceeded = [bool]$outputQuotaExceeded
         cleanedUp = [bool]$cleanedUp
     }
 }
@@ -3600,6 +3740,9 @@ function Invoke-StandardValidationCommandAndRecord {
     }
     $script:StandardValidationLastEvent = $event
     if (-not [bool]$processResult.cleanedUp) { throw 'FAILED|Validation child process cleanup failed.' }
+    if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded' -and [bool]$processResult.outputQuotaExceeded) {
+        throw "FAILED|$StageId/$ToolId output capture quota exceeded; the owned validator process was terminated."
+    }
     Assert-StandardValidationCandidateUnchanged `
         -CandidateRoot $OriginalCandidateRoot `
         -ExpectedContentSha256 $ExpectedCandidateContentSha256 `
@@ -4525,6 +4668,14 @@ function Invoke-StandardValidationRun {
         $authorityEvidence.binding = $authorityBinding
         $script:StandardValidationAuthorityEvidence = $authorityEvidence
         $adapter = Get-StandardValidationJson -Path $adapterFull -Context 'standard validation adapter'
+        if (-not $DevelopmentHarness) {
+            $runId = Get-StandardValidationProductionRunId `
+                -Adapter $adapter `
+                -CandidateRoot $originalCandidateRoot `
+                -ArtifactsRoot $artifactRootFull `
+                -TrustedToolRoot $trustedToolRootFull `
+                -TrustAnchorRoot $trustAnchorRootFull
+        }
         $adapterResult = Assert-StandardValidationAdapter `
             -Adapter $adapter `
             -CandidateRoot $originalCandidateRoot `
