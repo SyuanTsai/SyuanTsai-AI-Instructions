@@ -1296,8 +1296,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 ForEach-Object { Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json } |
                 Where-Object { $_.process.outputQuotaExceeded -eq $true } | Select-Object -First 1)[0]
         Assert-True ($null -ne $quotaEvent) 'The output-flood event must retain raw bounded-capture evidence.'
-        Assert-True ([string]$quotaEvent.process.stdout.Length -le 1048576) 'The stdout prefix must remain within its quota on overflow.'
-        Assert-True ([string]$quotaEvent.process.stderr.Length -le 1048576) 'The stderr prefix must remain within its quota on overflow.'
+        Assert-True (([string]$quotaEvent.process.stdout).Length -le 1048576) 'The stdout prefix must remain within its quota on overflow.'
+        Assert-True (([string]$quotaEvent.process.stderr).Length -le 1048576) 'The stderr prefix must remain within its quota on overflow.'
         Assert-Match ([string]$quotaEvent.process.outputQuotaDiagnostic) 'quota exceeded' 'The overflow diagnostic must be recorded outside the bounded stderr prefix.'
     }
 

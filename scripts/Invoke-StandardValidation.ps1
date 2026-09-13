@@ -3937,8 +3937,21 @@ function Invoke-StandardValidationCommandAndRecord {
     $eventStreamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
     # Keep a small serialization margin for Windows PowerShell 5.1, whose
     # redirected stream/JSON boundary can normalize a retained prefix after
-    # the bounded reader has already enforced the character quota.
-    $eventSerializationQuota = [Math]::Max(0, $eventStreamQuota - 4096)
+    # the bounded reader has already enforced the character quota. When the
+    # child has already exceeded the capture quota, retain only a conservative
+    # diagnostic prefix in the raw event; the separate diagnostic preserves
+    # the terminal reason without allowing a legacy serializer to expand the
+    # retained stream near the contract boundary.
+    $eventOutputQuotaExceeded = $false
+    if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
+        $eventOutputQuotaExceeded = [bool]$processResult.outputQuotaExceeded
+    }
+    $eventSerializationQuota = if ($eventOutputQuotaExceeded) {
+        [Math]::Min(65536, [Math]::Max(0, $eventStreamQuota - 4096))
+    }
+    else {
+        [Math]::Max(0, $eventStreamQuota - 4096)
+    }
     $eventStdout = [string]$processResult.stdout
     $eventStderr = [string]$processResult.stderr
     if ($eventStdout.Length -gt $eventSerializationQuota) { $eventStdout = $eventStdout.Substring(0, $eventSerializationQuota) }
@@ -3953,7 +3966,7 @@ function Invoke-StandardValidationCommandAndRecord {
         cleanedUp = [bool]$processResult.cleanedUp
     }
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
-        $boundedProcessResult.outputQuotaExceeded = [bool]$processResult.outputQuotaExceeded
+        $boundedProcessResult.outputQuotaExceeded = $eventOutputQuotaExceeded
     }
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaDiagnostic') {
         $boundedProcessResult.outputQuotaDiagnostic = if ($null -eq $processResult.outputQuotaDiagnostic) { $null } else { [string]$processResult.outputQuotaDiagnostic }
