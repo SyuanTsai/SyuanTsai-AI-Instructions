@@ -71,6 +71,7 @@ $script:StandardValidationExitCodes = [ordered]@{
 }
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
+$script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 $script:StandardValidationMaxReceiptAgeMinutes = 15
 $script:StandardValidationRepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:StandardValidationAuthorityRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
@@ -2661,10 +2662,48 @@ function Write-StandardValidationJsonReserved {
     }
 }
 
-function Write-StandardValidationJsonCreate {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)] $Value)
+function Register-StandardValidationEvidenceArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
 
-    $fullPath = Get-StandardValidationFullPath -Path $Path -Context 'artifact output'
+    if ($null -eq $script:StandardValidationEvidenceArtifactLedger) {
+        $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
+    }
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+    [void]$script:StandardValidationEvidenceArtifactLedger.Add([pscustomobject][ordered]@{
+        path = $fullPath
+        sha256 = Get-StandardValidationFileSha256 -Path $fullPath -Context $Context
+        context = $Context
+    })
+}
+
+function Assert-StandardValidationEvidenceArtifacts {
+    if ($null -eq $script:StandardValidationEvidenceArtifactLedger) { return }
+    foreach ($artifact in $script:StandardValidationEvidenceArtifactLedger) {
+        try {
+            Assert-StandardValidationRegularFile -Path ([string]$artifact.path) -Context ([string]$artifact.context)
+            $currentSha256 = Get-StandardValidationFileSha256 -Path ([string]$artifact.path) -Context ([string]$artifact.context)
+        }
+        catch {
+            throw "FAILED|Previously written validation evidence artifact '$($artifact.context)' is missing or not a regular file."
+        }
+        if ([string]$currentSha256 -cne [string]$artifact.sha256) {
+            throw "FAILED|Previously written validation evidence artifact '$($artifact.context)' changed after it was written."
+        }
+    }
+}
+
+function Write-StandardValidationJsonCreate {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)] $Value,
+        [string] $Context = 'artifact output'
+    )
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
     $parent = [System.IO.Path]::GetDirectoryName($fullPath)
     if (-not [string]::IsNullOrWhiteSpace($parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
     $json = $Value | ConvertTo-Json -Depth 100
@@ -2672,6 +2711,7 @@ function Write-StandardValidationJsonCreate {
     $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() }
     finally { $stream.Dispose() }
+    Register-StandardValidationEvidenceArtifact -Path $fullPath -Context $Context
     return $fullPath
 }
 
@@ -2680,7 +2720,10 @@ function Write-StandardValidationStageReceipt {
 
     $stageRoot = Join-Path $RunRoot ([string]$Stage.id)
     [void](New-Item -ItemType Directory -Path $stageRoot -Force)
-    [void](Write-StandardValidationJsonCreate -Path (Join-Path $stageRoot 'receipt.json') -Value $Stage)
+    [void](Write-StandardValidationJsonCreate `
+        -Path (Join-Path $stageRoot 'receipt.json') `
+        -Value $Stage `
+        -Context "stage '$($Stage.id)' receipt")
 }
 
 function Get-StandardValidationOutputHash {
@@ -3015,6 +3058,7 @@ function Invoke-StandardValidationCommandAndRecord {
     param(
         [Parameter(Mandatory = $true)] $CommandSpec,
         [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][string] $ChildWorkingRoot,
         [Parameter(Mandatory = $true)][string] $StageId,
         [Parameter(Mandatory = $true)][string] $ToolId,
         [Parameter(Mandatory = $true)][string] $CandidateId,
@@ -3052,6 +3096,10 @@ function Invoke-StandardValidationCommandAndRecord {
         throw "FAILED|$StageId/$ToolId command changed after adapter resolution."
     }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
+    Assert-StandardValidationEvidenceArtifacts
+    $childWorkingDirectory = Join-Path $ChildWorkingRoot $eventId
+    [void](New-Item -ItemType Directory -Path $childWorkingDirectory -Force)
+    Assert-StandardValidationNoReparsePoints -Root $childWorkingDirectory -Context "$StageId/$ToolId child working directory"
     $environment = @{
         STANDARD_VALIDATION_STAGE_ID = $StageId
         STANDARD_VALIDATION_TOOL_ID = $ToolId
@@ -3068,7 +3116,7 @@ function Invoke-StandardValidationCommandAndRecord {
     $processResult = Invoke-StandardValidationProcess `
         -Command ([string]$CommandSpec.command) `
         -Arguments @($CommandSpec.arguments) `
-        -WorkingDirectory $RunRoot `
+        -WorkingDirectory $childWorkingDirectory `
         -Environment $environment `
         -TimeoutSeconds $TimeoutSeconds `
         -CancellationPath $CancellationPath
@@ -3089,6 +3137,7 @@ function Invoke-StandardValidationCommandAndRecord {
             -CommandPath ([string]$CommandSpec.command) `
             -Context "$StageId/$ToolId"
     }
+    Assert-StandardValidationEvidenceArtifacts
     $commandSha256After = Get-StandardValidationFileSha256 -Path ([string]$CommandSpec.command) -Context "$StageId/$ToolId command"
     if ($commandSha256After -cne $commandSha256Before) {
         throw "FAILED|$StageId/$ToolId command changed during validation."
@@ -3107,7 +3156,10 @@ function Invoke-StandardValidationCommandAndRecord {
         stderr = [string]$processResult.stderr
     }
     $rawOutputPath = Join-Path $eventDirectory ("event-$eventId.json")
-    [void](Write-StandardValidationJsonCreate -Path $rawOutputPath -Value $rawOutput)
+    [void](Write-StandardValidationJsonCreate `
+        -Path $rawOutputPath `
+        -Value $rawOutput `
+        -Context "$StageId/$ToolId event output")
     $event = [pscustomobject][ordered]@{
         eventId = $eventId
         stageId = $StageId
@@ -3934,6 +3986,7 @@ function Invoke-StandardValidationRun {
     $candidateEvidence = $null
     $adapterEvidence = $null
     $runRoot = $null
+    $childWorkingRoot = $null
     $lockPath = $null
     $lockCreated = $false
     $finalWritten = $false
@@ -3957,6 +4010,7 @@ function Invoke-StandardValidationRun {
     $analyzerSemanticRequired = $false
     $semanticRequiredSources = New-Object 'System.Collections.Generic.List[string]'
     $authorityBinding = $null
+    $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 
     try {
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
@@ -4136,6 +4190,10 @@ function Invoke-StandardValidationRun {
         catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
+        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey
+        $childWorkingRoot = Assert-StandardValidationCanonicalRootPath -Path $childWorkingRoot -Context 'child working root'
+        [void](New-Item -ItemType Directory -Path $childWorkingRoot -Force)
+        Assert-StandardValidationNoReparsePoints -Root $childWorkingRoot -Context 'child working root'
         $snapshotRoot = Join-Path $runRoot 'candidate-snapshot'
         Copy-StandardValidationSnapshot -Source $originalCandidateRoot -Destination $snapshotRoot
         $snapshotInventory = Get-StandardValidationInventory -Root $snapshotRoot -Context 'candidate snapshot'
@@ -4161,6 +4219,7 @@ function Invoke-StandardValidationRun {
         $invocation = Invoke-StandardValidationCommandAndRecord `
             -CommandSpec $adapterResult.commands.packageAdapter `
             -RunRoot $runRoot `
+            -ChildWorkingRoot $childWorkingRoot `
             -StageId $stage.id `
             -ToolId 'package-adapter' `
             -CandidateId $candidateId `
@@ -4190,6 +4249,7 @@ function Invoke-StandardValidationRun {
                 $invocation = Invoke-StandardValidationCommandAndRecord `
                     -CommandSpec $adapterResult.commands[$toolName] `
                     -RunRoot $runRoot `
+                    -ChildWorkingRoot $childWorkingRoot `
                     -StageId $stage.id `
                     -ToolId $toolId `
                     -CandidateId $candidateId `
@@ -4224,6 +4284,7 @@ function Invoke-StandardValidationRun {
         $invocation = Invoke-StandardValidationCommandAndRecord `
             -CommandSpec $adapterResult.commands.staticAnalyzer `
             -RunRoot $runRoot `
+            -ChildWorkingRoot $childWorkingRoot `
             -StageId $stage.id `
             -ToolId 'staticAnalyzer' `
             -CandidateId $candidateId `
@@ -4268,6 +4329,7 @@ function Invoke-StandardValidationRun {
             $invocation = Invoke-StandardValidationCommandAndRecord `
                 -CommandSpec $test.command `
                 -RunRoot $runRoot `
+                -ChildWorkingRoot $childWorkingRoot `
                 -StageId $stage.id `
                 -ToolId $test.id `
                 -CandidateId $candidateId `
@@ -4435,6 +4497,15 @@ function Invoke-StandardValidationRun {
         }
     }
     finally {
+        try {
+            Assert-StandardValidationEvidenceArtifacts
+        }
+        catch {
+            $state = 'FAILED'
+            $failureState = 'FAILED'
+            $failureMessage = [string]$_.Exception.Message
+            $releaseEligible = $false
+        }
         $exitCode = [int]$script:StandardValidationExitCodes[$state]
         $finalEvidence = New-StandardValidationCandidateEvidence `
             -RunId $runId `

@@ -50,7 +50,7 @@ Describe 'Standard validation runner contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [string[]] $SkillIds = @('alpha', 'beta'),
-                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'repository-missing-evidence', 'repository-zero-tests')]
+                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'repository-missing-evidence', 'repository-zero-tests', 'repository-artifact-tamper')]
                 [string] $Behavior = 'pass'
             )
 
@@ -146,6 +146,13 @@ if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
     $result.testInventory = @('fixture-repository-test')
     $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
     $result.domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+    if ($fixtureBehavior -eq 'repository-artifact-tamper') {
+        $artifactRoot = Split-Path -Parent $env:STANDARD_VALIDATION_OUTPUT_PATH
+        $receipt = @(Get-ChildItem -LiteralPath (Join-Path $artifactRoot 'runs') -Filter 'receipt.json' -Recurse -Force -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer -and $_.FullName -match '[\\/]+controlled-acquisition[\\/]receipt\.json$' } |
+                Select-Object -First 1)[0]
+        if ($null -ne $receipt) { [IO.File]::Delete($receipt.FullName) }
+    }
     if ($fixtureBehavior -eq 'repository-missing-evidence') {
         $result.Remove('testInventory')
     }
@@ -641,6 +648,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Get-StandardValidationExpectedToolName' 'Every adapter slot must resolve through the central canonical tool-role map.'
         Assert-Match $runnerSource 'Assert-StandardValidationCanonicalRootPath' 'Root containment checks must use canonical existing filesystem components.'
         Assert-Match $runnerSource 'Get-StandardValidationPathCaseBehavior|Get-StandardValidationPathComparison' 'Path containment checks must detect filesystem case behavior rather than infer it from the operating-system enum.'
+        Assert-Match $runnerSource 'ChildWorkingRoot|childWorkingDirectory' 'Candidate-controlled children must run outside the supervisor evidence directory.'
+        Assert-Match $runnerSource 'Assert-StandardValidationEvidenceArtifacts' 'Previously written evidence artifacts must be revalidated before finalization.'
         Assert-Match $runnerSource 'symlinked or reparse-point ancestor' 'Symlinked root ancestors must fail closed before artifact creation.'
         Assert-Match $runnerSource 'Assert-StandardValidationLauncherFileIdentity' 'Production package launchers must revalidate safe Unix launcher symlinks through the central helper.'
         Assert-Match $runnerSource 'Get-StandardValidationSafeUnixSymlinkEntry' 'Production installed closures must validate Unix symlink targets centrally.'
@@ -932,6 +941,11 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $environmentFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'environment-leak') -Behavior 'environment-leak'
         $environmentResult = Invoke-RunnerFixture -Fixture $environmentFixture
         Assert-Equal $environmentResult.Evidence.state 'PASS' 'A secret inherited by the supervisor must not be visible to a validation child.'
+
+        $artifactTamperFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'repository-artifact-tamper') -Behavior 'repository-artifact-tamper'
+        $artifactTamperResult = Invoke-RunnerFixture -Fixture $artifactTamperFixture
+        Assert-Equal $artifactTamperResult.Evidence.state 'FAILED' 'A repository test that removes a prior evidence artifact must fail validation.'
+        Assert-Match $artifactTamperResult.Output 'Previously written validation evidence artifact' 'Prior evidence artifact tampering must be reported as a validation failure.'
 
         $outputTamperFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'output-tamper') -Behavior 'output-tamper'
         $outputTamperResult = Invoke-RunnerFixture -Fixture $outputTamperFixture

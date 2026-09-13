@@ -1139,7 +1139,10 @@ function Get-AuthorityConsumerReleaseAffectingMatch {
     # Action delegates are executable release surfaces too. Their behavior is
     # opaque to this repository, so they must still be structurally bound to
     # the canonical validator before the release job can run.
-    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
+    # docker/build-push-action can publish when its push input is true. The
+    # executable extractor intentionally keeps action uses values but not
+    # arbitrary with: fields, so classify every invocation conservatively.
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|docker/build-push-action@[A-Za-z0-9_./-]+|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
     # A non-option argument after git push may be a remote, a direct refspec,
     # or a configured shorthand whose branch-vs-tag meaning cannot be proven
     # from workflow text. Classify it as release-affecting and fail closed;
