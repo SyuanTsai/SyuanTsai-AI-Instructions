@@ -2246,12 +2246,6 @@ function Get-StandardValidationChildEnvironment {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $childEnvironment[$name] = [string]$value }
     }
-    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
-        $name = [string]$entry.Key
-        if ($name -match '^STANDARD_VALIDATION_[A-Za-z0-9_]+$') {
-            $childEnvironment[$name] = [string]$entry.Value
-        }
-    }
     foreach ($entry in $Environment.GetEnumerator()) {
         $name = [string]$entry.Key
         if ($name -notmatch '^STANDARD_VALIDATION_[A-Za-z0-9_]+$') {

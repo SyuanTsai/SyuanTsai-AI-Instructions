@@ -74,7 +74,8 @@ Describe 'Standard validation runner contract' {
 
             $toolScript = Join-Path $tools 'fixture-tool.ps1'
             $toolScriptText = @'
-$logPath = $env:STANDARD_VALIDATION_FIXTURE_LOG
+$fixtureBehavior = '__FIXTURE_BEHAVIOR__'
+$logPath = '__FIXTURE_LOG_PATH__'
 if (-not [string]::IsNullOrWhiteSpace($logPath)) {
     Add-Content -LiteralPath $logPath -Value ("{0}|{1}|{2}" -f $env:STANDARD_VALIDATION_STAGE_ID, $env:STANDARD_VALIDATION_TOOL_ID, $env:STANDARD_VALIDATION_SKILL_ID) -Encoding UTF8
 }
@@ -92,15 +93,18 @@ $result = [ordered]@{
     skillInventorySha256 = $env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256
     output = "fixture-$($env:STANDARD_VALIDATION_TOOL_ID)"
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'package-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'package-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     $result.status = 'failed'
     $result.decision = 'BLOCK'
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'environment-leak' -and -not [string]::IsNullOrWhiteSpace($env:SYP154_INHERITED_SECRET)) {
+if ($fixtureBehavior -eq 'environment-leak' -and (
+    -not [string]::IsNullOrWhiteSpace($env:SYP154_INHERITED_SECRET) -or
+    -not [string]::IsNullOrWhiteSpace($env:STANDARD_VALIDATION_INHERITED_SECRET)
+)) {
     $result.status = 'failed'
     $result.decision = 'BLOCK'
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'output-tamper' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'output-tamper' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     try {
         [IO.File]::WriteAllText($env:STANDARD_VALIDATION_OUTPUT_PATH, '{"attacker":true}', (New-Object Text.UTF8Encoding($false)))
     }
@@ -109,20 +113,20 @@ if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'output-tamper' -and $env:STAN
         $result.decision = 'BLOCK'
     }
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'wrong-candidate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'wrong-candidate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     $result.candidateIdentity = ('0' * 64)
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'missing-output' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'missing-output' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     exit 0
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'timeout' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'timeout' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     Start-Sleep -Seconds 10
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'static-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
+if ($fixtureBehavior -eq 'static-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
     $result.status = 'failed'
     $result.decision = 'BLOCK'
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'static-partial' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
+if ($fixtureBehavior -eq 'static-partial' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
     $result.status = 'partial'
     $result.decision = 'BLOCK'
     $result.analyzerCompleteness = 'partial'
@@ -130,31 +134,34 @@ if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'static-partial' -and $env:STA
 }
 if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
     $result.scannerIdentity = 'development-fixture-static-analyzer'
-    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'semantic-required') {
+    if ($fixtureBehavior -eq 'semantic-required') {
         $result.semanticRequired = $true
     }
-    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -ne 'static-partial') {
+    if ($fixtureBehavior -ne 'static-partial') {
         $result.analyzerCompleteness = 'complete'
     }
 }
 if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
-    [IO.File]::WriteAllText($env:STANDARD_VALIDATION_FIXTURE_SENTINEL, 'repository-test-ran', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText('__FIXTURE_SENTINEL_PATH__', 'repository-test-ran', (New-Object Text.UTF8Encoding($false)))
     $result.testInventory = @('fixture-repository-test')
     $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
     $result.domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
-    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'repository-missing-evidence') {
+    if ($fixtureBehavior -eq 'repository-missing-evidence') {
         $result.Remove('testInventory')
     }
-    if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'repository-zero-tests') {
+    if ($fixtureBehavior -eq 'repository-zero-tests') {
         $result.testInventory = @()
     }
 }
-if ($env:STANDARD_VALIDATION_FIXTURE_BEHAVIOR -eq 'snapshot-mutate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+if ($fixtureBehavior -eq 'snapshot-mutate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     $targetSkill = @($skills | Select-Object -First 1)[0]
     Add-Content -LiteralPath (Join-Path $env:STANDARD_VALIDATION_CANDIDATE_ROOT ("skills/$targetSkill/SKILL.md")) -Value 'mutated-by-package-fixture' -Encoding UTF8
 }
 $result | ConvertTo-Json -Depth 10 -Compress
 '@
+            $toolScriptText = $toolScriptText.Replace('__FIXTURE_BEHAVIOR__', $Behavior.Replace("'", "''"))
+            $toolScriptText = $toolScriptText.Replace('__FIXTURE_LOG_PATH__', $log.Replace("'", "''"))
+            $toolScriptText = $toolScriptText.Replace('__FIXTURE_SENTINEL_PATH__', $sentinel.Replace("'", "''"))
             Write-TestUtf8File -Path $toolScript -Text $toolScriptText
 
             $adapter = [ordered]@{
@@ -263,9 +270,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
             }
 
             $fixtureEnvironment = [ordered]@{
-                STANDARD_VALIDATION_FIXTURE_LOG = $Fixture.Log
-                STANDARD_VALIDATION_FIXTURE_BEHAVIOR = $Fixture.Behavior
-                STANDARD_VALIDATION_FIXTURE_SENTINEL = $Fixture.Sentinel
+                STANDARD_VALIDATION_INHERITED_SECRET = 'fixture-reserved-prefix-secret-must-not-cross-the-child-boundary'
                 SYP154_INHERITED_SECRET = 'fixture-secret-must-not-cross-the-child-boundary'
             }
             $previousEnvironment = @{}
