@@ -1145,12 +1145,13 @@ function Assert-StandardValidationToolReceipt {
     $receiptPath = Get-StandardValidationFullPath -Path ([string]$receiptPathValue) -Context "$Context resolver receipt"
     Assert-StandardValidationOutsideRoot -Path $receiptPath -Root $CandidateRoot -Context "$Context resolver receipt"
     Assert-StandardValidationRegularFile -Path $receiptPath -Context "$Context resolver receipt"
-    $actualReceiptSha256 = Get-StandardValidationFileSha256 -Path $receiptPath -Context "$Context resolver receipt"
+    $receiptSnapshot = Get-StandardValidationJsonSnapshot -Path $receiptPath -Context "$Context resolver receipt"
+    $actualReceiptSha256 = [string]$receiptSnapshot.sha256
     if ($actualReceiptSha256 -cne [string]$receiptSha256) {
         throw "BLOCKED|$Context resolver receipt hash does not match the adapter binding."
     }
 
-    $receipt = Get-StandardValidationJson -Path $receiptPath -Context "$Context resolver receipt"
+    $receipt = $receiptSnapshot.value
     Assert-StandardValidationExactPropertySet -Object $receipt -Expected @(
         'schemaVersion', 'evidenceType', 'status', 'toolName', 'source', 'channel',
         'resolvedVersion', 'resolvedIdentity', 'installRoot', 'executablePath',
