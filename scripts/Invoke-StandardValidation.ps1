@@ -3935,10 +3935,14 @@ function Invoke-StandardValidationCommandAndRecord {
     # implementation. This is the final serialization boundary and prevents
     # any platform-specific result mutation from exceeding the contract quota.
     $eventStreamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
+    # Keep a small serialization margin for Windows PowerShell 5.1, whose
+    # redirected stream/JSON boundary can normalize a retained prefix after
+    # the bounded reader has already enforced the character quota.
+    $eventSerializationQuota = [Math]::Max(0, $eventStreamQuota - 4096)
     $eventStdout = [string]$processResult.stdout
     $eventStderr = [string]$processResult.stderr
-    if ($eventStdout.Length -gt $eventStreamQuota) { $eventStdout = $eventStdout.Substring(0, $eventStreamQuota) }
-    if ($eventStderr.Length -gt $eventStreamQuota) { $eventStderr = $eventStderr.Substring(0, $eventStreamQuota) }
+    if ($eventStdout.Length -gt $eventSerializationQuota) { $eventStdout = $eventStdout.Substring(0, $eventSerializationQuota) }
+    if ($eventStderr.Length -gt $eventSerializationQuota) { $eventStderr = $eventStderr.Substring(0, $eventSerializationQuota) }
     $boundedProcessResult = [ordered]@{}
     foreach ($property in $processResult.PSObject.Properties) {
         $boundedProcessResult[$property.Name] = $property.Value
