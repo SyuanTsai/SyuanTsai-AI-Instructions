@@ -314,8 +314,12 @@ function Assert-StandardValidationRevision {
 function Assert-StandardValidationSourceRepository {
     param([Parameter(Mandatory = $true)][string] $Value)
 
-    if ($Value -cnotmatch '^https://[^/?#]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
-        throw 'INVALID|SourceRepository must be a canonical HTTPS repository URL.'
+    $repositoryUri = $null
+    if (-not [System.Uri]::TryCreate($Value, [System.UriKind]::Absolute, [ref]$repositoryUri) -or
+        $repositoryUri.Scheme -cne 'https' -or
+        -not [string]::IsNullOrEmpty($repositoryUri.UserInfo) -or
+        $Value -cnotmatch '^https://[^/?#]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+        throw 'INVALID|SourceRepository must be a canonical HTTPS repository URL without embedded credentials.'
     }
 }
 
