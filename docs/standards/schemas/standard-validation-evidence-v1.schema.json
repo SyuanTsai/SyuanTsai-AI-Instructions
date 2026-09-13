@@ -14,6 +14,7 @@
     "candidate",
     "adapter",
     "authority",
+    "launchBinding",
     "stages",
     "releaseEligible"
   ],
@@ -28,6 +29,7 @@
     "candidate": { "$ref": "#/$defs/candidate" },
     "adapter": { "$ref": "#/$defs/adapter" },
     "authority": { "$ref": "#/$defs/authority" },
+    "launchBinding": { "$ref": "#/$defs/launchBinding" },
     "stages": {
       "type": "array",
       "minItems": 10,
@@ -62,7 +64,7 @@
       "if": { "type": "object", "properties": { "releaseEligible": { "const": true } }, "required": ["releaseEligible"] },
       "then": {
         "type": "object",
-        "required": ["state", "exitCode", "candidate", "adapter", "authority", "stages"],
+        "required": ["state", "exitCode", "candidate", "adapter", "authority", "launchBinding", "stages"],
         "properties": {
           "state": { "const": "PASS" },
           "exitCode": { "const": 0 },
@@ -95,6 +97,16 @@
                   "selectedFiles": { "type": "array", "minItems": 11, "maxItems": 11, "items": { "$ref": "#/$defs/selectedFile" } }
                 }
               }
+            }
+          },
+          "launchBinding": {
+            "type": "object",
+            "required": ["status", "verified", "consumptionPath", "consumptionSha256"],
+            "properties": {
+              "status": { "const": "verified" },
+              "verified": { "const": true },
+              "consumptionPath": { "type": "string", "minLength": 1 },
+              "consumptionSha256": { "$ref": "#/$defs/sha256" }
             }
           },
           "stages": {
@@ -195,6 +207,22 @@
           "items": { "$ref": "#/$defs/trustAnchor" }
         },
         "binding": { "$ref": "#/$defs/authorityBinding" }
+      }
+    },
+    "launchBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "verified", "path", "sha256", "resolutionRunId", "issuedAt", "expiresAt", "consumptionPath", "consumptionSha256"],
+      "properties": {
+        "status": { "enum": ["verified", "unverified-development-harness", "unverified-production"] },
+        "verified": { "type": "boolean" },
+        "path": { "type": ["string", "null"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "resolutionRunId": { "type": "string", "format": "uuid" },
+        "issuedAt": { "type": ["string", "null"] },
+        "expiresAt": { "type": ["string", "null"] },
+        "consumptionPath": { "type": ["string", "null"] },
+        "consumptionSha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "trustAnchor": {

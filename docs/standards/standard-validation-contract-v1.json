@@ -8,7 +8,8 @@
     "adapter": "-AdapterPath <versioned declarative adapter JSON>",
     "artifacts": "-ArtifactsRoot <checkout-external run-owned directory>",
     "identity": ["-SourceRepository", "-SourceRevision", "-BaseRevision", "-EventName", "-CandidateArchivePath", "-CandidateAcquisitionEvidencePath", "-CandidateArchiveSha256", "-AuthorityRevision", "-AuthorityArchivePath", "-AuthoritySnapshotEvidencePath"],
-    "runId": "trusted-supervisor-generated fresh validation run id; caller-supplied -RunId is development-harness-only and rejected in production",
+    "runId": "trusted supervisor generates a fresh run ID at invocation start and passes the same ID to the resolver before receipt creation; production runner authenticates the signed launch binding and package-adapter resolver receipt against that exact ID before full adapter validation; every production slot must match it; caller-supplied -RunId is development-harness-only and rejected in production",
+    "launchBinding": "-SupervisorLaunchBindingPath <trusted-supervisor-signed validation-launch-binding-v1 JSON; required in production>",
     "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
     "developmentOnly": "-DevelopmentHarness",
     "lifecycle": "-CompleteLifecycle",
@@ -54,6 +55,20 @@
       "canonicalHash": "sha256-of-concatenated-lines; no-length-field"
     },
     "installedClosure": "all-regular-file-content-hashes-plus-in-root-unix-symlink-target-identities; target-must-be-non-reparse-regular-file-or-directory; reject-external-chained-and-special-file-symlinks",
+    "productionLaunchBinding": {
+      "required": true,
+      "argument": "-SupervisorLaunchBindingPath",
+      "evidenceType": "validation-launch-binding",
+      "attestation": "trusted-supervisor-validation-launch-v1",
+      "ordering": "trusted supervisor signs the binding, passes its resolutionRunId to the resolver before receipt creation, then passes the binding path to the central runner",
+      "bindingSnapshot": "runner reads, hashes, and parses one retained launch-binding byte snapshot; evidence registration must match that authenticated snapshot hash",
+      "adapterSnapshot": "runner reads adapter bytes once, computes adapterSha256 from those bytes, parses those same bytes, authenticates the snapshot hash against the signed binding, and fails closed if the adapter path changes during handoff",
+      "receiptSnapshot": "runner reads, hashes, and parses one retained resolver receipt byte snapshot; receipt provenance and parsed receipt fields must use that same snapshot",
+      "oneTimeConsumption": "trusted supervisor signs an absolute consumptionPath outside candidate, artifact, and trusted-tool roots; the runner atomically creates a supervisor-owned marker there before authority or resolver work, and an existing marker blocks replay",
+      "handoffRunIdFormat": "lowercase-32-character-hexadecimal-N",
+      "evidenceRunIdFormat": "canonical-hyphenated-UUID-D",
+      "binds": ["resolutionRunId", "candidateRoot", "adapterPath", "adapterSha256", "artifactsRoot", "outputPath", "trustedToolRoot", "sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateArchiveSha256", "authorityRevision", "issuedAt", "expiresAt", "consumptionPath"]
+    },
     "snapshotRevalidation": "before-and-after-every-child-process",
     "toolReceiptFreshness": "resolvedAtUtc-and-attestation-issuedAt-must-match-and-be-within-15-minutes-of-the-validation-start-window",
     "canonicalEntryPoint": "adapter.canonicalValidatorPath-inventoried-and-invoked-by-central-contract",
@@ -64,11 +79,16 @@
     "finalEvidenceWrite": "atomic-create-only",
     "finalEvidenceReservation": "supervisor-owned-exclusive-handle-before-child-processes; fail-on-substitution",
     "childEnvironment": "clear-inherited-environment; copy-approved-os-runtime-and-STANDARD_VALIDATION-namespace-only",
+    "childOutputCapture": {
+      "perStreamCharacterQuota": 1048576,
+      "onExceeded": "terminate-owned-process-tree-and-fail-closed",
+      "diagnostic": "record-separately-from-bounded-stdout-and-stderr-prefixes"
+    },
     "semanticTrigger": "effective-trigger-is-caller-addition-OR-typed-analyzer-requirement; record-trigger-decision",
     "timeoutOrCleanupFailure": "non-pass"
   },
   "evidence": {
-    "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256"],
+    "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256", "launchBinding.status=verified", "launchBinding.verified=true"],
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",
@@ -77,7 +97,7 @@
       "required": ["candidateId", "status=passed", "decision=PASS", "provider", "purpose", "scope", "consentGranted=true", "analyzerIdentity", "analyzerCompleteness=complete", "findings", "findingsSha256", "trusted-supervisor-signed-attestation"]
     },
     "releaseEligibility": {
-      "trueOnlyWhen": ["state=PASS", "exitCode=0", "adapter.mode=production", "candidate.acquisition.status=verified", "candidate.acquisition.verified=true", "authority.binding.status=verified", "authority.binding.verified=true", "stages[1..5].status=passed", "stages[6].id=conditional-semantic-scan-and-status=passed-or-not-applicable", "stages[7].id=ai-review-and-status=passed", "stages[8].id=human-approval-and-status=passed", "stages[9].id=publish-or-install-and-status=passed", "stages[10].id=post-install-verification-and-status=passed"]
+      "trueOnlyWhen": ["state=PASS", "exitCode=0", "adapter.mode=production", "candidate.acquisition.status=verified", "candidate.acquisition.verified=true", "authority.binding.status=verified", "authority.binding.verified=true", "launchBinding.status=verified", "launchBinding.verified=true", "stages[1..5].status=passed", "stages[6].id=conditional-semantic-scan-and-status=passed-or-not-applicable", "stages[7].id=ai-review-and-status=passed", "stages[8].id=human-approval-and-status=passed", "stages[9].id=publish-or-install-and-status=passed", "stages[10].id=post-install-verification-and-status=passed"]
     },
     "trustAnchors": ["docs/standards/trust-anchors/trusted-supervisor-public-key.xml", "docs/standards/trust-anchors/human-approval-public-key.xml"]
   },

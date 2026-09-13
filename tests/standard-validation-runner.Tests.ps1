@@ -50,7 +50,7 @@ Describe 'Standard validation runner contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [string[]] $SkillIds = @('alpha', 'beta'),
-                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'repository-missing-evidence', 'repository-zero-tests', 'repository-artifact-tamper')]
+                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'output-flood', 'output-near-quota', 'repository-missing-evidence', 'repository-zero-tests', 'repository-artifact-tamper')]
                 [string] $Behavior = 'pass'
             )
 
@@ -121,6 +121,13 @@ if ($fixtureBehavior -eq 'missing-output' -and $env:STANDARD_VALIDATION_STAGE_ID
 }
 if ($fixtureBehavior -eq 'timeout' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     Start-Sleep -Seconds 10
+}
+if ($fixtureBehavior -eq 'output-flood' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+    [Console]::Out.Write(('o' * 1100000))
+    [Console]::Error.Write(('e' * 1100000))
+}
+if ($fixtureBehavior -eq 'output-near-quota' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+    $result.output = 'v' * 1045000
 }
 if ($fixtureBehavior -eq 'static-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
     $result.status = 'failed'
@@ -604,6 +611,17 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal (($stages | ForEach-Object id) -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests,conditional-semantic-scan,ai-review,human-approval,publish-or-install,post-install-verification' 'Stage order must be canonical.'
         Assert-Equal (($contract.terminalStates | ForEach-Object state) -join ',') 'PASS,BLOCKED,FAILED,INVALID,CANCELLED' 'Terminal states must remain distinct.'
         Assert-Match ([string]$contract.execution.productionCommandPolicy) 'signed-resolver-receipt' 'Production commands must carry a trusted signed resolver receipt.'
+        Assert-Match ([string]$contract.cli.launchBinding) 'SupervisorLaunchBindingPath' 'Production CLI must expose the trusted supervisor launch binding input.'
+        Assert-True ([bool]$contract.execution.productionLaunchBinding.required) 'Production validation must require an authenticated launch binding.'
+        Assert-Equal ([string]$contract.execution.productionLaunchBinding.attestation) 'trusted-supervisor-validation-launch-v1' 'Launch binding attestation identity must be canonical.'
+        Assert-Equal ([string]$contract.execution.productionLaunchBinding.handoffRunIdFormat) 'lowercase-32-character-hexadecimal-N' 'The launch-binding handoff run-ID format must remain canonical.'
+        Assert-Equal ([string]$contract.execution.productionLaunchBinding.evidenceRunIdFormat) 'canonical-hyphenated-UUID-D' 'Evidence must declare the schema-compatible run-ID serialization.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.bindingSnapshot) 'reads.*hashes.*parses.*launch-binding.*snapshot.*evidence registration' 'The production launch-binding contract must retain the authenticated binding snapshot hash.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.adapterSnapshot) 'reads adapter bytes once.*parses those same bytes.*fails closed' 'The production launch-binding contract must bind authentication to one parsed adapter-byte snapshot.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.receiptSnapshot) 'reads.*hashes.*parses.*resolver receipt.*snapshot' 'The production launch-binding contract must bind resolver receipt fields and provenance to one parsed receipt snapshot.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.oneTimeConsumption) 'consumptionPath.*outside.*roots.*atomically.*marker.*existing marker.*replay' 'The production launch-binding contract must require authenticated one-time consumption outside caller-controlled roots.'
+        Assert-True (@($contract.evidence.requiredBinding) -contains 'launchBinding.status=verified') 'Evidence required bindings must include verified launch-binding status.'
+        Assert-True (@($contract.evidence.requiredBinding) -contains 'launchBinding.verified=true') 'Evidence required bindings must include the verified launch-binding boolean.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.packageAdapter) 'package-adapter' 'The package adapter slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillValidator) 'skill-validator' 'The skill-validator slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillTools) 'skill-tools' 'The skill-tools slot must have a fixed canonical tool role.'
@@ -614,16 +632,22 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
         $releaseConditions = ($contract.evidence.releaseEligibility.trueOnlyWhen -join ';')
         Assert-Match $releaseConditions 'stages\[1\.\.5\]\.status=passed' 'Release eligibility must bind the first five canonical stages.'
+        Assert-Match $releaseConditions 'launchBinding\.status=verified' 'Release eligibility must bind verified launch-binding status.'
+        Assert-Match $releaseConditions 'launchBinding\.verified=true' 'Release eligibility must bind the verified launch-binding boolean.'
         foreach ($stageId in @('conditional-semantic-scan', 'ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
             Assert-Match $releaseConditions ("stages\[[0-9]+\]\.id=$stageId-and-status=") "Release eligibility must bind the '$stageId' canonical stage."
         }
         Assert-Equal $contract.consent.publishInstall 'candidate-bound-trusted-supervisor-signed-lifecycle-attestation' 'Publish/install lifecycle evidence must require a trusted attestation.'
         Assert-Match ([string]$contract.stages[8].barrier) 'trusted-supervisor-signed' 'Publish/install stage must require trusted signed evidence.'
         Assert-Match ([string]$contract.stages[9].barrier) 'trusted-supervisor-signed' 'Post-install stage must require trusted signed evidence.'
+        Assert-Equal ([int]$contract.execution.childOutputCapture.perStreamCharacterQuota) 1048576 'Child output capture must expose a fixed per-stream character quota.'
+        Assert-Match ([string]$contract.execution.childOutputCapture.onExceeded) 'terminate.*fail' 'Child output quota overflow must terminate the owned process and fail closed.'
+        Assert-Match ([string]$contract.execution.childOutputCapture.diagnostic) 'separately' 'Child output quota diagnostics must be recorded separately from bounded stream prefixes.'
         $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-adapter-v1.schema.json') | ConvertFrom-Json
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
         Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
+        Assert-True (@($evidenceSchema.'$defs'.launchBinding.properties.status.enum) -contains 'unverified-production') 'The evidence schema must distinguish rejected production launch bindings from development harness runs.'
         Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'The evidence schema must bind every terminal state to its exit code and release eligibility.'
         $evidenceSchemaText = $evidenceSchema | ConvertTo-Json -Depth 20 -Compress
         Assert-Match $evidenceSchemaText '"if".*"state".*"then".*"exitCode"' 'The evidence schema must express conditional terminal state/exit-code relationships.'
@@ -645,6 +669,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'PR_SET_CHILD_SUBREAPER|SetChildSubreaper|SubreaperRequired' 'Restricted Unix hosts must use a kernel-enforced subreaper boundary and verify its descendants.'
         Assert-Match $runnerSource 'EnvironmentVariables\.Clear\(\)' 'Child processes must not inherit the supervisor environment wholesale.'
         Assert-Match $runnerSource 'New-StandardValidationOutputReservation' 'The runner must reserve the final evidence path.'
+        Assert-Match $runnerSource 'Consume-StandardValidationSupervisorLaunchBinding' 'The runner must consume each authenticated launch binding once before production work.'
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'
         Assert-Match $runnerSource 'Assert-StandardValidationAiReviewEvidence' 'AI review evidence must use the central typed review policy.'
         Assert-Match $runnerSource 'Assert-StandardValidationToolReceipt' 'Production command provenance must use a signed resolver receipt.'
@@ -665,10 +690,28 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'installedClosureSha256' 'Production tool execution must bind the complete installed dependency closure.'
         Assert-Match $runnerSource 'launcherDigestSha256' 'Production tool execution must bind the resolver launcher identity.'
         Assert-Match $runnerSource 'Production validation run IDs are generated by the trusted supervisor' 'Production validation must not accept a caller-selected run ID for receipt replay.'
+        Assert-Match $runnerSource 'Assert-StandardValidationSupervisorLaunchBinding' 'Production validation must authenticate a supervisor launch binding before resolver receipt validation.'
+        Assert-Match $runnerSource 'Get-StandardValidationJsonSnapshot|adapterSnapshotSha256' 'Production validation must parse the adapter from a retained byte snapshot.'
+        Assert-Match $runnerSource 'bindingSnapshot|ExpectedSha256' 'Production validation must retain and register the authenticated launch-binding snapshot hash.'
+        Assert-Match $runnerSource 'receiptSnapshot|actualReceiptSha256' 'Production validation must authenticate resolver receipt provenance and fields from one byte snapshot.'
+        Assert-Match $runnerSource 'Adapter changed during the trusted supervisor launch handoff' 'Production validation must fail closed on adapter substitution during launch handoff.'
+        Assert-Match $runnerSource 'SupervisorLaunchBindingPath' 'Production validation must receive the signed supervisor launch binding path.'
+        Assert-Match $runnerSource 'ExpectedRunId' 'Production resolver receipt validation must use the current supervisor launch binding.'
+        Assert-Match $runnerSource '-RunId \$ExpectedRunId' 'Production package-adapter receipt validation must reject a receipt from another run.'
+        Assert-Match $runnerSource 'outputQuotaDiagnostic' 'Output quota diagnostics must be retained outside bounded stream content.'
+        Assert-False ($runnerSource -match '\$stderr\s*=\s*"\$stderr`n\$quotaMessage"') 'Output quota diagnostics must not be appended beyond the stderr quota.'
+        Assert-Match $runnerSource 'StandardValidationBoundedCapture' 'Child output capture must use the bounded supervisor-owned reader.'
+        Assert-False ($runnerSource -match 'ReadToEndAsync') 'The runner must not retain unbounded child stdout/stderr with ReadToEndAsync.'
+        $productionRunIdIndex = $runnerSource.IndexOf('$runId = Get-StandardValidationProductionRunId', [StringComparison]::Ordinal)
+        $adapterValidationIndex = $runnerSource.IndexOf('$adapterResult = Assert-StandardValidationAdapter', [StringComparison]::Ordinal)
+        Assert-True ($productionRunIdIndex -ge 0 -and $adapterValidationIndex -ge 0 -and $productionRunIdIndex -lt $adapterValidationIndex) 'Production run ID derivation must precede full adapter validation.'
         Assert-False ($runnerSource -match 'LD_LIBRARY_PATH') 'Dynamic loader overrides must not be inherited by child processes.'
         $reservationIndex = $runnerSource.IndexOf('$outputReservation = New-StandardValidationOutputReservation', [StringComparison]::Ordinal)
         $contractResolverIndex = $runnerSource.IndexOf('$contractResult = Assert-StandardValidationContractFiles', [StringComparison]::Ordinal)
         Assert-True ($reservationIndex -ge 0 -and $contractResolverIndex -ge 0 -and $reservationIndex -lt $contractResolverIndex) 'Final output reservation must precede authority contract resolver child processes.'
+        $launchBindingIndex = $runnerSource.IndexOf('$launchBinding = Assert-StandardValidationSupervisorLaunchBinding', [StringComparison]::Ordinal)
+        $productionReceiptIndex = $runnerSource.IndexOf('$runId = Get-StandardValidationProductionRunId', [StringComparison]::Ordinal)
+        Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
@@ -765,6 +808,12 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $runIdResult.Evidence.state 'INVALID' 'Production validation must reject a caller-selected run ID.'
         Assert-Match $runIdResult.Output 'generated by the trusted supervisor|caller' 'Run-ID replay rejection must identify the trusted supervisor boundary.'
 
+        $missingBindingFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'missing-launch-binding')
+        $missingBindingResult = Invoke-RunnerFixture -Fixture $missingBindingFixture -DevelopmentHarness:$false
+        Assert-Equal $missingBindingResult.Evidence.state 'INVALID' 'Production validation must reject a missing supervisor launch binding.'
+        Assert-Equal $missingBindingResult.Evidence.launchBinding.status 'unverified-production' 'A rejected production launch binding must not be labeled as a development harness.'
+        Assert-Match $missingBindingResult.Output 'SupervisorLaunchBindingPath|launch binding' 'The missing launch binding must identify the trusted supervisor boundary.'
+
         $credentialFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'credentialed-source-repository')
         $credentialResult = Invoke-RunnerFixture `
             -Fixture $credentialFixture `
@@ -772,6 +821,540 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $credentialResult.Output '"state"\s*:\s*"INVALID"' 'Source repositories with embedded credentials must be rejected before evidence construction.'
         $credentialEvidenceText = if ($null -eq $credentialResult.Evidence) { '' } else { $credentialResult.Evidence | ConvertTo-Json -Depth 20 -Compress }
         Assert-False (($credentialResult.Output + $credentialEvidenceText) -match 'token') 'Rejected source-repository credentials must never appear in output or evidence.'
+    }
+
+    # Scenario: A production adapter carries a freshly signed resolver receipt and a trusted supervisor launch binding.
+    # Purpose: Authenticate the supervisor-to-resolver handoff before receipt validation, then bind every slot to the same run.
+    It 'UnitT01_authenticates_supervisor_launch_binding_before_signed_resolver_receipt' {
+        $root = Join-Path $TestDrive 'production-run-id-derivation'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+
+        . $script:RunnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath (Join-Path $root 'adapter.json') `
+            -ArtifactsRoot $artifactsRoot `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+
+        $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            Write-TestUtf8File -Path (Join-Path $trustedRoot 'trusted-supervisor-public-key.xml') -Text $rsa.ToXmlString($false)
+            $installRoot = Join-Path $trustedRoot 'fixture-tool'
+            [void](New-Item -ItemType Directory -Path $installRoot -Force)
+            $commandPath = Join-Path $installRoot 'fixture-tool.bin'
+            Write-TestUtf8File -Path $commandPath -Text 'trusted fixture executable bytes'
+            $executableSha256 = Get-StandardValidationFileSha256 -Path $commandPath -Context 'test resolver executable'
+            $installedInventory = Get-StandardValidationInventory -Root $installRoot -Context 'test resolver closure'
+            $installedClosureSha256 = Get-StandardValidationInventorySha256 -Inventory $installedInventory
+            $launcher = [ordered]@{
+                kind = 'direct-executable'
+                shimPath = $null
+                shimSha256 = $null
+                payloadPath = $null
+                payloadSha256 = $null
+                runtimePath = $null
+                runtimeSha256 = $null
+            }
+            $launcherDigestSha256 = Get-StandardValidationLauncherDigest -Launcher $launcher -Context 'test resolver launcher'
+            $productionGuid = [guid]::NewGuid()
+            $runIdText = $productionGuid.ToString('N')
+            $resolvedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            $fields = @{
+                channel = 'latest-stable'
+                executablePath = [IO.Path]::GetFullPath($commandPath)
+                executableSha256 = $executableSha256
+                installedClosureSha256 = $installedClosureSha256
+                installRoot = [IO.Path]::GetFullPath($installRoot)
+                launcherDigestSha256 = $launcherDigestSha256
+                issuedAt = $resolvedAtUtc
+                resolvedIdentity = 'fixture-tool@1.0.0'
+                resolvedVersion = '1.0.0'
+                resolutionRunId = $runIdText
+                resolvedAtUtc = $resolvedAtUtc
+                source = 'https://example.com/fixture-tool'
+                status = 'verified'
+                toolName = 'package-adapter'
+            }
+            $attestation = [ordered]@{
+                schemaVersion = 1
+                attestationType = 'trusted-supervisor-validation-tool-v1'
+                toolName = 'package-adapter'
+                source = 'https://example.com/fixture-tool'
+                channel = 'latest-stable'
+                status = 'verified'
+                resolvedVersion = '1.0.0'
+                resolvedIdentity = 'fixture-tool@1.0.0'
+                installRoot = [IO.Path]::GetFullPath($installRoot)
+                executablePath = [IO.Path]::GetFullPath($commandPath)
+                executableSha256 = $executableSha256
+                installedClosureSha256 = $installedClosureSha256
+                launcherDigestSha256 = $launcherDigestSha256
+                resolutionRunId = $runIdText
+                resolvedAtUtc = $resolvedAtUtc
+                issuedAt = $resolvedAtUtc
+                signature = $null
+            }
+            $payload = Get-StandardValidationSignedReceiptPayload -ReceiptType 'validation-tool-v1' -Fields $fields
+            $attestation.signature = [Convert]::ToBase64String($rsa.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($payload), 'SHA256'))
+            $receipt = [ordered]@{
+                schemaVersion = 1
+                evidenceType = 'validation-tool-resolution'
+                status = 'verified'
+                toolName = 'package-adapter'
+                source = 'https://example.com/fixture-tool'
+                channel = 'latest-stable'
+                resolvedVersion = '1.0.0'
+                resolvedIdentity = 'fixture-tool@1.0.0'
+                installRoot = [IO.Path]::GetFullPath($installRoot)
+                executablePath = [IO.Path]::GetFullPath($commandPath)
+                executableSha256 = $executableSha256
+                installedClosureSha256 = $installedClosureSha256
+                launcher = $launcher
+                launcherDigestSha256 = $launcherDigestSha256
+                resolutionRunId = $runIdText
+                resolvedAtUtc = $resolvedAtUtc
+                attestation = $attestation
+            }
+            $receiptPath = Join-Path $trustedRoot 'fixture-tool-receipt.json'
+            Write-TestUtf8File -Path $receiptPath -Text ($receipt | ConvertTo-Json -Depth 20)
+            $receiptSha256 = Get-StandardValidationFileSha256 -Path $receiptPath -Context 'test resolver receipt'
+            $adapterPath = Join-Path $root 'adapter.json'
+            Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":1}'
+            $adapterSha256 = Get-StandardValidationFileSha256 -Path $adapterPath -Context 'test adapter'
+            $outputPath = Join-Path $artifactsRoot 'evidence.json'
+            $authorityRevision = 'c' * 40
+            $candidateArchiveSha256 = 'd' * 64
+            $bindingIssuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+            $bindingExpiresAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString('o')
+            $consumptionPath = Join-Path $root 'launch-consumption.json'
+            $bindingFields = @{
+                adapterPath = [IO.Path]::GetFullPath($adapterPath)
+                adapterSha256 = $adapterSha256
+                artifactsRoot = [IO.Path]::GetFullPath($artifactsRoot)
+                authorityRevision = $authorityRevision
+                baseRevision = 'b' * 40
+                candidateArchiveSha256 = $candidateArchiveSha256
+                candidateRoot = [IO.Path]::GetFullPath($candidateRoot)
+                consumptionPath = [IO.Path]::GetFullPath($consumptionPath)
+                eventName = 'local'
+                expiresAt = $bindingExpiresAt
+                issuedAt = $bindingIssuedAt
+                outputPath = [IO.Path]::GetFullPath($outputPath)
+                resolutionRunId = $runIdText
+                sourceRepository = 'https://example.com/example/skills.git'
+                sourceRevision = 'a' * 40
+                trustedToolRoot = [IO.Path]::GetFullPath($trustedRoot)
+            }
+            $launchBinding = [ordered]@{
+                schemaVersion = 1
+                evidenceType = 'validation-launch-binding'
+                status = 'issued'
+                candidateRoot = [IO.Path]::GetFullPath($candidateRoot)
+                adapterPath = [IO.Path]::GetFullPath($adapterPath)
+                artifactsRoot = [IO.Path]::GetFullPath($artifactsRoot)
+                outputPath = [IO.Path]::GetFullPath($outputPath)
+                trustedToolRoot = [IO.Path]::GetFullPath($trustedRoot)
+                sourceRepository = 'https://example.com/example/skills.git'
+                sourceRevision = 'a' * 40
+                baseRevision = 'b' * 40
+                eventName = 'local'
+                candidateArchiveSha256 = $candidateArchiveSha256
+                adapterSha256 = $adapterSha256
+                authorityRevision = $authorityRevision
+                resolutionRunId = $runIdText
+                issuedAt = $bindingIssuedAt
+                expiresAt = $bindingExpiresAt
+                consumptionPath = [IO.Path]::GetFullPath($consumptionPath)
+                signature = $null
+            }
+            $bindingPayload = Get-StandardValidationSignedReceiptPayload -ReceiptType 'validation-launch-v1' -Fields $bindingFields
+            $launchBinding.signature = [Convert]::ToBase64String($rsa.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($bindingPayload), 'SHA256'))
+            $bindingPath = Join-Path $root 'launch-binding.json'
+            Write-TestUtf8File -Path $bindingPath -Text ($launchBinding | ConvertTo-Json -Depth 20)
+            $bindingSha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context 'test launch binding'
+            $adapterSnapshot = Get-StandardValidationJsonSnapshot -Path $adapterPath -Context 'adapter substitution snapshot'
+            Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":2}'
+            Assert-Equal $adapterSnapshot.value.schemaVersion 1 'The adapter snapshot must retain the bytes parsed before a path substitution.'
+            $substitutionBinding = Assert-StandardValidationSupervisorLaunchBinding `
+                -Path $bindingPath `
+                -CandidateRoot $candidateRoot `
+                -AdapterPath $adapterPath `
+                -AdapterSha256 $adapterSnapshot.sha256 `
+                -ArtifactsRoot $artifactsRoot `
+                -OutputPath $outputPath `
+                -TrustedToolRoot $trustedRoot `
+                -SourceRepository 'https://example.com/example/skills.git' `
+                -SourceRevision ('a' * 40) `
+                -BaseRevision ('b' * 40) `
+                -EventName 'local' `
+                -CandidateArchiveSha256 $candidateArchiveSha256 `
+                -AuthorityRevision $authorityRevision `
+                -TrustAnchorRoot $trustedRoot `
+                -Context 'adapter substitution snapshot'
+            Assert-Equal $substitutionBinding.resolutionRunId $runIdText 'The launch binding must authenticate the immutable adapter snapshot rather than rereading a substituted path.'
+            Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":1}'
+            $validatedBinding = Assert-StandardValidationSupervisorLaunchBinding `
+                -Path $bindingPath `
+                -CandidateRoot $candidateRoot `
+                -AdapterPath $adapterPath `
+                -AdapterSha256 $adapterSha256 `
+                -ArtifactsRoot $artifactsRoot `
+                -OutputPath $outputPath `
+                -TrustedToolRoot $trustedRoot `
+                -SourceRepository 'https://example.com/example/skills.git' `
+                -SourceRevision ('a' * 40) `
+                -BaseRevision ('b' * 40) `
+                -EventName 'local' `
+                -CandidateArchiveSha256 $candidateArchiveSha256 `
+                -AuthorityRevision $authorityRevision `
+                -TrustAnchorRoot $trustedRoot `
+                -Context 'test supervisor launch binding'
+            Assert-Equal $validatedBinding.resolutionRunId $runIdText 'The trusted launch binding must carry the supervisor-generated N-format run ID.'
+            Assert-StandardValidationLaunchBindingUnchanged -Binding $validatedBinding
+
+            $spec = [pscustomobject][ordered]@{
+                command = [IO.Path]::GetFullPath($commandPath)
+                arguments = [object[]]@()
+                provenance = [pscustomobject][ordered]@{
+                    toolName = 'package-adapter'
+                    receiptPath = [IO.Path]::GetFullPath($receiptPath)
+                    receiptSha256 = $receiptSha256
+                }
+            }
+            $adapter = [pscustomobject][ordered]@{ packageAdapter = $spec }
+            $derivedRunId = Get-StandardValidationProductionRunId `
+                -Adapter $adapter `
+                -CandidateRoot $candidateRoot `
+                -ArtifactsRoot $artifactsRoot `
+                -TrustedToolRoot $trustedRoot `
+                -TrustAnchorRoot $trustedRoot `
+                -ExpectedRunId $productionGuid `
+                -ExpectedLaunchIssuedAt $validatedBinding.issuedAt
+            Assert-Equal $derivedRunId.ToString('N') $runIdText 'Production run ID must come from the authenticated supervisor launch binding and signed resolver receipt.'
+
+            $bindingReplayRejected = $false
+            try {
+                Assert-StandardValidationSupervisorLaunchBinding `
+                    -Path $bindingPath `
+                    -CandidateRoot $candidateRoot `
+                    -AdapterPath $adapterPath `
+                    -AdapterSha256 $adapterSha256 `
+                    -ArtifactsRoot (Join-Path $root 'replayed-artifacts') `
+                    -OutputPath (Join-Path $root 'replayed-artifacts/evidence.json') `
+                    -TrustedToolRoot $trustedRoot `
+                    -SourceRepository 'https://example.com/example/skills.git' `
+                    -SourceRevision ('a' * 40) `
+                    -BaseRevision ('b' * 40) `
+                    -EventName 'local' `
+                    -CandidateArchiveSha256 $candidateArchiveSha256 `
+                    -AuthorityRevision $authorityRevision `
+                    -TrustAnchorRoot $trustedRoot `
+                    -Context 'replayed launch binding' | Out-Null
+            }
+            catch {
+                $bindingReplayRejected = $true
+                Assert-Match $_.Exception.Message 'different artifactsRoot' 'A signed launch binding must not be replayable into a different artifact root.'
+            }
+            Assert-True $bindingReplayRejected 'A signed launch binding must bind the artifact root used by the current invocation.'
+
+            $replayRejected = $false
+            try {
+                Get-StandardValidationProductionRunId `
+                    -Adapter $adapter `
+                    -CandidateRoot $candidateRoot `
+                    -ArtifactsRoot $artifactsRoot `
+                    -TrustedToolRoot $trustedRoot `
+                    -TrustAnchorRoot $trustedRoot `
+                    -ExpectedRunId ([guid]::NewGuid()) | Out-Null
+            }
+            catch {
+                $replayRejected = $true
+                Assert-Match $_.Exception.Message 'different validation run|current trusted-supervisor validation run' 'A signed receipt from an earlier run must be rejected for a new supervisor run.'
+            }
+            Assert-True $replayRejected 'A still-fresh signed resolver receipt must not be replayable into a new validation run.'
+
+            $validated = Assert-StandardValidationCommandSpec `
+                -Spec $spec `
+                -Context 'production run-id binding' `
+                -CandidateRoot $candidateRoot `
+                -ArtifactsRoot $artifactsRoot `
+                -TrustedToolRoot $trustedRoot `
+                -TrustAnchorRoot $trustedRoot `
+                -RunId $derivedRunId `
+                -ExpectedToolName 'package-adapter' `
+                -DevelopmentHarness:$false
+            Assert-Equal $validated.toolReceipt.runId.ToString('N') $runIdText 'The full production command validation must preserve the derived run ID.'
+
+            $script:OriginalLaunchBindingSnapshot = (Get-Command Get-StandardValidationJsonSnapshot -CommandType Function).ScriptBlock
+            $script:OriginalLaunchBindingJson = (Get-Command Get-StandardValidationJson -CommandType Function).ScriptBlock
+            $script:BindingSubstitutionPath = [IO.Path]::GetFullPath($bindingPath)
+            function Get-StandardValidationJsonSnapshot {
+                param([string] $Path, [string] $Context)
+                $snapshot = & $script:OriginalLaunchBindingSnapshot -Path $Path -Context $Context
+                if ([IO.Path]::GetFullPath($Path) -ceq $script:BindingSubstitutionPath) {
+                    Write-TestUtf8File -Path $Path -Text '{"replacement":true}'
+                }
+                return $snapshot
+            }
+            function Get-StandardValidationJson {
+                param([string] $Path, [string] $Context)
+                $value = & $script:OriginalLaunchBindingJson -Path $Path -Context $Context
+                if ([IO.Path]::GetFullPath($Path) -ceq $script:BindingSubstitutionPath) {
+                    Write-TestUtf8File -Path $Path -Text '{"replacement":true}'
+                }
+                return $value
+            }
+            $snapshotBinding = Assert-StandardValidationSupervisorLaunchBinding `
+                -Path $bindingPath `
+                -CandidateRoot $candidateRoot `
+                -AdapterPath $adapterPath `
+                -AdapterSha256 $adapterSha256 `
+                -ArtifactsRoot $artifactsRoot `
+                -OutputPath $outputPath `
+                -TrustedToolRoot $trustedRoot `
+                -SourceRepository 'https://example.com/example/skills.git' `
+                -SourceRevision ('a' * 40) `
+                -BaseRevision ('b' * 40) `
+                -EventName 'local' `
+                -CandidateArchiveSha256 $candidateArchiveSha256 `
+                -AuthorityRevision $authorityRevision `
+                -TrustAnchorRoot $trustedRoot `
+                -Context 'launch binding substitution snapshot'
+            Assert-Equal $snapshotBinding.sha256 $bindingSha256 'The launch-binding evidence hash must come from the authenticated byte snapshot.'
+            Assert-False ((Get-StandardValidationFileSha256 -Path $bindingPath -Context 'substituted launch binding') -ceq $bindingSha256) 'The binding substitution regression must replace the live path after snapshot capture.'
+            Write-TestUtf8File -Path $bindingPath -Text ($launchBinding | ConvertTo-Json -Depth 20)
+        }
+        finally { $rsa.Dispose() }
+    }
+
+    # Scenario: The public production runner must consume the exact run-ID format emitted by the authenticated launch-binding helper.
+    # Purpose: Exercise Invoke-StandardValidationRun through the launch-binding handoff before the authority gate, so a format mismatch cannot hide behind helper-only coverage.
+    It 'UnitT02_public_production_path_preserves_authenticated_launch_run_id_format' {
+        $root = Join-Path $TestDrive 'public-production-launch-binding'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        $bindingPath = Join-Path $root 'launch-binding.json'
+        $consumptionPath = Join-Path $root 'launch-consumption.json'
+        $outputPath = Join-Path $artifactsRoot 'evidence.json'
+        . $script:RunnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+        Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":1}'
+        Write-TestUtf8File -Path $bindingPath -Text '{"fixture":true}'
+        $bindingSha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context 'public launch binding fixture'
+        $publicRunGuid = [guid]::NewGuid()
+        $publicRunIdText = $publicRunGuid.ToString('N')
+        $issuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+        $expiresAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString('o')
+
+        $script:PublicLaunchBindingPath = $bindingPath
+        $script:PublicLaunchBindingSha256 = $bindingSha256
+        $script:PublicLaunchBindingRunIdText = $publicRunIdText
+        $script:PublicLaunchBindingIssuedAt = $issuedAt
+        $script:PublicLaunchBindingExpiresAt = $expiresAt
+        $script:PublicLaunchBindingConsumptionPath = $consumptionPath
+        $script:PublicLaunchBindingAdapterSha256 = $null
+        function Assert-StandardValidationSupervisorLaunchBinding {
+            param([string] $AdapterSha256)
+            $script:PublicLaunchBindingAdapterSha256 = $AdapterSha256
+            return [pscustomobject][ordered]@{
+                status = 'verified'
+                verified = $true
+                path = $script:PublicLaunchBindingPath
+                sha256 = $script:PublicLaunchBindingSha256
+                resolutionRunId = $script:PublicLaunchBindingRunIdText
+                issuedAt = $script:PublicLaunchBindingIssuedAt
+                expiresAt = $script:PublicLaunchBindingExpiresAt
+                consumptionPath = $script:PublicLaunchBindingConsumptionPath
+                consumptionSha256 = ('0' * 64)
+            }
+        }
+        function Assert-StandardValidationAuthoritySnapshot {
+            throw 'BLOCKED|public launch-binding handoff reached the authority gate.'
+        }
+
+        $result = Invoke-StandardValidationRun `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -CandidateArchiveSha256 ('d' * 64) `
+            -SupervisorLaunchBindingPath $bindingPath `
+            -AuthorityRevision ('c' * 40) `
+            -AuthorityArchivePath (Join-Path $root 'authority.zip') `
+            -AuthoritySnapshotEvidencePath (Join-Path $root 'authority.json') `
+            -TrustedToolRoot $trustedRoot `
+            -DevelopmentHarness:$false
+
+        Assert-True (Test-Path -LiteralPath $outputPath -PathType Leaf) 'The public production path must write terminal evidence after the test authority boundary.'
+        $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $outputPath | ConvertFrom-Json
+        Assert-Equal $script:PublicLaunchBindingAdapterSha256 (Get-StandardValidationFileSha256 -Path $adapterPath -Context 'public adapter snapshot') 'The public production path must hand the authenticated binding the hash of the parsed adapter snapshot.'
+        Assert-Equal $evidence.state 'BLOCKED' 'The public production path must reach the authority boundary after launch binding authentication.'
+        Assert-Match ([string]$evidence.failure.message) 'public launch-binding handoff reached the authority gate' 'The public production path must not fail on an N-format launch run ID before the authority boundary.'
+        Assert-True (Test-Path -LiteralPath $consumptionPath -PathType Leaf) 'The public production path must consume the signed launch binding before the authority boundary.'
+
+        Remove-Item -LiteralPath $artifactsRoot -Recurse -Force
+        [void](New-Item -ItemType Directory -Path $artifactsRoot -Force)
+        $replayResult = Invoke-StandardValidationRun `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -CandidateArchiveSha256 ('d' * 64) `
+            -SupervisorLaunchBindingPath $bindingPath `
+            -AuthorityRevision ('c' * 40) `
+            -AuthorityArchivePath (Join-Path $root 'authority.zip') `
+            -AuthoritySnapshotEvidencePath (Join-Path $root 'authority.json') `
+            -TrustedToolRoot $trustedRoot `
+            -DevelopmentHarness:$false
+        Assert-Equal $replayResult.state 'BLOCKED' 'A deleted and recreated artifact root must not permit launch-binding replay.'
+        Assert-Match ([string]$replayResult.failure.message) 'already been consumed|replay' 'Launch-binding replay must be rejected by the external consumption marker.'
+    }
+
+    # Scenario: The adapter is replaced after the immutable bytes have been snapshotted but before launch handoff returns.
+    # Purpose: Fail closed before any adapter-derived command can execute when the path no longer matches the authenticated snapshot.
+    It 'UnitT03_rejects_adapter_substitution_during_launch_handoff' {
+        $root = Join-Path $TestDrive 'adapter-substitution-during-launch'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        $bindingPath = Join-Path $root 'launch-binding.json'
+        $consumptionPath = Join-Path $root 'launch-consumption.json'
+        $outputPath = Join-Path $artifactsRoot 'evidence.json'
+        . $script:RunnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+        Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":1}'
+        Write-TestUtf8File -Path $bindingPath -Text '{"fixture":true}'
+        $adapterSha256 = Get-StandardValidationFileSha256 -Path $adapterPath -Context 'adapter substitution fixture'
+        $bindingSha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context 'adapter substitution binding fixture'
+        $runIdText = ([guid]::NewGuid()).ToString('N')
+        $issuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+        $expiresAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString('o')
+        $script:SubstitutionAdapterPath = $adapterPath
+        $script:SubstitutionAdapterSha256 = $null
+        $script:SubstitutionBindingPath = $bindingPath
+        $script:SubstitutionBindingSha256 = $bindingSha256
+        $script:SubstitutionRunIdText = $runIdText
+        $script:SubstitutionIssuedAt = $issuedAt
+        $script:SubstitutionExpiresAt = $expiresAt
+        $script:SubstitutionConsumptionPath = $consumptionPath
+        function Assert-StandardValidationSupervisorLaunchBinding {
+            param([string] $AdapterSha256)
+            $script:SubstitutionAdapterSha256 = $AdapterSha256
+            Write-TestUtf8File -Path $script:SubstitutionAdapterPath -Text '{"schemaVersion":2}'
+            return [pscustomobject][ordered]@{
+                status = 'verified'
+                verified = $true
+                path = $script:SubstitutionBindingPath
+                sha256 = $script:SubstitutionBindingSha256
+                resolutionRunId = $script:SubstitutionRunIdText
+                issuedAt = $script:SubstitutionIssuedAt
+                expiresAt = $script:SubstitutionExpiresAt
+                consumptionPath = $script:SubstitutionConsumptionPath
+                consumptionSha256 = ('0' * 64)
+            }
+        }
+        function Assert-StandardValidationAuthoritySnapshot {
+            throw 'BLOCKED|authority gate must not be reached after adapter substitution.'
+        }
+
+        $result = Invoke-StandardValidationRun `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -CandidateArchiveSha256 ('d' * 64) `
+            -SupervisorLaunchBindingPath $bindingPath `
+            -AuthorityRevision ('c' * 40) `
+            -AuthorityArchivePath (Join-Path $root 'authority.zip') `
+            -AuthoritySnapshotEvidencePath (Join-Path $root 'authority.json') `
+            -TrustedToolRoot $trustedRoot `
+            -DevelopmentHarness:$false
+
+        Assert-Equal $script:SubstitutionAdapterSha256 $adapterSha256 'The launch handoff must authenticate the hash of the immutable adapter snapshot.'
+        Assert-True (Test-Path -LiteralPath $outputPath -PathType Leaf) 'Adapter substitution must produce terminal evidence.'
+        $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $outputPath | ConvertFrom-Json
+        Assert-Equal $evidence.state 'BLOCKED' 'Adapter substitution during launch handoff must fail closed.'
+        Assert-Equal $evidence.launchBinding.resolutionRunId ([guid]::ParseExact($runIdText, 'N').ToString()) 'Substitution failure evidence must retain the authenticated launch-binding run ID.'
+        Assert-Match ([string]$evidence.failure.message) 'Adapter changed during the trusted supervisor launch handoff' 'The failure must identify the adapter substitution boundary.'
+    }
+
+    # Scenario: A child emits more data than the supervisor can safely retain on either redirected stream.
+    # Purpose: Bound stdout/stderr memory, terminate the owned process tree, and report a failed validation rather than buffering unbounded output.
+    It 'InterT11_terminates_child_when_output_capture_exceeds_quota' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'output-flood') -Behavior 'output-flood'
+        $result = Invoke-RunnerFixture -Fixture $fixture
+        Assert-True ($result.ExitCode -ne 0) 'An output-flood child must not return a pass exit code.'
+        Assert-Equal $result.Evidence.state 'FAILED' 'An output-flood child must fail the validation run.'
+        Assert-Match $result.Output 'output.*quota|quota.*output' 'The failure must identify bounded output capture as the cause.'
+        $quotaEvent = @(Get-ChildItem -LiteralPath (Join-Path $fixture.Artifacts 'runs') -Filter 'event-*.json' -Recurse -File |
+                ForEach-Object { Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json } |
+                Where-Object { $_.process.outputQuotaExceeded -eq $true } | Select-Object -First 1)[0]
+        Assert-True ($null -ne $quotaEvent) 'The output-flood event must retain raw bounded-capture evidence.'
+        Assert-True (([string]$quotaEvent.process.stdout).Length -le 1048576) 'The stdout prefix must remain within its quota on overflow.'
+        Assert-True (([string]$quotaEvent.process.stderr).Length -le 1048576) 'The stderr prefix must remain within its quota on overflow.'
+        Assert-Match ([string]$quotaEvent.process.outputQuotaDiagnostic) 'quota exceeded' 'The overflow diagnostic must be recorded outside the bounded stderr prefix.'
+    }
+
+    # Scenario: A child emits a valid JSON envelope whose stdout is near, but below, the capture quota.
+    # Purpose: Preserve the complete in-quota stream rather than applying an undocumented serialization margin.
+    It 'InterT12_preserves_valid_output_below_capture_quota' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'output-near-quota') -Behavior 'output-near-quota'
+        $result = Invoke-RunnerFixture -Fixture $fixture
+        Assert-Equal $result.Evidence.state 'PASS' 'A valid near-quota output envelope must remain a passing validation.'
+        $nearQuotaEvent = @(Get-ChildItem -LiteralPath (Join-Path $fixture.Artifacts 'runs') -Filter 'event-*.json' -Recurse -File |
+                ForEach-Object { Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json } |
+                Where-Object { $_.process.outputQuotaExceeded -eq $false -and ([string]$_.process.stdout).Length -gt (1048576 - 4096) } |
+                Select-Object -First 1)[0]
+        Assert-True ($null -ne $nearQuotaEvent) 'The valid near-quota event must retain the full stream above the former safety-margin threshold.'
+        Assert-True (([string]$nearQuotaEvent.process.stdout).Length -le 1048576) 'The valid near-quota stdout must remain within the capture quota.'
     }
 
     # Scenario: A harmless development adapter exposes two active Skills to the central runner.

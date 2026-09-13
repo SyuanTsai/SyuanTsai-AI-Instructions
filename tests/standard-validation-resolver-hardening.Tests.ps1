@@ -925,4 +925,59 @@ catch {
         Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
         Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate' 'Validation-tool resolver must not become a stage/severity policy engine.'
     }
+
+    # Scenario: A still-fresh signed package-adapter receipt from an earlier run is presented to the central runner.
+    # Purpose: Keep the resolver receipt bound to the current trusted-supervisor launch and prevent cross-run replay.
+    It 'UnitT101_requires_the_current_supervisor_run_binding_before_accepting_a_resolver_receipt' {
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+        $functionMatch = [regex]::Match($runner, '(?s)function\s+Get-StandardValidationProductionRunId\b.*?(?=\r?\nfunction\s|\z)')
+        Assert-True $functionMatch.Success 'The central runner must expose a production resolver run-binding function.'
+        $function = $functionMatch.Value
+        Assert-Match $function '\[guid\]\s*\$ExpectedRunId' 'Production receipt validation must receive the current supervisor run binding.'
+        Assert-Match $function '-RunId\s+\$ExpectedRunId' 'The package-adapter receipt must be authenticated against the current supervisor run.'
+        Assert-NotMatch $function '-RunId\s+\$null' 'Production receipt validation must not accept an unbound resolver run ID.'
+        Assert-Match $function 'different validation run|current trusted-supervisor validation run' 'Cross-run resolver receipt replay must fail closed.'
+    }
+
+    # Scenario: A resolver receipt path is replaced between the file read and a later provenance check.
+    # Purpose: Keep receipt authentication, parsed receipt fields, and the recorded receipt hash on one immutable byte snapshot.
+    It 'UnitT102_binds_receipt_validation_to_one_byte_snapshot' {
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+        $functionMatch = [regex]::Match($runner, '(?s)function\s+Assert-StandardValidationToolReceipt\b.*?(?=\r?\nfunction\s|\z)')
+        Assert-True $functionMatch.Success 'The central runner must expose the resolver receipt validation function.'
+        $function = $functionMatch.Value
+        Assert-Match $function 'Get-StandardValidationJsonSnapshot\s+-Path\s+\$receiptPath' 'Resolver receipt validation must read one retained receipt byte snapshot.'
+        Assert-Match $function '\$receiptSnapshot\.sha256' 'Resolver receipt validation must bind provenance to the snapshot hash.'
+        Assert-Match $function '\$receipt\s*=\s*\$receiptSnapshot\.value' 'Resolver receipt validation must consume fields parsed from the retained snapshot.'
+        Assert-NotMatch $function 'Get-StandardValidationJson\s+-Path\s+\$receiptPath' 'Resolver receipt validation must not parse a separately reread receipt path.'
+
+        $root = Join-Path $TestDrive 'resolver-receipt-byte-snapshot'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        . $runnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+        $receiptPath = Join-Path $root 'resolver-receipt.json'
+        Write-TestUtf8File -Path $receiptPath -Text '{"identity":"authenticated-A"}'
+        $snapshot = Get-StandardValidationJsonSnapshot -Path $receiptPath -Context 'resolver receipt substitution snapshot'
+        $snapshotSha256 = [string]$snapshot.sha256
+        Write-TestUtf8File -Path $receiptPath -Text '{"identity":"replacement-B"}'
+        Assert-Equal $snapshot.value.identity 'authenticated-A' 'Receipt substitution must not change the parsed value retained for validation.'
+        Assert-Equal $snapshot.sha256 $snapshotSha256 'Receipt substitution must retain the hash of the authenticated receipt bytes.'
+        Assert-False ((Get-StandardValidationFileSha256 -Path $receiptPath -Context 'replacement resolver receipt') -ceq $snapshotSha256) 'The regression must replace the live receipt path after snapshot capture.'
+    }
 }

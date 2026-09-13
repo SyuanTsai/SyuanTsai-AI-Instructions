@@ -2259,6 +2259,15 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $standard 'normative authority.*conformance regression.*MUST.*PR' 'Standard changes must update authority regression in the same PR.'
         Assert-Match $index 'tests/skill-repository-standard\.Tests\.ps1' 'Standards index must name the authority regression test.'
+        Assert-Match $standard 'trusted supervisor.*fresh validation run ID at invocation start' 'The Standard must bind resolver receipts to the current trusted-supervisor launch.'
+        Assert-Match $standard 'validation-launch-binding-v1' 'The Standard must define the signed supervisor launch-binding contract.'
+        Assert-Match $standard 'pass the same ID to the resolution orchestration.*before' 'The Standard must require the resolver to receive the supervisor run ID before receipt creation.'
+        Assert-Match $standard 'consumptionPath.*outside.*candidate.*artifact.*trusted-tool.*roots' 'The Standard must require an authenticated one-time launch-binding consumption path outside caller-controlled roots.'
+        Assert-Match $standard 'atomically create a supervisor-owned create-only consumption marker.*reject an existing marker' 'The Standard must reject launch-binding replay after artifact-root recreation.'
+        Assert-Match $standard 'revalidate its file hash before and after every child process' 'The Standard must revalidate the launch binding around child execution.'
+        Assert-Match $standard '1,048,576 characters' 'The Standard must define a fixed child-output memory quota.'
+        Assert-Match $standard 'record the overflow diagnostic separately' 'The Standard must keep overflow diagnostics outside bounded stream prefixes.'
+        Assert-Match $standard 'MUST NOT.*unbounded `ReadToEnd` capture' 'The Standard must prohibit unbounded child-output capture.'
     }
 
     It 'UnitT60_keeps_the_review_matrix_current_with_the_SYP167_authority_deliverables' {
@@ -2977,16 +2986,32 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     events = @()
                 }
             })
+        $schemaRunId = [guid]::NewGuid()
+        $schemaBinding = [pscustomobject][ordered]@{
+            status = 'verified'
+            verified = $true
+            path = $null
+            sha256 = ('0' * 64)
+            resolutionRunId = $schemaRunId.ToString('N')
+            issuedAt = $null
+            expiresAt = $null
+            consumptionPath = $null
+            consumptionSha256 = ('0' * 64)
+        }
         $schemaEvidence = New-StandardValidationCandidateEvidence `
-            -RunId ([guid]::NewGuid()) `
+            -RunId $schemaRunId `
             -State 'PASS' `
             -ExitCode 0 `
             -ReleaseEligible $false `
             -Stages $schemaStages `
             -ArtifactRoot 'unavailable' `
-            -LockPath 'unavailable' |
+            -LockPath 'unavailable' `
+            -DevelopmentHarness $false `
+            -LaunchBinding $schemaBinding |
             ConvertTo-Json -Depth 50 |
             ConvertFrom-Json
+        Assert-Equal $schemaEvidence.launchBinding.resolutionRunId $schemaRunId.ToString() 'Evidence must serialize the authenticated launch-binding run ID in canonical UUID format.'
+        Assert-False ([string]$schemaEvidence.launchBinding.resolutionRunId -match '^[0-9a-f]{32}$') 'Evidence must not expose the internal N-format launch-binding run ID.'
         Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
         foreach ($terminal in @(
             @{ state = 'PASS'; exitCode = 0; releaseEligible = $true },
@@ -3008,6 +3033,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $consistent.authority.binding.selectedFiles = @(1..11 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
+                $consistent.launchBinding.status = 'verified'
+                $consistent.launchBinding.verified = $true
+                $consistent.launchBinding.consumptionPath = 'C:\supervisor-state\launch-consumption.json'
+                $consistent.launchBinding.consumptionSha256 = ('1' * 64)
                 for ($stageIndex = 0; $stageIndex -lt 10; $stageIndex++) {
                     $consistent.stages[$stageIndex].status = if ($stageIndex -eq 5) { 'not-applicable' } else { 'passed' }
                 }
