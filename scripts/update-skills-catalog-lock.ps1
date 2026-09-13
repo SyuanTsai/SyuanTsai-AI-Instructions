@@ -94,7 +94,8 @@ try {
     foreach ($skill in @($catalog.skills | Where-Object { [string]$_.lifecycle.status -ne 'removed' } | Sort-Object id)) {
         $id = [string]$skill.id
         $sourceId = [string]$skill.source.sourceId
-        $sourcePath = [string]$skill.source.path
+        $sourcePath = if ([int64]$catalog.schemaVersion -eq 2) { [string]$skill.source.sourcePath } else { [string]$skill.source.path }
+        $targetPath = if ([int64]$catalog.schemaVersion -eq 2) { [string]$skill.source.targetPath } else { ".agents/skills/$id" }
         if (-not $sourceRoots.ContainsKey($sourceId)) { throw "Skill '$id' references source '$sourceId' that was not extracted." }
         $repositoryRootPath = [string]$sourceRoots[$sourceId]
         $skillRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRootPath $sourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
@@ -102,16 +103,18 @@ try {
         $skillDefinition = Join-Path $skillRoot 'SKILL.md'
         if (-not (Test-Path -LiteralPath $skillDefinition -PathType Leaf)) { throw "Skill '$id' is missing SKILL.md in source '$sourceId'." }
         Assert-SkillDefinition -SkillDefinitionPath $skillDefinition -ExpectedSkillId $id
-        $lockSkills += [ordered]@{
+        $lockSkill = [ordered]@{
             id = $id
             sourceId = $sourceId
             sourcePath = $sourcePath
             contentSha256 = Get-SkillInventorySha256 -RepositoryRoot $repositoryRootPath -SkillRoot $skillRoot
         }
+        if ([int64]$catalog.schemaVersion -eq 2) { $lockSkill.targetPath = $targetPath }
+        $lockSkills += $lockSkill
     }
 
     $lock = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = [int64]$catalog.schemaVersion
         catalogId = [string]$catalog.catalogId
         catalogSha256 = Get-RawSha256 -Path $CatalogPath
         sources = @($lockSources)

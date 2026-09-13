@@ -6,11 +6,11 @@
 
 | 文件 | Schema | 責任 |
 | --- | ---: | --- |
-| Skills Catalog | 1 | 宣告可用來源、穩定 Skill ID、群組、profiles、compatibility、dependencies 與 lifecycle。不得包含已解析 commit 或目標 Repository 的安裝狀態。 |
+| Skills Catalog | 1 (legacy read) / 2 (canonical write) | 宣告可用來源、穩定 Skill ID、群組、profiles、compatibility、dependencies 與 lifecycle。v2 明確分離 canonical source 與 runtime target；不得包含已解析 commit 或目標 Repository 的安裝狀態。 |
 | Catalog source pins | 1 | 記錄維護者選定的 requested ref、完整 resolved commit 與顯示版本，供 lock generator 重現與 stale-check。 |
-| Catalog lock | 1 | 將 catalog 及每個來源的 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash 與每個 Skill 的 deterministic content hash。 |
-| Managed manifest | 2 | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
-| User Skills managed manifest | 1 | 記錄 `$HOME/.agents/skills` 中由 Catalog 管理的檔案、Catalog commit、來源 pin 與逐檔 hash；未列入此 manifest 的個人 Skill 永遠視為 unmanaged。 |
+| Catalog lock | 1 (legacy read) / 2 (canonical write) | 將 catalog 及每個來源的 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash，以及每個 Skill 的 source／target mapping 與 deterministic content hash。 |
+| Managed manifest | 2 (legacy read) / 3 (canonical write) | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
+| User Skills managed manifest | 1 (legacy read) / 2 (canonical write) | 記錄 `$HOME/.agents/skills` 中由 Catalog 管理的檔案、Catalog commit、來源 pin 與逐檔 hash；未列入此 manifest 的個人 Skill 永遠視為 unmanaged。 |
 | Personal sync configuration | 4 | 記錄 exclusions、已安裝 AI-Instructions runtime/Catalog bundle 的 canonical GitHub Repository 與完整 commit SHA、Skill selection，以及更新 mode／channel／interval；不含任何 auto-commit 設定。 |
 | Runtime bundle metadata | 2 | 安裝時產生 `runtime-bundle.json`，記錄 Repository、commit、acquisition、archive hash，以及 runtime 精確檔案 inventory／hash；launcher 與所有 stable commands 每次執行前都必須完整驗證。 |
 | Update receipt | 1 | 記錄上次檢查時間、policy、current/candidate commit、結果、archive hash 與診斷訊息；`current` outcome 的 `candidateCommit` 固定為 `null`，已解析版本由 `currentCommit` 唯一表示。 |
@@ -20,7 +20,7 @@
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
-- Group 與 profile 只是 metadata，不是 Skill identity。Standard v1 canonical source 是 `skills/<skill-id>/**` 平面結構；SYP-155～159 完成前，production Catalog/Lock 仍可指向 legacy `.agents/skills/<skill-id>/**`。Consumer projection 仍由 runtime 獨立決定，不得把 target path 當成 source layout authority。
+- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。SYP-155～159 完成前，production Catalog/Lock 仍維持 legacy schema v1；不得把 target path 當成 source layout authority。
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
@@ -92,9 +92,9 @@ Executable contract 與 JSON Schemas 採相同的 strict object／scalar boundar
 
 Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、description、metadata 與 non-empty body 實作 fail-closed lexical subset；它不宣稱是完整 YAML conformance authority。完整 frontmatter type／syntax contract 仍必須由 Standard v1 指定的 safe YAML formal validators 執行；subset 無法明確接受的 YAML scalar、tag、duplicate key 或複雜形態一律拒絕，不得以 PowerShell coercion 猜測。
 
-## Managed manifest v2 provenance
+## Managed manifest v2/v3 provenance
 
-每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。現行 production manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；SYP-155～159 要切換 canonical `skills/<artifactId>/...` source 前，必須先版本化升級 central schema、parser、bootstrap 與 migration tests，target projection 不隨 source root 自動改名。Manifest v2 不使用 Git submodule metadata。
+每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。legacy manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；canonical manifest v3 才允許 `skills/<artifactId>/...` source 對應到 `.agents/skills/<artifactId>/...` target。未知 mapping／schema version 必須 fail closed，target projection 不隨 source root 自動改名。Manifest v2/v3 都不使用 Git submodule metadata。
 
 ## 個人設定 schema v4、runtime v2、安裝與升級
 

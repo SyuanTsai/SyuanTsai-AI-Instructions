@@ -121,4 +121,37 @@ Describe 'Skills source routing plan' {
         @($plan.Sources).Count | Should Be 0
         @($plan.Skills).Count | Should Be 0
     }
+
+    # Scenario: A version 2 Catalog and Lock use canonical source paths while projecting to the legacy runtime target.
+    # Purpose: Carry the explicit source/target mapping through routing and bind both paths to the immutable Lock.
+    It 'UnitT90_routes_canonical_source_paths_to_explicit_runtime_targets' {
+        $catalog = [pscustomobject]@{
+            schemaVersion=2
+            sources=@([pscustomobject]@{ id='alpha-source'; repository='https://example.test/alpha.git' })
+            skills=@([pscustomobject]@{
+                id='skill-alpha'
+                source=[pscustomobject]@{ sourceId='alpha-source'; sourcePath='skills/skill-alpha'; targetPath='.agents/skills/skill-alpha' }
+                lifecycle=[pscustomobject]@{ status='active' }
+            })
+        }
+        $lock = [pscustomobject]@{
+            schemaVersion=2
+            sources=@((New-TestLockedSource 'alpha-source' 'https://example.test/alpha.git' 'a'))
+            skills=@([pscustomobject]@{
+                id='skill-alpha'; sourceId='alpha-source'; sourcePath='skills/skill-alpha'; targetPath='.agents/skills/skill-alpha'; contentSha256=('1' * 64)
+            })
+        }
+
+        $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds @('skill-alpha')
+        @($plan.Skills).Count | Should Be 1
+        @($plan.Skills)[0].sourcePath | Should Be 'skills/skill-alpha'
+        @($plan.Skills)[0].targetPath | Should Be '.agents/skills/skill-alpha'
+        @($plan.Skills)[0].sourceLayoutVersion | Should Be 2
+
+        $lock.skills[0].targetPath = '.agents/skills/other-skill'
+        Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds @('skill-alpha') } 'lock source does not match catalog Skill'
+
+        $catalog.schemaVersion = '2'
+        Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds @('skill-alpha') } 'schemaVersion must be an integer'
+    }
 }

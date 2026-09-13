@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "catalogId": "example-agent-skills-v2",
+  "catalogSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sources": [
+    {
+      "id": "agent-skills",
+      "repository": "https://github.com/example/agent-skills-catalog.git",
+      "requestedRef": "v1.0.0",
+      "requestedRefType": "tag",
+      "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+      "resolvedVersion": "1.0.0",
+      "archiveSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "skills": [
+    {
+      "id": "work-with-jira",
+      "sourceId": "agent-skills",
+      "sourcePath": "skills/work-with-jira",
+      "targetPath": ".agents/skills/work-with-jira",
+      "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

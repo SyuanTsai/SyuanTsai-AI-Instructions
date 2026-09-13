@@ -1233,7 +1233,7 @@ function Get-SharedManagedExcludePaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 2) { Assert-ManagedManifestV2 -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -2584,16 +2584,16 @@ if ($manifestExists) {
     }
 
     $manifestSchemaVersion = $manifest.schemaVersion
-    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2)) {
+    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
 
-    if ($manifestSchemaVersion -eq 2) {
-        Assert-ManagedManifestV2 -Manifest $manifest
+    if ($manifestSchemaVersion -in @(2,3)) {
+        Assert-ManagedManifest -Manifest $manifest
     }
     else { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
-    if ($manifestSchemaVersion -eq 2 -and
+    if ($manifestSchemaVersion -in @(2,3) -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'

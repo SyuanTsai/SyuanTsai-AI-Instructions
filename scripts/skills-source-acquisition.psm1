@@ -676,11 +676,27 @@ function Expand-ValidatedSkillsSourceArchives {
         $skillId = [string] $skill.id
         $sourceId = [string] $skill.sourceId
         $sourcePath = [string] $skill.sourcePath
+        $targetPathProperty = $skill.PSObject.Properties['targetPath']
+        $targetPath = if ($null -ne $targetPathProperty) { [string]$targetPathProperty.Value } else { ".agents/skills/$skillId" }
+        $layoutVersionProperty = $skill.PSObject.Properties['sourceLayoutVersion']
+        if ($null -ne $layoutVersionProperty -and $layoutVersionProperty.Value -isnot [int] -and $layoutVersionProperty.Value -isnot [long]) {
+            throw "Selected Skill '$skillId' source layout version must be an integer."
+        }
+        $sourceLayoutVersion = if ($null -ne $layoutVersionProperty) { [int64]$layoutVersionProperty.Value } else { 1 }
+        if ($sourceLayoutVersion -notin @(1,2)) {
+            throw "Unsupported source layout version '$sourceLayoutVersion' for selected Skill '$skillId'."
+        }
         if (-not $stagedSourcesById.ContainsKey($sourceId)) {
             throw "Selected Skill '$skillId' references source '$sourceId' that was not staged."
         }
         if (-not (Test-SafeSourceRelativePath -Path $sourcePath)) {
             throw "Unsafe source path for selected Skill '$skillId': $sourcePath"
+        }
+        if (-not (Test-SafeSourceRelativePath -Path $targetPath)) {
+            throw "Unsafe target path for selected Skill '$skillId': $targetPath"
+        }
+        if ($sourceLayoutVersion -eq 2 -and ($sourcePath -cne "skills/$skillId" -or $targetPath -cne ".agents/skills/$skillId")) {
+            throw "Selected Skill '$skillId' has a non-canonical v2 source/target mapping."
         }
 
         $sourceRoot = [string] $stagedSourcesById[$sourceId].rootPath
@@ -711,6 +727,8 @@ function Expand-ValidatedSkillsSourceArchives {
             id = $skillId
             sourceId = $sourceId
             sourcePath = $sourcePath
+            targetPath = $targetPath
+            sourceLayoutVersion = $sourceLayoutVersion
             sourceRootPath = $sourceRoot
             skillRootPath = $skillRoot
             contentSha256 = $actualContentHash

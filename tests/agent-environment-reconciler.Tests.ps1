@@ -657,6 +657,13 @@ Describe 'user Skills managed manifest contract' {
         { Assert-UserSkillsManagedManifestV1 -Manifest $example } | Should Not Throw
     }
 
+    It 'accepts_the_canonical_source_version_2_example_with_the_flat_runtime_target' {
+        $example = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json') | ConvertFrom-Json
+        { Assert-UserSkillsManagedManifest -Manifest $example } | Should Not Throw
+        @($example.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
+        @($example.files)[0].targetPath | Should Match '^\.agents/skills/work-with-jira/'
+    }
+
     It 'rejects ownership outside the user Skills root' {
         $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'contract')
         $desired.Manifest.files[0].targetPath = 'Documents/SKILL.md'

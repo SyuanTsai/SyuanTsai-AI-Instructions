@@ -302,4 +302,13 @@ Describe 'production Skills Catalog' {
         }
         @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should Be 0
     }
+
+    # Scenario: The canonical source/target schema is introduced without rewriting production pins.
+    # Purpose: Keep the migration boundary explicit until the later production repin tasks are approved.
+    It 'InterT31_keeps_production_catalog_and_lock_on_legacy_schema_v1' {
+        $script:catalog.schemaVersion | Should Be 1
+        $script:lock.schemaVersion | Should Be 1
+        @($script:catalog.skills | Where-Object { $null -ne $_.source.PSObject.Properties['sourcePath'] -or $null -ne $_.source.PSObject.Properties['targetPath'] }).Count | Should Be 0
+        @($script:lock.skills | Where-Object { $null -ne $_.PSObject.Properties['targetPath'] }).Count | Should Be 0
+    }
 }

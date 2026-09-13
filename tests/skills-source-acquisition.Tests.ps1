@@ -78,7 +78,8 @@ function New-TestSkillSourceArchive {
     param(
         [string] $Name,
         [string] $SkillId,
-        [string] $SkillText
+        [string] $SkillText,
+        [string] $SkillRootPrefix = '.agents/skills'
     )
 
     $sourceRoot = Join-Path $TestDrive "$Name-root"
@@ -87,7 +88,8 @@ function New-TestSkillSourceArchive {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 
     $repositoryRoot = Join-Path $sourceRoot "$Name-repository"
-    $skillRoot = Join-Path $repositoryRoot ".agents\skills\$SkillId"
+    $skillRoot = Join-Path $repositoryRoot ($SkillRootPrefix.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    $skillRoot = Join-Path $skillRoot $SkillId
     New-Item -ItemType Directory -Path $skillRoot -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), $SkillText, (New-Object System.Text.UTF8Encoding($false)))
     $contentHash = Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
@@ -287,6 +289,29 @@ Describe 'Skills source archive acquisition' {
         @($result.Skills).Count | Should Be 2
         @($result.Skills)[0].contentSha256 | Should Be $alpha.ContentHash
         @($result.Skills)[1].contentSha256 | Should Be $beta.ContentHash
+    }
+
+    # Scenario: A v2 source archive stores the Skill under canonical skills/<id> while the runtime target stays flat under .agents/skills.
+    # Purpose: Prove acquisition validates the canonical source without treating it as the install target.
+    It 'UnitT11_stages_canonical_source_with_an_explicit_runtime_target' {
+        $canonical = New-TestSkillSourceArchive -Name 'canonical' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a') -SkillRootPrefix 'skills'
+        $plan = [pscustomobject]@{
+            Sources = @([pscustomobject]@{ id='source-a'; archiveSha256=(Get-TestFileSha256 $canonical.ArchivePath); resolvedCommit=('a' * 40) })
+            Skills = @([pscustomobject]@{
+                id='skill-a'; sourceId='source-a'; sourcePath='skills/skill-a'; targetPath='.agents/skills/skill-a'; sourceLayoutVersion=2; contentSha256=$canonical.ContentHash
+            })
+        }
+
+        $result = Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$canonical.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'canonical-staging')
+        @($result.Skills).Count | Should Be 1
+        $resolvedSkill = @($result.Skills)[0]
+        $resolvedSkill.sourcePath | Should Be 'skills/skill-a'
+        $resolvedSkill.targetPath | Should Be '.agents/skills/skill-a'
+        $resolvedSkill.sourceLayoutVersion | Should Be 2
+        Test-Path -LiteralPath $resolvedSkill.skillRootPath -PathType Container | Should Be $true
+
+        $plan.Skills[0].sourceLayoutVersion = 3
+        Assert-ThrowsMessage { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$canonical.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'unsupported-layout-staging') } 'Unsupported source layout version'
     }
 
     # Scenario: A required source archive's bytes do not match its locked archiveSha256.

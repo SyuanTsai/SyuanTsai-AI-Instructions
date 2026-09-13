@@ -663,7 +663,7 @@ function Get-CleanupSharedManagedPaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 2) { Assert-ManagedManifestV2 -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -756,15 +756,15 @@ Assert-CleanupManagedFilePath -TargetRoot $targetRootPath -FilePath $manifestPat
 try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { throw "Managed manifest is not valid JSON: $($_.Exception.Message)" }
 try {
-    if ($manifest.schemaVersion -eq 2) { Assert-ManagedManifestV2 -Manifest $manifest }
+    if ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
     elseif ($manifest.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
     else { throw "unsupported schemaVersion '$($manifest.schemaVersion)'." }
 }
 catch { throw "Managed manifest cannot prove cleanup ownership: $($_.Exception.Message)" }
-if (($manifest.schemaVersion -eq 2 -and
+if (($manifest.schemaVersion -in @(2,3) -and
      ([string]$manifest.catalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) -or
     $manifest.files -isnot [System.Array]) {
-    throw 'Managed manifest cannot prove cleanup ownership because its v2 identity is invalid.'
+    throw 'Managed manifest cannot prove cleanup ownership because its versioned identity is invalid.'
 }
 
 $entriesByPath = @{}
