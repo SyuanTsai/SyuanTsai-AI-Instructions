@@ -925,4 +925,18 @@ catch {
         Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
         Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate' 'Validation-tool resolver must not become a stage/severity policy engine.'
     }
+
+    # Scenario: A still-fresh signed package-adapter receipt from an earlier run is presented to the central runner.
+    # Purpose: Keep the resolver receipt bound to the current trusted-supervisor launch and prevent cross-run replay.
+    It 'UnitT101_requires_the_current_supervisor_run_binding_before_accepting_a_resolver_receipt' {
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+        $functionMatch = [regex]::Match($runner, '(?s)function\s+Get-StandardValidationProductionRunId\b.*?(?=\r?\nfunction\s|\z)')
+        Assert-True $functionMatch.Success 'The central runner must expose a production resolver run-binding function.'
+        $function = $functionMatch.Value
+        Assert-Match $function '\[guid\]\s*\$ExpectedRunId' 'Production receipt validation must receive the current supervisor run binding.'
+        Assert-Match $function '-RunId\s+\$ExpectedRunId' 'The package-adapter receipt must be authenticated against the current supervisor run.'
+        Assert-NotMatch $function '-RunId\s+\$null' 'Production receipt validation must not accept an unbound resolver run ID.'
+        Assert-Match $function 'different validation run|current trusted-supervisor validation run' 'Cross-run resolver receipt replay must fail closed.'
+    }
 }
