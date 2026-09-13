@@ -12,6 +12,7 @@ param(
     [string] $CandidateArchivePath,
     [string] $CandidateAcquisitionEvidencePath,
     [string] $CandidateArchiveSha256,
+    [string] $SupervisorLaunchBindingPath,
     [string] $RunId,
     [string] $AuthorityRevision,
     [string] $AuthorityArchivePath,
@@ -71,6 +72,7 @@ $script:StandardValidationExitCodes = [ordered]@{
 }
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
+$script:StandardValidationLaunchBinding = $null
 $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 $script:StandardValidationUnixPidNamespaceCapability = $null
 $script:StandardValidationMaxReceiptAgeMinutes = 15
@@ -739,7 +741,7 @@ function Get-StandardValidationSelectedFilesSha256 {
 
 function Get-StandardValidationSignedReceiptPayload {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1', 'publish-install-v1', 'post-install-v1', 'semantic-v1', 'validation-tool-v1', 'ai-review-v1')][string] $ReceiptType,
+        [Parameter(Mandatory = $true)][ValidateSet('candidate-acquisition-v1', 'authority-snapshot-v1', 'publish-install-v1', 'post-install-v1', 'semantic-v1', 'validation-tool-v1', 'validation-launch-v1', 'ai-review-v1')][string] $ReceiptType,
         [Parameter(Mandatory = $true)][hashtable] $Fields
     )
 
@@ -783,6 +785,176 @@ function Assert-StandardValidationSignedReceipt {
         }
     }
     finally { $rsa.Dispose() }
+}
+
+function Assert-StandardValidationSupervisorLaunchBinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $AdapterPath,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $OutputPath,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $SourceRepository,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $BaseRevision,
+        [Parameter(Mandatory = $true)][string] $EventName,
+        [Parameter(Mandatory = $true)][string] $CandidateArchiveSha256,
+        [Parameter(Mandatory = $true)][string] $AuthorityRevision,
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $bindingPath = Get-StandardValidationFullPath -Path $Path -Context "$Context path"
+    Assert-StandardValidationOutsideRoot -Path $bindingPath -Root $CandidateRoot -Context "$Context path"
+    Assert-StandardValidationOutsideRoot -Path $bindingPath -Root $ArtifactsRoot -Context "$Context path"
+    Assert-StandardValidationRegularFile -Path $bindingPath -Context $Context
+    $binding = Get-StandardValidationJson -Path $bindingPath -Context $Context
+    Assert-StandardValidationExactPropertySet -Object $binding -Expected @(
+        'schemaVersion', 'evidenceType', 'status', 'candidateRoot', 'adapterPath',
+        'artifactsRoot', 'outputPath', 'trustedToolRoot', 'sourceRepository',
+        'sourceRevision', 'baseRevision', 'eventName', 'candidateArchiveSha256',
+        'adapterSha256', 'authorityRevision', 'resolutionRunId', 'issuedAt',
+        'expiresAt', 'signature'
+    ) -Context $Context
+    if ((Get-StandardValidationRequiredProperty -Object $binding -Name 'schemaVersion' -Context $Context) -ne 1 -or
+        [string](Get-StandardValidationRequiredProperty -Object $binding -Name 'evidenceType' -Context $Context) -cne 'validation-launch-binding' -or
+        [string](Get-StandardValidationRequiredProperty -Object $binding -Name 'status' -Context $Context) -cne 'issued') {
+        throw "BLOCKED|$Context has an unsupported launch-binding identity or status."
+    }
+
+    $runIdText = Get-StandardValidationRequiredProperty -Object $binding -Name 'resolutionRunId' -Context $Context
+    if ($runIdText -isnot [string] -or [string]$runIdText -cnotmatch '^[0-9a-f]{32}$') {
+        throw "BLOCKED|$Context resolutionRunId must be a lowercase 32-character hexadecimal value."
+    }
+    $runId = [guid]::Empty
+    if (-not [guid]::TryParseExact([string]$runIdText, 'N', [ref]$runId) -or $runId -eq [guid]::Empty) {
+        throw "BLOCKED|$Context resolutionRunId is not a non-empty GUID."
+    }
+
+    $expectedPaths = @(
+        @{ Name = 'candidateRoot'; Expected = $CandidateRoot },
+        @{ Name = 'adapterPath'; Expected = $AdapterPath },
+        @{ Name = 'artifactsRoot'; Expected = $ArtifactsRoot },
+        @{ Name = 'outputPath'; Expected = $OutputPath },
+        @{ Name = 'trustedToolRoot'; Expected = $TrustedToolRoot }
+    )
+    foreach ($pair in $expectedPaths) {
+        $actualValue = Get-StandardValidationRequiredProperty -Object $binding -Name $pair.Name -Context $Context
+        if ($actualValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$actualValue) -or
+            [string]$actualValue -match '[\x00-\x1F\x7F]' -or
+            -not [System.IO.Path]::IsPathRooted([string]$actualValue)) {
+            throw "BLOCKED|$Context $($pair.Name) must be an absolute path without control characters."
+        }
+        $actualPath = Get-StandardValidationFullPath -Path ([string]$actualValue) -Context "$Context $($pair.Name)"
+        $expectedPath = Get-StandardValidationFullPath -Path ([string]$pair.Expected) -Context "$Context expected $($pair.Name)"
+        $comparison = Get-StandardValidationPathComparison -Paths @($actualPath, $expectedPath)
+        if (-not [string]::Equals($actualPath, $expectedPath, $comparison)) {
+            throw "BLOCKED|$Context is bound to a different $($pair.Name)."
+        }
+    }
+
+    $expectedStringFields = @(
+        @{ Name = 'sourceRepository'; Expected = $SourceRepository },
+        @{ Name = 'sourceRevision'; Expected = $SourceRevision },
+        @{ Name = 'baseRevision'; Expected = $BaseRevision },
+        @{ Name = 'eventName'; Expected = $EventName },
+        @{ Name = 'authorityRevision'; Expected = $AuthorityRevision }
+    )
+    foreach ($pair in $expectedStringFields) {
+        $actualValue = Get-StandardValidationRequiredProperty -Object $binding -Name $pair.Name -Context $Context
+        if ($actualValue -isnot [string] -or [string]$actualValue -match '[\x00-\x1F\x7F]' -or
+            [string]$actualValue -cne [string]$pair.Expected) {
+            throw "BLOCKED|$Context is bound to a different $($pair.Name)."
+        }
+    }
+    $bindingArchiveSha256 = Get-StandardValidationRequiredProperty -Object $binding -Name 'candidateArchiveSha256' -Context $Context
+    Assert-StandardValidationSha256 -Value $bindingArchiveSha256 -Context "$Context candidateArchiveSha256"
+    Assert-StandardValidationSha256 -Value $CandidateArchiveSha256 -Context 'CandidateArchiveSha256'
+    if ([string]$bindingArchiveSha256 -cne $CandidateArchiveSha256) {
+        throw "BLOCKED|$Context is bound to a different candidate archive."
+    }
+    $bindingAdapterSha256 = Get-StandardValidationRequiredProperty -Object $binding -Name 'adapterSha256' -Context $Context
+    Assert-StandardValidationSha256 -Value $bindingAdapterSha256 -Context "$Context adapterSha256"
+    $actualAdapterSha256 = Get-StandardValidationFileSha256 -Path $AdapterPath -Context "$Context adapter"
+    if ([string]$bindingAdapterSha256 -cne $actualAdapterSha256) {
+        throw "BLOCKED|$Context is bound to a different adapter."
+    }
+
+    $issuedAt = Assert-StandardValidationFreshTimestamp `
+        -Value (Get-StandardValidationRequiredProperty -Object $binding -Name 'issuedAt' -Context $Context) `
+        -Context "$Context issuedAt" `
+        -MaxAgeMinutes $script:StandardValidationMaxReceiptAgeMinutes
+    $expiresAtValue = Get-StandardValidationRequiredProperty -Object $binding -Name 'expiresAt' -Context $Context
+    $expiresAt = if ($expiresAtValue -is [DateTime]) {
+        if ($expiresAtValue.Kind -ne [DateTimeKind]::Utc) { throw "BLOCKED|$Context expiresAt is not UTC." }
+        $expiresAtValue.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    elseif ($expiresAtValue -is [DateTimeOffset]) {
+        if ($expiresAtValue.Offset -ne [TimeSpan]::Zero) { throw "BLOCKED|$Context expiresAt is not UTC." }
+        $expiresAtValue.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    elseif ($expiresAtValue -is [string]) { [string]$expiresAtValue }
+    else { throw "BLOCKED|$Context expiresAt must be a UTC timestamp." }
+    if ($expiresAt -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,7})?(Z|\+00:00)$') {
+        throw "BLOCKED|$Context expiresAt must be an ISO-8601 UTC timestamp."
+    }
+    $parsedIssuedAt = [DateTimeOffset]::MinValue
+    $parsedExpiresAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($issuedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsedIssuedAt) -or
+        -not [DateTimeOffset]::TryParse($expiresAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsedExpiresAt) -or
+        $parsedIssuedAt.Offset -ne [TimeSpan]::Zero -or $parsedExpiresAt.Offset -ne [TimeSpan]::Zero -or
+        $parsedExpiresAt -le [DateTimeOffset]::UtcNow -or
+        $parsedExpiresAt -le $parsedIssuedAt -or
+        $parsedExpiresAt -gt $parsedIssuedAt.AddMinutes($script:StandardValidationMaxReceiptAgeMinutes)) {
+        throw "BLOCKED|$Context expiresAt is outside the one-run launch-binding window."
+    }
+
+    $payloadFields = @{
+        adapterPath = [string](Get-StandardValidationFullPath -Path $AdapterPath -Context "$Context adapter")
+        adapterSha256 = [string]$bindingAdapterSha256
+        artifactsRoot = [string](Get-StandardValidationFullPath -Path $ArtifactsRoot -Context "$Context artifactsRoot")
+        authorityRevision = [string]$AuthorityRevision
+        baseRevision = [string]$BaseRevision
+        candidateArchiveSha256 = [string]$bindingArchiveSha256
+        candidateRoot = [string](Get-StandardValidationFullPath -Path $CandidateRoot -Context "$Context candidateRoot")
+        eventName = [string]$EventName
+        expiresAt = $expiresAt
+        issuedAt = $issuedAt
+        outputPath = [string](Get-StandardValidationFullPath -Path $OutputPath -Context "$Context outputPath")
+        resolutionRunId = [string]$runIdText
+        sourceRepository = [string]$SourceRepository
+        sourceRevision = [string]$SourceRevision
+        trustedToolRoot = [string](Get-StandardValidationFullPath -Path $TrustedToolRoot -Context "$Context trustedToolRoot")
+    }
+    Assert-StandardValidationSignedReceipt `
+        -Receipt $binding `
+        -ReceiptType 'validation-launch-v1' `
+        -Fields $payloadFields `
+        -TrustAnchorRoot $TrustAnchorRoot `
+        -Context $Context
+
+    return [pscustomobject][ordered]@{
+        status = 'verified'
+        verified = $true
+        path = $bindingPath
+        sha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context "$Context file"
+        resolutionRunId = $runId.ToString()
+        issuedAt = $issuedAt
+        expiresAt = $expiresAt
+    }
+}
+
+function Assert-StandardValidationLaunchBindingUnchanged {
+    param([Parameter(Mandatory = $true)] $Binding)
+
+    if (-not [bool](Get-StandardValidationProperty -Object $Binding -Name 'verified')) { return }
+    $path = [string](Get-StandardValidationRequiredProperty -Object $Binding -Name 'path' -Context 'launch binding')
+    $expectedSha256 = [string](Get-StandardValidationRequiredProperty -Object $Binding -Name 'sha256' -Context 'launch binding')
+    Assert-StandardValidationRegularFile -Path $path -Context 'launch binding'
+    if ((Get-StandardValidationFileSha256 -Path $path -Context 'launch binding') -cne $expectedSha256) {
+        throw 'FAILED|Trusted supervisor launch binding changed during validation.'
+    }
 }
 
 function Get-StandardValidationLauncherDigest {
@@ -1081,6 +1253,7 @@ function Assert-StandardValidationToolReceipt {
         launcherDigestSha256 = [string]$receipt.launcherDigestSha256
         toolName = [string]$receipt.toolName
         runId = $receiptRunId
+        resolvedAtUtc = $resolvedAtUtc
     }
 }
 
@@ -2028,19 +2201,20 @@ function Get-StandardValidationProductionRunId {
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
-        [Parameter(Mandatory = $true)][guid] $ExpectedRunId
+        [Parameter(Mandatory = $true)][guid] $ExpectedRunId,
+        [string] $ExpectedLaunchIssuedAt
     )
 
     if ($ExpectedRunId -eq [guid]::Empty) {
         throw 'INVALID|The trusted supervisor must provide a non-empty production validation run ID.'
     }
 
-    # The trusted supervisor creates ExpectedRunId at the start of this
-    # invocation. Authenticate the package-adapter receipt against that exact
-    # launch binding before the complete adapter is resolved. A still-fresh
-    # signed receipt from an earlier run therefore cannot be replayed into a
-    # new validation, and every later production slot remains bound to the
-    # same supervisor-generated ID.
+    # ExpectedRunId is recovered from an authenticated supervisor launch
+    # binding. Authenticate the package-adapter receipt against that exact
+    # binding before the complete adapter is resolved. A still-fresh signed
+    # receipt from an earlier run therefore cannot be replayed into a new
+    # validation, and every later production slot remains bound to the same
+    # supervisor-generated ID.
     $packageSpec = Get-StandardValidationRequiredProperty -Object $Adapter -Name 'packageAdapter' -Context 'adapter packageAdapter'
     $packageResult = Assert-StandardValidationCommandSpec `
         -Spec $packageSpec `
@@ -2057,6 +2231,19 @@ function Get-StandardValidationProductionRunId {
         $packageResult.toolReceipt.runId -eq [guid]::Empty -or
         ([guid]$packageResult.toolReceipt.runId) -ne $ExpectedRunId) {
         throw 'BLOCKED|The authenticated package-adapter resolver receipt is not bound to the current trusted-supervisor validation run.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedLaunchIssuedAt)) {
+        $launchIssuedAt = [DateTimeOffset]::Parse(
+            $ExpectedLaunchIssuedAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None)
+        $receiptResolvedAt = [DateTimeOffset]::Parse(
+            [string]$packageResult.toolReceipt.resolvedAtUtc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None)
+        if ($receiptResolvedAt -lt $launchIssuedAt) {
+            throw 'BLOCKED|The package-adapter resolver receipt predates the trusted-supervisor launch binding.'
+        }
     }
     return $ExpectedRunId
 }
@@ -3643,6 +3830,9 @@ function Invoke-StandardValidationCommandAndRecord {
 
     $eventId = [guid]::NewGuid().ToString()
     $script:StandardValidationLastEvent = $null
+    if ($null -ne $script:StandardValidationLaunchBinding) {
+        Assert-StandardValidationLaunchBindingUnchanged -Binding $script:StandardValidationLaunchBinding
+    }
     Assert-StandardValidationCandidateAcquisitionArtifactsUnchanged `
         -ArchivePath $CandidateArchivePath `
         -ExpectedArchiveSha256 $ExpectedCandidateArchiveSha256 `
@@ -3700,6 +3890,9 @@ function Invoke-StandardValidationCommandAndRecord {
         -EvidencePath $CandidateAcquisitionEvidencePath `
         -ExpectedEvidenceSha256 $ExpectedCandidateAcquisitionEvidenceSha256 `
         -Context "$StageId/$ToolId candidate acquisition after child"
+    if ($null -ne $script:StandardValidationLaunchBinding) {
+        Assert-StandardValidationLaunchBindingUnchanged -Binding $script:StandardValidationLaunchBinding
+    }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
@@ -4441,7 +4634,8 @@ function New-StandardValidationCandidateEvidence {
         [string] $FailureState,
         [string] $FailureMessage,
         [string] $ArtifactRoot,
-        [string] $LockPath
+        [string] $LockPath,
+        $LaunchBinding
     )
 
         $result = [ordered]@{
@@ -4455,6 +4649,12 @@ function New-StandardValidationCandidateEvidence {
         candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); archiveSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid'); acquisition = [ordered]@{ status = 'unverified'; verified = $false; sourceRepository = 'unavailable'; sourceRevision = 'unavailable'; baseRevision = 'unavailable'; eventName = 'invalid'; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); contentSha256 = $null; evidencePath = $null; evidenceSha256 = ('0' * 64) } } } else { $Candidate }
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
         authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
+        launchBinding = if ($null -eq $LaunchBinding) {
+            [ordered]@{ status = 'unverified-development-harness'; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null }
+        }
+        else {
+            [ordered]@{ status = [string]$LaunchBinding.status; verified = [bool]$LaunchBinding.verified; path = [string]$LaunchBinding.path; sha256 = [string]$LaunchBinding.sha256; resolutionRunId = [string]$LaunchBinding.resolutionRunId; issuedAt = [string]$LaunchBinding.issuedAt; expiresAt = [string]$LaunchBinding.expiresAt }
+        }
         stages = $Stages
         artifacts = [ordered]@{
             root = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { 'unavailable' } else { $ArtifactRoot }
@@ -4530,6 +4730,7 @@ function Invoke-StandardValidationRun {
         [string] $CandidateArchivePath,
         [string] $CandidateAcquisitionEvidencePath,
         [string] $CandidateArchiveSha256,
+        [string] $SupervisorLaunchBindingPath,
         [string] $ValidationRunId,
         [string] $AuthorityRevision,
         [string] $AuthorityArchivePath,
@@ -4552,8 +4753,9 @@ function Invoke-StandardValidationRun {
     )
 
     $script:StandardValidationAuthorityEvidence = $null
+    $script:StandardValidationLaunchBinding = $null
     $script:StandardValidationLastEvent = $null
-    $runId = [guid]::NewGuid()
+    $runId = if ($DevelopmentHarness) { [guid]::NewGuid() } else { [guid]::Empty }
     $stages = New-StandardValidationStages
     $state = 'FAILED'
     $failureState = 'FAILED'
@@ -4586,6 +4788,7 @@ function Invoke-StandardValidationRun {
     $analyzerSemanticRequired = $false
     $semanticRequiredSources = New-Object 'System.Collections.Generic.List[string]'
     $authorityBinding = $null
+    $launchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 
     try {
@@ -4649,6 +4852,34 @@ function Invoke-StandardValidationRun {
                 [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $trustAnchorRootFull)
             }
         }
+        $adapter = Get-StandardValidationJson -Path $adapterFull -Context 'standard validation adapter'
+        if (-not $DevelopmentHarness) {
+            if ([string]::IsNullOrWhiteSpace($SupervisorLaunchBindingPath)) {
+                throw 'INVALID|Production validation requires SupervisorLaunchBindingPath from the trusted supervisor.'
+            }
+            if ([string]::IsNullOrWhiteSpace($AuthorityRevision) -or [string]::IsNullOrWhiteSpace($AuthorityArchivePath) -or
+                [string]::IsNullOrWhiteSpace($AuthoritySnapshotEvidencePath)) {
+                throw 'INVALID|Production validation requires AuthorityRevision, AuthorityArchivePath, and AuthoritySnapshotEvidencePath.'
+            }
+            $launchBinding = Assert-StandardValidationSupervisorLaunchBinding `
+                -Path $SupervisorLaunchBindingPath `
+                -CandidateRoot $originalCandidateRoot `
+                -AdapterPath $adapterFull `
+                -ArtifactsRoot $artifactRootFull `
+                -OutputPath $outputFull `
+                -TrustedToolRoot $trustedToolRootFull `
+                -SourceRepository $SourceRepository `
+                -SourceRevision $SourceRevision `
+                -BaseRevision $BaseRevision `
+                -EventName $EventName `
+                -CandidateArchiveSha256 $CandidateArchiveSha256 `
+                -AuthorityRevision $AuthorityRevision `
+                -TrustAnchorRoot $trustAnchorRootFull `
+                -Context 'trusted supervisor launch binding'
+            $runId = [guid]::ParseExact([string]$launchBinding.resolutionRunId, 'N')
+            [void](Register-StandardValidationEvidenceArtifact -Path $launchBinding.path -Context 'trusted supervisor launch binding')
+            $script:StandardValidationLaunchBinding = $launchBinding
+        }
         if ($DevelopmentHarness) {
             $authorityBinding = [ordered]@{
                 status = 'unverified-development-harness'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null
@@ -4657,10 +4888,6 @@ function Invoke-StandardValidationRun {
             }
         }
         else {
-            if ([string]::IsNullOrWhiteSpace($AuthorityRevision) -or [string]::IsNullOrWhiteSpace($AuthorityArchivePath) -or
-                [string]::IsNullOrWhiteSpace($AuthoritySnapshotEvidencePath)) {
-                throw 'INVALID|Production validation requires AuthorityRevision, AuthorityArchivePath, and AuthoritySnapshotEvidencePath.'
-            }
             $authorityBinding = Assert-StandardValidationAuthoritySnapshot `
                 -RepositoryRoot (Split-Path -Parent $PSScriptRoot) `
                 -AuthorityRevision $AuthorityRevision `
@@ -4675,7 +4902,6 @@ function Invoke-StandardValidationRun {
         $authorityEvidence = $contractResult.authority
         $authorityEvidence.binding = $authorityBinding
         $script:StandardValidationAuthorityEvidence = $authorityEvidence
-        $adapter = Get-StandardValidationJson -Path $adapterFull -Context 'standard validation adapter'
         if (-not $DevelopmentHarness) {
             $runId = Get-StandardValidationProductionRunId `
                 -Adapter $adapter `
@@ -4683,7 +4909,8 @@ function Invoke-StandardValidationRun {
                 -ArtifactsRoot $artifactRootFull `
                 -TrustedToolRoot $trustedToolRootFull `
                 -TrustAnchorRoot $trustAnchorRootFull `
-                -ExpectedRunId $runId
+                -ExpectedRunId $runId `
+                -ExpectedLaunchIssuedAt $launchBinding.issuedAt
         }
         $adapterResult = Assert-StandardValidationAdapter `
             -Adapter $adapter `
@@ -5124,7 +5351,8 @@ function Invoke-StandardValidationRun {
             -FailureState $failureState `
             -FailureMessage $failureMessage `
             -ArtifactRoot $artifactRootFull `
-            -LockPath $lockPath
+            -LockPath $lockPath `
+            -LaunchBinding $launchBinding
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
                 Assert-StandardValidationOutputReservation `
@@ -5156,7 +5384,8 @@ function Invoke-StandardValidationRun {
                     -FailureState $failureState `
                     -FailureMessage $failureMessage `
                     -ArtifactRoot $artifactRootFull `
-                    -LockPath $lockPath
+                    -LockPath $lockPath `
+                    -LaunchBinding $launchBinding
                 try {
                     $outputReservationStream.Dispose()
                     $outputReservationStream = $null
@@ -5203,7 +5432,8 @@ function Invoke-StandardValidationRun {
                         -FailureState $failureState `
                         -FailureMessage $failureMessage `
                         -ArtifactRoot $artifactRootFull `
-                        -LockPath $lockPath
+                        -LockPath $lockPath `
+                        -LaunchBinding $launchBinding
                 }
             }
         }
@@ -5229,6 +5459,7 @@ $result = Invoke-StandardValidationRun `
     -CandidateArchivePath $CandidateArchivePath `
     -CandidateAcquisitionEvidencePath $CandidateAcquisitionEvidencePath `
     -CandidateArchiveSha256 $CandidateArchiveSha256 `
+    -SupervisorLaunchBindingPath $SupervisorLaunchBindingPath `
     -ValidationRunId $RunId `
     -AuthorityRevision $AuthorityRevision `
     -AuthorityArchivePath $AuthorityArchivePath `

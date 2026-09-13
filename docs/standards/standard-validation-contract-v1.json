@@ -8,7 +8,8 @@
     "adapter": "-AdapterPath <versioned declarative adapter JSON>",
     "artifacts": "-ArtifactsRoot <checkout-external run-owned directory>",
     "identity": ["-SourceRepository", "-SourceRevision", "-BaseRevision", "-EventName", "-CandidateArchivePath", "-CandidateAcquisitionEvidencePath", "-CandidateArchiveSha256", "-AuthorityRevision", "-AuthorityArchivePath", "-AuthoritySnapshotEvidencePath"],
-    "runId": "trusted supervisor generates a fresh run ID at invocation start; production runner authenticates the signed package-adapter resolver receipt against that exact launch binding before full adapter validation; every production slot must match it; caller-supplied -RunId is development-harness-only and rejected in production",
+    "runId": "trusted supervisor generates a fresh run ID at invocation start and passes the same ID to the resolver before receipt creation; production runner authenticates the signed launch binding and package-adapter resolver receipt against that exact ID before full adapter validation; every production slot must match it; caller-supplied -RunId is development-harness-only and rejected in production",
+    "launchBinding": "-SupervisorLaunchBindingPath <trusted-supervisor-signed validation-launch-binding-v1 JSON; required in production>",
     "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
     "developmentOnly": "-DevelopmentHarness",
     "lifecycle": "-CompleteLifecycle",
@@ -54,6 +55,14 @@
       "canonicalHash": "sha256-of-concatenated-lines; no-length-field"
     },
     "installedClosure": "all-regular-file-content-hashes-plus-in-root-unix-symlink-target-identities; target-must-be-non-reparse-regular-file-or-directory; reject-external-chained-and-special-file-symlinks",
+    "productionLaunchBinding": {
+      "required": true,
+      "argument": "-SupervisorLaunchBindingPath",
+      "evidenceType": "validation-launch-binding",
+      "attestation": "trusted-supervisor-validation-launch-v1",
+      "ordering": "trusted supervisor signs the binding, passes its resolutionRunId to the resolver before receipt creation, then passes the binding path to the central runner",
+      "binds": ["resolutionRunId", "candidateRoot", "adapterPath", "adapterSha256", "artifactsRoot", "outputPath", "trustedToolRoot", "sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateArchiveSha256", "authorityRevision", "issuedAt", "expiresAt"]
+    },
     "snapshotRevalidation": "before-and-after-every-child-process",
     "toolReceiptFreshness": "resolvedAtUtc-and-attestation-issuedAt-must-match-and-be-within-15-minutes-of-the-validation-start-window",
     "canonicalEntryPoint": "adapter.canonicalValidatorPath-inventoried-and-invoked-by-central-contract",
