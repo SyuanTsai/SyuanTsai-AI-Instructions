@@ -2984,16 +2984,30 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     events = @()
                 }
             })
+        $schemaRunId = [guid]::NewGuid()
+        $schemaBinding = [pscustomobject][ordered]@{
+            status = 'verified'
+            verified = $true
+            path = $null
+            sha256 = ('0' * 64)
+            resolutionRunId = $schemaRunId.ToString('N')
+            issuedAt = $null
+            expiresAt = $null
+        }
         $schemaEvidence = New-StandardValidationCandidateEvidence `
-            -RunId ([guid]::NewGuid()) `
+            -RunId $schemaRunId `
             -State 'PASS' `
             -ExitCode 0 `
             -ReleaseEligible $false `
             -Stages $schemaStages `
             -ArtifactRoot 'unavailable' `
-            -LockPath 'unavailable' |
+            -LockPath 'unavailable' `
+            -DevelopmentHarness $false `
+            -LaunchBinding $schemaBinding |
             ConvertTo-Json -Depth 50 |
             ConvertFrom-Json
+        Assert-Equal $schemaEvidence.launchBinding.resolutionRunId $schemaRunId.ToString() 'Evidence must serialize the authenticated launch-binding run ID in canonical UUID format.'
+        Assert-False ([string]$schemaEvidence.launchBinding.resolutionRunId -match '^[0-9a-f]{32}$') 'Evidence must not expose the internal N-format launch-binding run ID.'
         Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
         foreach ($terminal in @(
             @{ state = 'PASS'; exitCode = 0; releaseEligible = $true },

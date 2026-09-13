@@ -212,7 +212,7 @@
       "additionalProperties": false,
       "required": ["status", "verified", "path", "sha256", "resolutionRunId", "issuedAt", "expiresAt"],
       "properties": {
-        "status": { "enum": ["verified", "unverified-development-harness"] },
+        "status": { "enum": ["verified", "unverified-development-harness", "unverified-production"] },
         "verified": { "type": "boolean" },
         "path": { "type": ["string", "null"] },
         "sha256": { "$ref": "#/$defs/sha256" },

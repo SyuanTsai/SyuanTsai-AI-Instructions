@@ -61,6 +61,8 @@
       "evidenceType": "validation-launch-binding",
       "attestation": "trusted-supervisor-validation-launch-v1",
       "ordering": "trusted supervisor signs the binding, passes its resolutionRunId to the resolver before receipt creation, then passes the binding path to the central runner",
+      "handoffRunIdFormat": "lowercase-32-character-hexadecimal-N",
+      "evidenceRunIdFormat": "canonical-hyphenated-UUID-D",
       "binds": ["resolutionRunId", "candidateRoot", "adapterPath", "adapterSha256", "artifactsRoot", "outputPath", "trustedToolRoot", "sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateArchiveSha256", "authorityRevision", "issuedAt", "expiresAt"]
     },
     "snapshotRevalidation": "before-and-after-every-child-process",

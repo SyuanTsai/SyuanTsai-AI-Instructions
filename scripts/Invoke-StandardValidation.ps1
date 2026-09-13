@@ -4635,6 +4635,7 @@ function New-StandardValidationCandidateEvidence {
         [string] $FailureMessage,
         [string] $ArtifactRoot,
         [string] $LockPath,
+        [Parameter(Mandatory = $true)][bool] $DevelopmentHarness,
         $LaunchBinding
     )
 
@@ -4650,10 +4651,10 @@ function New-StandardValidationCandidateEvidence {
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
         authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
         launchBinding = if ($null -eq $LaunchBinding) {
-            [ordered]@{ status = 'unverified-development-harness'; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null }
+            [ordered]@{ status = if ($DevelopmentHarness) { 'unverified-development-harness' } else { 'unverified-production' }; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null }
         }
         else {
-            [ordered]@{ status = [string]$LaunchBinding.status; verified = [bool]$LaunchBinding.verified; path = [string]$LaunchBinding.path; sha256 = [string]$LaunchBinding.sha256; resolutionRunId = [string]$LaunchBinding.resolutionRunId; issuedAt = [string]$LaunchBinding.issuedAt; expiresAt = [string]$LaunchBinding.expiresAt }
+            [ordered]@{ status = [string]$LaunchBinding.status; verified = [bool]$LaunchBinding.verified; path = [string]$LaunchBinding.path; sha256 = [string]$LaunchBinding.sha256; resolutionRunId = $RunId.ToString(); issuedAt = [string]$LaunchBinding.issuedAt; expiresAt = [string]$LaunchBinding.expiresAt }
         }
         stages = $Stages
         artifacts = [ordered]@{
@@ -5352,6 +5353,7 @@ function Invoke-StandardValidationRun {
             -FailureMessage $failureMessage `
             -ArtifactRoot $artifactRootFull `
             -LockPath $lockPath `
+            -DevelopmentHarness $DevelopmentHarness `
             -LaunchBinding $launchBinding
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
@@ -5385,6 +5387,7 @@ function Invoke-StandardValidationRun {
                     -FailureMessage $failureMessage `
                     -ArtifactRoot $artifactRootFull `
                     -LockPath $lockPath `
+                    -DevelopmentHarness $DevelopmentHarness `
                     -LaunchBinding $launchBinding
                 try {
                     $outputReservationStream.Dispose()
@@ -5433,6 +5436,7 @@ function Invoke-StandardValidationRun {
                         -FailureMessage $failureMessage `
                         -ArtifactRoot $artifactRootFull `
                         -LockPath $lockPath `
+                        -DevelopmentHarness $DevelopmentHarness `
                         -LaunchBinding $launchBinding
                 }
             }

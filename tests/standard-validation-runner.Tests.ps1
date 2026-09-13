@@ -611,6 +611,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match ([string]$contract.cli.launchBinding) 'SupervisorLaunchBindingPath' 'Production CLI must expose the trusted supervisor launch binding input.'
         Assert-True ([bool]$contract.execution.productionLaunchBinding.required) 'Production validation must require an authenticated launch binding.'
         Assert-Equal ([string]$contract.execution.productionLaunchBinding.attestation) 'trusted-supervisor-validation-launch-v1' 'Launch binding attestation identity must be canonical.'
+        Assert-Equal ([string]$contract.execution.productionLaunchBinding.handoffRunIdFormat) 'lowercase-32-character-hexadecimal-N' 'The launch-binding handoff run-ID format must remain canonical.'
+        Assert-Equal ([string]$contract.execution.productionLaunchBinding.evidenceRunIdFormat) 'canonical-hyphenated-UUID-D' 'Evidence must declare the schema-compatible run-ID serialization.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.packageAdapter) 'package-adapter' 'The package adapter slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillValidator) 'skill-validator' 'The skill-validator slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillTools) 'skill-tools' 'The skill-tools slot must have a fixed canonical tool role.'
@@ -634,6 +636,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
         Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
+        Assert-True (@($evidenceSchema.'$defs'.launchBinding.properties.status.enum) -contains 'unverified-production') 'The evidence schema must distinguish rejected production launch bindings from development harness runs.'
         Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'The evidence schema must bind every terminal state to its exit code and release eligibility.'
         $evidenceSchemaText = $evidenceSchema | ConvertTo-Json -Depth 20 -Compress
         Assert-Match $evidenceSchemaText '"if".*"state".*"then".*"exitCode"' 'The evidence schema must express conditional terminal state/exit-code relationships.'
@@ -792,6 +795,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $missingBindingFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'missing-launch-binding')
         $missingBindingResult = Invoke-RunnerFixture -Fixture $missingBindingFixture -DevelopmentHarness:$false
         Assert-Equal $missingBindingResult.Evidence.state 'INVALID' 'Production validation must reject a missing supervisor launch binding.'
+        Assert-Equal $missingBindingResult.Evidence.launchBinding.status 'unverified-production' 'A rejected production launch binding must not be labeled as a development harness.'
         Assert-Match $missingBindingResult.Output 'SupervisorLaunchBindingPath|launch binding' 'The missing launch binding must identify the trusted supervisor boundary.'
 
         $credentialFixture = New-RunnerFixture -Root (Join-Path $TestDrive 'credentialed-source-repository')
