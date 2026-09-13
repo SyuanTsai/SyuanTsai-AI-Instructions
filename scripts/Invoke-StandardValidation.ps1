@@ -3943,12 +3943,21 @@ function Invoke-StandardValidationCommandAndRecord {
     $eventStderr = [string]$processResult.stderr
     if ($eventStdout.Length -gt $eventSerializationQuota) { $eventStdout = $eventStdout.Substring(0, $eventSerializationQuota) }
     if ($eventStderr.Length -gt $eventSerializationQuota) { $eventStderr = $eventStderr.Substring(0, $eventSerializationQuota) }
-    $boundedProcessResult = [ordered]@{}
-    foreach ($property in $processResult.PSObject.Properties) {
-        $boundedProcessResult[$property.Name] = $property.Value
+    $boundedProcessResult = [ordered]@{
+        startedAt = [string]$processResult.startedAt
+        endedAt = [string]$processResult.endedAt
+        exitCode = [int]$processResult.exitCode
+        status = [string]$processResult.status
+        stdout = $eventStdout
+        stderr = $eventStderr
+        cleanedUp = [bool]$processResult.cleanedUp
     }
-    $boundedProcessResult.stdout = $eventStdout
-    $boundedProcessResult.stderr = $eventStderr
+    if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
+        $boundedProcessResult.outputQuotaExceeded = [bool]$processResult.outputQuotaExceeded
+    }
+    if ($processResult.PSObject.Properties.Name -contains 'outputQuotaDiagnostic') {
+        $boundedProcessResult.outputQuotaDiagnostic = if ($null -eq $processResult.outputQuotaDiagnostic) { $null } else { [string]$processResult.outputQuotaDiagnostic }
+    }
     $processResult = [pscustomobject]$boundedProcessResult
     if ($null -ne $OutputReservationStream) {
         Assert-StandardValidationOutputReservation `
@@ -3990,9 +3999,9 @@ function Invoke-StandardValidationCommandAndRecord {
         toolId = $ToolId
         skillId = if ([string]::IsNullOrWhiteSpace($SkillId)) { $null } else { $SkillId }
         candidateId = $CandidateId
-        process = $processResult
-        stdout = [string]$processResult.stdout
-        stderr = [string]$processResult.stderr
+        process = $boundedProcessResult
+        stdout = $eventStdout
+        stderr = $eventStderr
     }
     $rawOutputPath = Join-Path $eventDirectory ("event-$eventId.json")
     [void](Write-StandardValidationJsonCreate `
