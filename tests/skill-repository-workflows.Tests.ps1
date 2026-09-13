@@ -409,6 +409,40 @@ jobs:
 '@
             },
             @{
+                Name = 'release-workflow-references-canonical-only'
+                RelativePath = '.github/workflows/release-canonical-reference.yml'
+                Text = @'
+name: Release with canonical path reference only
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: Get-Item ./scripts/Validate.ps1
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-same-step-without-success-gate'
+                RelativePath = '.github/workflows/release-same-step.yml'
+                Text = @'
+name: Release with ungated same-step validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - shell: bash
+        run: |
+          ./scripts/Validate.ps1
+          gh release create $GITHUB_REF_NAME
+'@
+            },
+            @{
                 Name = 'release-workflow-with-unbound-validation'
                 RelativePath = '.github/workflows/release-unbound.yml'
                 Text = @'

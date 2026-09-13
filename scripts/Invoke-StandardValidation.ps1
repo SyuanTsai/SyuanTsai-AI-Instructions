@@ -1260,6 +1260,40 @@ function Assert-StandardValidationCandidateAcquisition {
     }
 }
 
+function Assert-StandardValidationCandidateAcquisitionArtifactsUnchanged {
+    param(
+        [string] $ArchivePath,
+        [string] $ExpectedArchiveSha256,
+        [string] $EvidencePath,
+        [string] $ExpectedEvidenceSha256,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $hasArchive = -not [string]::IsNullOrWhiteSpace($ArchivePath)
+    $hasExpectedArchive = -not [string]::IsNullOrWhiteSpace($ExpectedArchiveSha256)
+    $hasEvidence = -not [string]::IsNullOrWhiteSpace($EvidencePath)
+    $hasExpectedEvidence = -not [string]::IsNullOrWhiteSpace($ExpectedEvidenceSha256)
+    if (-not ($hasArchive -or $hasExpectedArchive -or $hasEvidence -or $hasExpectedEvidence)) { return }
+    if (-not ($hasArchive -and $hasExpectedArchive -and $hasEvidence -and $hasExpectedEvidence)) {
+        throw "BLOCKED|$Context candidate acquisition artifact binding is incomplete."
+    }
+
+    Assert-StandardValidationSha256 -Value $ExpectedArchiveSha256 -Context "$Context archiveSha256"
+    Assert-StandardValidationSha256 -Value $ExpectedEvidenceSha256 -Context "$Context evidenceSha256"
+    $archiveFull = Get-StandardValidationFullPath -Path $ArchivePath -Context "$Context archive"
+    $evidenceFull = Get-StandardValidationFullPath -Path $EvidencePath -Context "$Context evidence"
+    Assert-StandardValidationRegularFile -Path $archiveFull -Context "$Context archive"
+    Assert-StandardValidationRegularFile -Path $evidenceFull -Context "$Context evidence"
+    $archiveSha256 = Get-StandardValidationFileSha256 -Path $archiveFull -Context "$Context archive"
+    $evidenceSha256 = Get-StandardValidationFileSha256 -Path $evidenceFull -Context "$Context evidence"
+    if ($archiveSha256 -cne $ExpectedArchiveSha256) {
+        throw "FAILED|$Context candidate archive changed during validation."
+    }
+    if ($evidenceSha256 -cne $ExpectedEvidenceSha256) {
+        throw "FAILED|$Context candidate acquisition receipt changed during validation."
+    }
+}
+
 function Assert-StandardValidationAuthoritySnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -3446,6 +3480,10 @@ function Invoke-StandardValidationCommandAndRecord {
         [Parameter(Mandatory = $true)][string] $ActiveSkillsText,
         [Parameter(Mandatory = $true)][string] $OriginalCandidateRoot,
         [Parameter(Mandatory = $true)][string] $ExpectedCandidateContentSha256,
+        [string] $CandidateArchivePath,
+        [string] $ExpectedCandidateArchiveSha256,
+        [string] $CandidateAcquisitionEvidencePath,
+        [string] $ExpectedCandidateAcquisitionEvidenceSha256,
         [Parameter(Mandatory = $true)][string] $AdapterPath,
         [Parameter(Mandatory = $true)][string] $ExpectedAdapterSha256,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
@@ -3457,6 +3495,12 @@ function Invoke-StandardValidationCommandAndRecord {
 
     $eventId = [guid]::NewGuid().ToString()
     $script:StandardValidationLastEvent = $null
+    Assert-StandardValidationCandidateAcquisitionArtifactsUnchanged `
+        -ArchivePath $CandidateArchivePath `
+        -ExpectedArchiveSha256 $ExpectedCandidateArchiveSha256 `
+        -EvidencePath $CandidateAcquisitionEvidencePath `
+        -ExpectedEvidenceSha256 $ExpectedCandidateAcquisitionEvidenceSha256 `
+        -Context "$StageId/$ToolId candidate acquisition before child"
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
     }
@@ -3502,6 +3546,12 @@ function Invoke-StandardValidationCommandAndRecord {
             -Token $OutputReservationToken `
             -Context "$StageId/$ToolId"
     }
+    Assert-StandardValidationCandidateAcquisitionArtifactsUnchanged `
+        -ArchivePath $CandidateArchivePath `
+        -ExpectedArchiveSha256 $ExpectedCandidateArchiveSha256 `
+        -EvidencePath $CandidateAcquisitionEvidencePath `
+        -ExpectedEvidenceSha256 $ExpectedCandidateAcquisitionEvidenceSha256 `
+        -Context "$StageId/$ToolId candidate acquisition after child"
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     if ($null -ne $script:StandardValidationAuthorityEvidence) {
         Assert-StandardValidationAuthorityUnchanged -Authority $script:StandardValidationAuthorityEvidence
@@ -4525,6 +4575,10 @@ function Invoke-StandardValidationRun {
         if (-not $DevelopmentHarness -and [string]$candidateAcquisition.contentSha256 -cne $expectedCandidateContentSha256) {
             throw 'BLOCKED|Candidate acquisition receipt content identity does not match the candidate root.'
         }
+        $candidateArchivePathForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.archivePath }
+        $candidateArchiveSha256ForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.archiveSha256 }
+        $candidateAcquisitionEvidencePathForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.evidencePath }
+        $candidateAcquisitionEvidenceSha256ForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.evidenceSha256 }
         $expectedAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter'
         $candidateId = Get-StandardValidationTextSha256 -Value (
             "$SourceRepository`n$SourceRevision`n$BaseRevision`n$EventName`n$expectedCandidateContentSha256`n$expectedAdapterSha256`n$CandidateArchiveSha256"
@@ -4605,6 +4659,10 @@ function Invoke-StandardValidationRun {
             -ActiveSkillsText $activeSkillsText `
             -OriginalCandidateRoot $originalCandidateRoot `
             -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+            -CandidateArchivePath $candidateArchivePathForChildren `
+            -ExpectedCandidateArchiveSha256 $candidateArchiveSha256ForChildren `
+            -CandidateAcquisitionEvidencePath $candidateAcquisitionEvidencePathForChildren `
+            -ExpectedCandidateAcquisitionEvidenceSha256 $candidateAcquisitionEvidenceSha256ForChildren `
             -AdapterPath $adapterFull `
             -ExpectedAdapterSha256 $expectedAdapterSha256 `
             -TimeoutSeconds $TimeoutSeconds `
@@ -4636,6 +4694,10 @@ function Invoke-StandardValidationRun {
                     -ActiveSkillsText $activeSkillsText `
                     -OriginalCandidateRoot $originalCandidateRoot `
                     -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+                    -CandidateArchivePath $candidateArchivePathForChildren `
+                    -ExpectedCandidateArchiveSha256 $candidateArchiveSha256ForChildren `
+                    -CandidateAcquisitionEvidencePath $candidateAcquisitionEvidencePathForChildren `
+                    -ExpectedCandidateAcquisitionEvidenceSha256 $candidateAcquisitionEvidenceSha256ForChildren `
                     -AdapterPath $adapterFull `
                     -ExpectedAdapterSha256 $expectedAdapterSha256 `
                     -TimeoutSeconds $TimeoutSeconds `
@@ -4670,6 +4732,10 @@ function Invoke-StandardValidationRun {
             -ActiveSkillsText $activeSkillsText `
             -OriginalCandidateRoot $originalCandidateRoot `
             -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+            -CandidateArchivePath $candidateArchivePathForChildren `
+            -ExpectedCandidateArchiveSha256 $candidateArchiveSha256ForChildren `
+            -CandidateAcquisitionEvidencePath $candidateAcquisitionEvidencePathForChildren `
+            -ExpectedCandidateAcquisitionEvidenceSha256 $candidateAcquisitionEvidenceSha256ForChildren `
             -AdapterPath $adapterFull `
             -ExpectedAdapterSha256 $expectedAdapterSha256 `
             -TimeoutSeconds $TimeoutSeconds `
@@ -4714,6 +4780,10 @@ function Invoke-StandardValidationRun {
                 -ActiveSkillsText $activeSkillsText `
                 -OriginalCandidateRoot $originalCandidateRoot `
                 -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+                -CandidateArchivePath $candidateArchivePathForChildren `
+                -ExpectedCandidateArchiveSha256 $candidateArchiveSha256ForChildren `
+                -CandidateAcquisitionEvidencePath $candidateAcquisitionEvidencePathForChildren `
+                -ExpectedCandidateAcquisitionEvidenceSha256 $candidateAcquisitionEvidenceSha256ForChildren `
                 -AdapterPath $adapterFull `
                 -ExpectedAdapterSha256 $expectedAdapterSha256 `
                 -TimeoutSeconds $TimeoutSeconds `

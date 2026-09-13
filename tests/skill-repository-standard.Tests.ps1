@@ -3104,6 +3104,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push --mirror') 'A mirror push must be release-affecting because it can publish tag refs.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: docker/build-push-action@0123456789012345678901234567890123456789`nwith:`n  push: true") 'A Docker build-push action must be release-affecting because its push input can publish an image.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'docker buildx build --platform linux/amd64 --push .') 'A Docker buildx build with --push must be release-affecting because it publishes an image.'
+        Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text './scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A direct canonical validator command must count as an invocation.'
+        Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'pwsh -File ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A canonical validator launched through pwsh -File must count as an invocation.'
+        Assert-False ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'Get-Item ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'Reading the canonical validator path must not count as executing it.'
 
         $implicitSuccessJob = @'
   release:

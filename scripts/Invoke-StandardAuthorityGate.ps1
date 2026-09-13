@@ -1025,6 +1025,59 @@ function Get-AuthorityConsumerExecutableText {
     return [string]::Join("`n", $fragments.ToArray())
 }
 
+function Get-AuthorityConsumerWorkflowExecutableSteps {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $steps = New-Object 'System.Collections.Generic.List[object]'
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $stepMatch = [regex]::Match([string]$lines[$index], '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+        if (-not $stepMatch.Success) { continue }
+        $stepIndent = $stepMatch.Groups['indent'].Value.Length
+        $stepEndIndex = $lines.Count - 1
+        for ($forward = $index + 1; $forward -lt $lines.Count; $forward++) {
+            $candidateLine = [string]$lines[$forward]
+            if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+            $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+            $candidateIndent = ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length
+            if (($candidateMatch.Success -and $candidateIndent -eq $stepIndent) -or
+                (-not $candidateMatch.Success -and $candidateIndent -lt $stepIndent)) {
+                $stepEndIndex = $forward - 1
+                break
+            }
+        }
+
+        $hasExecutableField = $false
+        for ($fieldIndex = $index; $fieldIndex -le $stepEndIndex; $fieldIndex++) {
+            $fieldLine = [string]$lines[$fieldIndex]
+            if ($fieldLine -match '^\s*(?:-\s+)?(?:"run"|''run''|run|"uses"|''uses''|uses)\s*:') {
+                $hasExecutableField = $true
+                break
+            }
+        }
+        if (-not $hasExecutableField) {
+            $index = $stepEndIndex
+            continue
+        }
+
+        $stepLines = New-Object 'System.Collections.Generic.List[string]'
+        for ($stepLineIndex = $index; $stepLineIndex -le $stepEndIndex; $stepLineIndex++) {
+            [void]$stepLines.Add([string]$lines[$stepLineIndex])
+        }
+        $stepText = [string]::Join("`n", $stepLines.ToArray())
+        $executableText = Get-AuthorityConsumerExecutableText -Text $stepText
+        if (-not [string]::IsNullOrWhiteSpace($executableText)) {
+            [void]$steps.Add([pscustomobject][ordered]@{
+                    text = $stepText
+                    executableText = $executableText
+                })
+        }
+        $index = $stepEndIndex
+    }
+    return $steps.ToArray()
+}
+
 function Get-AuthorityConsumerScriptText {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -1130,6 +1183,38 @@ function Get-AuthorityConsumerCanonicalTokenPattern {
     return '(?<![A-Za-z0-9_.-])(?:\.[/\\])?' + $pathPattern + '(?![A-Za-z0-9_.-])'
 }
 
+function Test-AuthorityConsumerCanonicalCommandInvocation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Command,
+        [Parameter(Mandatory = $true)][string] $CanonicalPattern
+    )
+
+    $command = (Remove-AuthorityConsumerShellComments -Line $Command).Trim()
+    if ([string]::IsNullOrWhiteSpace($command)) { return $false }
+
+    # A path mentioned by an inspection or output command is evidence about the
+    # validator, not execution of it. Keep this list conservative so a release
+    # workflow cannot satisfy the canonical binding by merely reading a file.
+    $inspectionCommandPattern = '(?i)^(?:&\s*)?(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String|Get-Item|Test-Path|Get-FileHash|Resolve-Path|Get-Command|stat|ls|dir|find|realpath|sha(?:256)?sum|file|git\s+(?:show|diff|cat-file|ls-files))\b'
+    if ($command -match $inspectionCommandPattern) { return $false }
+
+    $directPattern = '^(?:&\s*|call\s+|exec\s+|command\s+)?' + $CanonicalPattern + '(?=\s|$)'
+    if ([regex]::IsMatch($command, $directPattern)) { return $true }
+
+    # Common interpreters may invoke the canonical script through -File or an
+    # equivalent positional argument. Do not accept an inspection command that
+    # happens to be embedded in `pwsh -Command "Get-Item <canonical path>"`.
+    $launcherPattern = '^(?i)(?:pwsh|powershell(?:\.exe)?|python(?:3(?:\.exe)?)?|node(?:\.exe)?|bash|sh|cmd(?:\.exe)?|dotnet)\b'
+    if ($command -notmatch $launcherPattern) { return $false }
+    $pathMatch = [regex]::Match($command, $CanonicalPattern)
+    if (-not $pathMatch.Success) { return $false }
+    $launcherArguments = $command.Substring(0, $pathMatch.Index)
+    if ($launcherArguments -match '(?i)(?:^|\s)(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String|Get-Item|Test-Path|Get-FileHash|Resolve-Path|Get-Command|stat|ls|dir|find|realpath|sha(?:256)?sum|file|git\s+(?:show|diff|cat-file|ls-files))\b') {
+        return $false
+    }
+    return $true
+}
+
 function Test-AuthorityConsumerCanonicalInvocation {
     param(
         [Parameter(Mandatory = $true)][string] $Text,
@@ -1148,7 +1233,9 @@ function Test-AuthorityConsumerCanonicalInvocation {
                 $command -match '(?i)^(?:[A-Za-z_][A-Za-z0-9_]*\s*=|set\s+[A-Za-z_][A-Za-z0-9_]*=)') {
                 continue
             }
-            $count += [regex]::Matches($command, $pattern).Count
+            if (Test-AuthorityConsumerCanonicalCommandInvocation -Command $command -CanonicalPattern $pattern) {
+                $count++
+            }
         }
     }
     return $count
@@ -1315,6 +1402,47 @@ function Get-AuthorityConsumerWorkflowJobs {
     return $jobs.ToArray()
 }
 
+function Assert-AuthorityConsumerSameStepReleaseSuccess {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorkflowPath,
+        [Parameter(Mandatory = $true)][string] $JobText,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath,
+        [Parameter(Mandatory = $true)][string] $JobId
+    )
+
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text $JobText)) {
+        $stepExecutableText = [string]$step.executableText
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation `
+            -Text $stepExecutableText `
+            -CanonicalRelativePath $CanonicalRelativePath
+        $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $stepExecutableText
+        if ($canonicalCount -eq 0 -or -not $releaseMatch.Success) { continue }
+
+        $canonicalMatch = [regex]::Match($stepExecutableText, $canonicalPattern)
+        if (-not $canonicalMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must execute the canonical validator before its same-step release command in job '$JobId'."
+        }
+
+        # A multiline shell block is not success-gated merely because the
+        # canonical command appears earlier. Require an && chain from the
+        # canonical invocation to the release command; semicolon/newline-only
+        # sequencing can continue after a failed validator.
+        $prefixBeforeRelease = $stepExecutableText.Substring(0, $releaseMatch.Index)
+        $lastAnd = $prefixBeforeRelease.LastIndexOf('&&')
+        if ($lastAnd -lt ($canonicalMatch.Index + $canonicalMatch.Length)) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must explicitly success-gate a same-step release after the canonical validator in job '$JobId'."
+        }
+        $afterLastAnd = $stepExecutableText.Substring($lastAnd + 2, $releaseMatch.Index - ($lastAnd + 2))
+        $canonicalToRelease = $stepExecutableText.Substring(
+            $canonicalMatch.Index + $canonicalMatch.Length,
+            $releaseMatch.Index - ($canonicalMatch.Index + $canonicalMatch.Length))
+        if (-not [string]::IsNullOrWhiteSpace($afterLastAnd) -or $canonicalToRelease -match ';|\|\|') {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must explicitly success-gate a same-step release after the canonical validator in job '$JobId'."
+        }
+    }
+}
+
 function Test-AuthorityConsumerJobNeedsCanonical {
     param(
         [Parameter(Mandatory = $true)][string] $JobText,
@@ -1440,6 +1568,11 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
 
     $canonicalJob = $canonicalJobs[0]
     foreach ($releaseJob in $releaseJobs) {
+        Assert-AuthorityConsumerSameStepReleaseSuccess `
+            -WorkflowPath $WorkflowPath `
+            -JobText ([string]$releaseJob.text) `
+            -CanonicalRelativePath $CanonicalRelativePath `
+            -JobId ([string]$releaseJob.id)
         $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
         if ($releaseJob.id -ceq $canonicalJob.id) {
             $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
