@@ -50,7 +50,7 @@ Describe 'Standard validation runner contract' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [string[]] $SkillIds = @('alpha', 'beta'),
-                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'output-flood', 'repository-missing-evidence', 'repository-zero-tests', 'repository-artifact-tamper')]
+                [ValidateSet('pass', 'static-fail', 'static-partial', 'package-fail', 'wrong-candidate', 'missing-output', 'timeout', 'snapshot-mutate', 'environment-leak', 'semantic-required', 'output-tamper', 'output-flood', 'output-near-quota', 'repository-missing-evidence', 'repository-zero-tests', 'repository-artifact-tamper')]
                 [string] $Behavior = 'pass'
             )
 
@@ -125,6 +125,9 @@ if ($fixtureBehavior -eq 'timeout' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'p
 if ($fixtureBehavior -eq 'output-flood' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
     [Console]::Out.Write(('o' * 1100000))
     [Console]::Error.Write(('e' * 1100000))
+}
+if ($fixtureBehavior -eq 'output-near-quota' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
+    $result.output = 'v' * 1045000
 }
 if ($fixtureBehavior -eq 'static-fail' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
     $result.status = 'failed'
@@ -616,6 +619,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match ([string]$contract.execution.productionLaunchBinding.bindingSnapshot) 'reads.*hashes.*parses.*launch-binding.*snapshot.*evidence registration' 'The production launch-binding contract must retain the authenticated binding snapshot hash.'
         Assert-Match ([string]$contract.execution.productionLaunchBinding.adapterSnapshot) 'reads adapter bytes once.*parses those same bytes.*fails closed' 'The production launch-binding contract must bind authentication to one parsed adapter-byte snapshot.'
         Assert-Match ([string]$contract.execution.productionLaunchBinding.receiptSnapshot) 'reads.*hashes.*parses.*resolver receipt.*snapshot' 'The production launch-binding contract must bind resolver receipt fields and provenance to one parsed receipt snapshot.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.oneTimeConsumption) 'consumptionPath.*outside.*roots.*atomically.*marker.*existing marker.*replay' 'The production launch-binding contract must require authenticated one-time consumption outside caller-controlled roots.'
+        Assert-True (@($contract.evidence.requiredBinding) -contains 'launchBinding.status=verified') 'Evidence required bindings must include verified launch-binding status.'
+        Assert-True (@($contract.evidence.requiredBinding) -contains 'launchBinding.verified=true') 'Evidence required bindings must include the verified launch-binding boolean.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.packageAdapter) 'package-adapter' 'The package adapter slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillValidator) 'skill-validator' 'The skill-validator slot must have a fixed canonical tool role.'
         Assert-Equal ([string]$contract.execution.productionToolRoles.skillTools) 'skill-tools' 'The skill-tools slot must have a fixed canonical tool role.'
@@ -626,6 +632,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
         $releaseConditions = ($contract.evidence.releaseEligibility.trueOnlyWhen -join ';')
         Assert-Match $releaseConditions 'stages\[1\.\.5\]\.status=passed' 'Release eligibility must bind the first five canonical stages.'
+        Assert-Match $releaseConditions 'launchBinding\.status=verified' 'Release eligibility must bind verified launch-binding status.'
+        Assert-Match $releaseConditions 'launchBinding\.verified=true' 'Release eligibility must bind the verified launch-binding boolean.'
         foreach ($stageId in @('conditional-semantic-scan', 'ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
             Assert-Match $releaseConditions ("stages\[[0-9]+\]\.id=$stageId-and-status=") "Release eligibility must bind the '$stageId' canonical stage."
         }
@@ -661,6 +669,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'PR_SET_CHILD_SUBREAPER|SetChildSubreaper|SubreaperRequired' 'Restricted Unix hosts must use a kernel-enforced subreaper boundary and verify its descendants.'
         Assert-Match $runnerSource 'EnvironmentVariables\.Clear\(\)' 'Child processes must not inherit the supervisor environment wholesale.'
         Assert-Match $runnerSource 'New-StandardValidationOutputReservation' 'The runner must reserve the final evidence path.'
+        Assert-Match $runnerSource 'Consume-StandardValidationSupervisorLaunchBinding' 'The runner must consume each authenticated launch binding once before production work.'
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'
         Assert-Match $runnerSource 'Assert-StandardValidationAiReviewEvidence' 'AI review evidence must use the central typed review policy.'
         Assert-Match $runnerSource 'Assert-StandardValidationToolReceipt' 'Production command provenance must use a signed resolver receipt.'
@@ -926,6 +935,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
             $candidateArchiveSha256 = 'd' * 64
             $bindingIssuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
             $bindingExpiresAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString('o')
+            $consumptionPath = Join-Path $root 'launch-consumption.json'
             $bindingFields = @{
                 adapterPath = [IO.Path]::GetFullPath($adapterPath)
                 adapterSha256 = $adapterSha256
@@ -934,6 +944,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 baseRevision = 'b' * 40
                 candidateArchiveSha256 = $candidateArchiveSha256
                 candidateRoot = [IO.Path]::GetFullPath($candidateRoot)
+                consumptionPath = [IO.Path]::GetFullPath($consumptionPath)
                 eventName = 'local'
                 expiresAt = $bindingExpiresAt
                 issuedAt = $bindingIssuedAt
@@ -962,6 +973,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 resolutionRunId = $runIdText
                 issuedAt = $bindingIssuedAt
                 expiresAt = $bindingExpiresAt
+                consumptionPath = [IO.Path]::GetFullPath($consumptionPath)
                 signature = $null
             }
             $bindingPayload = Get-StandardValidationSignedReceiptPayload -ReceiptType 'validation-launch-v1' -Fields $bindingFields
@@ -1136,6 +1148,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         }
         $adapterPath = Join-Path $root 'adapter.json'
         $bindingPath = Join-Path $root 'launch-binding.json'
+        $consumptionPath = Join-Path $root 'launch-consumption.json'
         $outputPath = Join-Path $artifactsRoot 'evidence.json'
         . $script:RunnerPath `
             -CandidateRoot $candidateRoot `
@@ -1161,6 +1174,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $script:PublicLaunchBindingRunIdText = $publicRunIdText
         $script:PublicLaunchBindingIssuedAt = $issuedAt
         $script:PublicLaunchBindingExpiresAt = $expiresAt
+        $script:PublicLaunchBindingConsumptionPath = $consumptionPath
         $script:PublicLaunchBindingAdapterSha256 = $null
         function Assert-StandardValidationSupervisorLaunchBinding {
             param([string] $AdapterSha256)
@@ -1173,6 +1187,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 resolutionRunId = $script:PublicLaunchBindingRunIdText
                 issuedAt = $script:PublicLaunchBindingIssuedAt
                 expiresAt = $script:PublicLaunchBindingExpiresAt
+                consumptionPath = $script:PublicLaunchBindingConsumptionPath
+                consumptionSha256 = ('0' * 64)
             }
         }
         function Assert-StandardValidationAuthoritySnapshot {
@@ -1201,6 +1217,28 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Equal $script:PublicLaunchBindingAdapterSha256 (Get-StandardValidationFileSha256 -Path $adapterPath -Context 'public adapter snapshot') 'The public production path must hand the authenticated binding the hash of the parsed adapter snapshot.'
         Assert-Equal $evidence.state 'BLOCKED' 'The public production path must reach the authority boundary after launch binding authentication.'
         Assert-Match ([string]$evidence.failure.message) 'public launch-binding handoff reached the authority gate' 'The public production path must not fail on an N-format launch run ID before the authority boundary.'
+        Assert-True (Test-Path -LiteralPath $consumptionPath -PathType Leaf) 'The public production path must consume the signed launch binding before the authority boundary.'
+
+        Remove-Item -LiteralPath $artifactsRoot -Recurse -Force
+        [void](New-Item -ItemType Directory -Path $artifactsRoot -Force)
+        $replayResult = Invoke-StandardValidationRun `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -CandidateArchiveSha256 ('d' * 64) `
+            -SupervisorLaunchBindingPath $bindingPath `
+            -AuthorityRevision ('c' * 40) `
+            -AuthorityArchivePath (Join-Path $root 'authority.zip') `
+            -AuthoritySnapshotEvidencePath (Join-Path $root 'authority.json') `
+            -TrustedToolRoot $trustedRoot `
+            -DevelopmentHarness:$false
+        Assert-Equal $replayResult.state 'BLOCKED' 'A deleted and recreated artifact root must not permit launch-binding replay.'
+        Assert-Match ([string]$replayResult.failure.message) 'already been consumed|replay' 'Launch-binding replay must be rejected by the external consumption marker.'
     }
 
     # Scenario: The adapter is replaced after the immutable bytes have been snapshotted but before launch handoff returns.
@@ -1215,6 +1253,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         }
         $adapterPath = Join-Path $root 'adapter.json'
         $bindingPath = Join-Path $root 'launch-binding.json'
+        $consumptionPath = Join-Path $root 'launch-consumption.json'
         $outputPath = Join-Path $artifactsRoot 'evidence.json'
         . $script:RunnerPath `
             -CandidateRoot $candidateRoot `
@@ -1241,6 +1280,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $script:SubstitutionRunIdText = $runIdText
         $script:SubstitutionIssuedAt = $issuedAt
         $script:SubstitutionExpiresAt = $expiresAt
+        $script:SubstitutionConsumptionPath = $consumptionPath
         function Assert-StandardValidationSupervisorLaunchBinding {
             param([string] $AdapterSha256)
             $script:SubstitutionAdapterSha256 = $AdapterSha256
@@ -1253,6 +1293,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 resolutionRunId = $script:SubstitutionRunIdText
                 issuedAt = $script:SubstitutionIssuedAt
                 expiresAt = $script:SubstitutionExpiresAt
+                consumptionPath = $script:SubstitutionConsumptionPath
+                consumptionSha256 = ('0' * 64)
             }
         }
         function Assert-StandardValidationAuthoritySnapshot {
@@ -1299,6 +1341,20 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True (([string]$quotaEvent.process.stdout).Length -le 1048576) 'The stdout prefix must remain within its quota on overflow.'
         Assert-True (([string]$quotaEvent.process.stderr).Length -le 1048576) 'The stderr prefix must remain within its quota on overflow.'
         Assert-Match ([string]$quotaEvent.process.outputQuotaDiagnostic) 'quota exceeded' 'The overflow diagnostic must be recorded outside the bounded stderr prefix.'
+    }
+
+    # Scenario: A child emits a valid JSON envelope whose stdout is near, but below, the capture quota.
+    # Purpose: Preserve the complete in-quota stream rather than applying an undocumented serialization margin.
+    It 'InterT12_preserves_valid_output_below_capture_quota' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'output-near-quota') -Behavior 'output-near-quota'
+        $result = Invoke-RunnerFixture -Fixture $fixture
+        Assert-Equal $result.Evidence.state 'PASS' 'A valid near-quota output envelope must remain a passing validation.'
+        $nearQuotaEvent = @(Get-ChildItem -LiteralPath (Join-Path $fixture.Artifacts 'runs') -Filter 'event-*.json' -Recurse -File |
+                ForEach-Object { Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json } |
+                Where-Object { $_.process.outputQuotaExceeded -eq $false -and ([string]$_.process.stdout).Length -gt (1048576 - 4096) } |
+                Select-Object -First 1)[0]
+        Assert-True ($null -ne $nearQuotaEvent) 'The valid near-quota event must retain the full stream above the former safety-margin threshold.'
+        Assert-True (([string]$nearQuotaEvent.process.stdout).Length -le 1048576) 'The valid near-quota stdout must remain within the capture quota.'
     }
 
     # Scenario: A harmless development adapter exposes two active Skills to the central runner.

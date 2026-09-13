@@ -854,7 +854,7 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         'artifactsRoot', 'outputPath', 'trustedToolRoot', 'sourceRepository',
         'sourceRevision', 'baseRevision', 'eventName', 'candidateArchiveSha256',
         'adapterSha256', 'authorityRevision', 'resolutionRunId', 'issuedAt',
-        'expiresAt', 'signature'
+        'expiresAt', 'consumptionPath', 'signature'
     ) -Context $Context
     if ((Get-StandardValidationRequiredProperty -Object $binding -Name 'schemaVersion' -Context $Context) -ne 1 -or
         [string](Get-StandardValidationRequiredProperty -Object $binding -Name 'evidenceType' -Context $Context) -cne 'validation-launch-binding' -or
@@ -920,6 +920,19 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         throw "BLOCKED|$Context is bound to a different adapter snapshot."
     }
 
+    $consumptionPathValue = Get-StandardValidationRequiredProperty -Object $binding -Name 'consumptionPath' -Context $Context
+    if ($consumptionPathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$consumptionPathValue) -or
+        [string]$consumptionPathValue -match '[\x00-\x1F\x7F]' -or
+        -not [System.IO.Path]::IsPathRooted([string]$consumptionPathValue)) {
+        throw "BLOCKED|$Context consumptionPath must be an absolute path without control characters."
+    }
+    $consumptionPath = Assert-StandardValidationCanonicalRootPath `
+        -Path ([string]$consumptionPathValue) `
+        -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $CandidateRoot -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $ArtifactsRoot -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $TrustedToolRoot -Context "$Context consumptionPath"
+
     $issuedAt = Assert-StandardValidationFreshTimestamp `
         -Value (Get-StandardValidationRequiredProperty -Object $binding -Name 'issuedAt' -Context $Context) `
         -Context "$Context issuedAt" `
@@ -957,6 +970,7 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         baseRevision = [string]$BaseRevision
         candidateArchiveSha256 = [string]$bindingArchiveSha256
         candidateRoot = [string](Get-StandardValidationFullPath -Path $CandidateRoot -Context "$Context candidateRoot")
+        consumptionPath = [string]$consumptionPath
         eventName = [string]$EventName
         expiresAt = $expiresAt
         issuedAt = $issuedAt
@@ -981,6 +995,74 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         resolutionRunId = $runId.ToString('N')
         issuedAt = $issuedAt
         expiresAt = $expiresAt
+        consumptionPath = $consumptionPath
+        consumptionSha256 = ('0' * 64)
+    }
+}
+
+function Consume-StandardValidationSupervisorLaunchBinding {
+    param(
+        [Parameter(Mandatory = $true)] $Binding,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if (-not [bool](Get-StandardValidationRequiredProperty -Object $Binding -Name 'verified' -Context $Context) -or
+        [string](Get-StandardValidationRequiredProperty -Object $Binding -Name 'status' -Context $Context) -cne 'verified') {
+        throw "BLOCKED|$Context requires a verified launch binding."
+    }
+    $consumptionPathValue = Get-StandardValidationRequiredProperty -Object $Binding -Name 'consumptionPath' -Context $Context
+    if ($consumptionPathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$consumptionPathValue) -or
+        [string]$consumptionPathValue -match '[\x00-\x1F\x7F]' -or
+        -not [System.IO.Path]::IsPathRooted([string]$consumptionPathValue)) {
+        throw "BLOCKED|$Context consumptionPath must be an absolute path without control characters."
+    }
+    $consumptionPath = Assert-StandardValidationCanonicalRootPath `
+        -Path ([string]$consumptionPathValue) `
+        -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $CandidateRoot -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $ArtifactsRoot -Context "$Context consumptionPath"
+    Assert-StandardValidationOutsideRoot -Path $consumptionPath -Root $TrustedToolRoot -Context "$Context consumptionPath"
+    $parent = [System.IO.Path]::GetDirectoryName($consumptionPath)
+    if ([string]::IsNullOrWhiteSpace($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "BLOCKED|$Context supervisor-owned consumption directory is unavailable."
+    }
+    [void](Assert-StandardValidationCanonicalRootPath -Path $parent -Context "$Context consumption directory")
+    $marker = [ordered]@{
+        schemaVersion = 1
+        evidenceType = 'validation-launch-consumption'
+        resolutionRunId = [string](Get-StandardValidationRequiredProperty -Object $Binding -Name 'resolutionRunId' -Context $Context)
+        launchBindingSha256 = [string](Get-StandardValidationRequiredProperty -Object $Binding -Name 'sha256' -Context $Context)
+        consumedAt = (Get-Date).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($marker | ConvertTo-Json -Depth 20 -Compress) + [Environment]::NewLine)
+    try {
+        $stream = [System.IO.File]::Open($consumptionPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+        }
+        finally { $stream.Dispose() }
+    }
+    catch [System.IO.IOException] {
+        if (Test-Path -LiteralPath $consumptionPath -PathType Leaf) {
+            throw "BLOCKED|$Context launch binding has already been consumed and cannot be replayed."
+        }
+        throw "BLOCKED|$Context supervisor-owned launch-binding consumption marker could not be created."
+    }
+    catch {
+        throw "BLOCKED|$Context supervisor-owned launch-binding consumption marker could not be created: $($_.Exception.Message)"
+    }
+    $sha256 = Get-StandardValidationFileSha256 -Path $consumptionPath -Context "$Context consumption marker"
+    Register-StandardValidationEvidenceArtifact `
+        -Path $consumptionPath `
+        -ExpectedSha256 $sha256 `
+        -Context "$Context consumption marker"
+    return [pscustomobject][ordered]@{
+        path = $consumptionPath
+        sha256 = $sha256
     }
 }
 
@@ -3935,22 +4017,20 @@ function Invoke-StandardValidationCommandAndRecord {
     # implementation. This is the final serialization boundary and prevents
     # any platform-specific result mutation from exceeding the contract quota.
     $eventStreamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
-    # Keep a small serialization margin for Windows PowerShell 5.1, whose
-    # redirected stream/JSON boundary can normalize a retained prefix after
-    # the bounded reader has already enforced the character quota. When the
-    # child has already exceeded the capture quota, retain only a conservative
-    # diagnostic prefix in the raw event; the separate diagnostic preserves
-    # the terminal reason without allowing a legacy serializer to expand the
-    # retained stream near the contract boundary.
+    # When the child has already exceeded the capture quota, retain only a
+    # conservative diagnostic prefix in the raw event; the separate diagnostic
+    # preserves the terminal reason without allowing a legacy serializer to
+    # expand the retained stream near the contract boundary. A valid in-quota
+    # stream must remain complete and must not be silently shortened here.
     $eventOutputQuotaExceeded = $false
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
         $eventOutputQuotaExceeded = [bool]$processResult.outputQuotaExceeded
     }
     $eventSerializationQuota = if ($eventOutputQuotaExceeded) {
-        [Math]::Min(65536, [Math]::Max(0, $eventStreamQuota - 4096))
+        [Math]::Min(65536, $eventStreamQuota)
     }
     else {
-        [Math]::Max(0, $eventStreamQuota - 4096)
+        $eventStreamQuota
     }
     $eventStdout = [string]$processResult.stdout
     $eventStderr = [string]$processResult.stderr
@@ -4746,10 +4826,10 @@ function New-StandardValidationCandidateEvidence {
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
         authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
         launchBinding = if ($null -eq $LaunchBinding) {
-            [ordered]@{ status = if ($DevelopmentHarness) { 'unverified-development-harness' } else { 'unverified-production' }; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null }
+            [ordered]@{ status = if ($DevelopmentHarness) { 'unverified-development-harness' } else { 'unverified-production' }; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null; consumptionPath = $null; consumptionSha256 = ('0' * 64) }
         }
         else {
-            [ordered]@{ status = [string]$LaunchBinding.status; verified = [bool]$LaunchBinding.verified; path = [string]$LaunchBinding.path; sha256 = [string]$LaunchBinding.sha256; resolutionRunId = $RunId.ToString(); issuedAt = [string]$LaunchBinding.issuedAt; expiresAt = [string]$LaunchBinding.expiresAt }
+            [ordered]@{ status = [string]$LaunchBinding.status; verified = [bool]$LaunchBinding.verified; path = [string]$LaunchBinding.path; sha256 = [string]$LaunchBinding.sha256; resolutionRunId = $RunId.ToString(); issuedAt = [string]$LaunchBinding.issuedAt; expiresAt = [string]$LaunchBinding.expiresAt; consumptionPath = [string]$LaunchBinding.consumptionPath; consumptionSha256 = [string]$LaunchBinding.consumptionSha256 }
         }
         stages = $Stages
         artifacts = [ordered]@{
@@ -4795,7 +4875,8 @@ function Assert-StandardValidationReleaseEligibility {
         [Parameter(Mandatory = $true)] $Candidate,
         [Parameter(Mandatory = $true)] $Authority,
         [Parameter(Mandatory = $true)] $Stages,
-        [Parameter(Mandatory = $true)][bool] $DevelopmentHarness
+        [Parameter(Mandatory = $true)][bool] $DevelopmentHarness,
+        [Parameter(Mandatory = $true)] $LaunchBinding
     )
 
     if ($DevelopmentHarness) {
@@ -4808,6 +4889,18 @@ function Assert-StandardValidationReleaseEligibility {
     $binding = Get-StandardValidationRequiredProperty -Object $Authority -Name 'binding' -Context 'release eligibility authority'
     if ([string]$binding.status -cne 'verified' -or $binding.verified -isnot [bool] -or -not [bool]$binding.verified) {
         throw 'BLOCKED|Release eligibility requires verified authority binding.'
+    }
+    if ([string]$LaunchBinding.status -cne 'verified' -or $LaunchBinding.verified -isnot [bool] -or -not [bool]$LaunchBinding.verified) {
+        throw 'BLOCKED|Release eligibility requires verified launch binding.'
+    }
+    $consumptionPath = Get-StandardValidationRequiredProperty -Object $LaunchBinding -Name 'consumptionPath' -Context 'release eligibility launch binding'
+    $consumptionSha256 = Get-StandardValidationRequiredProperty -Object $LaunchBinding -Name 'consumptionSha256' -Context 'release eligibility launch binding'
+    if ($consumptionPath -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$consumptionPath)) {
+        throw 'BLOCKED|Release eligibility requires a consumed launch-binding marker path.'
+    }
+    Assert-StandardValidationSha256 -Value $consumptionSha256 -Context 'release eligibility launch-binding consumption marker'
+    if ([string]$consumptionSha256 -ceq ('0' * 64)) {
+        throw 'BLOCKED|Release eligibility requires a consumed launch-binding marker.'
     }
     [void](Assert-StandardValidationCanonicalLifecycleStages -Stages $Stages -Context 'release eligibility stages')
     return $true
@@ -4978,6 +5071,14 @@ function Invoke-StandardValidationRun {
                 -TrustAnchorRoot $trustAnchorRootFull `
                 -Context 'trusted supervisor launch binding'
             $runId = [guid]::ParseExact([string]$launchBinding.resolutionRunId, 'N')
+            $consumption = Consume-StandardValidationSupervisorLaunchBinding `
+                -Binding $launchBinding `
+                -CandidateRoot $originalCandidateRoot `
+                -ArtifactsRoot $artifactRootFull `
+                -TrustedToolRoot $trustedToolRootFull `
+                -Context 'trusted supervisor launch binding'
+            $launchBinding.consumptionPath = [string]$consumption.path
+            $launchBinding.consumptionSha256 = [string]$consumption.sha256
             $adapterSha256AfterBinding = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter launch handoff revalidation'
             if ($adapterSha256AfterBinding -cne $adapterSnapshotSha256) {
                 throw 'BLOCKED|Adapter changed during the trusted supervisor launch handoff.'
@@ -5399,7 +5500,8 @@ function Invoke-StandardValidationRun {
                     -Candidate $candidateEvidence `
                     -Authority $authorityEvidence `
                     -Stages $stages `
-                    -DevelopmentHarness $DevelopmentHarness)
+                    -DevelopmentHarness $DevelopmentHarness `
+                    -LaunchBinding $launchBinding)
             $releaseEligible = $true
         }
         Assert-StandardValidationAuthorityUnchanged -Authority $authorityEvidence

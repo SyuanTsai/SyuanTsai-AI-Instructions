@@ -101,10 +101,12 @@
           },
           "launchBinding": {
             "type": "object",
-            "required": ["status", "verified"],
+            "required": ["status", "verified", "consumptionPath", "consumptionSha256"],
             "properties": {
               "status": { "const": "verified" },
-              "verified": { "const": true }
+              "verified": { "const": true },
+              "consumptionPath": { "type": "string", "minLength": 1 },
+              "consumptionSha256": { "$ref": "#/$defs/sha256" }
             }
           },
           "stages": {
@@ -210,7 +212,7 @@
     "launchBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "verified", "path", "sha256", "resolutionRunId", "issuedAt", "expiresAt"],
+      "required": ["status", "verified", "path", "sha256", "resolutionRunId", "issuedAt", "expiresAt", "consumptionPath", "consumptionSha256"],
       "properties": {
         "status": { "enum": ["verified", "unverified-development-harness", "unverified-production"] },
         "verified": { "type": "boolean" },
@@ -218,7 +220,9 @@
         "sha256": { "$ref": "#/$defs/sha256" },
         "resolutionRunId": { "type": "string", "format": "uuid" },
         "issuedAt": { "type": ["string", "null"] },
-        "expiresAt": { "type": ["string", "null"] }
+        "expiresAt": { "type": ["string", "null"] },
+        "consumptionPath": { "type": ["string", "null"] },
+        "consumptionSha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "trustAnchor": {

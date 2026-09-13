@@ -2262,6 +2262,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $standard 'trusted supervisor.*fresh validation run ID at invocation start' 'The Standard must bind resolver receipts to the current trusted-supervisor launch.'
         Assert-Match $standard 'validation-launch-binding-v1' 'The Standard must define the signed supervisor launch-binding contract.'
         Assert-Match $standard 'pass the same ID to the resolution orchestration.*before' 'The Standard must require the resolver to receive the supervisor run ID before receipt creation.'
+        Assert-Match $standard 'consumptionPath.*outside.*candidate.*artifact.*trusted-tool.*roots' 'The Standard must require an authenticated one-time launch-binding consumption path outside caller-controlled roots.'
+        Assert-Match $standard 'atomically create a supervisor-owned create-only consumption marker.*reject an existing marker' 'The Standard must reject launch-binding replay after artifact-root recreation.'
         Assert-Match $standard 'revalidate its file hash before and after every child process' 'The Standard must revalidate the launch binding around child execution.'
         Assert-Match $standard '1,048,576 characters' 'The Standard must define a fixed child-output memory quota.'
         Assert-Match $standard 'record the overflow diagnostic separately' 'The Standard must keep overflow diagnostics outside bounded stream prefixes.'
@@ -2993,6 +2995,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             resolutionRunId = $schemaRunId.ToString('N')
             issuedAt = $null
             expiresAt = $null
+            consumptionPath = $null
+            consumptionSha256 = ('0' * 64)
         }
         $schemaEvidence = New-StandardValidationCandidateEvidence `
             -RunId $schemaRunId `
@@ -3031,6 +3035,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     })
                 $consistent.launchBinding.status = 'verified'
                 $consistent.launchBinding.verified = $true
+                $consistent.launchBinding.consumptionPath = 'C:\supervisor-state\launch-consumption.json'
+                $consistent.launchBinding.consumptionSha256 = ('1' * 64)
                 for ($stageIndex = 0; $stageIndex -lt 10; $stageIndex++) {
                     $consistent.stages[$stageIndex].status = if ($stageIndex -eq 5) { 'not-applicable' } else { 'passed' }
                 }
