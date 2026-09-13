@@ -11,7 +11,7 @@
 - 未列出的新檔案，不因所在目錄自動加入本次授權範圍，須經來源審查後更新清單。
 - 檔案內若存在其他權利人的適用聲明，仍須保留；本清單不授予本維護者無權授予的權利。
 
-通用核心包含 Instructions、Catalog metadata、標準、安裝工具、測試及維護文件。Catalog 指向的 Skill 內容不在本 Repository 的檔案授權範圍內。
+通用核心包含 Instructions、Catalog metadata、中央 validation contract／runner、標準、安裝工具、測試及維護文件。Catalog 指向的 Skill 內容不在本 Repository 的檔案授權範圍內。
 
 ## 暫不授予額外授權
 

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "contract": "standard-validation-contract-v1",
+  "authority": "docs/standards/skill-repository-standard.md",
+  "runner": "scripts/Invoke-StandardValidation.ps1",
+  "cli": {
+    "candidate": "-CandidateRoot <read-only candidate directory>",
+    "adapter": "-AdapterPath <versioned declarative adapter JSON>",
+    "artifacts": "-ArtifactsRoot <checkout-external run-owned directory>",
+    "identity": ["-SourceRepository", "-SourceRevision", "-BaseRevision", "-EventName", "-CandidateArchivePath", "-CandidateAcquisitionEvidencePath", "-CandidateArchiveSha256", "-AuthorityRevision", "-AuthorityArchivePath", "-AuthoritySnapshotEvidencePath"],
+    "runId": "trusted-supervisor-generated fresh validation run id; caller-supplied -RunId is development-harness-only and rejected in production",
+    "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
+    "developmentOnly": "-DevelopmentHarness",
+    "lifecycle": "-CompleteLifecycle",
+    "result": "-OutputPath <atomic JSON evidence path>",
+    "exitCodes": { "PASS": 0, "BLOCKED": 10, "FAILED": 20, "INVALID": 30, "CANCELLED": 40 }
+  },
+  "stages": [
+    { "order": 1, "id": "controlled-acquisition", "condition": "always", "barrier": "candidate-snapshot-and-authority-identity" },
+    { "order": 2, "id": "integrity-verification", "condition": "always", "barrier": "exact-candidate-and-adapter-inventory" },
+    { "order": 3, "id": "package-validation", "condition": "always", "barrier": "adapter-then-skill-validator-and-skill-tools-for-every-active-skill" },
+    { "order": 4, "id": "skillspector-static", "condition": "always", "barrier": "complete-static-analysis" },
+    { "order": 5, "id": "repository-tests", "condition": "always", "barrier": "static-pass-only" },
+    { "order": 6, "id": "conditional-semantic-scan", "condition": "when-triggered", "barrier": "explicit-consent-and-candidate-bound-evidence" },
+    { "order": 7, "id": "ai-review", "condition": "lifecycle-evidence", "barrier": "candidate-bound-review-evidence" },
+    { "order": 8, "id": "human-approval", "condition": "lifecycle-evidence", "barrier": "independent-human-approval" },
+    { "order": 9, "id": "publish-or-install", "condition": "approved-release-or-authorized-install", "barrier": "candidate-bound-trusted-supervisor-signed-authorized-result" },
+    { "order": 10, "id": "post-install-verification", "condition": "after-install", "barrier": "candidate-bound-trusted-supervisor-signed-installed-inventory-and-integrity" }
+  ],
+  "terminalStates": [
+    { "state": "PASS", "exitCode": 0, "meaning": "Validation passed; releaseEligible is false for development harnesses and validation-only runs." },
+    { "state": "BLOCKED", "exitCode": 10, "meaning": "A required consent, approval, severity disposition, or stage barrier is not satisfied." },
+    { "state": "FAILED", "exitCode": 20, "meaning": "A trusted process, report, analyzer, test, timeout, or cleanup failed." },
+    { "state": "INVALID", "exitCode": 30, "meaning": "Candidate, adapter, schema, path, identity, or duplicate execution is invalid." },
+    { "state": "CANCELLED", "exitCode": 40, "meaning": "Cancellation was requested and the child process was stopped; this is never a pass." }
+  ],
+  "execution": {
+    "encoding": "UTF-8-no-BOM",
+    "artifactRoot": "checkout-external-run-owned",
+    "candidateInput": "read-only-snapshot",
+    "productionCommandPolicy": "direct-trusted-executable-or-resolver-attested-package-shim; candidate-independent-trusted-supervisor-signed-resolver-receipt; signed-installed-closure-and-launcher-payload-runtime-revalidated-before-and-after-every-child; generic-interpreters-and-unsigned-script-payloads-development-harness-only",
+    "productionToolRoles": {
+      "packageAdapter": "package-adapter",
+      "skillValidator": "skill-validator",
+      "skillTools": "skill-tools",
+      "staticAnalyzer": "skillspector",
+      "repositoryTests": "pester"
+    },
+    "inventoryEncoding": {
+      "line": "<path>\\t<raw-file-sha256>\\n",
+      "sort": "ordinal",
+      "entries": "all-regular-files",
+      "path": "valid-utf8-forward-slash-relative; reject-absolute-drive-unc-backslash-colon-control-empty-dot-dot; NFC-and-ASCII-case-collision-rejected",
+      "canonicalHash": "sha256-of-concatenated-lines; no-length-field"
+    },
+    "installedClosure": "all-regular-file-content-hashes-plus-in-root-unix-symlink-target-identities; target-must-be-non-reparse-regular-file-or-directory; reject-external-chained-and-special-file-symlinks",
+    "snapshotRevalidation": "before-and-after-every-child-process",
+    "toolReceiptFreshness": "resolvedAtUtc-and-attestation-issuedAt-must-match-and-be-within-15-minutes-of-the-validation-start-window",
+    "canonicalEntryPoint": "adapter.canonicalValidatorPath-inventoried-and-invoked-by-central-contract",
+    "maxExecutionsPerEventCandidate": 1,
+    "packageBeforeStatic": true,
+    "staticBeforeRepositoryTests": true,
+    "candidateCodeBeforeStatic": false,
+    "finalEvidenceWrite": "atomic-create-only",
+    "finalEvidenceReservation": "supervisor-owned-exclusive-handle-before-child-processes; fail-on-substitution",
+    "childEnvironment": "clear-inherited-environment; copy-approved-os-runtime-and-STANDARD_VALIDATION-namespace-only",
+    "semanticTrigger": "effective-trigger-is-caller-addition-OR-typed-analyzer-requirement; record-trigger-decision",
+    "timeoutOrCleanupFailure": "non-pass"
+  },
+  "evidence": {
+    "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256"],
+    "toolResult": "actual-process-exit-and-output-envelope",
+    "coverage": "discovered-active-skill-set",
+    "unknownOrMissing": "fail-closed",
+    "aiReview": "trusted-supervisor-signed-ai-review-v1; typed-passed-PASS-decision; reviewedCandidate-bound; reviewFindings-and-findingDisposition-canonical-digests-and-count-match; canonical-severity-mapping",
+    "semanticEvidence": {
+      "required": ["candidateId", "status=passed", "decision=PASS", "provider", "purpose", "scope", "consentGranted=true", "analyzerIdentity", "analyzerCompleteness=complete", "findings", "findingsSha256", "trusted-supervisor-signed-attestation"]
+    },
+    "releaseEligibility": {
+      "trueOnlyWhen": ["state=PASS", "exitCode=0", "adapter.mode=production", "candidate.acquisition.status=verified", "candidate.acquisition.verified=true", "authority.binding.status=verified", "authority.binding.verified=true", "stages[1..5].status=passed", "stages[6].id=conditional-semantic-scan-and-status=passed-or-not-applicable", "stages[7].id=ai-review-and-status=passed", "stages[8].id=human-approval-and-status=passed", "stages[9].id=publish-or-install-and-status=passed", "stages[10].id=post-install-verification-and-status=passed"]
+    },
+    "trustAnchors": ["docs/standards/trust-anchors/trusted-supervisor-public-key.xml", "docs/standards/trust-anchors/human-approval-public-key.xml"]
+  },
+  "consent": {
+    "semantic": "explicit-provider-scope-purpose-consent-plus-complete-analyzer-findings-and-trusted-attestation-required-when-triggered",
+    "aiReviewCannotReplaceHumanApproval": true,
+    "humanApproval": "candidate-bound-trusted-supervisor-signed-rsa-attestation",
+    "publishInstall": "candidate-bound-trusted-supervisor-signed-lifecycle-attestation"
+  }
+}

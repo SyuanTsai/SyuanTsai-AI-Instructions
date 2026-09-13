@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Standard validation evidence v1",
+  "description": "Candidate-bound evidence envelope emitted by the central validation runner. A report is not a pass unless its event, identity, process result, and coverage are all present.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidence",
+    "contract",
+    "runId",
+    "state",
+    "exitCode",
+    "candidate",
+    "adapter",
+    "authority",
+    "stages",
+    "releaseEligible"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "evidence": { "const": "standard-validation-evidence-v1" },
+    "contract": { "const": "standard-validation-contract-v1" },
+    "runId": { "type": "string", "format": "uuid" },
+    "state": { "enum": ["PASS", "BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
+    "exitCode": { "type": "integer", "enum": [0, 10, 20, 30, 40] },
+    "releaseEligible": { "type": "boolean" },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "authority": { "$ref": "#/$defs/authority" },
+    "stages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/stage" }
+    },
+    "failure": { "$ref": "#/$defs/failure" },
+    "artifacts": { "$ref": "#/$defs/artifacts" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "PASS" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode"], "properties": { "exitCode": { "const": 0 } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "BLOCKED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 10 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "FAILED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 20 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "INVALID" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 30 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "state": { "const": "CANCELLED" } }, "required": ["state"] },
+      "then": { "type": "object", "required": ["exitCode", "releaseEligible"], "properties": { "exitCode": { "const": 40 }, "releaseEligible": { "const": false } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "releaseEligible": { "const": true } }, "required": ["releaseEligible"] },
+      "then": {
+        "type": "object",
+        "required": ["state", "exitCode", "candidate", "adapter", "authority", "stages"],
+        "properties": {
+          "state": { "const": "PASS" },
+          "exitCode": { "const": 0 },
+          "adapter": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": { "mode": { "const": "production" } }
+          },
+          "candidate": {
+            "type": "object",
+            "required": ["acquisition"],
+            "properties": {
+              "acquisition": {
+                "type": "object",
+                "required": ["status", "verified"],
+                "properties": { "status": { "const": "verified" }, "verified": { "const": true } }
+              }
+            }
+          },
+          "authority": {
+            "type": "object",
+            "required": ["binding"],
+            "properties": {
+              "binding": {
+                "type": "object",
+                "required": ["status", "verified", "selectedFiles"],
+                "properties": {
+                  "status": { "const": "verified" },
+                  "verified": { "const": true },
+                  "selectedFiles": { "type": "array", "minItems": 11, "maxItems": 11, "items": { "$ref": "#/$defs/selectedFile" } }
+                }
+              }
+            }
+          },
+          "stages": {
+            "prefixItems": [
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 1 }, "id": { "const": "controlled-acquisition" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 2 }, "id": { "const": "integrity-verification" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 3 }, "id": { "const": "package-validation" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 4 }, "id": { "const": "skillspector-static" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 5 }, "id": { "const": "repository-tests" }, "condition": { "const": "always" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 6 }, "id": { "const": "conditional-semantic-scan" }, "condition": { "const": "when-triggered" }, "status": { "enum": ["passed", "not-applicable"] } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 7 }, "id": { "const": "ai-review" }, "condition": { "const": "lifecycle-evidence" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 8 }, "id": { "const": "human-approval" }, "condition": { "const": "lifecycle-evidence" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 9 }, "id": { "const": "publish-or-install" }, "condition": { "const": "approved-release-or-authorized-install" }, "status": { "const": "passed" } } },
+              { "type": "object", "required": ["order", "id", "condition", "status"], "properties": { "order": { "const": 10 }, "id": { "const": "post-install-verification" }, "condition": { "const": "after-install" }, "status": { "const": "passed" } } }
+            ],
+            "items": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "archiveSha256", "acquisition", "inventory", "activeSkills"],
+      "properties": {
+        "sourceRepository": { "type": "string", "format": "uri" },
+        "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "baseRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "eventName": { "type": "string", "minLength": 1 },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "acquisition": { "$ref": "#/$defs/acquisition" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "inventory": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/inventoryEntry" }
+        },
+        "activeSkills": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "inventoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "length"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safeRelativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "length": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "sha256", "mode", "canonicalValidatorPath", "skillsRoot", "activeSkills"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "mode": { "enum": ["production", "development-harness"] },
+        "canonicalValidatorPath": { "$ref": "#/$defs/safeRelativePath" },
+        "skillsRoot": { "$ref": "#/$defs/safeRelativePath" },
+        "activeSkills": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "trustAnchors", "binding"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "runnerPath": { "$ref": "#/$defs/safeRelativePath" },
+        "runnerSha256": { "$ref": "#/$defs/sha256" },
+        "contractPath": { "$ref": "#/$defs/safeRelativePath" },
+        "contractSha256": { "$ref": "#/$defs/sha256" },
+        "policyPath": { "$ref": "#/$defs/safeRelativePath" },
+        "policySha256": { "$ref": "#/$defs/sha256" },
+        "authorityGatePath": { "$ref": "#/$defs/safeRelativePath" },
+        "authorityGateSha256": { "$ref": "#/$defs/sha256" },
+        "resolverPath": { "$ref": "#/$defs/safeRelativePath" },
+        "resolverSha256": { "$ref": "#/$defs/sha256" },
+        "trustAnchors": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/trustAnchor" }
+        },
+        "binding": { "$ref": "#/$defs/authorityBinding" }
+      }
+    },
+    "trustAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "sha256"],
+      "properties": {
+        "id": { "enum": ["supervisor", "humanApproval"] },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "verified", "sourceRepository", "sourceRevision", "baseRevision", "eventName", "archivePath", "archiveUrl", "archivePrefix", "archiveSha256", "contentSha256", "evidencePath", "evidenceSha256"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "verified": { "type": "boolean" },
+        "sourceRepository": { "type": ["string", "null"] },
+        "sourceRevision": { "type": ["string", "null"] },
+        "baseRevision": { "type": ["string", "null"] },
+        "eventName": { "type": ["string", "null"] },
+        "archivePath": { "type": ["string", "null"] },
+        "archiveUrl": { "type": ["string", "null"] },
+        "archivePrefix": { "type": ["string", "null"] },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "evidencePath": { "type": ["string", "null"] },
+        "evidenceSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "authorityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "verified", "repository", "revision", "archivePath", "archiveUrl", "archivePrefix", "archiveSha256", "snapshotEvidencePath", "snapshotEvidenceSha256", "snapshotInventorySha256", "selectedFiles"],
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "verified": { "type": "boolean" },
+        "repository": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"] },
+        "archivePath": { "type": ["string", "null"] },
+        "archiveUrl": { "type": ["string", "null"] },
+        "archivePrefix": { "type": ["string", "null"] },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "snapshotEvidencePath": { "type": ["string", "null"] },
+        "snapshotEvidenceSha256": { "$ref": "#/$defs/sha256" },
+        "snapshotInventorySha256": { "$ref": "#/$defs/sha256" },
+        "selectedFiles": { "type": "array", "items": { "$ref": "#/$defs/selectedFile" } }
+      }
+    },
+    "selectedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safeRelativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order", "id", "condition", "status", "startedAt", "endedAt", "events"],
+      "properties": {
+        "order": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "id": { "type": "string", "minLength": 1 },
+        "condition": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["passed", "failed", "blocked", "cancelled", "not-run", "not-applicable"] },
+        "startedAt": { "type": ["string", "null"] },
+        "endedAt": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "triggerDecision": { "anyOf": [{ "$ref": "#/$defs/triggerDecision" }, { "type": "null" }] },
+        "semanticEvidence": { "anyOf": [{ "$ref": "#/$defs/semanticEvidence" }, { "type": "null" }] },
+        "aiReviewEvidence": { "anyOf": [{ "$ref": "#/$defs/aiReviewEvidence" }, { "type": "null" }] },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+      }
+    },
+    "triggerDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callerRequested", "analyzerRequired", "analyzerSources", "effectiveTriggered"],
+      "properties": {
+        "callerRequested": { "type": "boolean" },
+        "analyzerRequired": { "type": "boolean" },
+        "analyzerSources": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "effectiveTriggered": { "type": "boolean" }
+      }
+    },
+    "semanticEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "evidenceType", "candidateId", "status", "decision", "provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256", "attestation"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "evidenceType": { "const": "semantic" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "provider": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 },
+        "consentGranted": { "const": true },
+        "analyzerIdentity": { "type": "string", "minLength": 1 },
+        "analyzerCompleteness": { "const": "complete" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/semanticFinding" } },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "attestation": { "$ref": "#/$defs/semanticAttestation" }
+      }
+    },
+    "semanticFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low", "informational"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "semanticAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attestationType", "candidateId", "evidenceType", "status", "decision", "provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findingsSha256", "issuedAt", "signature"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "attestationType": { "const": "trusted-supervisor-semantic-v1" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "evidenceType": { "const": "semantic" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "provider": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 },
+        "consentGranted": { "const": true },
+        "analyzerIdentity": { "type": "string", "minLength": 1 },
+        "analyzerCompleteness": { "const": "complete" },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "aiReviewEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "evidenceType", "candidateId", "status", "decision", "reviewedCandidate", "reviewFindings", "findingDisposition", "reviewFindingsSha256", "findingDispositionSha256", "attestation"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "evidenceType": { "const": "ai-review" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "reviewedCandidate": { "$ref": "#/$defs/sha256" },
+        "reviewFindings": { "type": "array", "items": { "$ref": "#/$defs/aiReviewFinding" } },
+        "findingDisposition": { "type": "array", "items": { "type": "object" } },
+        "reviewFindingsSha256": { "$ref": "#/$defs/sha256" },
+        "findingDispositionSha256": { "$ref": "#/$defs/sha256" },
+        "attestation": { "$ref": "#/$defs/aiReviewAttestation" }
+      }
+    },
+    "aiReviewFinding": {
+      "type": "object",
+      "required": ["severity"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low", "informational"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "aiReviewAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attestationType", "candidateId", "evidenceType", "status", "decision", "reviewedCandidate", "reviewFindingsSha256", "findingDispositionSha256", "issuedAt", "signature"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "attestationType": { "const": "trusted-supervisor-ai-review-v1" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "evidenceType": { "const": "ai-review" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "reviewedCandidate": { "$ref": "#/$defs/sha256" },
+        "reviewFindingsSha256": { "$ref": "#/$defs/sha256" },
+        "findingDispositionSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "stageId", "toolId", "candidateId", "commandSha256", "exitCode", "status", "outputSha256", "outputPath", "cleanedUp"],
+      "properties": {
+        "eventId": { "type": "string", "format": "uuid" },
+        "stageId": { "type": "string", "minLength": 1 },
+        "toolId": { "type": "string", "minLength": 1 },
+        "skillId": { "type": ["string", "null"] },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "commandSha256": { "$ref": "#/$defs/sha256" },
+        "exitCode": { "type": "integer" },
+        "status": { "enum": ["passed", "failed", "startup-failed", "timeout", "cancelled", "cleanup-failed", "invalid-output"] },
+        "outputSha256": { "$ref": "#/$defs/sha256" },
+        "outputPath": { "type": "string", "minLength": 1 },
+        "cleanedUp": { "type": "boolean" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "message"],
+      "properties": {
+        "state": { "enum": ["BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "lockPath"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "lockPath": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

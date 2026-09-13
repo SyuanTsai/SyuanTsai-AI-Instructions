@@ -7,6 +7,8 @@ param(
 
     [string] $ExpectedGoRuntimeVersion = $env:STANDARD_GO_RUNTIME_VERSION,
 
+    [string] $GoCommandPath = $env:STANDARD_GO_COMMAND_PATH,
+
     [switch] $DefineFunctionsOnly
 )
 
@@ -22,7 +24,12 @@ function Get-AuthorityProperty {
         $DefaultValue = $null
     )
 
-    if ($null -eq $Object -or $null -eq $Object.PSObject) { return ,$DefaultValue }
+    if ($null -eq $Object) { return ,$DefaultValue }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if (-not $Object.Contains($Name)) { return ,$DefaultValue }
+        return ,$Object[$Name]
+    }
+    if ($null -eq $Object.PSObject) { return ,$DefaultValue }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return ,$DefaultValue }
     return ,$property.Value
@@ -35,7 +42,16 @@ function Get-AuthorityRequiredProperty {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    if ($null -eq $Object -or $null -eq $Object.PSObject) {
+    if ($null -eq $Object) {
+        throw "$Context is missing required property '$Name'."
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if (-not $Object.Contains($Name) -or $null -eq $Object[$Name]) {
+            throw "$Context is missing required property '$Name'."
+        }
+        return ,$Object[$Name]
+    }
+    if ($null -eq $Object.PSObject) {
         throw "$Context is missing required property '$Name'."
     }
     $property = $Object.PSObject.Properties[$Name]
@@ -43,6 +59,96 @@ function Get-AuthorityRequiredProperty {
         throw "$Context is missing required property '$Name'."
     }
     return ,$property.Value
+}
+
+function Assert-AuthorityRunReceiptContext {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $ExpectedRunId,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($ExpectedRunId -notmatch '^[0-9a-f]{32}$') {
+        throw "$Context expected run id is malformed."
+    }
+    $actualRunId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'resolutionRunId' -Context $Context
+    if ($actualRunId -isnot [string] -or [string]$actualRunId -cne $ExpectedRunId) {
+        throw "$Context is bound to a different authority run."
+    }
+
+    $resolvedAtUtc = Get-AuthorityRequiredProperty -Object $Receipt -Name 'resolvedAtUtc' -Context $Context
+    if ($resolvedAtUtc -is [DateTime]) {
+        if ($resolvedAtUtc.Kind -ne [DateTimeKind]::Utc) {
+            throw "$Context resolvedAtUtc is not UTC."
+        }
+    }
+    elseif ($resolvedAtUtc -is [DateTimeOffset]) {
+        if ($resolvedAtUtc.Offset -ne [TimeSpan]::Zero) {
+            throw "$Context resolvedAtUtc is not UTC."
+        }
+    }
+    elseif ($resolvedAtUtc -is [string] -and
+        [string]$resolvedAtUtc -match '^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$') {
+        # The JSON reader on Windows PowerShell materializes ISO timestamps as
+        # DateTime; retain a string fallback for callers that preserve JSON text.
+    }
+    else {
+        throw "$Context resolvedAtUtc is missing or not a UTC timestamp."
+    }
+    $parsedResolvedAtUtc = [DateTimeOffset]::MinValue
+    $resolvedAtText = if ($resolvedAtUtc -is [DateTime]) {
+        $resolvedAtUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    elseif ($resolvedAtUtc -is [DateTimeOffset]) {
+        $resolvedAtUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    else { [string]$resolvedAtUtc }
+    if (-not [DateTimeOffset]::TryParse(
+            $resolvedAtText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None,
+            [ref]$parsedResolvedAtUtc) -or
+        $parsedResolvedAtUtc.Offset -ne [TimeSpan]::Zero -or
+        $parsedResolvedAtUtc -gt [DateTimeOffset]::UtcNow.AddMinutes(5) -or
+        $parsedResolvedAtUtc -lt [DateTimeOffset]::UtcNow.AddMinutes(-15)) {
+        throw "$Context resolvedAtUtc is outside the fresh validation receipt window."
+    }
+
+    $receiptExecutionContext = Get-AuthorityRequiredProperty -Object $Receipt -Name 'executionContext' -Context $Context
+    $executionOs = Get-AuthorityRequiredProperty -Object $receiptExecutionContext -Name 'os' -Context "$Context executionContext"
+    $executionArchitecture = Get-AuthorityRequiredProperty -Object $receiptExecutionContext -Name 'architecture' -Context "$Context executionContext"
+    if ($executionOs -isnot [string] -or [string]$executionOs -notmatch '^(windows|unix|osx|other)$' -or
+        $executionArchitecture -isnot [string] -or [string]$executionArchitecture -notmatch '^[a-z0-9_-]+$') {
+        throw "$Context executionContext is malformed."
+    }
+    return $true
+}
+
+function New-AuthorityRunOwnedToolRoot {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunId
+    )
+
+    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'Authority tool root requires a lowercase 32-character run id.'
+    }
+
+    # The authority evidence tree can be nested below a long checkout or CI
+    # artifact path. Keep formal tool installations in a compact, run-owned
+    # sibling under the OS temp root so Python venv/ensurepip deep paths do not
+    # fail on Windows hosts without Long Paths enabled.
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $tempRoot ("svt-tools-{0}" -f $RunId)))
+    if ($toolRoot.Length -ge 128) {
+        throw "Authority tool root is too long for the Windows Python venv path budget: $toolRoot"
+    }
+    [void](New-Item -ItemType Directory -Path $toolRoot -ErrorAction Stop)
+    $toolRootItem = Get-Item -Force -LiteralPath $toolRoot -ErrorAction Stop
+    if (-not $toolRootItem.PSIsContainer -or
+        ($toolRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Authority tool root must be a new non-reparse directory: $toolRoot"
+    }
+    return $toolRoot
 }
 
 function Assert-AuthorityUpstreamAdapterReport {
@@ -183,6 +289,11 @@ function Assert-AuthorityFileIdentity {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "$Context path is not an installed file: $path"
     }
+    $item = Get-Item -Force -LiteralPath $path -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Context path must be a regular non-reparse file: $path"
+    }
     Assert-AuthoritySha256 -Value $Sha256Value -Context "$Context receipt hash"
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
     if ($actual -cne [string]$Sha256Value) {
@@ -214,6 +325,102 @@ function Assert-AuthorityPathWithinRoot {
     }
 }
 
+function Get-AuthorityAsciiCaseFold {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $code = [int][char]$character
+        if ($code -ge 65 -and $code -le 90) { $code += 32 }
+        [void]$builder.Append([char]$code)
+    }
+    return $builder.ToString()
+}
+
+function Get-AuthoritySymlinkTarget {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    foreach ($propertyName in @('LinkTarget', 'Target')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    throw "Installed authority tool directory cannot read the symbolic-link target: $($Item.FullName)"
+}
+
+function Get-AuthoritySymlinkIdentitySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Target,
+        [Parameter(Mandatory = $true)][string] $ResolvedRelativeTarget
+    )
+
+    $canonical = "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash((New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-AuthoritySafeUnixSymlinkEntry {
+    param(
+        [Parameter(Mandatory = $true)] $Item,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+
+    # PowerShell on Unix can report a symlink as a non-container item. The
+    # resolved target, not PSIsContainer on the link itself, is the
+    # authoritative regular-file-or-directory check below.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+        throw "Installed authority tool directory contains an unsupported reparse point: $($Item.FullName)"
+    }
+    $target = Get-AuthoritySymlinkTarget -Item $Item
+    if ($target -match '[\x00-\x1F\x7F]' -or $target.Contains('\') -or $target.Contains(':')) {
+        throw "Installed authority tool directory contains an unsafe symbolic-link target: '$target'."
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $parentFull = [System.IO.Path]::GetFullPath((Split-Path -Parent $Item.FullName))
+    try {
+        $targetFull = if ([System.IO.Path]::IsPathRooted($target)) {
+            [System.IO.Path]::GetFullPath($target)
+        }
+        else {
+            [System.IO.Path]::GetFullPath((Join-Path $parentFull $target))
+        }
+    }
+    catch {
+        throw "Installed authority tool directory contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
+    }
+    Assert-AuthorityPathWithinRoot -Path $targetFull -Root $rootFull -Context 'Installed authority tool symbolic-link target'
+    $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
+    if ((-not $targetItem.PSIsContainer -and $targetItem -isnot [System.IO.FileInfo]) -or
+        ($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed authority tool symbolic-link target must be a non-reparse regular file or directory: '$target'."
+    }
+    $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $relativeTarget = $relativeTarget.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+    if ([string]::IsNullOrEmpty($relativeTarget) -or $relativeTarget.StartsWith('/') -or $relativeTarget.Contains('\') -or
+        $relativeTarget.Contains(':') -or $relativeTarget -match '[\x00-\x1F\x7F]' -or
+        @($relativeTarget.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+        throw "Installed authority tool symbolic-link target has an unsafe relative path: '$relativeTarget'."
+    }
+    $relative = $Item.FullName.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $relative = $relative.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+    if ([string]::IsNullOrEmpty($relative) -or $relative.StartsWith('/') -or $relative.Contains('\') -or
+        $relative.Contains(':') -or $relative -match '[\x00-\x1F\x7F]' -or
+        @($relative.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+        throw "Installed authority tool directory contains an unsafe relative path: '$relative'."
+    }
+    return [pscustomobject][ordered]@{
+        path = $relative
+        sha256 = Get-AuthoritySymlinkIdentitySha256 -Target $target -ResolvedRelativeTarget $relativeTarget
+    }
+}
+
 function Get-AuthorityDirectoryClosureSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -221,19 +428,79 @@ function Get-AuthorityDirectoryClosureSha256 {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    $entries = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)) {
-        $relative = $file.FullName.Substring($root.Length).TrimStart(
+    $rootItem = Get-Item -Force -LiteralPath $root -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed authority tool directory must be a regular non-reparse directory: $root"
+    }
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # Unix tool/package layouts may expose in-root file or directory
+            # symlinks; bind their target identities instead of dropping them.
+            $symlinkEntry = Get-AuthoritySafeUnixSymlinkEntry -Item $item -Root $root
+            $relativeSymlinkPath = [string]$symlinkEntry.path
+            if (-not $ordinalPaths.Add($relativeSymlinkPath)) {
+                throw "Installed authority tool directory contains a duplicate path: '$relativeSymlinkPath'."
+            }
+            $nfcSymlinkPath = $relativeSymlinkPath.Normalize([System.Text.NormalizationForm]::FormC)
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne $relativeSymlinkPath) {
+                throw "Installed authority tool directory contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$relativeSymlinkPath'."
+            }
+            $nfcPaths[$nfcSymlinkPath] = $relativeSymlinkPath
+            $asciiCaseSymlinkPath = Get-AuthorityAsciiCaseFold -Value $nfcSymlinkPath
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne $relativeSymlinkPath) {
+                throw "Installed authority tool directory contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$relativeSymlinkPath'."
+            }
+            $asciiCasePaths[$asciiCaseSymlinkPath] = $relativeSymlinkPath
+            [void]$entries.Add($symlinkEntry)
+            continue
+        }
+        if ($item.PSIsContainer) { continue }
+        if ($item -isnot [System.IO.FileInfo]) {
+            throw "Installed authority tool directory contains a non-regular filesystem entry: $($item.FullName)"
+        }
+        $relative = $item.FullName.Substring($root.Length).TrimStart(
             [System.IO.Path]::DirectorySeparatorChar,
             [System.IO.Path]::AltDirectorySeparatorChar
-        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
-        $entries += [pscustomobject]@{
-            path = $relative
-            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+        if ([string]::IsNullOrEmpty($relative) -or $relative.StartsWith('/') -or $relative.Contains('\') -or
+            $relative.Contains(':') -or $relative -match '[\x00-\x1F\x7F]' -or
+            @($relative.Split('/') | Where-Object { [string]::IsNullOrEmpty($_) -or $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+            throw "Installed authority tool directory contains an unsafe relative path: '$relative'."
         }
+        if (-not $ordinalPaths.Add($relative)) {
+            throw "Installed authority tool directory contains a duplicate path: '$relative'."
+        }
+        $nfc = $relative.Normalize([System.Text.NormalizationForm]::FormC)
+        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+            throw "Installed authority tool directory contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
+        }
+        $nfcPaths[$nfc] = $relative
+        $asciiCase = Get-AuthorityAsciiCaseFold -Value $nfc
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+            throw "Installed authority tool directory contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
+        }
+        $asciiCasePaths[$asciiCase] = $relative
+        [void]$entries.Add([pscustomobject][ordered]@{
+                path = $relative
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+            })
     }
     if ($entries.Count -eq 0) { throw "Installed authority tool directory is empty: $root" }
-    $canonical = ($entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in $entries) {
+        $insertAt = 0
+        while ($insertAt -lt $ordered.Count -and
+            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
+            $insertAt++
+        }
+        [void]$ordered.Insert($insertAt, $entry)
+    }
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         return ([System.BitConverter]::ToString(
@@ -243,6 +510,41 @@ function Get-AuthorityDirectoryClosureSha256 {
     finally {
         $sha.Dispose()
     }
+}
+
+function Assert-AuthorityLauncherFileIdentity {
+    param(
+        [Parameter(Mandatory = $true)] $PathValue,
+        [Parameter(Mandatory = $true)] $Sha256Value,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][bool] $AllowUnixSymlink,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($PathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$PathValue)) {
+        throw "$Context path is missing."
+    }
+    $path = [System.IO.Path]::GetFullPath([string]$PathValue)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "$Context path is not an installed file: $path"
+    }
+    $item = Get-Item -Force -LiteralPath $path -ErrorAction Stop
+    if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo]) {
+        throw "$Context path must be a file: $path"
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (-not $AllowUnixSymlink -or [Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+            throw "$Context path must be a regular non-reparse file: $path"
+        }
+        Assert-AuthorityPathWithinRoot -Path $path -Root $InstallRoot -Context "$Context symlink"
+        [void](Get-AuthoritySafeUnixSymlinkEntry -Item $item -Root $InstallRoot)
+    }
+    Assert-AuthoritySha256 -Value $Sha256Value -Context "$Context receipt hash"
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+    if ($actual -cne [string]$Sha256Value) {
+        throw "$Context changed after resolution. Expected '$Sha256Value', got '$actual'."
+    }
+    return $path
 }
 
 function Read-AuthorityJson {
@@ -285,8 +587,8 @@ function Assert-AuthorityValidationSecurityGate {
         [ordered]@{ order=6; id='conditional-semantic-scan'; name='Conditional Semantic Scan'; condition='when-triggered'; evidence=@('triggerDecision', 'semanticReport', 'semanticCompleteness') },
         [ordered]@{ order=7; id='ai-review'; name='AI Review'; condition='always'; evidence=@('reviewFindings', 'findingDisposition', 'reviewedCandidate') },
         [ordered]@{ order=8; id='human-approval'; name='Human Approval'; condition='always'; evidence=@('approver', 'approvalTimestamp', 'approvedCandidate') },
-        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install'; evidence=@('releaseIdentity', 'publishOrInstallResult', 'authorization') },
-        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install'; evidence=@('installedInventory', 'installedManifest', 'postInstallIntegrity') }
+        [ordered]@{ order=9; id='publish-or-install'; name='Publish / Install'; condition='approved-release-or-authorized-install'; evidence=@('releaseIdentity', 'publishOrInstallResult', 'authorization', 'attestation') },
+        [ordered]@{ order=10; id='post-install-verification'; name='Post-install Verification'; condition='after-install'; evidence=@('installedInventory', 'installedManifest', 'postInstallIntegrity', 'attestation') }
     )
     $stages = Get-AuthorityRequiredProperty -Object $Policy -Name 'stages' -Context 'Validation/security gate policy'
     if ($stages -isnot [array] -or @($stages).Count -ne $expectedStages.Count) {
@@ -361,7 +663,1105 @@ function Assert-AuthorityValidationSecurityGate {
         Assert-AuthorityExactString -Value $semantics[$index] -Expected $expectedSemantics[$index] -Context "Validation/security gate pass/block semantics $($index + 1)"
     }
 
+    $childEnvironment = Get-AuthorityRequiredProperty -Object $security -Name 'childProcessEnvironment' -Context 'Validation/security gate child environment policy'
+    Assert-AuthorityJsonPropertySet -Object $childEnvironment -Expected @('inheritance', 'allowed', 'forbidden') -Context 'Validation/security gate child environment policy'
+    Assert-AuthorityExactString -Value $childEnvironment.inheritance -Expected 'clear-before-launch' -Context 'Validation/security gate child environment inheritance'
+    Assert-AuthorityExactStringSequence -Value $childEnvironment.allowed -Expected @('approved-os-runtime', 'STANDARD_VALIDATION_*') -Context 'Validation/security gate child environment allowlist'
+    Assert-AuthorityExactString -Value $childEnvironment.forbidden -Expected 'arbitrary-inherited-secrets' -Context 'Validation/security gate child environment forbidden surface'
+
+    $outputReservation = Get-AuthorityRequiredProperty -Object $security -Name 'outputReservation' -Context 'Validation/security gate output reservation policy'
+    Assert-AuthorityJsonPropertySet -Object $outputReservation -Expected @('requiredBeforeChildProcess', 'ownership', 'substitutionAction') -Context 'Validation/security gate output reservation policy'
+    Assert-AuthorityExactBoolean -Value $outputReservation.requiredBeforeChildProcess -Expected $true -Context 'Validation/security gate output reservation requirement'
+    Assert-AuthorityExactString -Value $outputReservation.ownership -Expected 'supervisor-exclusive-handle' -Context 'Validation/security gate output reservation ownership'
+    Assert-AuthorityExactString -Value $outputReservation.substitutionAction -Expected 'BLOCK' -Context 'Validation/security gate output reservation substitution action'
+
+    $semanticTrigger = Get-AuthorityRequiredProperty -Object $security -Name 'semanticTrigger' -Context 'Validation/security gate semantic trigger policy'
+    Assert-AuthorityJsonPropertySet -Object $semanticTrigger -Expected @('analyzerProperty', 'effectiveDecision', 'recorded') -Context 'Validation/security gate semantic trigger policy'
+    Assert-AuthorityExactString -Value $semanticTrigger.analyzerProperty -Expected 'semanticRequired' -Context 'Validation/security gate analyzer semantic trigger property'
+    Assert-AuthorityExactString -Value $semanticTrigger.effectiveDecision -Expected 'callerRequested-OR-analyzerRequired' -Context 'Validation/security gate effective semantic trigger'
+    Assert-AuthorityExactBoolean -Value $semanticTrigger.recorded -Expected $true -Context 'Validation/security gate semantic trigger recording'
+
+    $semanticEvidence = Get-AuthorityRequiredProperty -Object $security -Name 'semanticEvidence' -Context 'Validation/security gate semantic evidence policy'
+    Assert-AuthorityJsonPropertySet -Object $semanticEvidence -Expected @('authentication', 'requiredFields', 'success') -Context 'Validation/security gate semantic evidence policy'
+    Assert-AuthorityExactString -Value $semanticEvidence.authentication -Expected 'trusted-supervisor-signed-semantic-v1' -Context 'Validation/security gate semantic evidence authentication'
+    Assert-AuthorityExactStringSequence -Value $semanticEvidence.requiredFields -Expected @(
+        'provider', 'purpose', 'scope', 'consentGranted', 'analyzerIdentity', 'analyzerCompleteness', 'findings', 'findingsSha256'
+    ) -Context 'Validation/security gate semantic evidence required fields'
+    Assert-AuthorityExactStringSequence -Value $semanticEvidence.success -Expected @(
+        'status=passed', 'decision=PASS', 'consentGranted=true', 'analyzerCompleteness=complete', 'findings=array', 'findingsSha256=verified'
+    ) -Context 'Validation/security gate semantic evidence success conditions'
+
+    $aiReview = Get-AuthorityRequiredProperty -Object $security -Name 'aiReview' -Context 'Validation/security gate AI review policy'
+    Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy', 'authentication', 'digestFields', 'attestation') -Context 'Validation/security gate AI review policy'
+    Assert-AuthorityExactString -Value $aiReview.status -Expected 'passed' -Context 'Validation/security gate AI review status'
+    Assert-AuthorityExactString -Value $aiReview.decision -Expected 'PASS' -Context 'Validation/security gate AI review decision'
+    Assert-AuthorityExactString -Value $aiReview.candidateBinding -Expected 'reviewedCandidate' -Context 'Validation/security gate AI review candidate binding'
+    Assert-AuthorityExactStringSequence -Value $aiReview.arrayFields -Expected @('reviewFindings', 'findingDisposition') -Context 'Validation/security gate AI review arrays'
+    Assert-AuthorityExactBoolean -Value $aiReview.equalCounts -Expected $true -Context 'Validation/security gate AI review count binding'
+    Assert-AuthorityExactString -Value $aiReview.severityPolicy -Expected 'central' -Context 'Validation/security gate AI review severity policy'
+    Assert-AuthorityExactString -Value $aiReview.authentication -Expected 'trusted-supervisor-signed-ai-review-v1' -Context 'Validation/security gate AI review authentication'
+    Assert-AuthorityExactStringSequence -Value $aiReview.digestFields -Expected @('reviewFindingsSha256', 'findingDispositionSha256') -Context 'Validation/security gate AI review digests'
+    Assert-AuthorityExactString -Value $aiReview.attestation -Expected 'trusted-supervisor-ai-review-v1' -Context 'Validation/security gate AI review attestation'
+
+    $trustAnchors = Get-AuthorityRequiredProperty -Object $security -Name 'trustAnchors' -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @('root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes') -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityExactString -Value $trustAnchors.root -Expected 'docs/standards/trust-anchors' -Context 'Validation/security gate trust-anchor root'
+    Assert-AuthorityExactString -Value $trustAnchors.supervisorPublicKey -Expected 'trusted-supervisor-public-key.xml' -Context 'Validation/security gate supervisor trust anchor'
+    Assert-AuthorityExactString -Value $trustAnchors.humanApprovalPublicKey -Expected 'human-approval-public-key.xml' -Context 'Validation/security gate human-approval trust anchor'
+    Assert-AuthorityExactBoolean -Value $trustAnchors.pinnedHashes -Expected $true -Context 'Validation/security gate pinned trust-anchor hashes'
+
+    Assert-AuthorityEntryPointPolicy -Contract (Get-AuthorityRequiredProperty `
+        -Object $Policy `
+        -Name 'entryPointContract' `
+        -Context 'Validation/security gate policy')
+
     return ,$Policy
+}
+
+function Assert-AuthorityExactBoolean {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][bool] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [bool] -or [bool]$Value -ne $Expected) {
+        throw "$Context must be '$Expected'."
+    }
+}
+
+function Assert-AuthorityJsonPropertySet {
+    param(
+        [Parameter(Mandatory = $true)] $Object,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($null -eq $Object -or $Object -is [array] -or $Object -is [string]) {
+        throw "$Context must be a JSON object."
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        $actual = @($Object.Keys | ForEach-Object { [string]$_ })
+    }
+    elseif ($null -eq $Object.PSObject) {
+        throw "$Context must be a JSON object."
+    }
+    else {
+        $actual = @($Object.PSObject.Properties | ForEach-Object { [string]$_.Name })
+    }
+    $missing = @($Expected | Where-Object { $actual -cnotcontains $_ })
+    $unexpected = @($actual | Where-Object { $Expected -cnotcontains $_ })
+    if ($missing.Count -gt 0 -or $unexpected.Count -gt 0 -or $actual.Count -ne $Expected.Count) {
+        throw "$Context has an invalid property set. Missing='$($missing -join ',')' Unexpected='$($unexpected -join ',')'."
+    }
+}
+
+function Assert-AuthorityExactStringSequence {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Value -isnot [array] -or @($Value).Count -ne $Expected.Count) {
+        throw "$Context must contain the exact ordered sequence."
+    }
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        if ($Value[$index] -isnot [string] -or [string]$Value[$index] -cne $Expected[$index]) {
+            throw "$Context must contain the exact ordered sequence."
+        }
+    }
+}
+
+function Assert-AuthorityEntryPointPolicy {
+    param([Parameter(Mandatory = $true)] $Contract)
+
+    Assert-AuthorityJsonPropertySet -Object $Contract -Expected @(
+        'canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts',
+        'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles'
+    ) -Context 'Validation/security gate entry-point contract'
+
+    $canonicalExecution = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'canonicalExecution' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $canonicalExecution -Expected @(
+        'maxPerEventCandidate', 'route', 'sameCandidateBinding', 'samePassBlockSemantics'
+    ) -Context 'Entry-point canonical execution policy'
+    Assert-AuthorityNonNegativeInteger `
+        -Value (Get-AuthorityRequiredProperty -Object $canonicalExecution -Name 'maxPerEventCandidate' -Context 'Entry-point canonical execution policy') `
+        -Context 'Entry-point canonical execution maxPerEventCandidate'
+    if ([int64]$canonicalExecution.maxPerEventCandidate -ne 1) {
+        throw 'Entry-point contract must allow at most one canonical execution per event/candidate.'
+    }
+    Assert-AuthorityExactString `
+        -Value $canonicalExecution.route `
+        -Expected 'canonical-validator' `
+        -Context 'Entry-point canonical execution route'
+    Assert-AuthorityExactBoolean `
+        -Value $canonicalExecution.sameCandidateBinding `
+        -Expected $true `
+        -Context 'Entry-point canonical execution candidate binding'
+    Assert-AuthorityExactBoolean `
+        -Value $canonicalExecution.samePassBlockSemantics `
+        -Expected $true `
+        -Context 'Entry-point canonical execution pass/block semantics'
+
+    $surfaces = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'releaseAffectingSurfaces' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $surfaces -Expected @(
+        'workflowGlob', 'hookRoots', 'publicCommandFiles', 'mustRouteTo', 'alternateGateAction',
+        'requiresFailurePropagation', 'forbiddenFailureSuppression'
+    ) -Context 'Entry-point release-affecting surface policy'
+    Assert-AuthorityExactString -Value $surfaces.workflowGlob -Expected '.github/workflows/*.{yml,yaml}' -Context 'Entry-point workflow inventory'
+    Assert-AuthorityExactStringSequence -Value $surfaces.hookRoots -Expected @('.git/hooks', '.githooks') -Context 'Entry-point hook inventory'
+    Assert-AuthorityExactStringSequence -Value $surfaces.publicCommandFiles -Expected @(
+        'README.md', 'RELEASING.md', 'RELEASE.md', 'docs/RELEASE.md', 'docs/RELEASING.md'
+    ) -Context 'Entry-point public command inventory'
+    Assert-AuthorityExactString -Value $surfaces.mustRouteTo -Expected 'canonical-validator' -Context 'Entry-point release routing'
+    Assert-AuthorityExactString -Value $surfaces.alternateGateAction -Expected 'BLOCK' -Context 'Entry-point alternate gate action'
+    Assert-AuthorityExactBoolean -Value $surfaces.requiresFailurePropagation -Expected $true -Context 'Entry-point failure propagation'
+    Assert-AuthorityExactStringSequence -Value $surfaces.forbiddenFailureSuppression -Expected @(
+        '|| true', '|| :', 'continue-on-error: true', 'if: always()'
+    ) -Context 'Entry-point failure suppression inventory'
+
+    $componentScripts = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'componentScripts' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $componentScripts -Expected @('mayExist', 'mayBeTopLevelReleaseGate') -Context 'Entry-point component script policy'
+    Assert-AuthorityExactBoolean -Value $componentScripts.mayExist -Expected $true -Context 'Entry-point component script availability'
+    Assert-AuthorityExactBoolean -Value $componentScripts.mayBeTopLevelReleaseGate -Expected $false -Context 'Entry-point component script release authority'
+
+    $compatibility = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'compatibilityLane' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $compatibility -Expected @(
+        'allowed', 'requiresCanonicalDependency', 'requiresRestrictedPurpose',
+        'mayMirrorCanonicalResult', 'mayRunIndependentPassBlockPolicy', 'mayBeCanonicalReleaseGate'
+    ) -Context 'Entry-point compatibility lane policy'
+    Assert-AuthorityExactBoolean -Value $compatibility.allowed -Expected $true -Context 'Entry-point compatibility lane availability'
+    Assert-AuthorityExactBoolean -Value $compatibility.requiresCanonicalDependency -Expected $true -Context 'Entry-point compatibility canonical dependency'
+    Assert-AuthorityExactBoolean -Value $compatibility.requiresRestrictedPurpose -Expected $true -Context 'Entry-point compatibility restricted purpose'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayMirrorCanonicalResult -Expected $true -Context 'Entry-point compatibility result mirroring'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayRunIndependentPassBlockPolicy -Expected $false -Context 'Entry-point compatibility independent policy'
+    Assert-AuthorityExactBoolean -Value $compatibility.mayBeCanonicalReleaseGate -Expected $false -Context 'Entry-point compatibility release authority'
+
+    $triggerAdapters = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'triggerAdapters' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $triggerAdapters -Expected @(
+        'allowedEvents', 'mustShareCanonicalValidator', 'mustShareCandidateBinding', 'duplicateEventCandidateExecution',
+        'candidateKey', 'overlappingFilterAction'
+    ) -Context 'Entry-point trigger adapter policy'
+    Assert-AuthorityExactStringSequence -Value $triggerAdapters.allowedEvents -Expected @('pull_request', 'push', 'workflow_dispatch') -Context 'Entry-point trigger adapter events'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCanonicalValidator -Expected $true -Context 'Entry-point trigger adapter validator binding'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.mustShareCandidateBinding -Expected $true -Context 'Entry-point trigger adapter candidate binding'
+    Assert-AuthorityExactBoolean -Value $triggerAdapters.duplicateEventCandidateExecution -Expected $false -Context 'Entry-point duplicate event execution'
+    Assert-AuthorityExactString -Value $triggerAdapters.candidateKey -Expected 'event-only' -Context 'Entry-point trigger adapter candidate key'
+    Assert-AuthorityExactString -Value $triggerAdapters.overlappingFilterAction -Expected 'BLOCK' -Context 'Entry-point overlapping trigger filter action'
+
+    $roles = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'authorityWorkflowRoles' `
+        -Context 'Validation/security gate entry-point contract'
+    if ($roles -isnot [array] -or @($roles).Count -ne 4) {
+        throw 'Entry-point authority workflow role inventory must contain exactly four roles.'
+    }
+    $expectedRoles = @(
+        @{ path = '.github/workflows/standards-conformance.yml'; role = 'canonical-authority-regression' },
+        @{ path = '.github/workflows/pr8-powershell-validation.yml'; role = 'compatibility-and-linux-composition-bridge' },
+        @{ path = '.github/workflows/syp86-production-lock.yml'; role = 'production-lock-contract' },
+        @{ path = '.github/workflows/syp101-production-smoke.yml'; role = 'production-smoke-contract' }
+    )
+    for ($index = 0; $index -lt $expectedRoles.Count; $index++) {
+        $role = $roles[$index]
+        Assert-AuthorityJsonPropertySet -Object $role -Expected @('path', 'role', 'consumerAlternateGate') -Context "Entry-point authority workflow role $($index + 1)"
+        Assert-AuthorityExactString -Value $role.path -Expected $expectedRoles[$index].path -Context "Entry-point authority workflow role $($index + 1) path"
+        Assert-AuthorityExactString -Value $role.role -Expected $expectedRoles[$index].role -Context "Entry-point authority workflow role $($index + 1) name"
+        Assert-AuthorityExactBoolean -Value $role.consumerAlternateGate -Expected $false -Context "Entry-point authority workflow role $($index + 1) consumer alternate gate"
+    }
+}
+
+function Remove-AuthorityConsumerShellComments {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Line)
+
+    if ($Line -match '^\s*(?:#|REM(?:\s|$)|::)') { return '' }
+    $singleQuote = [char]39
+    $doubleQuote = [char]34
+    $hash = [char]35
+    $inSingleQuote = $false
+    $inDoubleQuote = $false
+    for ($index = 0; $index -lt $Line.Length; $index++) {
+        $character = $Line[$index]
+        if ($character -eq $singleQuote -and -not $inDoubleQuote) {
+            $inSingleQuote = -not $inSingleQuote
+            continue
+        }
+        if ($character -eq $doubleQuote -and -not $inSingleQuote) {
+            $inDoubleQuote = -not $inDoubleQuote
+            continue
+        }
+        if ($character -eq $hash -and -not $inSingleQuote -and -not $inDoubleQuote -and
+            ($index -eq 0 -or [char]::IsWhiteSpace($Line[$index - 1]))) {
+            return $Line.Substring(0, $index)
+        }
+    }
+    return $Line
+}
+
+function Test-AuthorityConsumerWorkflowStepRunnable {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines,
+        [Parameter(Mandatory = $true)][int] $StepStartIndex,
+        [Parameter(Mandatory = $true)][int] $StepEndIndex,
+        [Parameter(Mandatory = $true)][int] $StepIndent
+    )
+
+    $conditions = New-Object 'System.Collections.Generic.List[string]'
+    $stepLine = [string]$Lines[$StepStartIndex]
+    $inlineIf = [regex]::Match($stepLine, '^\s*-\s*(?:"if"|''if''|if)\s*:\s*(?<value>.*)$')
+    if ($inlineIf.Success) { [void]$conditions.Add([string]$inlineIf.Groups['value'].Value) }
+    for ($index = $StepStartIndex + 1; $index -le $StepEndIndex; $index++) {
+        $line = [string]$Lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+        if ($indent -ne ($StepIndent + 2)) { continue }
+        $ifMatch = [regex]::Match($line, '^[ \t]*(?:"if"|''if''|if)\s*:\s*(?<value>.*)$')
+        if ($ifMatch.Success) { [void]$conditions.Add([string]$ifMatch.Groups['value'].Value) }
+    }
+    if ($conditions.Count -eq 0) { return $true }
+    if ($conditions.Count -ne 1) { return $false }
+
+    $condition = (Remove-AuthorityConsumerShellComments -Line $conditions[0]).Trim()
+    if ([string]::IsNullOrWhiteSpace($condition) -or $condition -match '^[|>][+-]?\s*$') { return $false }
+    if ($condition -match '^\$\{\{(?<expression>.*)\}\}$') {
+        $condition = $Matches.expression.Trim()
+    }
+    # Filter only conditions that are provably disabled. Runtime-dependent
+    # expressions remain in the executable inventory: a conditional release
+    # surface must not disappear merely because its event/ref is evaluated by
+    # GitHub Actions at run time. An unknown condition is conservatively
+    # treated as potentially runnable; a canonical step explicitly disabled
+    # with false (or another constant-false scalar) is not counted.
+    if ($condition -match '^(?i:false|0|null|''|"")$') { return $false }
+    return $true
+}
+
+function Get-AuthorityConsumerExecutableText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $fragments = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -notmatch '^\s*(?:-\s+)?(?:"run"|''run''|run|"uses"|''uses''|uses)\s*:\s*(?<value>.*)$') { continue }
+        $keyIndent = ([regex]::Match($line, '^\s*')).Value.Length
+        $valueRaw = [string]$Matches.value
+        $stepStartIndex = -1
+        $stepIndent = -1
+        for ($backward = $index; $backward -ge 0; $backward--) {
+            $candidateLine = [string]$lines[$backward]
+            if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+            $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+            if ($candidateMatch.Success -and $candidateMatch.Groups['indent'].Value.Length -le $keyIndent) {
+                $stepStartIndex = $backward
+                $stepIndent = $candidateMatch.Groups['indent'].Value.Length
+                break
+            }
+            $candidateIndent = ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length
+            if ($candidateIndent -lt $keyIndent) { break }
+        }
+        $stepEndIndex = $lines.Count - 1
+        if ($stepStartIndex -ge 0) {
+            for ($forward = $stepStartIndex + 1; $forward -lt $lines.Count; $forward++) {
+                $candidateLine = [string]$lines[$forward]
+                if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+                $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+                if (($candidateMatch.Success -and $candidateMatch.Groups['indent'].Value.Length -eq $stepIndent) -or
+                    (-not $candidateMatch.Success -and ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length -lt $stepIndent)) {
+                    $stepEndIndex = $forward - 1
+                    break
+                }
+            }
+            if (-not (Test-AuthorityConsumerWorkflowStepRunnable `
+                        -Lines $lines `
+                        -StepStartIndex $stepStartIndex `
+                        -StepEndIndex $stepEndIndex `
+                        -StepIndent $stepIndent)) {
+                if ((Remove-AuthorityConsumerShellComments -Line $valueRaw).Trim() -match '^[|>][+-]?\s*$') {
+                    $index = $stepEndIndex
+                }
+                continue
+            }
+        }
+        $value = (Remove-AuthorityConsumerShellComments -Line $valueRaw).Trim()
+        if ($value -match '^[|>][+-]?\s*$') {
+            $blockLines = New-Object 'System.Collections.Generic.List[string]'
+            $nestedIndex = $index + 1
+            while ($nestedIndex -lt $lines.Count) {
+                $nestedLine = [string]$lines[$nestedIndex]
+                if ($nestedLine -match '^\s*$') {
+                    [void]$blockLines.Add('')
+                    $nestedIndex++
+                    continue
+                }
+                $nestedIndent = ([regex]::Match($nestedLine, '^\s*')).Value.Length
+                if ($nestedIndent -le $keyIndent) { break }
+                [void]$blockLines.Add((Remove-AuthorityConsumerShellComments -Line $nestedLine))
+                $nestedIndex++
+            }
+            [void]$fragments.Add([string]::Join("`n", $blockLines.ToArray()))
+            $index = $nestedIndex - 1
+            continue
+        }
+        [void]$fragments.Add($value)
+    }
+    return [string]::Join("`n", $fragments.ToArray())
+}
+
+function Get-AuthorityConsumerWorkflowExecutableSteps {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $steps = New-Object 'System.Collections.Generic.List[object]'
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $stepMatch = [regex]::Match([string]$lines[$index], '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+        if (-not $stepMatch.Success) { continue }
+        $stepIndent = $stepMatch.Groups['indent'].Value.Length
+        $stepEndIndex = $lines.Count - 1
+        for ($forward = $index + 1; $forward -lt $lines.Count; $forward++) {
+            $candidateLine = [string]$lines[$forward]
+            if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+            $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+            $candidateIndent = ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length
+            if (($candidateMatch.Success -and $candidateIndent -eq $stepIndent) -or
+                (-not $candidateMatch.Success -and $candidateIndent -lt $stepIndent)) {
+                $stepEndIndex = $forward - 1
+                break
+            }
+        }
+
+        $hasExecutableField = $false
+        for ($fieldIndex = $index; $fieldIndex -le $stepEndIndex; $fieldIndex++) {
+            $fieldLine = [string]$lines[$fieldIndex]
+            if ($fieldLine -match '^\s*(?:-\s+)?(?:"run"|''run''|run|"uses"|''uses''|uses)\s*:') {
+                $hasExecutableField = $true
+                break
+            }
+        }
+        if (-not $hasExecutableField) {
+            $index = $stepEndIndex
+            continue
+        }
+
+        $stepLines = New-Object 'System.Collections.Generic.List[string]'
+        for ($stepLineIndex = $index; $stepLineIndex -le $stepEndIndex; $stepLineIndex++) {
+            [void]$stepLines.Add([string]$lines[$stepLineIndex])
+        }
+        $stepText = [string]::Join("`n", $stepLines.ToArray())
+        $executableText = Get-AuthorityConsumerExecutableText -Text $stepText
+        if (-not [string]::IsNullOrWhiteSpace($executableText)) {
+            [void]$steps.Add([pscustomobject][ordered]@{
+                    text = $stepText
+                    executableText = $executableText
+                })
+        }
+        $index = $stepEndIndex
+    }
+    return $steps.ToArray()
+}
+
+function Get-AuthorityConsumerScriptText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $cleanLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $lines) {
+        [void]$cleanLines.Add((Remove-AuthorityConsumerShellComments -Line ([string]$line)))
+    }
+    return [string]::Join("`n", $cleanLines.ToArray())
+}
+
+function Get-AuthorityConsumerWorkflowCandidateKey {
+    param(
+        [Parameter(Mandatory = $true)][string] $Event,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines
+    )
+
+    # Trigger path/branch filters are not a proof of disjoint candidates: one
+    # change can match two normalized filter expressions. Use the event as the
+    # conservative candidate key so overlapping adapters fail closed instead
+    # of being treated as separate canonical executions.
+    return $Event
+}
+
+function Get-AuthorityConsumerWorkflowEvents {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $candidates = New-Object 'System.Collections.Generic.List[object]'
+    $onFound = $false
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -notmatch '^\s*(?:"on"|''on''|on)\s*:\s*(?<value>.*)$') { continue }
+        $onFound = $true
+        $inlineValue = (Remove-AuthorityConsumerShellComments -Line ([string]$Matches.value)).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($inlineValue) -and $inlineValue -notmatch '^\{?\s*\}?$') {
+            $recognized = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            foreach ($match in [regex]::Matches($inlineValue, '(?<![A-Za-z0-9_-])(pull_request|push|workflow_dispatch)(?![A-Za-z0-9_-])')) {
+                $event = [string]$match.Groups[1].Value
+                if ($recognized.Add($event)) {
+                    [void]$candidates.Add([pscustomobject]@{
+                            Event = $event
+                            CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $event -Lines @($inlineValue)
+                        })
+                }
+            }
+            if ($candidates.Count -eq 0) {
+                [void]$candidates.Add([pscustomobject]@{ Event = '__unsupported__'; CandidateKey = '__unsupported__' })
+            }
+            break
+        }
+
+        $onIndent = ([regex]::Match($line, '^\s*')).Value.Length
+        $eventIndent = $null
+        $currentEvent = $null
+        $currentLines = New-Object 'System.Collections.Generic.List[string]'
+        for ($nestedIndex = $index + 1; $nestedIndex -lt $lines.Count; $nestedIndex++) {
+            $nestedLine = [string]$lines[$nestedIndex]
+            if ($nestedLine -match '^\s*(?:#.*)?$') {
+                if ($null -ne $currentEvent) { [void]$currentLines.Add($nestedLine) }
+                continue
+            }
+            $nestedIndent = ([regex]::Match($nestedLine, '^\s*')).Value.Length
+            if ($nestedIndent -le $onIndent) { break }
+            if ($nestedLine -match '^(?<indent>\s*)(?<event>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?<value>.*)$') {
+                if ($null -eq $eventIndent) { $eventIndent = $nestedIndent }
+                if ($nestedIndent -eq $eventIndent) {
+                    if ($null -ne $currentEvent) {
+                        [void]$candidates.Add([pscustomobject]@{
+                                Event = $currentEvent
+                                CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $currentEvent -Lines $currentLines.ToArray()
+                            })
+                    }
+                    $currentEvent = [string]$Matches.event
+                    $currentLines = New-Object 'System.Collections.Generic.List[string]'
+                    [void]$currentLines.Add([string]$Matches.value)
+                    continue
+                }
+            }
+            if ($null -ne $currentEvent) { [void]$currentLines.Add($nestedLine) }
+        }
+        if ($null -ne $currentEvent) {
+            [void]$candidates.Add([pscustomobject]@{
+                    Event = $currentEvent
+                    CandidateKey = Get-AuthorityConsumerWorkflowCandidateKey -Event $currentEvent -Lines $currentLines.ToArray()
+                })
+        }
+        break
+    }
+
+    if (-not $onFound -or $candidates.Count -eq 0) {
+        return ,([pscustomobject]@{ Event = '__unsupported__'; CandidateKey = '__unsupported__' })
+    }
+    return $candidates.ToArray()
+}
+
+function Get-AuthorityConsumerCanonicalTokenPattern {
+    param([Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+
+    $pathPattern = [regex]::Escape($CanonicalRelativePath.Replace('\', '/')).Replace('/', '[/\\]')
+    return '(?<![A-Za-z0-9_.-])(?:\.[/\\])?' + $pathPattern + '(?![A-Za-z0-9_.-])'
+}
+
+function Test-AuthorityConsumerCanonicalCommandInvocation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Command,
+        [Parameter(Mandatory = $true)][string] $CanonicalPattern
+    )
+
+    $command = (Remove-AuthorityConsumerShellComments -Line $Command).Trim()
+    if ([string]::IsNullOrWhiteSpace($command)) { return $false }
+
+    # A path mentioned by an inspection or output command is evidence about the
+    # validator, not execution of it. Keep this list conservative so a release
+    # workflow cannot satisfy the canonical binding by merely reading a file.
+    $inspectionCommandPattern = '(?i)^(?:&\s*)?(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String|Get-Item|Test-Path|Get-FileHash|Resolve-Path|Get-Command|stat|ls|dir|find|realpath|sha(?:256)?sum|file|git\s+(?:show|diff|cat-file|ls-files))\b'
+    if ($command -match $inspectionCommandPattern) { return $false }
+
+    $directPattern = '^(?:&\s*|call\s+|exec\s+|command\s+)?' + $CanonicalPattern + '(?=\s|$)'
+    if ([regex]::IsMatch($command, $directPattern)) { return $true }
+
+    # Common interpreters may invoke the canonical script through -File or an
+    # equivalent positional argument. Do not accept an inspection command that
+    # happens to be embedded in `pwsh -Command "Get-Item <canonical path>"`.
+    $launcherPattern = '^(?i)(?:pwsh|powershell(?:\.exe)?|python(?:3(?:\.exe)?)?|node(?:\.exe)?|bash|sh|cmd(?:\.exe)?|dotnet)\b'
+    if ($command -notmatch $launcherPattern) { return $false }
+    $pathMatch = [regex]::Match($command, $CanonicalPattern)
+    if (-not $pathMatch.Success) { return $false }
+    $launcherArguments = $command.Substring(0, $pathMatch.Index)
+    if ($launcherArguments -match '(?i)(?:^|\s)(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String|Get-Item|Test-Path|Get-FileHash|Resolve-Path|Get-Command|stat|ls|dir|find|realpath|sha(?:256)?sum|file|git\s+(?:show|diff|cat-file|ls-files))\b') {
+        return $false
+    }
+    return $true
+}
+
+function Test-AuthorityConsumerCanonicalInvocation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $pattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $count = 0
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    foreach ($line in $normalized.Split("`n")) {
+        $commandSegments = [regex]::Split((Remove-AuthorityConsumerShellComments -Line ([string]$line)), '(?:;|&&|\|\|)')
+        foreach ($segment in $commandSegments) {
+            $command = ([string]$segment).Trim()
+            if ([string]::IsNullOrWhiteSpace($command) -or
+                $command -match '(?i)^(?:echo|printf|Write-Output|Write-Host|Set-Content|Add-Content|cat|type|grep|Select-String)\b' -or
+                $command -match '(?i)^(?:[A-Za-z_][A-Za-z0-9_]*\s*=|set\s+[A-Za-z_][A-Za-z0-9_]*=)') {
+                continue
+            }
+            if (Test-AuthorityConsumerCanonicalCommandInvocation -Command $command -CanonicalPattern $pattern) {
+                $count++
+            }
+        }
+    }
+    return $count
+}
+
+function Test-AuthorityConsumerNonCanonicalValidationCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $scriptPattern = '(?i)(?<![A-Za-z0-9_.-])(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]+\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)(?![A-Za-z0-9_.-])'
+    $localValidationPathPattern = '(?i)(?<![A-Za-z0-9_.-])(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]*(?:test|validate|check|lint|scan|gate)[A-Za-z0-9_.-]*(?![A-Za-z0-9_.-])'
+    foreach ($pattern in @($scriptPattern, $localValidationPathPattern)) {
+        foreach ($match in [regex]::Matches($Text, $pattern)) {
+            if ($match.Value -notmatch $canonicalPattern) { return $true }
+        }
+    }
+    $toolPattern = '(?im)(?<![A-Za-z0-9_.-])(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan)(?:[-:][A-Za-z0-9_.-]+)?)|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)(?![A-Za-z0-9_.-])'
+    return [regex]::IsMatch($Text, $toolPattern)
+}
+
+function Test-AuthorityConsumerCompatibilityMarker {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    return ($Text -match '(?im)\bneeds\s*:\s*[^\r\n]*canonical' -and
+        $Text -match '(?i)\b(?:compatibility|legacy|windows\s+powershell\s*5\.1|pester\s*3)\b')
+}
+
+function Test-AuthorityConsumerCompatibilityLane {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $ExecutableText,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    if (-not (Test-AuthorityConsumerCompatibilityMarker -Text $Text)) { return $false }
+    if ($ExecutableText -match '(?im)actions/checkout@|\b(?:Install-Module|pip\s+install|npm\s+(?:install|ci)|go\s+install)\b') { return $false }
+    if (Test-AuthorityConsumerNonCanonicalValidationCommand -Text $ExecutableText -CanonicalRelativePath $CanonicalRelativePath) { return $false }
+    if ($Text -match '(?im)^\s*if\s*:\s*failure\(\)|\|\s*failure\b' -or
+        $ExecutableText -match '(?im)^\s*(?:exit\s+[1-9]|exit\s+/b\s+[1-9]|throw\b|return\s+[1-9]|false\b)') { return $false }
+    return $true
+}
+
+function Get-AuthorityConsumerOpaqueReleaseHelperMatch {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    # A local helper can hide the actual publish command and its failure behavior. Until a
+    # trusted helper manifest/inspection contract exists, classify these dispatches as unsafe.
+    $opaqueHelperPattern = '(?im)(?<![A-Za-z0-9_.-])(?:(?:\.[/\\])|(?:[A-Za-z0-9_.-]+[/\\])+)(?:ship|release|publish|deploy)(?:\.(?:ps1|psm1|py|js|sh|cmd|bat|exe))?(?![A-Za-z0-9_.-])'
+    return [regex]::Match($Text, $opaqueHelperPattern)
+}
+
+function Test-AuthorityConsumerOpaqueReleaseHelper {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    return (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text).Success
+}
+
+function Get-AuthorityConsumerReleaseAffectingMatch {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    # Action delegates are executable release surfaces too. Their behavior is
+    # opaque to this repository, so they must still be structurally bound to
+    # the canonical validator before the release job can run.
+    # docker/build-push-action can publish when its push input is true. The
+    # executable extractor intentionally keeps action uses values but not
+    # arbitrary with: fields, so classify every invocation conservatively.
+    # `docker buildx build --push` is the equivalent CLI publish surface.
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|--mirror\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|docker\s+buildx\s+build\b[^\r\n]*\s--push(?:=(?!false(?:\b|$))[^\s;&|]*)?(?=\s|$)|docker/build-push-action@[A-Za-z0-9_./-]+|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
+    # A non-option argument after git push may be a remote, a direct refspec,
+    # or a configured shorthand whose branch-vs-tag meaning cannot be proven
+    # from workflow text. Classify it as release-affecting and fail closed;
+    # this includes `git push origin v1.2.3`.
+    $gitPushAmbiguousRefspecPattern = '(?im)(?<![A-Za-z0-9_.-])git\s+push\b(?:(?:\s+--?[A-Za-z0-9][A-Za-z0-9-]*(?:=\S+)?|\s+--))*\s+(?!-)[^\s;&|]+'
+    # gh api becomes a mutating request when fields/input are supplied, or
+    # when an explicit mutating method is selected. Treat every such API call
+    # as release-affecting so an authenticated mutation cannot hide from the
+    # canonical release gate, including repos/{owner}/{repo}/releases calls.
+    $githubApiMutationPattern = '(?im)(?<![A-Za-z0-9_.-])gh\s+api\b[^\r\n]*(?:\s-[fF](?:=|\s)|\s--(?:field|raw-field|input)(?:=|\s)|\s(?:-X|--method)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)'
+
+    $candidateMatches = @(
+        [regex]::Match($Text, $releasePattern)
+        [regex]::Match($Text, $gitPushAmbiguousRefspecPattern)
+        [regex]::Match($Text, $githubApiMutationPattern)
+        (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text)
+    ) | Where-Object { $_.Success } | Sort-Object -Property Index
+    if (@($candidateMatches).Count -gt 0) {
+        return @($candidateMatches)[0]
+    }
+    return [regex]::Match('', '(?!)')
+}
+
+function Test-AuthorityConsumerReleaseAffectingCommand {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    return (Get-AuthorityConsumerReleaseAffectingMatch -Text $Text).Success
+}
+
+function Test-AuthorityConsumerFailureSuppression {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $suppressionPatterns = @(
+        '(?i)\|\|\s*(?:true|:|echo|printf|write-output|write-host|exit\s+0)\b',
+        '(?im)^\s*continue-on-error\s*:\s*(?!false\b)\S+',
+        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?(?:always|failure|cancelled)\s*\(\)',
+        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?!\s*cancelled\s*\(\)'
+    )
+    foreach ($pattern in $suppressionPatterns) {
+        if ([regex]::IsMatch($Text, $pattern)) { return $true }
+    }
+    return $false
+}
+
+function Get-AuthorityConsumerWorkflowJobs {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $jobsLineIndex = -1
+    $jobsIndent = -1
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^(?<indent>\s*)jobs\s*:\s*(?:#.*)?$') {
+            $jobsLineIndex = $index
+            $jobsIndent = $Matches.indent.Length
+            break
+        }
+    }
+    if ($jobsLineIndex -lt 0) { return @() }
+
+    $jobs = New-Object 'System.Collections.Generic.List[object]'
+    $current = $null
+    for ($index = $jobsLineIndex + 1; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^\s*')).Value.Length
+        if ($indent -le $jobsIndent) { break }
+        if ($line -match '^(?<jobIndent>\s{1,})(?<jobId>[A-Za-z0-9_.-]+)\s*:\s*(?:#.*)?$' -and
+            $Matches.jobIndent.Length -eq ($jobsIndent + 2)) {
+            if ($null -ne $current) {
+                $current.endIndex = $index - 1
+                [void]$jobs.Add($current)
+            }
+            $current = [pscustomobject][ordered]@{
+                id = [string]$Matches.jobId
+                startIndex = $index
+                endIndex = $null
+                text = $null
+            }
+        }
+    }
+    if ($null -ne $current) {
+        $current.endIndex = $lines.Count - 1
+        [void]$jobs.Add($current)
+    }
+    foreach ($job in $jobs.ToArray()) {
+        $jobLines = New-Object 'System.Collections.Generic.List[string]'
+        for ($index = [int]$job.startIndex; $index -le [int]$job.endIndex; $index++) {
+            [void]$jobLines.Add([string]$lines[$index])
+        }
+        $job.text = [string]::Join("`n", $jobLines.ToArray())
+    }
+    return $jobs.ToArray()
+}
+
+function Assert-AuthorityConsumerSameStepReleaseSuccess {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorkflowPath,
+        [Parameter(Mandatory = $true)][string] $JobText,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath,
+        [Parameter(Mandatory = $true)][string] $JobId
+    )
+
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text $JobText)) {
+        $stepExecutableText = [string]$step.executableText
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation `
+            -Text $stepExecutableText `
+            -CanonicalRelativePath $CanonicalRelativePath
+        $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $stepExecutableText
+        if ($canonicalCount -eq 0 -or -not $releaseMatch.Success) { continue }
+
+        $canonicalMatch = [regex]::Match($stepExecutableText, $canonicalPattern)
+        if (-not $canonicalMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must execute the canonical validator before its same-step release command in job '$JobId'."
+        }
+
+        # A multiline shell block is not success-gated merely because the
+        # canonical command appears earlier. Require an && chain from the
+        # canonical invocation to the release command; semicolon/newline-only
+        # sequencing can continue after a failed validator.
+        $prefixBeforeRelease = $stepExecutableText.Substring(0, $releaseMatch.Index)
+        $lastAnd = $prefixBeforeRelease.LastIndexOf('&&')
+        if ($lastAnd -lt ($canonicalMatch.Index + $canonicalMatch.Length)) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must explicitly success-gate a same-step release after the canonical validator in job '$JobId'."
+        }
+        $afterLastAnd = $stepExecutableText.Substring($lastAnd + 2, $releaseMatch.Index - ($lastAnd + 2))
+        $canonicalToRelease = $stepExecutableText.Substring(
+            $canonicalMatch.Index + $canonicalMatch.Length,
+            $releaseMatch.Index - ($canonicalMatch.Index + $canonicalMatch.Length))
+        if (-not [string]::IsNullOrWhiteSpace($afterLastAnd) -or $canonicalToRelease -match ';|\|\|') {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' must explicitly success-gate a same-step release after the canonical validator in job '$JobId'."
+        }
+    }
+}
+
+function Test-AuthorityConsumerJobNeedsCanonical {
+    param(
+        [Parameter(Mandatory = $true)][string] $JobText,
+        [Parameter(Mandatory = $true)][string] $CanonicalJobId
+    )
+
+    $normalized = $JobText.Replace("`r`n", "`n").Replace("`r", "`n")
+    $lines = $normalized.Split("`n")
+    $jobIndent = $null
+    $needsLineIndex = -1
+    $needsIndent = -1
+    $needsCount = 0
+    $needsValueRaw = $null
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        if ($null -eq $jobIndent) {
+            $jobIndent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+            continue
+        }
+        $needsMatch = [regex]::Match($line, '^(?<indent>[ \t]*)needs\s*:\s*(?<value>.*)$')
+        if (-not $needsMatch.Success -or $needsMatch.Groups['indent'].Value.Length -ne ([int]$jobIndent + 2)) { continue }
+        $needsCount++
+        if ($needsCount -eq 1) {
+            $needsLineIndex = $index
+            $needsIndent = $needsMatch.Groups['indent'].Value.Length
+            $needsValueRaw = $needsMatch.Groups['value'].Value
+        }
+    }
+    if ($needsCount -ne 1) { return $false }
+
+    $canonicalValues = @($CanonicalJobId, "'$CanonicalJobId'", ('"' + $CanonicalJobId + '"'))
+    $needsValue = (Remove-AuthorityConsumerShellComments -Line ([string]$needsValueRaw)).Trim()
+    $canonicalDependencyFound = $false
+    if (-not [string]::IsNullOrWhiteSpace($needsValue)) {
+        if ($needsValue.StartsWith('[', [StringComparison]::Ordinal) -and $needsValue.EndsWith(']', [StringComparison]::Ordinal)) {
+            foreach ($item in @($needsValue.Substring(1, $needsValue.Length - 2) -split ',')) {
+                if ($canonicalValues -ccontains ([string]$item).Trim()) { $canonicalDependencyFound = $true; break }
+            }
+        }
+        else {
+            $canonicalDependencyFound = $canonicalValues -ccontains $needsValue
+        }
+    }
+    else {
+        for ($index = $needsLineIndex + 1; $index -lt $lines.Count; $index++) {
+            $line = [string]$lines[$index]
+            if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+            $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+            if ($indent -le $needsIndent) { break }
+            if ($indent -ne ($needsIndent + 2)) { return $false }
+            $itemMatch = [regex]::Match($line, '^[ \t]*-\s*(?<value>.*)$')
+            if (-not $itemMatch.Success) { return $false }
+            $item = (Remove-AuthorityConsumerShellComments -Line $itemMatch.Groups['value'].Value).Trim()
+            if ($canonicalValues -ccontains $item) { $canonicalDependencyFound = $true; break }
+        }
+    }
+    if (-not $canonicalDependencyFound) { return $false }
+
+    # A release job may add a job-level condition, but it must still be
+    # provably gated on canonical success. Conditions that only mention a
+    # dependency are not enough: a failure/cancelled result must never be an
+    # acceptable prerequisite for a release-affecting command.
+    $jobIndent = $null
+    $ifValue = $null
+    $ifCount = 0
+    foreach ($line in $lines) {
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+        if ($null -eq $jobIndent) { $jobIndent = $indent; continue }
+        $ifMatch = [regex]::Match($line, '^(?<indent>[ \t]*)if\s*:\s*(?<value>.*)$')
+        if (-not $ifMatch.Success -or $ifMatch.Groups['indent'].Value.Length -ne ([int]$jobIndent + 2)) { continue }
+        $ifCount++
+        if ($ifCount -ne 1) { return $false }
+        $ifValue = (Remove-AuthorityConsumerShellComments -Line $ifMatch.Groups['value'].Value).Trim()
+    }
+    if ($ifCount -eq 0) { return $true }
+    if ([string]::IsNullOrWhiteSpace($ifValue) -or $ifValue -in @('|', '>', '|-', '>-', '|+', '>+')) { return $false }
+    if ($ifValue -match '(?i)\b(?:always|failure|cancelled)\s*\(' -or $ifValue -match '\|\|') { return $false }
+
+    $escapedCanonicalJobId = [regex]::Escape($CanonicalJobId)
+    $canonicalSuccessPattern = '(?i)(?:needs\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result\s*==\s*[\x27\"]success[\x27\"]|[\x27\"]success[\x27\"]\s*==\s*needs\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result)'
+    $successMatch = [regex]::Match($ifValue, $canonicalSuccessPattern)
+    if (-not $successMatch.Success) { return $false }
+    $remainingCondition = $ifValue.Remove($successMatch.Index, $successMatch.Length)
+    if ($remainingCondition -match '(?i)\bneeds\s*\.\s*' + $escapedCanonicalJobId + '\s*\.\s*result\b') { return $false }
+    return $true
+}
+
+function Assert-AuthorityConsumerReleaseFailurePropagation {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorkflowPath,
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $executableText = Get-AuthorityConsumerExecutableText -Text $Text
+    if (Test-AuthorityConsumerOpaqueReleaseHelper -Text $executableText) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' invokes an opaque local release helper; inspect the helper or fail closed."
+    }
+    if (-not (Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText)) { return }
+    if (Test-AuthorityConsumerFailureSuppression -Text $Text) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation."
+    }
+
+    $jobs = @(Get-AuthorityConsumerWorkflowJobs -Text $Text)
+    if ($jobs.Count -eq 0) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' has no structurally inspectable jobs for canonical failure propagation."
+    }
+    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $canonicalJobs = @()
+    $releaseJobs = @()
+    foreach ($job in $jobs) {
+        $jobExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$job.text)
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $jobExecutableText -CanonicalRelativePath $CanonicalRelativePath
+        $release = Test-AuthorityConsumerReleaseAffectingCommand -Text $jobExecutableText
+        if ($canonicalCount -gt 0) { $canonicalJobs += $job }
+        if ($release) { $releaseJobs += $job }
+    }
+    if ($canonicalJobs.Count -ne 1 -or $releaseJobs.Count -eq 0) {
+        throw "BLOCK: release-affecting workflow '$WorkflowPath' must structurally bind its release job to exactly one canonical job."
+    }
+
+    $canonicalJob = $canonicalJobs[0]
+    foreach ($releaseJob in $releaseJobs) {
+        Assert-AuthorityConsumerSameStepReleaseSuccess `
+            -WorkflowPath $WorkflowPath `
+            -JobText ([string]$releaseJob.text) `
+            -CanonicalRelativePath $CanonicalRelativePath `
+            -JobId ([string]$releaseJob.id)
+        $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
+        if ($releaseJob.id -ceq $canonicalJob.id) {
+            $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
+            $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $releaseExecutableText
+            if (-not $canonicalMatch.Success -or -not $releaseMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
+                throw "BLOCK: release-affecting workflow '$WorkflowPath' must run the canonical validator before its release command in job '$($releaseJob.id)'."
+            }
+        }
+        elseif (-not (Test-AuthorityConsumerJobNeedsCanonical -JobText ([string]$releaseJob.text) -CanonicalJobId ([string]$canonicalJob.id))) {
+            throw "BLOCK: release-affecting workflow '$WorkflowPath' release job '$($releaseJob.id)' must depend on canonical job '$($canonicalJob.id)'."
+        }
+    }
+}
+
+function Assert-AuthorityConsumerEntryPointContract {
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $CanonicalValidatorPath,
+        [Parameter(Mandatory = $true)] $Policy
+    )
+
+    $contract = Get-AuthorityRequiredProperty -Object $Policy -Name 'entryPointContract' -Context 'Consumer entry-point contract'
+    Assert-AuthorityEntryPointPolicy -Contract $contract
+
+    $rootItem = Get-Item -Force -LiteralPath $RepositoryRoot -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BLOCK: consumer entry-point contract requires a non-reparse repository root.'
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($rootItem.FullName)
+    $authorityRepositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+    $isAuthorityRepository = Test-AuthorityPathEqual -Left $rootFull -Right $authorityRepositoryRoot
+    $canonicalRelative = $CanonicalValidatorPath.Replace('\', '/')
+    while ($canonicalRelative.StartsWith('./', [System.StringComparison]::Ordinal)) {
+        $canonicalRelative = $canonicalRelative.Substring(2)
+    }
+    if ([string]::IsNullOrWhiteSpace($canonicalRelative) -or
+        [System.IO.Path]::IsPathRooted($CanonicalValidatorPath) -or
+        $canonicalRelative -match '(^|/)\.\.(?:/|$)' -or
+        $canonicalRelative -match '(^|/)\.(?:/|$)' -or
+        $canonicalRelative -match '^[A-Za-z]:' -or
+        $canonicalRelative -match '//') {
+        throw 'BLOCK: consumer entry-point contract has an unsafe canonical validator path.'
+    }
+    $canonicalFull = [System.IO.Path]::GetFullPath((Join-Path $rootFull ($canonicalRelative -replace '/', [System.IO.Path]::DirectorySeparatorChar)))
+    [void](Assert-AuthorityPathWithinRoot -Path $canonicalFull -Root $rootFull -Context 'Consumer canonical validator')
+    $canonicalItem = Get-Item -Force -LiteralPath $canonicalFull -ErrorAction Stop
+    if ($canonicalItem.PSIsContainer -or ($canonicalItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BLOCK: consumer entry-point contract canonical validator must be a non-reparse regular file.'
+    }
+
+    $authorityRolePaths = @($contract.authorityWorkflowRoles | ForEach-Object { ([string]$_.path).Replace('\', '/') })
+    $eventOwners = @{}
+    $workflowRoot = Join-Path $rootFull '.github/workflows'
+    $workflowFiles = @()
+    if (Test-Path -LiteralPath $workflowRoot -PathType Container) {
+        $workflowRootItem = Get-Item -Force -LiteralPath $workflowRoot -ErrorAction Stop
+        if (($workflowRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'BLOCK: consumer entry-point workflow inventory encountered a reparse-point directory.'
+        }
+        $workflowFiles = @(Get-ChildItem -Force -LiteralPath $workflowRoot -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in @('.yml', '.yaml') } | Sort-Object FullName)
+    }
+    foreach ($workflowFile in $workflowFiles) {
+        if (($workflowFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point workflow '$($workflowFile.FullName)' is a reparse point."
+        }
+        $relativePath = $workflowFile.FullName.Substring($rootFull.Length).TrimStart(
+            [System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar
+        ).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+        if ($isAuthorityRepository -and $authorityRolePaths -contains $relativePath) { continue }
+        $text = [System.IO.File]::ReadAllText($workflowFile.FullName)
+        $executableText = Get-AuthorityConsumerExecutableText -Text $text
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $executableText -CanonicalRelativePath $canonicalRelative
+        $nonCanonical = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $executableText -CanonicalRelativePath $canonicalRelative
+        $compatibility = Test-AuthorityConsumerCompatibilityLane `
+            -Text $text `
+            -ExecutableText $executableText `
+            -CanonicalRelativePath $canonicalRelative
+        $compatibilityDeclared = Test-AuthorityConsumerCompatibilityMarker -Text $text
+        $releaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText
+        if ($releaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) {
+            Assert-AuthorityConsumerReleaseFailurePropagation `
+                -WorkflowPath $relativePath `
+                -Text $text `
+                -CanonicalRelativePath $canonicalRelative
+        }
+        if ($compatibilityDeclared -and $canonicalCount -eq 0 -and -not $compatibility) {
+            throw "BLOCK: compatibility workflow '$relativePath' must depend on the canonical result and only mirror its status."
+        }
+        if ($nonCanonical) {
+            if ($compatibility) {
+                throw "BLOCK: compatibility workflow '$relativePath' executes an independent validation command; compatibility lanes may only mirror the canonical result."
+            }
+            throw "BLOCK: consumer entry-point contract found an alternate or non-canonical validation command in workflow '$relativePath'."
+        }
+        if ($compatibility -and $releaseAffecting) {
+            throw "BLOCK: compatibility workflow '$relativePath' must not publish, deploy, or otherwise act as a release gate."
+        }
+        if ($releaseAffecting -and $canonicalCount -ne 1) {
+            throw "BLOCK: release-affecting workflow '$relativePath' must execute the canonical validator exactly once."
+        }
+        if ($canonicalCount -gt 1) {
+            throw "BLOCK: consumer entry-point contract found duplicate canonical executions in workflow '$relativePath'."
+        }
+        $candidates = @(Get-AuthorityConsumerWorkflowEvents -Text $text)
+        if ($canonicalCount -gt 0) {
+            if (@($candidates | Where-Object { [string]$_.Event -ceq '__unsupported__' }).Count -gt 0) {
+                throw "BLOCK: consumer entry-point contract found an unsupported or unbound trigger in workflow '$relativePath'."
+            }
+            foreach ($candidate in $candidates) {
+                $event = [string]$candidate.Event
+                if ($event -notin @('pull_request', 'push', 'workflow_dispatch')) {
+                    throw "BLOCK: consumer entry-point contract found unsupported trigger '$event' in workflow '$relativePath'."
+                }
+                $candidateKey = [string]$candidate.CandidateKey
+                if ($eventOwners.ContainsKey($candidateKey)) {
+                    throw "BLOCK: consumer entry-point contract found duplicate canonical execution for event/candidate '$candidateKey' in '$relativePath' and '$($eventOwners[$candidateKey])'."
+                }
+                $eventOwners[$candidateKey] = $relativePath
+            }
+        }
+    }
+
+    foreach ($hookRootRelative in @($contract.releaseAffectingSurfaces.hookRoots)) {
+        $hookRoot = Join-Path $rootFull ([string]$hookRootRelative -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $hookRoot -PathType Container)) { continue }
+        $hookRootItem = Get-Item -Force -LiteralPath $hookRoot -ErrorAction Stop
+        if (($hookRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point hook inventory root '$hookRootRelative' is a reparse point."
+        }
+        $hookFiles = @(Get-ChildItem -Force -LiteralPath $hookRoot -File -Recurse -ErrorAction Stop |
+            Where-Object {
+                -not ([string]$hookRootRelative -ceq '.git/hooks' -and
+                    $_.Name.EndsWith('.sample', [System.StringComparison]::OrdinalIgnoreCase))
+            })
+        foreach ($hookFile in $hookFiles) {
+            if (($hookFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "BLOCK: consumer entry-point hook '$($hookFile.FullName)' is a reparse point."
+            }
+            $hookText = [System.IO.File]::ReadAllText($hookFile.FullName)
+            $hookExecutableText = Get-AuthorityConsumerScriptText -Text $hookText
+            $hookCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative
+            $hookReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $hookExecutableText
+            if (Test-AuthorityConsumerOpaqueReleaseHelper -Text $hookExecutableText) {
+                throw "BLOCK: release-affecting hook '$($hookFile.FullName)' invokes an opaque local release helper; inspect the helper or fail closed."
+            }
+            if ($hookReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
+                (Test-AuthorityConsumerFailureSuppression -Text $hookText)) {
+                throw "BLOCK: release-affecting hook '$($hookFile.FullName)' suppresses canonical or release failure propagation."
+            }
+            if ($hookReleaseAffecting -and $hookCanonicalCount -ne 1) {
+                throw "BLOCK: consumer entry-point contract found a release-affecting hook that does not execute the canonical validator exactly once: '$hookFile'."
+            }
+            if ((Test-AuthorityConsumerNonCanonicalValidationCommand -Text $hookExecutableText -CanonicalRelativePath $canonicalRelative) -or
+                $hookCanonicalCount -eq 0 -and $hookExecutableText -match '(?im)\b(?:validate|validation|test|pester|pytest|lint|scan|gate)\b') {
+                throw "BLOCK: consumer entry-point contract found a hook that bypasses the canonical validator: '$hookFile'."
+            }
+            if ($hookCanonicalCount -gt 1) {
+                throw "BLOCK: consumer entry-point contract found duplicate canonical executions in hook '$hookFile'."
+            }
+        }
+    }
+
+    foreach ($publicRelativePath in @($contract.releaseAffectingSurfaces.publicCommandFiles)) {
+        $publicPath = Join-Path $rootFull ([string]$publicRelativePath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $publicPath -PathType Leaf)) { continue }
+        $publicItem = Get-Item -Force -LiteralPath $publicPath -ErrorAction Stop
+        if (($publicItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "BLOCK: consumer entry-point public command '$publicRelativePath' is a reparse point."
+        }
+        $publicText = [System.IO.File]::ReadAllText($publicPath)
+        $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
+        $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicText -CanonicalRelativePath $canonicalRelative
+        $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicText
+        if ($publicReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
+            (Test-AuthorityConsumerFailureSuppression -Text $publicText)) {
+            throw "BLOCK: release-affecting public command '$publicRelativePath' suppresses canonical or release failure propagation."
+        }
+        $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
+        if ($publicReleaseAffecting -and $publicCanonicalCount -ne 1) {
+            throw "BLOCK: consumer entry-point contract found a public release command without exactly one canonical validator invocation: '$publicRelativePath'."
+        }
+        if ($nonCanonicalPublicCommand -and ($isReleaseInstructions -or
+            $publicText -match '(?is)(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate).{0,240}(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install)|(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install).{0,240}(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate)')) {
+            throw "BLOCK: consumer entry-point contract found a public command that declares an alternate release gate: '$publicRelativePath'."
+        }
+    }
+
+    return $true
 }
 
 function Invoke-AuthorityExternalCommand {
@@ -396,13 +1796,90 @@ function Invoke-AuthorityExternalCommand {
     }
 }
 
+function Get-AuthorityLauncherDigest {
+    param([Parameter(Mandatory = $true)] $Launcher)
+
+    $lines = @('launcherType=validation-launcher-v1')
+    foreach ($name in @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+        $propertyValue = Get-AuthorityProperty -Object $Launcher -Name $name
+        $value = if ($null -eq $propertyValue) { 'null' } else { [string]$propertyValue }
+        $lines += "$name=$value"
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash((New-Object System.Text.UTF8Encoding($false)).GetBytes(($lines -join "`n") + "`n"))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Assert-AuthorityLauncherReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $ToolName,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][string] $ExecutablePath,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $launcher = Get-AuthorityRequiredProperty -Object $Receipt -Name 'launcher' -Context $Context
+    $expectedNames = @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')
+    Assert-AuthorityJsonPropertySet -Object $launcher -Expected $expectedNames -Context "$Context launcher"
+    $kind = Get-AuthorityRequiredProperty -Object $launcher -Name 'kind' -Context "$Context launcher"
+    if ($kind -isnot [string] -or [string]$kind -notin @('direct-executable', 'windows-cmd-shim', 'unix-node-shim')) {
+        throw "$Context launcher kind is not approved."
+    }
+    if ($kind -ceq 'direct-executable') {
+        foreach ($name in @('shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+            if ($null -ne (Get-AuthorityProperty -Object $launcher -Name $name)) {
+                throw "$Context direct executable launcher must not declare shim, payload, or runtime files."
+            }
+        }
+        return
+    }
+    if ($ToolName -cne 'skill-tools') { throw "$Context package shim is only approved for skill-tools." }
+    $windowsShim = $kind -ceq 'windows-cmd-shim'
+    if ($windowsShim -ne ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)) {
+        throw "$Context launcher kind does not match the execution platform."
+    }
+    $shimPath = Assert-AuthorityLauncherFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimPath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'shimSha256' -Context "$Context launcher") `
+        -InstallRoot $InstallRoot `
+        -AllowUnixSymlink ($kind -ceq 'unix-node-shim') `
+        -Context "$Context launcher shim"
+    $payloadPath = Assert-AuthorityFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'payloadPath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'payloadSha256' -Context "$Context launcher") `
+        -Context "$Context launcher payload"
+    $runtimePath = Assert-AuthorityFileIdentity `
+        -PathValue (Get-AuthorityRequiredProperty -Object $launcher -Name 'runtimePath' -Context "$Context launcher") `
+        -Sha256Value (Get-AuthorityRequiredProperty -Object $launcher -Name 'runtimeSha256' -Context "$Context launcher") `
+        -Context "$Context launcher runtime"
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not [string]::Equals($shimPath, [IO.Path]::GetFullPath($ExecutablePath), $comparison)) {
+        throw "$Context launcher shim does not match the executable path."
+    }
+    Assert-AuthorityPathWithinRoot -Path $shimPath -Root $InstallRoot -Context "$Context launcher shim"
+    Assert-AuthorityPathWithinRoot -Path $payloadPath -Root $InstallRoot -Context "$Context launcher payload"
+    if ([IO.Path]::GetFileName($runtimePath).ToLowerInvariant() -notin @('node', 'node.exe', 'nodejs', 'nodejs.exe')) {
+        throw "$Context launcher runtime is not the approved Node runtime."
+    }
+}
+
 function Assert-InstalledAuthorityToolReceipt {
     param(
         [Parameter(Mandatory = $true)] $Receipt,
         [Parameter(Mandatory = $true)][string] $ToolName,
         [Parameter(Mandatory = $true)][string] $ExpectedSource,
-        [Parameter(Mandatory = $true)][string] $InstallRoot
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [string] $ExpectedRunId
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRunId)) {
+        Assert-AuthorityRunReceiptContext -Receipt $Receipt -ExpectedRunId $ExpectedRunId -Context "$ToolName receipt" | Out-Null
+    }
 
     $schemaVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'schemaVersion' -Context "$ToolName receipt"
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1) {
@@ -435,11 +1912,34 @@ function Assert-InstalledAuthorityToolReceipt {
     }
     Assert-AuthorityPathWithinRoot -Path ([string]$toolInstallRoot) -Root $InstallRoot -Context "$ToolName install root"
 
-    $executablePath = Assert-AuthorityFileIdentity `
+    $launcherValue = Get-AuthorityProperty -Object $Receipt -Name 'launcher'
+    $allowUnixLauncherSymlink = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+        $ToolName -ceq 'skill-tools' -and [string]$launcherValue.kind -ceq 'unix-node-shim'
+    $executablePath = Assert-AuthorityLauncherFileIdentity `
         -PathValue (Get-AuthorityProperty -Object $Receipt -Name 'executablePath') `
         -Sha256Value (Get-AuthorityProperty -Object $Receipt -Name 'executableSha256') `
+        -InstallRoot ([string]$toolInstallRoot) `
+        -AllowUnixSymlink $allowUnixLauncherSymlink `
         -Context "$ToolName executable"
     Assert-AuthorityPathWithinRoot -Path $executablePath -Root ([string]$toolInstallRoot) -Context "$ToolName executable"
+
+    Assert-AuthoritySha256 `
+        -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'installedClosureSha256' -Context "$ToolName receipt") `
+        -Context "$ToolName installed closure"
+    $actualInstalledClosure = Get-AuthorityDirectoryClosureSha256 -Path ([string]$toolInstallRoot)
+    if ($actualInstalledClosure -cne [string]$Receipt.installedClosureSha256) {
+        throw "$ToolName installed closure changed after resolution."
+    }
+    Assert-AuthorityLauncherReceipt `
+        -Receipt $Receipt `
+        -ToolName $ToolName `
+        -InstallRoot ([string]$toolInstallRoot) `
+        -ExecutablePath $executablePath `
+        -Context "$ToolName receipt"
+    Assert-AuthoritySha256 -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'launcherDigestSha256' -Context "$ToolName receipt") -Context "$ToolName launcher digest"
+    if ([string]$Receipt.launcherDigestSha256 -cne (Get-AuthorityLauncherDigest -Launcher $Receipt.launcher)) {
+        throw "$ToolName launcher metadata changed after resolution."
+    }
 
     Assert-AuthoritySha256 `
         -Value (Get-AuthorityProperty -Object $Receipt -Name 'dependencyClosureSha256') `
@@ -452,8 +1952,66 @@ function Assert-InstalledAuthorityToolReceipt {
     return $executablePath
 }
 
+function Assert-AuthoritySkillValidatorRuntimeReceipt {
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)][string] $GoCommandPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedGoRuntimeVersion,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $receiptGoPath = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimePath' -Context $Context
+    $receiptGoSha256 = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeSha256' -Context $Context
+    $validatedGoPath = Assert-AuthorityFileIdentity `
+        -PathValue $receiptGoPath `
+        -Sha256Value $receiptGoSha256 `
+        -Context "$Context Go runtime"
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [StringComparison]::Ordinal
+    }
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($validatedGoPath),
+        [IO.Path]::GetFullPath($GoCommandPath),
+        $pathComparison
+    )) {
+        throw "$Context Go runtime path does not match the setup-resolved executable."
+    }
+
+    $versionOutput = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeVersionOutput' -Context $Context
+    if ($versionOutput -isnot [array] -or @($versionOutput).Count -ne 1) {
+        throw "$Context Go runtime version output must contain exactly one line."
+    }
+    $versionMatch = [regex]::Match(
+        [string]@($versionOutput)[0],
+        '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) (?<os>[^\s]+)/(?<architecture>[^\s]+)$'
+    )
+    if (-not $versionMatch.Success -or
+        [string]$versionMatch.Groups['version'].Value -cne $ExpectedGoRuntimeVersion) {
+        throw "$Context Go runtime version output is not the expected stable runtime."
+    }
+    $receiptVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeVersion' -Context $Context
+    $receiptOs = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeOs' -Context $Context
+    $receiptArchitecture = Get-AuthorityRequiredProperty -Object $Receipt -Name 'goRuntimeArchitecture' -Context $Context
+    if ($receiptVersion -isnot [string] -or [string]$receiptVersion -cne $ExpectedGoRuntimeVersion -or
+        $receiptOs -isnot [string] -or [string]$receiptOs -cne [string]$versionMatch.Groups['os'].Value -or
+        $receiptArchitecture -isnot [string] -or [string]$receiptArchitecture -cne [string]$versionMatch.Groups['architecture'].Value) {
+        throw "$Context Go runtime identity does not match its exact version output."
+    }
+    return $validatedGoPath
+}
+
 function Assert-AuthorityPolicyReceipt {
-    param([Parameter(Mandatory = $true)] $Receipt)
+    param(
+        [Parameter(Mandatory = $true)] $Receipt,
+        [string] $ExpectedRunId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRunId)) {
+        Assert-AuthorityRunReceiptContext -Receipt $Receipt -ExpectedRunId $ExpectedRunId -Context 'Validation policy receipt' | Out-Null
+    }
 
     $schemaVersion = Get-AuthorityRequiredProperty -Object $Receipt -Name 'schemaVersion' -Context 'Validation policy receipt'
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1) {
@@ -1248,10 +2806,33 @@ if ([string]::IsNullOrWhiteSpace($expectedGoRuntimeVersion) -or
     $expectedGoRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
     throw 'The authority gate requires STANDARD_GO_RUNTIME_VERSION from the setup-go run-resolved latest stable runtime.'
 }
+$goCommandPath = [string]$GoCommandPath
+if ([string]::IsNullOrWhiteSpace($goCommandPath)) {
+    $goApplications = @(Get-Command -Name 'go' -CommandType Application -ErrorAction SilentlyContinue)
+    if ($goApplications.Count -ne 1) {
+        throw 'The authority gate requires one run-resolved Go executable path from setup-go.'
+    }
+    $goCommandPath = if ($null -ne $goApplications[0].PSObject.Properties['Path']) {
+        [string]$goApplications[0].Path
+    }
+    else {
+        [string]$goApplications[0].Source
+    }
+}
+if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) {
+    throw 'The authority gate requires an absolute run-resolved Go executable path.'
+}
+$goCommandPath = [IO.Path]::GetFullPath($goCommandPath)
+$goCommandItem = Get-Item -Force -LiteralPath $goCommandPath -ErrorAction SilentlyContinue
+if ($null -eq $goCommandItem -or $goCommandItem.PSIsContainer -or
+    ($goCommandItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The authority gate requires a regular run-resolved Go executable: $goCommandPath"
+}
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
 )
 foreach ($requiredPath in @($validationSecurityGatePath, $upstreamAdapterPolicyPath, $upstreamAdapterValidatorPath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -1273,9 +2854,8 @@ if (-not $artifactsItem.PSIsContainer -or
 
 $runId = [guid]::NewGuid().ToString('N')
 $runRoot = Join-Path $artifactsRootPath "standard-authority-$runId"
-$installRoot = Join-Path $runRoot 'tools'
+$installRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
 $fixtureRoot = Join-Path $runRoot 'fixture/standard-validation-fixture'
-[void](New-Item -ItemType Directory -Path $installRoot -Force)
 [void](New-Item -ItemType Directory -Path $fixtureRoot -Force)
 
 $fixtureText = @'
@@ -1330,9 +2910,9 @@ finally {
 }
 
 $policyReceiptPath = Join-Path $runRoot 'policy.json'
-& $resolverPath -ValidatePolicyOnly -OutputPath $policyReceiptPath | Out-Host
+& $resolverPath -ValidatePolicyOnly -RunId $runId -OutputPath $policyReceiptPath | Out-Host
 $policyReceipt = Read-AuthorityJson -Path $policyReceiptPath -Context 'Validation policy resolver'
-Assert-AuthorityPolicyReceipt -Receipt $policyReceipt
+Assert-AuthorityPolicyReceipt -Receipt $policyReceipt -ExpectedRunId $runId
 
 $expectedSources = [ordered]@{
     'skillspector' = 'NVIDIA/SkillSpector'
@@ -1350,11 +2930,13 @@ foreach ($entry in $expectedSources.GetEnumerator()) {
         -ToolName $entry.Key `
         -Install `
         -InstallRoot $installRoot `
+        -RunId $runId `
         -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
+        -GoCommandPath $goCommandPath `
         -OutputPath $receiptPath | Out-Host
     $receipt = Read-AuthorityJson -Path $receiptPath -Context "$($entry.Key) resolver"
     $executablePaths[$entry.Key] = Assert-InstalledAuthorityToolReceipt `
-        -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot
+        -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot -ExpectedRunId $runId
     $receipts[$entry.Key] = $receipt
     if ($entry.Key -ceq 'skillspector') {
         Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -Force -ErrorAction SilentlyContinue
@@ -1364,12 +2946,7 @@ foreach ($entry in $expectedSources.GetEnumerator()) {
 
 foreach ($entry in $expectedSources.GetEnumerator()) {
     $receipt = $receipts[$entry.Key]
-    $expectedClosure = if ($entry.Key -in @('skillspector', 'skill-tools')) {
-        Get-AuthorityProperty -Object $receipt -Name 'installedClosureSha256'
-    }
-    else {
-        Get-AuthorityProperty -Object $receipt -Name 'dependencyClosureSha256'
-    }
+    $expectedClosure = Get-AuthorityProperty -Object $receipt -Name 'installedClosureSha256'
     Assert-AuthoritySha256 -Value $expectedClosure -Context "$($entry.Key) installed closure"
     $actualClosure = Get-AuthorityDirectoryClosureSha256 -Path ([string]$receipt.installRoot)
     if ($actualClosure -cne [string]$expectedClosure) {
@@ -1478,6 +3055,11 @@ if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorRece
 if ($skillValidatorRuntimeVersion -cne $expectedGoRuntimeVersion) {
     throw "skill-validator receipt Go runtime '$skillValidatorRuntimeVersion' does not match the setup-go run-resolved latest stable runtime '$expectedGoRuntimeVersion'."
 }
+Assert-AuthoritySkillValidatorRuntimeReceipt `
+    -Receipt $skillValidatorReceipt `
+    -GoCommandPath $goCommandPath `
+    -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
+    -Context 'skill-validator receipt' | Out-Null
 
 $skillToolsReceipt = $receipts.'skill-tools'
 if ($skillToolsReceipt.registry -isnot [string] -or
@@ -1778,6 +3360,9 @@ $summary = [ordered]@{
         policyPath = 'docs/standards/validation-security-gate.json'
         policySha256 = $validationSecurityGatePolicySha256
         stageIds = @($validationSecurityGate.stages | ForEach-Object { [string]$_.id })
+        executionScope = 'protected-authority-fixture-regression'
+        productionCandidateRunnerInvoked = $false
+        tenStageCompletionClaim = $false
     }
     fixture = [ordered]@{
         id = 'standard-validation-fixture'

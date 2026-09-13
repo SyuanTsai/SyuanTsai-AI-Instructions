@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Standard validation consumer adapter v1",
+  "description": "Declarative, candidate-bound adapter consumed by the central Standard validation runner. It cannot redefine stage order, severity, approval, or pre-Static hooks. Production command specifications must identify directly executable tools and carry a trusted-supervisor-signed resolver receipt; generic interpreters and script payloads are development-harness-only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "adapter",
+    "mode",
+    "skillsRoot",
+    "activeSkills",
+    "canonicalValidatorPath",
+    "packageAdapter",
+    "skillValidator",
+    "skillTools",
+    "staticAnalyzer",
+    "repositoryTests"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "adapter": { "const": "standard-validation-adapter-v1" },
+    "mode": { "enum": ["production", "development-harness"] },
+    "skillsRoot": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$"
+    },
+    "activeSkills": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      }
+    },
+    "canonicalValidatorPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$",
+      "description": "Candidate-relative path to the one canonical validator entry point. The trusted supervisor inventories release-affecting entry points and invokes this path as the canonical consumer gate."
+    },
+    "packageAdapter": { "$ref": "#/$defs/commandSpec" },
+    "skillValidator": { "$ref": "#/$defs/commandSpec" },
+    "skillTools": { "$ref": "#/$defs/commandSpec" },
+    "staticAnalyzer": { "$ref": "#/$defs/commandSpec" },
+    "repositoryTests": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/testSpec" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "mode": { "const": "production" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "packageAdapter": { "required": ["provenance"] },
+          "skillValidator": { "required": ["provenance"] },
+          "skillTools": { "required": ["provenance"] },
+          "staticAnalyzer": { "required": ["provenance"] },
+          "repositoryTests": { "items": { "required": ["provenance"] } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "commandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "arguments"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to a run-resolved trusted executable; it must not be under CandidateRoot. Generic interpreters or script payloads are permitted only for development-harness adapters, never production."
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": { "$ref": "#/$defs/commandProvenance" }
+      }
+    },
+    "commandProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolName", "receiptPath", "receiptSha256"],
+      "properties": {
+        "toolName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receiptPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receiptSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "testSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "command", "arguments"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": { "$ref": "#/$defs/commandProvenance" }
+      }
+    }
+  }
+}

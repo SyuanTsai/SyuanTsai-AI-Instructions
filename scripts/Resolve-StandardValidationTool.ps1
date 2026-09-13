@@ -13,10 +13,43 @@ param(
 
     [string] $ExpectedGoRuntimeVersion,
 
+    [string] $RunId,
+
+    [string] $GoCommandPath,
+
     [string] $OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
+
+$script:ResolverRunId = if ([string]::IsNullOrWhiteSpace($RunId)) {
+    [guid]::NewGuid().ToString('N')
+}
+else {
+    [string]$RunId
+}
+if ($script:ResolverRunId -notmatch '^[0-9a-f]{32}$') {
+    throw 'Resolver RunId must be a lowercase 32-character hexadecimal value.'
+}
+$script:ResolverResolvedAtUtc = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+$script:ResolverExecutionContext = [ordered]@{
+    os = switch ([Environment]::OSVersion.Platform) {
+        ([PlatformID]::Win32NT) { 'windows'; break }
+        ([PlatformID]::Unix) { 'unix'; break }
+        ([PlatformID]::MacOSX) { 'osx'; break }
+        default { 'other'; break }
+    }
+    architecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        [string]$env:PROCESSOR_ARCHITEW6432
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITECTURE)) {
+        [string]$env:PROCESSOR_ARCHITECTURE
+    }
+    else {
+        'unknown'
+    }
+}
+$script:ResolverExecutionContext.architecture = ([string]$script:ResolverExecutionContext.architecture).ToLowerInvariant()
 
 $trustedSources = [ordered]@{
     'skillspector' = 'NVIDIA/SkillSpector'
@@ -62,6 +95,42 @@ $trustedGoDistribution = [ordered]@{
     'rejectInheritedBuildCache' = $true
     'rejectDangerousEnvironment' = $true
     'recordBinaryHash' = $true
+}
+
+function Write-ResolverJsonOutput {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Json
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and
+        -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+
+    $stream = [System.IO.File]::Open(
+        $fullPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+        try {
+            $writer.Write($Json)
+            $writer.Write([Environment]::NewLine)
+            $writer.Flush()
+        }
+        finally {
+            $writer.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
 }
 
 $deniedGoEnvironmentNames = @(
@@ -373,6 +442,39 @@ function Assert-Command {
     return $resolvedPath
 }
 
+function Assert-NativeCommandPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+        throw "The resolved native command path for '$Name' must be absolute."
+    }
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    $item = Get-Item -Force -LiteralPath $resolvedPath -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer -and
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The resolved native command path for '$Name' must be a regular file: '$resolvedPath'."
+    }
+    if ($null -eq $item -or -not $item.PSIsContainer) {
+        $expectedNames = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            @($Name, "$Name.exe")
+        }
+        else {
+            @($Name)
+        }
+        $fileName = [IO.Path]::GetFileName($resolvedPath)
+        if (@($expectedNames | Where-Object { [string]::Equals([string]$_, $fileName, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+            throw "The resolved native command path for '$Name' has an unexpected file name: '$resolvedPath'."
+        }
+    }
+    if ($null -eq $item -or $item.PSIsContainer) {
+        throw "The resolved native command path for '$Name' must be a regular file: '$resolvedPath'."
+    }
+    return $resolvedPath
+}
+
 function Assert-NpmCommand {
     $name = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'npm.cmd' } else { 'npm' }
     return Assert-Command -Name $name
@@ -475,23 +577,191 @@ function Get-BytesSha256 {
     }
 }
 
+function Get-ResolverAsciiCaseFold {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    $builder = New-Object Text.StringBuilder
+    foreach ($character in $Value.ToCharArray()) {
+        $code = [int][char]$character
+        if ($code -ge 65 -and $code -le 90) { $code += 32 }
+        [void]$builder.Append([char]$code)
+    }
+    return $builder.ToString()
+}
+
+function Assert-ResolverSafeRelativePath {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    if ([string]::IsNullOrEmpty($Value) -or $Value.StartsWith('/') -or $Value.Contains('\') -or
+        $Value.Contains(':') -or $Value -match '[\x00-\x1F\x7F]') {
+        throw "Installed tool closure contains an unsafe relative path: '$Value'."
+    }
+    foreach ($segment in $Value.Split('/')) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') {
+            throw "Installed tool closure contains an unsafe relative path: '$Value'."
+        }
+    }
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        [void]$utf8.GetBytes($Value)
+    }
+    catch {
+        throw "Installed tool closure contains a non-UTF-8 relative path: '$Value'."
+    }
+}
+
+function Get-ResolverSymlinkTarget {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    foreach ($propertyName in @('LinkTarget', 'Target')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    throw "Installed tool closure cannot read the symbolic-link target: $($Item.FullName)"
+}
+
+function Get-ResolverSymlinkIdentitySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Target,
+        [Parameter(Mandatory = $true)][string] $ResolvedRelativeTarget
+    )
+
+    $canonical = "symbolicLinkTarget=$Target`nresolvedTarget=$ResolvedRelativeTarget`n"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-ResolverSafeUnixSymlinkEntry {
+    param(
+        [Parameter(Mandatory = $true)] $Item,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+
+    # PowerShell on Unix can report a symlink as a non-container item. The
+    # resolved target, not PSIsContainer on the link itself, is the
+    # authoritative regular-file-or-directory check below.
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+        throw "Installed tool closure contains an unsupported reparse point: $($Item.FullName)"
+    }
+    $target = Get-ResolverSymlinkTarget -Item $Item
+    if ($target -match '[\x00-\x1F\x7F]' -or $target.Contains('\') -or $target.Contains(':')) {
+        throw "Installed tool closure contains an unsafe symbolic-link target: '$target'."
+    }
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $parentFull = [IO.Path]::GetFullPath((Split-Path -Parent $Item.FullName))
+    try {
+        $targetFull = if ([IO.Path]::IsPathRooted($target)) {
+            [IO.Path]::GetFullPath($target)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $parentFull $target))
+        }
+    }
+    catch {
+        throw "Installed tool closure contains an invalid symbolic-link target '$target': $($_.Exception.Message)"
+    }
+    $comparison = [StringComparison]::Ordinal
+    $rootPrefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if ([string]::Equals($targetFull, $rootFull, $comparison) -or
+        -not $targetFull.StartsWith($rootPrefix, $comparison)) {
+        throw "Installed tool closure symbolic-link target escapes the install root: '$target'."
+    }
+    $targetItem = Get-Item -Force -LiteralPath $targetFull -ErrorAction Stop
+    if ((-not $targetItem.PSIsContainer -and $targetItem -isnot [IO.FileInfo]) -or
+        ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed tool closure symbolic-link target must be a non-reparse regular file or directory: '$target'."
+    }
+    $relativeTarget = $targetFull.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $relativeTarget = $relativeTarget.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+    Assert-ResolverSafeRelativePath -Value $relativeTarget
+    return [pscustomobject][ordered]@{
+        path = $Item.FullName.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+        sha256 = Get-ResolverSymlinkIdentitySha256 -Target $target -ResolvedRelativeTarget $relativeTarget
+    }
+}
+
 function Get-DirectoryClosureIdentity {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     $root = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-    $entries = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)) {
-        $relative = $file.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
-        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/')
-        $entries += [pscustomobject][ordered]@{
-            path = $relative
-            sha256 = Get-FileSha256 -Path $file.FullName
+    $rootItem = Get-Item -Force -LiteralPath $root -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Installed tool closure root must be a regular non-reparse directory: $root"
+    }
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # Unix tool/package layouts may expose in-root file or directory
+            # symlinks. Keep only their verified target identities inside the
+            # signed closure; every other reparse shape remains rejected.
+            $symlinkEntry = Get-ResolverSafeUnixSymlinkEntry -Item $item -Root $root
+            Assert-ResolverSafeRelativePath -Value ([string]$symlinkEntry.path)
+            if (-not $ordinalPaths.Add([string]$symlinkEntry.path)) {
+                throw "Installed tool closure contains a duplicate path: '$($symlinkEntry.path)'."
+            }
+            $nfcSymlinkPath = ([string]$symlinkEntry.path).Normalize([Text.NormalizationForm]::FormC)
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne [string]$symlinkEntry.path) {
+                throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$($symlinkEntry.path)'."
+            }
+            $nfcPaths[$nfcSymlinkPath] = [string]$symlinkEntry.path
+            $asciiCaseSymlinkPath = Get-ResolverAsciiCaseFold -Value $nfcSymlinkPath
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne [string]$symlinkEntry.path) {
+                throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$($symlinkEntry.path)'."
+            }
+            $asciiCasePaths[$asciiCaseSymlinkPath] = [string]$symlinkEntry.path
+            [void]$entries.Add($symlinkEntry)
+            continue
         }
+        if ($item.PSIsContainer) { continue }
+        if ($item -isnot [IO.FileInfo]) {
+            throw "Installed tool closure contains a non-regular filesystem entry: $($item.FullName)"
+        }
+        $relative = $item.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+        Assert-ResolverSafeRelativePath -Value $relative
+        if (-not $ordinalPaths.Add($relative)) {
+            throw "Installed tool closure contains a duplicate path: '$relative'."
+        }
+        $nfc = $relative.Normalize([Text.NormalizationForm]::FormC)
+        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+            throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
+        }
+        $nfcPaths[$nfc] = $relative
+        $asciiCase = Get-ResolverAsciiCaseFold -Value $nfc
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+            throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
+        }
+        $asciiCasePaths[$asciiCase] = $relative
+        [void]$entries.Add([pscustomobject][ordered]@{
+                path = $relative
+                sha256 = Get-FileSha256 -Path $item.FullName
+            })
     }
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
     }
-    $canonical = ($entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in $entries) {
+        $insertAt = 0
+        while ($insertAt -lt $ordered.Count -and
+            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
+            $insertAt++
+        }
+        [void]$ordered.Insert($insertAt, $entry)
+    }
+    $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         $closureHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
@@ -501,7 +771,31 @@ function Get-DirectoryClosureIdentity {
     }
     return [ordered]@{
         sha256 = $closureHash
-        entries = $entries
+        entries = $ordered.ToArray()
+    }
+}
+
+function Get-ResolverLauncherDigest {
+    param([Parameter(Mandatory = $true)] $Launcher)
+
+    $lines = @('launcherType=validation-launcher-v1')
+    foreach ($name in @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')) {
+        $propertyValue = if ($Launcher -is [System.Collections.IDictionary]) {
+            if ($Launcher.Contains($name)) { $Launcher[$name] } else { $null }
+        }
+        else {
+            $property = $Launcher.PSObject.Properties[$name]
+            if ($null -eq $property) { $null } else { $property.Value }
+        }
+        $value = if ($null -eq $propertyValue) { 'null' } else { [string]$propertyValue }
+        $lines += "$name=$value"
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes(($lines -join "`n") + "`n"))) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
     }
 }
 
@@ -1990,6 +2284,7 @@ function Invoke-WithApprovedGoEnvironment {
         [Parameter(Mandatory = $true)] $ExpectedEnvironment,
         [Parameter(Mandatory = $true)] $DistributionPolicy,
         [string] $InstallBinPath,
+        [string] $GoCommandPath,
         [scriptblock] $EnvironmentProbe,
         [Parameter(Mandatory = $true)][scriptblock] $Action
     )
@@ -2055,7 +2350,12 @@ function Invoke-WithApprovedGoEnvironment {
         ))
         $goCommand = $null
         if ($null -eq $EnvironmentProbe) {
-            $goCommand = Assert-Command -Name 'go'
+            $goCommand = if ([string]::IsNullOrWhiteSpace($GoCommandPath)) {
+                Assert-Command -Name 'go'
+            }
+            else {
+                Assert-NativeCommandPath -Path $GoCommandPath -Name 'go'
+            }
             $effectiveJson = (Invoke-CheckedCommand -Command $goCommand -Arguments (@('env', '-json') + $effectiveNames)) -join "`n"
             $effective = $effectiveJson | ConvertFrom-Json
         }
@@ -2384,6 +2684,7 @@ function Resolve-Pester {
         executableSha256 = if ($null -eq $modulePath) { $null } else { Get-FileSha256 -Path $modulePath }
         dependencyClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
         dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $moduleClosure)
+        installedClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
     }
 }
 
@@ -2585,7 +2886,8 @@ function Resolve-SkillValidator {
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)] $ToolPolicy,
         [string] $RequestedInstallRoot,
-        [string] $ExpectedGoRuntimeVersion
+        [string] $ExpectedGoRuntimeVersion,
+        [string] $GoCommandPath
     )
 
     $modulePath = 'github.com/agent-ecosystem/skill-validator'
@@ -2604,7 +2906,7 @@ function Resolve-SkillValidator {
     $installBinPath = if ($ShouldInstall) { Join-Path $toolInstallPath 'bin' } else { $null }
 
     try {
-        return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -Action {
+        return Invoke-WithApprovedGoEnvironment -ExpectedEnvironment $expectedEnvironment -DistributionPolicy $ToolPolicy.goDistribution -InstallBinPath $installBinPath -GoCommandPath $GoCommandPath -Action {
             param($goCommand, $effectiveBinPath)
 
             $approvedRuntimeFunction = $ExecutionContext.InvokeCommand.GetCommand(
@@ -2615,10 +2917,19 @@ function Resolve-SkillValidator {
             if ($null -eq $approvedRuntimeFunction -or $approvedRuntimeFunction.CommandType -ne [System.Management.Automation.CommandTypes]::Function) {
                 throw 'The approved Go runtime evidence authenticator function is unavailable.'
             }
+            $goVersionOutput = @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version'))
             $goRuntimeVersion = & $approvedRuntimeFunction `
-                -VersionOutput @(Invoke-CheckedCommand -Command $goCommand -Arguments @('version')) `
+                -VersionOutput $goVersionOutput `
                 -ExpectedVersionRule ([string]$ToolPolicy.goRuntimeVersion) `
                 -ExpectedRuntimeVersion $ExpectedGoRuntimeVersion
+            $goVersionMatch = [regex]::Match(
+                [string]$goVersionOutput[0],
+                '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) (?<os>[^\s]+)/(?<architecture>[^\s]+)$'
+            )
+            if (-not $goVersionMatch.Success) {
+                throw 'Approved Go runtime evidence did not expose a stable OS/architecture identity.'
+            }
+            $goRuntimeSha256 = Get-FileSha256 -Path $goCommand
 
             $metadataJson = (Invoke-CheckedCommand -Command $goCommand -Arguments @('list', '-m', '-json', "$modulePath@latest")) -join "`n"
             $metadata = $metadataJson | ConvertFrom-Json
@@ -2668,8 +2979,14 @@ function Resolve-SkillValidator {
                 executableSha256 = $executableSha256
                 dependencyClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $installedClosure)
+                installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
                 goRuntimeVersion = $goRuntimeVersion
                 goRuntimeSource = $trustedGoRuntimeSource
+                goRuntimePath = $goCommand
+                goRuntimeSha256 = $goRuntimeSha256
+                goRuntimeVersionOutput = $goVersionOutput
+                goRuntimeOs = [string]$goVersionMatch.Groups['os'].Value
+                goRuntimeArchitecture = [string]$goVersionMatch.Groups['architecture'].Value
                 moduleCacheIsolation = [string]$ToolPolicy.goDistribution.moduleCacheIsolation
                 buildCacheIsolation = [string]$ToolPolicy.goDistribution.buildCacheIsolation
                 temporaryDirectoryIsolation = [string]$ToolPolicy.goDistribution.temporaryDirectoryIsolation
@@ -2779,7 +3096,9 @@ function Resolve-SkillSpector {
             $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
             $venvPath = Join-Path $toolInstallPath 'venv'
             $installation = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
-                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', $venvPath))
+                # Keep interpreter entries as regular files so the signed
+                # installed closure can reject external/file symlinks.
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', '--copies', $venvPath))
                 $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                     Join-Path $venvPath 'Scripts\python.exe'
                 }
@@ -2962,6 +3281,9 @@ $policy = Get-Policy -Path $PolicyPath
 if ($ValidatePolicyOnly) {
     $result = [ordered]@{
         schemaVersion = 1
+        resolutionRunId = $script:ResolverRunId
+        resolvedAtUtc = $script:ResolverResolvedAtUtc
+        executionContext = $script:ResolverExecutionContext
         policy = [string]$policy.policy
         sourceTrust = [ordered]@{
             enforcement = [string]$policy.sourceTrust.enforcement
@@ -2995,7 +3317,8 @@ else {
                 -ShouldInstall ([bool]$Install) `
                 -ToolPolicy $policy.tools.'skill-validator' `
                 -RequestedInstallRoot $InstallRoot `
-                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion
+                -ExpectedGoRuntimeVersion $ExpectedGoRuntimeVersion `
+                -GoCommandPath $GoCommandPath
         }
         'skillspector' {
             Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot
@@ -3003,8 +3326,29 @@ else {
     }
 
     $toolPolicy = $policy.tools.$ToolName
+    $launcher = [pscustomobject][ordered]@{
+        kind = 'direct-executable'
+        shimPath = $null
+        shimSha256 = $null
+        payloadPath = $null
+        payloadSha256 = $null
+        runtimePath = $null
+        runtimeSha256 = $null
+    }
+    if ($ToolName -ceq 'skill-tools') {
+        $launcher.kind = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'windows-cmd-shim' } else { 'unix-node-shim' }
+        $launcher.shimPath = $resolved.executablePath
+        $launcher.shimSha256 = $resolved.executableSha256
+        $launcher.payloadPath = $resolved.entryPointPath
+        $launcher.payloadSha256 = $resolved.entryPointSha256
+        $launcher.runtimePath = $resolved.nodePath
+        $launcher.runtimeSha256 = $resolved.nodeSha256
+    }
     $result = [ordered]@{
         schemaVersion = 1
+        resolutionRunId = $script:ResolverRunId
+        resolvedAtUtc = $script:ResolverResolvedAtUtc
+        executionContext = $script:ResolverExecutionContext
         toolName = $ToolName
         source = [string]$toolPolicy.source
         channel = [string]$toolPolicy.channel
@@ -3015,8 +3359,11 @@ else {
         installRoot = $resolved.installRoot
         executablePath = $resolved.executablePath
         executableSha256 = $resolved.executableSha256
+        installedClosureSha256 = $resolved.installedClosureSha256
         dependencyClosureSha256 = $resolved.dependencyClosureSha256
         dependencyClosure = $resolved.dependencyClosure
+        launcher = $launcher
+        launcherDigestSha256 = Get-ResolverLauncherDigest -Launcher $launcher
     }
     if ($ToolName -eq 'pester') {
         $result.modulePath = $resolved.modulePath
@@ -3036,6 +3383,11 @@ else {
         $result.checksumDatabase = [string]$toolPolicy.checksumDatabase
         $result.goRuntimeVersion = [string]$resolved.goRuntimeVersion
         $result.goRuntimeSource = [string]$resolved.goRuntimeSource
+        $result.goRuntimePath = [string]$resolved.goRuntimePath
+        $result.goRuntimeSha256 = [string]$resolved.goRuntimeSha256
+        $result.goRuntimeVersionOutput = $resolved.goRuntimeVersionOutput
+        $result.goRuntimeOs = [string]$resolved.goRuntimeOs
+        $result.goRuntimeArchitecture = [string]$resolved.goRuntimeArchitecture
         $result.moduleCacheIsolation = [string]$resolved.moduleCacheIsolation
         $result.buildCacheIsolation = [string]$resolved.buildCacheIsolation
         $result.temporaryDirectoryIsolation = [string]$resolved.temporaryDirectoryIsolation
@@ -3072,11 +3424,7 @@ else {
 
 $json = $result | ConvertTo-Json -Depth 20
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
-    $directory = Split-Path -Parent $OutputPath
-    if (-not [string]::IsNullOrWhiteSpace($directory)) {
-        [void](New-Item -ItemType Directory -Path $directory -Force)
-    }
-    [IO.File]::WriteAllText($OutputPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    Write-ResolverJsonOutput -Path $OutputPath -Json $json
 }
 
 $json

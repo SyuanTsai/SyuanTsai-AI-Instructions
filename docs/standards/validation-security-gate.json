@@ -72,7 +72,7 @@
       "name": "Publish / Install",
       "condition": "approved-release-or-authorized-install",
       "failureAction": "BLOCK",
-      "evidence": ["releaseIdentity", "publishOrInstallResult", "authorization"]
+      "evidence": ["releaseIdentity", "publishOrInstallResult", "authorization", "attestation"]
     },
     {
       "order": 10,
@@ -80,7 +80,7 @@
       "name": "Post-install Verification",
       "condition": "after-install",
       "failureAction": "BLOCK",
-      "evidence": ["installedInventory", "installedManifest", "postInstallIntegrity"]
+      "evidence": ["installedInventory", "installedManifest", "postInstallIntegrity", "attestation"]
     }
   ],
   "security": {
@@ -111,6 +111,102 @@
       }
     ],
     "aiReviewCannotReplaceHumanApproval": true,
-    "samePassBlockSemantics": ["local", "pre-push", "ci"]
+    "samePassBlockSemantics": ["local", "pre-push", "ci"],
+    "childProcessEnvironment": {
+      "inheritance": "clear-before-launch",
+      "allowed": ["approved-os-runtime", "STANDARD_VALIDATION_*"],
+      "forbidden": "arbitrary-inherited-secrets"
+    },
+    "outputReservation": {
+      "requiredBeforeChildProcess": true,
+      "ownership": "supervisor-exclusive-handle",
+      "substitutionAction": "BLOCK"
+    },
+    "semanticTrigger": {
+      "analyzerProperty": "semanticRequired",
+      "effectiveDecision": "callerRequested-OR-analyzerRequired",
+      "recorded": true
+    },
+    "semanticEvidence": {
+      "authentication": "trusted-supervisor-signed-semantic-v1",
+      "requiredFields": ["provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256"],
+      "success": ["status=passed", "decision=PASS", "consentGranted=true", "analyzerCompleteness=complete", "findings=array", "findingsSha256=verified"]
+    },
+    "aiReview": {
+      "status": "passed",
+      "decision": "PASS",
+      "candidateBinding": "reviewedCandidate",
+      "arrayFields": ["reviewFindings", "findingDisposition"],
+      "equalCounts": true,
+      "severityPolicy": "central",
+      "authentication": "trusted-supervisor-signed-ai-review-v1",
+      "digestFields": ["reviewFindingsSha256", "findingDispositionSha256"],
+      "attestation": "trusted-supervisor-ai-review-v1"
+    },
+    "trustAnchors": {
+      "root": "docs/standards/trust-anchors",
+      "supervisorPublicKey": "trusted-supervisor-public-key.xml",
+      "humanApprovalPublicKey": "human-approval-public-key.xml",
+      "pinnedHashes": true
+    }
+  },
+  "entryPointContract": {
+    "canonicalExecution": {
+      "maxPerEventCandidate": 1,
+      "route": "canonical-validator",
+      "sameCandidateBinding": true,
+      "samePassBlockSemantics": true
+    },
+    "releaseAffectingSurfaces": {
+      "workflowGlob": ".github/workflows/*.{yml,yaml}",
+      "hookRoots": [".git/hooks", ".githooks"],
+      "publicCommandFiles": ["README.md", "RELEASING.md", "RELEASE.md", "docs/RELEASE.md", "docs/RELEASING.md"],
+      "mustRouteTo": "canonical-validator",
+      "alternateGateAction": "BLOCK",
+      "requiresFailurePropagation": true,
+      "forbiddenFailureSuppression": ["|| true", "|| :", "continue-on-error: true", "if: always()"]
+    },
+    "componentScripts": {
+      "mayExist": true,
+      "mayBeTopLevelReleaseGate": false
+    },
+    "compatibilityLane": {
+      "allowed": true,
+      "requiresCanonicalDependency": true,
+      "requiresRestrictedPurpose": true,
+      "mayMirrorCanonicalResult": true,
+      "mayRunIndependentPassBlockPolicy": false,
+      "mayBeCanonicalReleaseGate": false
+    },
+    "triggerAdapters": {
+      "allowedEvents": ["pull_request", "push", "workflow_dispatch"],
+      "mustShareCanonicalValidator": true,
+      "mustShareCandidateBinding": true,
+      "duplicateEventCandidateExecution": false,
+      "candidateKey": "event-only",
+      "overlappingFilterAction": "BLOCK"
+    },
+    "authorityWorkflowRoles": [
+      {
+        "path": ".github/workflows/standards-conformance.yml",
+        "role": "canonical-authority-regression",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/pr8-powershell-validation.yml",
+        "role": "compatibility-and-linux-composition-bridge",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/syp86-production-lock.yml",
+        "role": "production-lock-contract",
+        "consumerAlternateGate": false
+      },
+      {
+        "path": ".github/workflows/syp101-production-smoke.yml",
+        "role": "production-smoke-contract",
+        "consumerAlternateGate": false
+      }
+    ]
   }
 }

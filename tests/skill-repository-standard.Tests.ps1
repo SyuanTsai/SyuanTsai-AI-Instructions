@@ -15,6 +15,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:UpstreamAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\upstream-adapter-v1.schema.json'
         $script:ValidationSecurityGatePath = Join-Path $script:StandardsRoot 'validation-security-gate.json'
         $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
+        $script:StandardValidationAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-adapter-v1.schema.json'
+        $script:StandardValidationEvidenceSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-evidence-v1.schema.json'
+        $script:StandardValidationContractPath = Join-Path $script:StandardsRoot 'standard-validation-contract-v1.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
         $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
@@ -204,6 +207,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $items = @($Value)
                 $minItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'minItems'
                 if ($null -ne $minItemsProperty -and $items.Count -lt [int]$minItemsProperty.Value) { return $false }
+                $maxItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'maxItems'
+                if ($null -ne $maxItemsProperty -and $items.Count -gt [int]$maxItemsProperty.Value) { return $false }
                 $uniqueProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'uniqueItems'
                 if ($null -ne $uniqueProperty -and [bool]$uniqueProperty.Value) {
                     for ($left = 0; $left -lt $items.Count; $left++) {
@@ -214,13 +219,38 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                         }
                     }
                 }
+                $prefixItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'prefixItems'
+                $prefixSchemas = @()
+                if ($null -ne $prefixItemsProperty) {
+                    $prefixSchemas = @($prefixItemsProperty.Value)
+                    if ($items.Count -lt $prefixSchemas.Count) { return $false }
+                    for ($index = 0; $index -lt $prefixSchemas.Count; $index++) {
+                        if (-not (Test-AuthorityJsonSchemaValue -Value $items[$index] -Schema $prefixSchemas[$index] -RootSchema $RootSchema)) {
+                            return $false
+                        }
+                    }
+                }
                 $itemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'items'
-                if ($null -ne $itemsProperty) {
+                if ($null -ne $itemsProperty -and $itemsProperty.Value -is [bool] -and -not [bool]$itemsProperty.Value -and
+                    $items.Count -gt $prefixSchemas.Count) {
+                    return $false
+                }
+                if ($null -ne $itemsProperty -and $itemsProperty.Value -isnot [bool]) {
                     foreach ($item in $items) {
                         if (-not (Test-AuthorityJsonSchemaValue -Value $item -Schema $itemsProperty.Value -RootSchema $RootSchema)) {
                             return $false
                         }
                     }
+                }
+                $containsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'contains'
+                if ($null -ne $containsProperty) {
+                    $containsCount = 0
+                    foreach ($item in $items) {
+                        if (Test-AuthorityJsonSchemaValue -Value $item -Schema $containsProperty.Value -RootSchema $RootSchema) {
+                            $containsCount++
+                        }
+                    }
+                    if ($containsCount -lt 1) { return $false }
                 }
             }
             elseif ($type -ceq 'string') {
@@ -1104,6 +1134,27 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver 'executableSha256 = \$resolved\.executableSha256' 'Every tool receipt must project its exact executable hash.'
     }
 
+    It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $runId = [guid]::NewGuid().ToString('N')
+        $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
+        try {
+            Assert-True (Test-Path -LiteralPath $toolRoot -PathType Container) 'Authority tools must be created in a run-owned directory.'
+            Assert-False ((Get-Item -Force -LiteralPath $toolRoot).Attributes -band [System.IO.FileAttributes]::ReparsePoint) 'Authority tool root must not be a reparse point.'
+            Assert-True ($toolRoot.Length -lt 128) 'Authority tool root must leave path-length headroom for Python venv and pip files.'
+            Assert-Match $toolRoot ('svt-tools-' + $runId) 'Authority tool root must bind to the current run id.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $toolRoot) {
+                Remove-Item -LiteralPath $toolRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        Assert-Match $gate 'New-AuthorityRunOwnedToolRoot' 'Authority gate must allocate its formal tool root through the short-path helper.'
+    }
+
     It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
         $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RequiredPowerShellWorkflowPath
@@ -1111,7 +1162,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
-        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
+        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
         Assert-Match $workflow "'scripts/Resolve-PythonWheelClosure\.py'" 'Python helper changes must trigger the standalone authority workflow.'
         Assert-NotMatch $workflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Standards workflow must not maintain a divergent inline resolver sequence.'
         Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
@@ -1119,7 +1170,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
         Assert-Match $requiredWorkflow '(?ms)^permissions:\r?\n  contents: read\r?\n\r?\njobs:' 'Required workflow token permissions must be explicitly read-only.'
         Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
-        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
+        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
         Assert-NotMatch $requiredWorkflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Required context must not maintain a divergent inline resolver sequence.'
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
@@ -1137,8 +1188,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate "(?s)trustedGoRuntimeVersion'.*?-Expected 'latest-stable'" 'Shared gate must bind the policy receipt to the latest stable Go runtime rule.'
         Assert-Match $gate '\$skillValidatorRuntimeVersion' 'Shared gate must validate the stable Go runtime selected for the run.'
         Assert-Match $gate 'skillValidatorRuntimeIdentityPattern' 'Shared gate must require the selected Go runtime in the resolved identity.'
-        Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
-        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with setup-go runtime evidence.'
+        Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -RunId \$runId -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
+        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-RunId \$runId `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-GoCommandPath \$goCommandPath `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with run-bound setup-go runtime evidence.'
         Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
         Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
         Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
@@ -1489,11 +1540,15 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $executablePath = Join-Path $toolRoot 'fixture-tool.bin'
         Write-TestUtf8File -Path $executablePath -Text 'fixture executable'
         $executableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher = [pscustomobject][ordered]@{
+            kind='direct-executable'; shimPath=$null; shimSha256=$null; payloadPath=$null; payloadSha256=$null; runtimePath=$null; runtimeSha256=$null
+        }
         $validReceipt = [pscustomobject][ordered]@{
             schemaVersion=1; toolName='fixture-tool'; source='fixture/source'; channel='latest-stable'
             frozenForRun=$true; resolvedVersion='1.0.0'; resolvedIdentity='fixture@1.0.0'
             identityKind='fixture-release'; installRoot=$toolRoot; executablePath=$executablePath
-            executableSha256=$executableSha256; dependencyClosureSha256=('a' * 64)
+            executableSha256=$executableSha256; installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher; launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher); dependencyClosureSha256=('a' * 64)
             dependencyClosure=@([pscustomobject]@{ name='fixture-tool'; version='1.0.0' }, [pscustomobject]@{ name='dependency'; version='2.0.0' })
         }
         Assert-InstalledAuthorityToolReceipt -Receipt $validReceipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null
@@ -1514,6 +1569,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Receipt coercion '$($case.Name)' must fail closed."
+        }
+
+        $closureMutationPath = Join-Path $toolRoot 'unexpected-installed-file.bin'
+        Write-TestUtf8File -Path $closureMutationPath -Text 'installed closure mutation'
+        try {
+            $errorMessage = $null
+            try { Assert-InstalledAuthorityToolReceipt -Receipt $validReceipt -ToolName 'fixture-tool' -ExpectedSource 'fixture/source' -InstallRoot $installRoot | Out-Null }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'installed closure changed' 'A post-resolution installed-file mutation must fail the closure binding.'
+        }
+        finally {
+            Remove-Item -LiteralPath $closureMutationPath -Force -ErrorAction SilentlyContinue
         }
 
         $validPolicy = [pscustomobject][ordered]@{
@@ -1544,6 +1611,48 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Policy coercion '$($case.Path)' must fail closed."
         }
+    }
+
+    # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.
+    # Purpose: Bind the skill-validator receipt to the exact setup-go executable, bytes, version output and authority run.
+    It 'UnitT33a_requires_run_bound_skill_validator_runtime_identity' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $runId = 'b' * 32
+        $goPath = Join-Path $TestDrive 'go.exe'
+        Write-TestUtf8File -Path $goPath -Text 'approved go executable fixture'
+        $goSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $goPath).Hash.ToLowerInvariant()
+        $receipt = [pscustomobject][ordered]@{
+            resolutionRunId=$runId
+            resolvedAtUtc=[DateTime]::UtcNow
+            executionContext=[pscustomobject][ordered]@{ os='windows'; architecture='amd64' }
+            goRuntimePath=$goPath
+            goRuntimeSha256=$goSha256
+            goRuntimeVersion='1.27.1'
+            goRuntimeVersionOutput=@('go version go1.27.1 windows/amd64')
+            goRuntimeOs='windows'
+            goRuntimeArchitecture='amd64'
+        }
+
+        Assert-AuthorityRunReceiptContext -Receipt $receipt -ExpectedRunId $runId -Context 'skill-validator receipt'
+        Assert-AuthoritySkillValidatorRuntimeReceipt `
+            -Receipt $receipt `
+            -GoCommandPath $goPath `
+            -ExpectedGoRuntimeVersion '1.27.1' `
+            -Context 'skill-validator receipt'
+
+        $tampered = Copy-TestJsonObject -Value $receipt
+        $tampered.goRuntimeSha256 = ('c' * 64)
+        $errorMessage = $null
+        try {
+            Assert-AuthoritySkillValidatorRuntimeReceipt `
+                -Receipt $tampered `
+                -GoCommandPath $goPath `
+                -ExpectedGoRuntimeVersion '1.27.1' `
+                -Context 'skill-validator receipt'
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'changed after resolution|hash' 'A changed Go runtime receipt must fail closed.'
     }
 
     # Scenario: Pester 4 and Pester 6 expose different result shapes, and required counts can arrive as coercible text.
@@ -2752,8 +2861,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             ,@('triggerDecision', 'semanticReport', 'semanticCompleteness')
             ,@('reviewFindings', 'findingDisposition', 'reviewedCandidate')
             ,@('approver', 'approvalTimestamp', 'approvedCandidate')
-            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization')
-            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity')
+            ,@('releaseIdentity', 'publishOrInstallResult', 'authorization', 'attestation')
+            ,@('installedInventory', 'installedManifest', 'postInstallIntegrity', 'attestation')
         )
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.id }) $expectedIds 'Canonical validation/security stage IDs must remain ordered.'
         Assert-ExactStringSequence ($policy.stages | ForEach-Object { [string]$_.name }) $expectedNames 'Canonical validation/security stage names must remain ordered.'
@@ -2793,6 +2902,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Equal $actual[0].action $expected.action "Severity '$($expected.level)' has the wrong action."
         }
         Assert-True ([bool]$policy.security.aiReviewCannotReplaceHumanApproval) 'AI Review must not replace Human Approval.'
+        Assert-Equal $policy.security.aiReview.authentication 'trusted-supervisor-signed-ai-review-v1' 'AI review must require trusted-supervisor authentication.'
+        Assert-ExactStringSequence $policy.security.aiReview.digestFields @('reviewFindingsSha256', 'findingDispositionSha256') 'AI review must bind both complete result digests.'
+        Assert-Equal $policy.security.aiReview.attestation 'trusted-supervisor-ai-review-v1' 'AI review must use the canonical attestation type.'
         Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
 
         Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
@@ -2810,6 +2922,220 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
         Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
+    }
+
+    # Scenario: The central runner contract changes without a versioned adapter/evidence boundary.
+    # Purpose: Keep consumer declarations thin and make the production runner's barrier semantics machine-readable.
+    It 'UnitT92_binds_the_central_runner_to_versioned_adapter_evidence_and_barriers' {
+        foreach ($path in @($script:StandardValidationAdapterSchemaPath, $script:StandardValidationEvidenceSchemaPath, $script:StandardValidationContractPath)) {
+            Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Missing central runner contract file '$path'."
+            $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        }
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardValidation.ps1'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath $runnerPath
+        Assert-Equal $contract.contract 'standard-validation-contract-v1' 'Central runner contract identity changed.'
+        Assert-Equal @($contract.stages).Count 10 'Central runner contract must retain all ten canonical stages.'
+        Assert-True ([bool]$contract.execution.packageBeforeStatic) 'Package tools must be a Static prerequisite.'
+        Assert-True ([bool]$contract.execution.staticBeforeRepositoryTests) 'Static must be a repository-test prerequisite.'
+        Assert-False ([bool]$contract.execution.candidateCodeBeforeStatic) 'Candidate code must not execute before Static.'
+        Assert-Match $runner 'Invoke-StandardValidationProcess' 'Central runner must record actual child process execution.'
+        Assert-Match $runner 'Assert-StandardValidationToolEnvelope' 'Central runner must validate actual tool output envelopes.'
+        Assert-Match $runner 'SemanticConsent' 'Central runner must expose explicit semantic consent.'
+        Assert-Match $runner 'CompleteLifecycle' 'Central runner must keep release lifecycle evidence separate from validation-only runs.'
+
+        $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationEvidenceSchemaPath | ConvertFrom-Json
+        Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'Validation evidence schema must declare all terminal-state consistency rules.'
+        . $runnerPath `
+            -CandidateRoot (Join-Path $TestDrive 'schema-candidate') `
+            -AdapterPath (Join-Path $TestDrive 'schema-adapter.json') `
+            -ArtifactsRoot (Join-Path $TestDrive 'schema-artifacts') `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -DefineFunctionsOnly
+        $schemaStageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static', 'repository-tests', 'conditional-semantic-scan', 'ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')
+        $schemaStages = @(1..10 | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    order = $_
+                    id = $schemaStageIds[$_ - 1]
+                    condition = @(
+                        'always'
+                        'always'
+                        'always'
+                        'always'
+                        'always'
+                        'when-triggered'
+                        'lifecycle-evidence'
+                        'lifecycle-evidence'
+                        'approved-release-or-authorized-install'
+                        'after-install'
+                    )[$_ - 1]
+                    status = 'not-applicable'
+                    startedAt = $null
+                    endedAt = $null
+                    events = @()
+                }
+            })
+        $schemaEvidence = New-StandardValidationCandidateEvidence `
+            -RunId ([guid]::NewGuid()) `
+            -State 'PASS' `
+            -ExitCode 0 `
+            -ReleaseEligible $false `
+            -Stages $schemaStages `
+            -ArtifactRoot 'unavailable' `
+            -LockPath 'unavailable' |
+            ConvertTo-Json -Depth 50 |
+            ConvertFrom-Json
+        Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
+        foreach ($terminal in @(
+            @{ state = 'PASS'; exitCode = 0; releaseEligible = $true },
+            @{ state = 'BLOCKED'; exitCode = 10; releaseEligible = $false },
+            @{ state = 'FAILED'; exitCode = 20; releaseEligible = $false },
+            @{ state = 'INVALID'; exitCode = 30; releaseEligible = $false },
+            @{ state = 'CANCELLED'; exitCode = 40; releaseEligible = $false }
+        )) {
+            $consistent = Copy-TestJsonObject -Value $schemaEvidence
+            $consistent.state = $terminal.state
+            $consistent.exitCode = $terminal.exitCode
+            $consistent.releaseEligible = $terminal.releaseEligible
+            if ($terminal.releaseEligible) {
+                $consistent.adapter.mode = 'production'
+                $consistent.candidate.acquisition.status = 'verified'
+                $consistent.candidate.acquisition.verified = $true
+                $consistent.authority.binding.status = 'verified'
+                $consistent.authority.binding.verified = $true
+                $consistent.authority.binding.selectedFiles = @(1..11 | ForEach-Object {
+                        [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
+                    })
+                for ($stageIndex = 0; $stageIndex -lt 10; $stageIndex++) {
+                    $consistent.stages[$stageIndex].status = if ($stageIndex -eq 5) { 'not-applicable' } else { 'passed' }
+                }
+            }
+            Assert-AuthoritySchemaInstance -Value $consistent -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message "A consistent '$($terminal.state)' validation evidence envelope must be schema-valid."
+        }
+        foreach ($contradiction in @(
+            @{ Name = 'blocked-with-zero'; state = 'BLOCKED'; exitCode = 0; releaseEligible = $false },
+            @{ Name = 'pass-with-failure-code'; state = 'PASS'; exitCode = 20; releaseEligible = $false },
+            @{ Name = 'failed-release-eligible'; state = 'FAILED'; exitCode = 20; releaseEligible = $true },
+            @{ Name = 'blocked-release-eligible'; state = 'BLOCKED'; exitCode = 10; releaseEligible = $true }
+        )) {
+            $contradictory = Copy-TestJsonObject -Value $schemaEvidence
+            $contradictory.state = $contradiction.state
+            $contradictory.exitCode = $contradiction.exitCode
+            $contradictory.releaseEligible = $contradiction.releaseEligible
+            Assert-AuthoritySchemaInstance -Value $contradictory -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $false -Message "Contradictory '$($contradiction.Name)' validation evidence must fail schema validation."
+        }
+    }
+
+    # Scenario: A consumer adds a renamed workflow, hook, or public command that runs a component validator directly.
+    # Purpose: Keep one canonical validation execution per event/candidate while making the central authority workflow exceptions explicit.
+    It 'UnitT95_binds_the_consumer_entry_point_inventory_and_authority_workflow_exceptions' {
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        Assert-True ($null -ne $policy.entryPointContract) 'Canonical validation/security policy must declare the consumer entry-point contract.'
+        Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Entry-point contract policy must be schema-valid.'
+        Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
+
+        $contract = $policy.entryPointContract
+        Assert-ExactPropertySet $contract @('canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts', 'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles') 'Entry-point contract property set changed.'
+        Assert-Equal $contract.canonicalExecution.maxPerEventCandidate 1 'A consumer must have at most one canonical execution per event/candidate.'
+        Assert-Equal $contract.canonicalExecution.route 'canonical-validator' 'All release-affecting consumer surfaces must route to the canonical validator.'
+        Assert-True ([bool]$contract.canonicalExecution.sameCandidateBinding) 'Trigger adapters must bind the same event candidate.'
+        Assert-True ([bool]$contract.canonicalExecution.samePassBlockSemantics) 'Trigger adapters must share canonical pass/block semantics.'
+        Assert-Equal $contract.releaseAffectingSurfaces.workflowGlob '.github/workflows/*.{yml,yaml}' 'Consumer workflow inventory must cover both YAML extensions.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.hookRoots @('.git/hooks', '.githooks') 'Consumer hook inventory must list versioned and local hook roots.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.publicCommandFiles @('README.md', 'RELEASING.md', 'RELEASE.md', 'docs/RELEASE.md', 'docs/RELEASING.md') 'Public release command inventory must cover the documented entry-point files.'
+        Assert-Equal $contract.releaseAffectingSurfaces.mustRouteTo 'canonical-validator' 'Release-affecting surfaces must route to the canonical validator.'
+        Assert-Equal $contract.releaseAffectingSurfaces.alternateGateAction 'BLOCK' 'Consumer alternate gates must block closed.'
+        Assert-True ([bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) 'Release-affecting surfaces must preserve canonical failure propagation.'
+        Assert-ExactStringSequence $contract.releaseAffectingSurfaces.forbiddenFailureSuppression @('|| true', '|| :', 'continue-on-error: true', 'if: always()') 'Release-affecting surfaces must reject failure suppression.'
+        Assert-True ([bool]$contract.componentScripts.mayExist) 'Component/diagnostic scripts must remain allowed.'
+        Assert-False ([bool]$contract.componentScripts.mayBeTopLevelReleaseGate) 'Component scripts must not become public release gates.'
+        Assert-True ([bool]$contract.compatibilityLane.allowed) 'Compatibility lanes must remain available for explicit legacy coverage.'
+        Assert-True ([bool]$contract.compatibilityLane.requiresCanonicalDependency) 'Consumer compatibility status jobs must depend on the canonical result.'
+        Assert-True ([bool]$contract.compatibilityLane.requiresRestrictedPurpose) 'Compatibility lanes must have a restricted purpose.'
+        Assert-True ([bool]$contract.compatibilityLane.mayMirrorCanonicalResult) 'Compatibility status jobs may mirror the canonical result.'
+        Assert-False ([bool]$contract.compatibilityLane.mayRunIndependentPassBlockPolicy) 'Consumer compatibility lanes must not own an independent pass/block policy.'
+        Assert-False ([bool]$contract.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lanes must never become the canonical release gate.'
+        Assert-ExactStringSequence $contract.triggerAdapters.allowedEvents @('pull_request', 'push', 'workflow_dispatch') 'Protected PR, trusted push, and manual trigger adapters must be explicit.'
+        Assert-True ([bool]$contract.triggerAdapters.mustShareCanonicalValidator) 'Trigger adapters must share the canonical validator.'
+        Assert-True ([bool]$contract.triggerAdapters.mustShareCandidateBinding) 'Trigger adapters must share candidate binding.'
+        Assert-False ([bool]$contract.triggerAdapters.duplicateEventCandidateExecution) 'The same event/candidate must not execute the canonical validator twice.'
+
+        $roles = @($contract.authorityWorkflowRoles)
+        Assert-Equal $roles.Count 4 'The authority workflow exception inventory must contain exactly four roles.'
+        Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.path }) @(
+            '.github/workflows/standards-conformance.yml',
+            '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/syp86-production-lock.yml',
+            '.github/workflows/syp101-production-smoke.yml'
+        ) 'The authority workflow exception inventory must preserve all four workflow paths.'
+        Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.role }) @(
+            'canonical-authority-regression',
+            'compatibility-and-linux-composition-bridge',
+            'production-lock-contract',
+            'production-smoke-contract'
+        ) 'The authority workflow exception roles must remain explicit and ordered.'
+        foreach ($role in $roles) {
+            Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be treated as a consumer alternate gate."
+        }
+
+        Assert-Match $standard 'one canonical validation execution per event/candidate' 'Normative Standard must prohibit duplicate canonical validation execution.'
+        Assert-Match $standard 'workflow.*hook.*public' 'Normative Standard must define the release-affecting entry-point inventory.'
+        Assert-Match $standard 'component.*MUST NOT.*release path' 'Normative Standard must keep component scripts non-authoritative.'
+        Assert-Match $standard 'compatibility.*needs.*canonical|compatibility.*canonical.*result' 'Normative Standard must constrain compatibility lanes to the canonical result.'
+        Assert-Match $index 'entry-point|canonical validation execution' 'Standards index must expose the entry-point contract.'
+        Assert-Match $matrix 'entry-point|alternate gate|canonical validation execution' 'Review matrix must record the entry-point boundary.'
+        Assert-Match $gate 'Assert-AuthorityConsumerEntryPointContract' 'The executable authority must expose the consumer entry-point contract checker.'
+        Assert-Match $gate 'Get-AuthorityConsumerReleaseAffectingMatch -Text \$releaseExecutableText' 'Release ordering must use the same release-surface matcher as release detection.'
+
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases -f tag_name=v1.0.0') 'A gh api release creation with fields must be release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases --method PATCH --raw-field name=v1.0.0') 'An explicit mutating gh api release request must be release-affecting.'
+        Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases') 'A read-only gh api release lookup must not be classified as a mutation.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin v1.2.3') 'A direct tag refspec passed to git push must be release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin') 'An explicit git push whose ref type cannot be established must fail closed.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push --mirror') 'A mirror push must be release-affecting because it can publish tag refs.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: docker/build-push-action@0123456789012345678901234567890123456789`nwith:`n  push: true") 'A Docker build-push action must be release-affecting because its push input can publish an image.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'docker buildx build --platform linux/amd64 --push .') 'A Docker buildx build with --push must be release-affecting because it publishes an image.'
+        Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text './scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A direct canonical validator command must count as an invocation.'
+        Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'pwsh -File ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A canonical validator launched through pwsh -File must count as an invocation.'
+        Assert-False ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'Get-Item ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'Reading the canonical validator path must not count as executing it.'
+
+        $implicitSuccessJob = @'
+  release:
+    needs: canonical
+    run: gh release create v1.0.0
+'@
+        Assert-True (Test-AuthorityConsumerJobNeedsCanonical -JobText $implicitSuccessJob -CanonicalJobId 'canonical') 'A release job without an override condition must inherit canonical success gating.'
+        $explicitSuccessJob = @'
+  release:
+    needs: canonical
+    if: ${{ needs.canonical.result == 'success' }}
+    run: gh release create v1.0.0
+'@
+        Assert-True (Test-AuthorityConsumerJobNeedsCanonical -JobText $explicitSuccessJob -CanonicalJobId 'canonical') 'A release job may use an explicit canonical-success condition.'
+        $failureConditionJob = @'
+  release:
+    needs: canonical
+    if: ${{ needs.canonical.result == 'failure' }}
+    run: gh release create v1.0.0
+'@
+        Assert-False (Test-AuthorityConsumerJobNeedsCanonical -JobText $failureConditionJob -CanonicalJobId 'canonical') 'A release job must not run when the canonical validator fails.'
+
+        $weakened = Copy-TestJsonObject -Value $policy
+        $weakened.entryPointContract.canonicalExecution.maxPerEventCandidate = 2
+        Assert-AuthoritySchemaInstance -Value $weakened -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $false -Message 'A policy allowing two canonical executions per event/candidate must fail schema validation.'
+        $errorMessage = $null
+        try { Assert-AuthorityValidationSecurityGate -Policy $weakened | Out-Null }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'entry-point|canonical execution|event/candidate' 'The executable authority must reject a weakened entry-point contract.'
     }
 
     # Scenario: PowerShell returns JSON integers as Int64 on some Linux/runtime combinations.

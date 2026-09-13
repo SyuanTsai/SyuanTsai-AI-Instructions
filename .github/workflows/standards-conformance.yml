@@ -9,10 +9,12 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-StandardValidation.ps1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
+      - 'tests/standard-validation-runner.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -25,10 +27,12 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-StandardValidation.ps1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
+      - 'tests/standard-validation-runner.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -60,12 +64,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $versionOutput = @(& go version)
+          $goApplication = Get-Command -Name go -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1
+          $goCommandPath = if ($null -ne $goApplication.PSObject.Properties['Path']) { [string]$goApplication.Path } else { [string]$goApplication.Source }
+          if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) { throw "setup-go returned a non-absolute Go path: $goCommandPath" }
+          $versionOutput = @(& $goCommandPath version)
           if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or
               [string]$versionOutput[0] -notmatch '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$') {
             throw "setup-go did not provide one stable Go runtime version. Evidence='$($versionOutput -join ' | ')'"
           }
           "STANDARD_GO_RUNTIME_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STANDARD_GO_COMMAND_PATH=$goCommandPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run canonical Standard v1 authority gate
         shell: pwsh
@@ -73,7 +82,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -ExpectedGoRuntimeVersion $env:STANDARD_GO_RUNTIME_VERSION
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -ExpectedGoRuntimeVersion $env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath $env:STANDARD_GO_COMMAND_PATH
 
       - name: Check whitespace in the event range
         shell: bash

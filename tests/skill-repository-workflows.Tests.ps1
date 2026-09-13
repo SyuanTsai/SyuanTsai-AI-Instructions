@@ -1,6 +1,8 @@
 Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:ValidationSecurityGatePath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
+        $script:AuthorityGatePath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
         $script:CheckoutSha = '3d3c42e5aac5ba805825da76410c181273ba90b1'
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
@@ -14,6 +16,7 @@ Describe 'Agent Skill authority workflow contract' {
             'skill-repository-standard.Tests.ps1'
             'skill-repository-workflows.Tests.ps1'
             'standard-validation-resolver-hardening.Tests.ps1'
+            'standard-validation-runner.Tests.ps1'
         )
         $script:AuthorityWorkflowDependencies = @(
             'pr8-powershell-validation.yml'
@@ -24,6 +27,11 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-True {
             param([bool] $Condition, [string] $Message)
             if (-not $Condition) { throw $Message }
+        }
+
+        function Assert-False {
+            param([bool] $Condition, [string] $Message)
+            if ($Condition) { throw $Message }
         }
 
         function Assert-Equal {
@@ -39,6 +47,35 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-NotMatch {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
+
+        function Write-TestUtf8File {
+            param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Text)
+
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $parent = [IO.Path]::GetDirectoryName($fullPath)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                [void](New-Item -ItemType Directory -Path $parent -Force)
+            }
+            [IO.File]::WriteAllText($fullPath, $Text, (New-Object Text.UTF8Encoding($false)))
+        }
+
+        function New-ConsumerEntryPointFixture {
+            param([Parameter(Mandatory = $true)][string] $Root)
+
+            [void](New-Item -ItemType Directory -Path $Root -Force)
+            Write-TestUtf8File -Path (Join-Path $Root 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+            Write-TestUtf8File -Path (Join-Path $Root '.github/workflows/validate.yml') -Text @'
+name: Canonical validation
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
         }
     }
 
@@ -75,7 +112,7 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-Match $workflow 'cache:\s*false' 'Authority Go setup must not restore a cross-run module or build cache.'
             Assert-NotMatch $workflow 'actions/setup-go@v[0-9]+' 'Authority workflows must not use a mutable setup-go tag.'
             Assert-Match $workflow 'STANDARD_GO_RUNTIME_VERSION=\$\(\$Matches\.version\)' 'Authority workflows must capture the exact Go runtime resolved by setup-go.'
-            Assert-Match $workflow '& ./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION' 'Authority workflows must pass the setup-go resolved runtime into the shared gate.'
+            Assert-Match $workflow '& ./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'Authority workflows must pass the setup-go resolved runtime into the shared gate.'
             Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=')) 'The approved Go runtime must be provisioned before its version is captured.'
             Assert-True ($workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The resolved Go runtime must be captured before the authority gate starts.'
         }
@@ -92,6 +129,7 @@ Describe 'Agent Skill authority workflow contract' {
         }
         Assert-Match $gate 'ExpectedGoRuntimeVersion = \$env:STANDARD_GO_RUNTIME_VERSION' 'The shared authority gate must require the setup-go resolved runtime when invoked directly.'
         Assert-Match $gate '-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion' 'The shared authority gate must pass the resolved runtime into the resolver.'
+        Assert-Match $gate '-GoCommandPath \$goCommandPath' 'The shared authority gate must pass the run-resolved Go executable path into the resolver.'
         Assert-Match $gate 'skill-validator receipt Go runtime.*does not match the setup-go run-resolved latest stable runtime' 'The shared authority gate must bind the resolver receipt to setup-go evidence.'
     }
 
@@ -213,5 +251,439 @@ Describe 'Agent Skill authority workflow contract' {
         Assert-Match $gate 'validation-security-gate\.json' 'Shared authority gate must load the canonical validation/security policy.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
         Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'
+    }
+
+    # Scenario: A consumer adds a renamed workflow, hook, release command, or duplicate trigger adapter around a component script.
+    # Purpose: Enforce the central entry-point inventory contract while allowing non-authoritative components and status-only compatibility jobs.
+    It 'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles' {
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        Assert-True ($null -ne $policy.entryPointContract) 'Canonical validation/security policy must declare the entry-point contract.'
+        Assert-Match $authorityGate 'Assert-AuthorityConsumerEntryPointContract' 'The shared authority gate must expose the consumer entry-point contract checker.'
+
+        $canonicalFixture = Join-Path $TestDrive 'entry-point-valid'
+        New-ConsumerEntryPointFixture -Root $canonicalFixture
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $canonicalFixture `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A single canonical workflow must satisfy the entry-point contract.'
+
+        Write-TestUtf8File -Path (Join-Path $canonicalFixture 'scripts/check-domain.ps1') -Text "Invoke-Pester -Path tests/domain`n"
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $canonicalFixture `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A component script must not become an alternate gate merely because it exists.'
+
+        $negativeCases = @(
+            @{
+                Name = 'arbitrary-workflow-name'
+                RelativePath = '.github/workflows/domain-check.yaml'
+                Text = "name: Domain check`non:`n  pull_request:`njobs:`n  domain:`n    steps:`n      - run: ./scripts/run-domain-tests.ps1`n"
+            },
+            @{
+                Name = 'pre-push-hook-bypass'
+                RelativePath = '.githooks/pre-push'
+                Text = "#!/bin/sh`nInvoke-Pester -Path tests/domain`n"
+            },
+            @{
+                Name = 'pre-commit-hook-bypass'
+                RelativePath = '.githooks/pre-commit'
+                Text = "#!/bin/sh`nInvoke-Pester -Path tests/domain`n"
+            },
+            @{
+                Name = 'authority-role-name-bypass'
+                RelativePath = '.github/workflows/standards-conformance.yml'
+                Text = "name: Fake authority role`non:`n  pull_request:`njobs:`n  domain:`n    steps:`n      - run: ./scripts/run-domain-tests.ps1`n"
+            },
+            @{
+                Name = 'public-release-command'
+                RelativePath = 'README.md'
+                Text = "Run ./scripts/run-domain-tests.ps1 as the release gate.`n"
+            },
+            @{
+                Name = 'release-workflow-without-canonical'
+                RelativePath = '.github/workflows/release.yml'
+                Text = @'
+name: Release
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-action-without-canonical'
+                RelativePath = '.github/workflows/release-action.yml'
+                Text = @'
+name: Release action
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - uses: softprops/action-gh-release@v2
+'@
+            },
+            @{
+                Name = 'release-workflow-step-name-only-canonical'
+                RelativePath = '.github/workflows/release-step-name.yml'
+                Text = @'
+name: Release step metadata
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - name: ./scripts/Validate.ps1
+        run: gh release create v1.0.0
+'@
+            },
+            @{
+                Name = 'release-workflow-comment-only-canonical'
+                RelativePath = '.github/workflows/release-comment.yml'
+                Text = @'
+name: Release comment metadata
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - run: |
+          # ./scripts/Validate.ps1
+          gh release create v1.0.0
+'@
+            },
+            @{
+                Name = 'release-workflow-suppresses-canonical-failure'
+                RelativePath = '.github/workflows/release-suppressed.yml'
+                Text = @'
+name: Release with suppressed validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: ./scripts/Validate.ps1 || true
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-disables-canonical-step'
+                RelativePath = '.github/workflows/release-disabled-canonical.yml'
+                Text = @'
+name: Release with disabled canonical validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - if: ${{ false }}
+        run: ./scripts/Validate.ps1
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-conditional-release'
+                RelativePath = '.github/workflows/release-conditional.yml'
+                Text = @'
+name: Conditional release without canonical validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-references-canonical-only'
+                RelativePath = '.github/workflows/release-canonical-reference.yml'
+                Text = @'
+name: Release with canonical path reference only
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - run: Get-Item ./scripts/Validate.ps1
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-same-step-without-success-gate'
+                RelativePath = '.github/workflows/release-same-step.yml'
+                Text = @'
+name: Release with ungated same-step validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - shell: bash
+        run: |
+          ./scripts/Validate.ps1
+          gh release create $GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-with-unbound-validation'
+                RelativePath = '.github/workflows/release-unbound.yml'
+                Text = @'
+name: Release with unbound validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    steps:
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-unrelated-list-item'
+                RelativePath = '.github/workflows/release-unrelated-list.yml'
+                Text = @'
+name: Release with unrelated list item
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    steps:
+      - canonical-validation
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
+                Name = 'release-workflow-opaque-local-helper'
+                RelativePath = '.github/workflows/release-opaque-helper.yml'
+                Text = @'
+name: Release with opaque local helper
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    needs: canonical-validation
+    steps:
+      - run: ./ship
+'@
+                Files = @(
+                    @{
+                        RelativePath = 'ship'
+                        Text = "gh release create `$env:GITHUB_REF_NAME`n"
+                    }
+                )
+            },
+            @{
+                Name = 'release-workflow-opaque-action-delegate'
+                RelativePath = '.github/workflows/release-opaque-action.yml'
+                Text = @'
+name: Release with opaque action delegate
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    steps:
+      - uses: acme/ship@0123456789012345678901234567890123456789
+'@
+            },
+            @{
+                Name = 'compatibility-independent-validation'
+                RelativePath = '.github/workflows/compatibility-independent.yml'
+                Text = @'
+name: Compatibility status
+on:
+  workflow_dispatch:
+jobs:
+  compatibility-status:
+    needs: canonical-validation
+    steps:
+      - run: Invoke-Pester -Path tests/domain
+'@
+            }
+        )
+        foreach ($case in $negativeCases) {
+            $root = Join-Path $TestDrive ("entry-point-negative-{0}" -f $case.Name)
+            New-ConsumerEntryPointFixture -Root $root
+            Write-TestUtf8File -Path (Join-Path $root $case.RelativePath) -Text $case.Text
+            if ($case.ContainsKey('Files')) {
+                foreach ($file in @($case.Files)) {
+                    Write-TestUtf8File -Path (Join-Path $root $file.RelativePath) -Text $file.Text
+                }
+            }
+            $errorMessage = $null
+            try {
+                Assert-AuthorityConsumerEntryPointContract `
+                    -RepositoryRoot $root `
+                    -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                    -Policy $policy | Out-Null
+            }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'entry-point contract|alternate|canonical|opaque|release' "Consumer entry-point case '$($case.Name)' must fail closed."
+        }
+
+        $compatibilityRoot = Join-Path $TestDrive 'entry-point-compatibility-status'
+        New-ConsumerEntryPointFixture -Root $compatibilityRoot
+        Write-TestUtf8File -Path (Join-Path $compatibilityRoot '.github/workflows/compatibility-status.yml') -Text @'
+name: Compatibility status
+on:
+  pull_request:
+jobs:
+  compatibility-status:
+    needs: canonical-validation
+    steps:
+      - run: echo canonical-validation.result
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $compatibilityRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A compatibility status job may depend on and mirror the canonical result.'
+
+        $releaseBoundRoot = Join-Path $TestDrive 'entry-point-release-bound'
+        [void](New-Item -ItemType Directory -Path $releaseBoundRoot -Force)
+        Write-TestUtf8File -Path (Join-Path $releaseBoundRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $releaseBoundRoot '.github/workflows/release-bound.yml') -Text @'
+name: Release with bound validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+  release:
+    needs:
+      - canonical-validation
+    steps:
+      - canonical-validation
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $releaseBoundRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'A release job must be allowed when it depends on the canonical validation job.'
+
+        $duplicateRoot = Join-Path $TestDrive 'entry-point-duplicate-event'
+        New-ConsumerEntryPointFixture -Root $duplicateRoot
+        Write-TestUtf8File -Path (Join-Path $duplicateRoot '.github/workflows/duplicate-pr.yaml') -Text @'
+name: Duplicate PR adapter
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  duplicate:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        $duplicateError = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $duplicateRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy | Out-Null
+        }
+        catch { $duplicateError = $_.Exception.Message }
+        Assert-Match $duplicateError 'duplicate|event|candidate' 'Two canonical executions for the same event/candidate must fail closed.'
+
+        $splitRoot = Join-Path $TestDrive 'entry-point-split-triggers'
+        [void](New-Item -ItemType Directory -Path $splitRoot -Force)
+        Write-TestUtf8File -Path (Join-Path $splitRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $splitRoot '.github/workflows/protected-pr.yml') -Text @'
+name: Protected PR adapter
+on:
+  pull_request:
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Write-TestUtf8File -Path (Join-Path $splitRoot '.github/workflows/trusted-push.yml') -Text @'
+name: Trusted push adapter
+on:
+  push:
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $splitRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy) 'Protected PR and trusted push adapters may be separate when their events do not duplicate execution.'
+
+        $disjointCandidateRoot = Join-Path $TestDrive 'entry-point-disjoint-candidates'
+        [void](New-Item -ItemType Directory -Path (Join-Path $disjointCandidateRoot '.github/workflows') -Force)
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot 'scripts/Validate.ps1') -Text "Write-Output 'canonical validation'`n"
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot '.github/workflows/main-pr.yml') -Text @'
+name: Main pull request adapter
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        Write-TestUtf8File -Path (Join-Path $disjointCandidateRoot '.github/workflows/release-pr.yml') -Text @'
+name: Release pull request adapter
+on:
+  pull_request:
+    branches:
+      - release
+jobs:
+  canonical-validation:
+    steps:
+      - run: ./scripts/Validate.ps1
+'@
+        $filterOverlapError = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $disjointCandidateRoot `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy | Out-Null
+        }
+        catch { $filterOverlapError = $_.Exception.Message }
+        Assert-Match $filterOverlapError 'duplicate|event/candidate|overlap' 'Different path or branch filters must not be treated as proof of disjoint canonical execution.'
+
+        $roles = @($policy.entryPointContract.authorityWorkflowRoles)
+        Assert-Equal $roles.Count 4 'The authority repository must explicitly classify all four legitimate workflow roles.'
+        foreach ($role in $roles) {
+            Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be classified as a consumer alternate gate."
+            Assert-True (Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $role.path) -PathType Leaf) "Authority workflow role '$($role.path)' must remain present."
+        }
+        Assert-Match $authorityGate 'standards-conformance\.yml|pr8-powershell-validation\.yml|syp86-production-lock\.yml|syp101-production-smoke\.yml' 'The authority gate contract must retain the explicit four-workflow role surface.'
     }
 }

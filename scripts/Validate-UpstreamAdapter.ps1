@@ -11,6 +11,42 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Write-AdapterJsonOutput {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Json
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and
+        -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+
+    $stream = [System.IO.File]::Open(
+        $fullPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+        try {
+            $writer.Write($Json)
+            $writer.Write([Environment]::NewLine)
+            $writer.Flush()
+        }
+        finally {
+            $writer.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-AdapterProperty {
     param(
         [Parameter(Mandatory = $true)] $Object,
@@ -1238,9 +1274,7 @@ try {
         -ArchiveSha256 $ArchiveSha256
     $json = $result | ConvertTo-Json -Depth 20
     if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
-        $parent = Split-Path -Parent $OutputPath
-        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
-        [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($OutputPath), $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        Write-AdapterJsonOutput -Path $OutputPath -Json $json
     }
     Write-Output $json
 }
