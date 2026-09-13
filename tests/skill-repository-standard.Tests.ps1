@@ -2259,8 +2259,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $standard 'normative authority.*conformance regression.*MUST.*PR' 'Standard changes must update authority regression in the same PR.'
         Assert-Match $index 'tests/skill-repository-standard\.Tests\.ps1' 'Standards index must name the authority regression test.'
-        Assert-Match $standard 'derive the production run ID from its `resolutionRunId`' 'The Standard must bind the production run ID to an authenticated resolver receipt.'
+        Assert-Match $standard 'trusted supervisor.*fresh validation run ID at invocation start' 'The Standard must bind resolver receipts to the current trusted-supervisor launch.'
         Assert-Match $standard '1,048,576 characters' 'The Standard must define a fixed child-output memory quota.'
+        Assert-Match $standard 'record the overflow diagnostic separately' 'The Standard must keep overflow diagnostics outside bounded stream prefixes.'
         Assert-Match $standard 'MUST NOT.*unbounded `ReadToEnd` capture' 'The Standard must prohibit unbounded child-output capture.'
     }
 

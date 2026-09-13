@@ -2027,14 +2027,20 @@ function Get-StandardValidationProductionRunId {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
-        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot
+        [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
+        [Parameter(Mandatory = $true)][guid] $ExpectedRunId
     )
 
-    # The resolver signs resolutionRunId before the adapter reaches this
-    # function. Authenticate the package-adapter receipt first, then use its
-    # signed ID as the binding for the complete adapter. This keeps the
-    # production ID inside the trusted orchestration path without accepting a
-    # caller-selected value or comparing receipts with a freshly unrelated ID.
+    if ($ExpectedRunId -eq [guid]::Empty) {
+        throw 'INVALID|The trusted supervisor must provide a non-empty production validation run ID.'
+    }
+
+    # The trusted supervisor creates ExpectedRunId at the start of this
+    # invocation. Authenticate the package-adapter receipt against that exact
+    # launch binding before the complete adapter is resolved. A still-fresh
+    # signed receipt from an earlier run therefore cannot be replayed into a
+    # new validation, and every later production slot remains bound to the
+    # same supervisor-generated ID.
     $packageSpec = Get-StandardValidationRequiredProperty -Object $Adapter -Name 'packageAdapter' -Context 'adapter packageAdapter'
     $packageResult = Assert-StandardValidationCommandSpec `
         -Spec $packageSpec `
@@ -2043,15 +2049,16 @@ function Get-StandardValidationProductionRunId {
         -ArtifactsRoot $ArtifactsRoot `
         -TrustedToolRoot $TrustedToolRoot `
         -TrustAnchorRoot $TrustAnchorRoot `
-        -RunId $null `
+        -RunId $ExpectedRunId `
         -ExpectedToolName (Get-StandardValidationExpectedToolName -AdapterSlot 'packageAdapter') `
         -DevelopmentHarness:$false
     if ($null -eq $packageResult.toolReceipt -or
         $packageResult.toolReceipt.PSObject.Properties.Name -notcontains 'runId' -or
-        $packageResult.toolReceipt.runId -eq [guid]::Empty) {
-        throw 'BLOCKED|Production validation run ID could not be derived from the authenticated package-adapter resolver receipt.'
+        $packageResult.toolReceipt.runId -eq [guid]::Empty -or
+        ([guid]$packageResult.toolReceipt.runId) -ne $ExpectedRunId) {
+        throw 'BLOCKED|The authenticated package-adapter resolver receipt is not bound to the current trusted-supervisor validation run.'
     }
-    return [guid]$packageResult.toolReceipt.runId
+    return $ExpectedRunId
 }
 
 function New-StandardValidationStages {
@@ -2660,6 +2667,7 @@ function Invoke-StandardValidationProcess {
     $stdout = ''
     $stderr = ''
     $outputQuotaExceeded = $false
+    $outputQuotaDiagnostic = $null
     $cleanedUp = $true
     $process = $null
     $rootProcessId = $null
@@ -3040,8 +3048,7 @@ function Invoke-StandardValidationProcess {
         if ($quotaStreams.Count -gt 0) {
             $outputQuotaExceeded = $true
             if ($null -eq $terminationStatus) { $terminationStatus = 'failed' }
-            $quotaMessage = "Owned validator output capture quota exceeded for $($quotaStreams -join ' and ') (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)."
-            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = $quotaMessage } else { $stderr = "$stderr`n$quotaMessage" }
+            $outputQuotaDiagnostic = "Owned validator output capture quota exceeded for $($quotaStreams -join ' and ') (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)."
         }
         if ($process.HasExited) { $exitCode = $process.ExitCode }
         if (-not $cleanedUp) {
@@ -3097,6 +3104,7 @@ function Invoke-StandardValidationProcess {
         stdout = [string]$stdout
         stderr = [string]$stderr
         outputQuotaExceeded = [bool]$outputQuotaExceeded
+        outputQuotaDiagnostic = if ($null -eq $outputQuotaDiagnostic) { $null } else { [string]$outputQuotaDiagnostic }
         cleanedUp = [bool]$cleanedUp
     }
 }
@@ -4674,7 +4682,8 @@ function Invoke-StandardValidationRun {
                 -CandidateRoot $originalCandidateRoot `
                 -ArtifactsRoot $artifactRootFull `
                 -TrustedToolRoot $trustedToolRootFull `
-                -TrustAnchorRoot $trustAnchorRootFull
+                -TrustAnchorRoot $trustAnchorRootFull `
+                -ExpectedRunId $runId
         }
         $adapterResult = Assert-StandardValidationAdapter `
             -Adapter $adapter `

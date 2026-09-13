@@ -8,7 +8,7 @@
     "adapter": "-AdapterPath <versioned declarative adapter JSON>",
     "artifacts": "-ArtifactsRoot <checkout-external run-owned directory>",
     "identity": ["-SourceRepository", "-SourceRevision", "-BaseRevision", "-EventName", "-CandidateArchivePath", "-CandidateAcquisitionEvidencePath", "-CandidateArchiveSha256", "-AuthorityRevision", "-AuthorityArchivePath", "-AuthoritySnapshotEvidencePath"],
-    "runId": "production runner authenticates the signed package-adapter resolver receipt resolutionRunId before full adapter validation; every production slot must match it; caller-supplied -RunId is development-harness-only and rejected in production",
+    "runId": "trusted supervisor generates a fresh run ID at invocation start; production runner authenticates the signed package-adapter resolver receipt against that exact launch binding before full adapter validation; every production slot must match it; caller-supplied -RunId is development-harness-only and rejected in production",
     "optionalEvidence": ["-SemanticEvidencePath", "-AiReviewEvidencePath", "-HumanApprovalEvidencePath", "-PublishInstallEvidencePath", "-PostInstallEvidencePath"],
     "developmentOnly": "-DevelopmentHarness",
     "lifecycle": "-CompleteLifecycle",
@@ -66,7 +66,8 @@
     "childEnvironment": "clear-inherited-environment; copy-approved-os-runtime-and-STANDARD_VALIDATION-namespace-only",
     "childOutputCapture": {
       "perStreamCharacterQuota": 1048576,
-      "onExceeded": "terminate-owned-process-tree-and-fail-closed"
+      "onExceeded": "terminate-owned-process-tree-and-fail-closed",
+      "diagnostic": "record-separately-from-bounded-stdout-and-stderr-prefixes"
     },
     "semanticTrigger": "effective-trigger-is-caller-addition-OR-typed-analyzer-requirement; record-trigger-decision",
     "timeoutOrCleanupFailure": "non-pass"
