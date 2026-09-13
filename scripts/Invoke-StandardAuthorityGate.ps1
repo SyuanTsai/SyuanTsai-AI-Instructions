@@ -942,11 +942,14 @@ function Test-AuthorityConsumerWorkflowStepRunnable {
     if ($condition -match '^\$\{\{(?<expression>.*)\}\}$') {
         $condition = $Matches.expression.Trim()
     }
-    # Only conditions that are statically runnable on a successful release path
-    # are counted. An arbitrary expression may disable the canonical step for
-    # the release event, so it must fail closed until the workflow is parsed
-    # with a full GitHub Actions expression evaluator.
-    return $condition -match '^(?i:true|success\(\))$'
+    # Filter only conditions that are provably disabled. Runtime-dependent
+    # expressions remain in the executable inventory: a conditional release
+    # surface must not disappear merely because its event/ref is evaluated by
+    # GitHub Actions at run time. An unknown condition is conservatively
+    # treated as potentially runnable; a canonical step explicitly disabled
+    # with false (or another constant-false scalar) is not counted.
+    if ($condition -match '^(?i:false|0|null|''|"")$') { return $false }
+    return $true
 }
 
 function Get-AuthorityConsumerExecutableText {

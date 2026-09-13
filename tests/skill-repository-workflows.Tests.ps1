@@ -393,6 +393,22 @@ jobs:
 '@
             },
             @{
+                Name = 'release-workflow-conditional-release'
+                RelativePath = '.github/workflows/release-conditional.yml'
+                Text = @'
+name: Conditional release without canonical validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
                 Name = 'release-workflow-with-unbound-validation'
                 RelativePath = '.github/workflows/release-unbound.yml'
                 Text = @'
