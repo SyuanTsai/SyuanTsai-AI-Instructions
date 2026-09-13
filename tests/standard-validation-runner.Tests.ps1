@@ -972,7 +972,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 -AuthorityRevision $authorityRevision `
                 -TrustAnchorRoot $trustedRoot `
                 -Context 'test supervisor launch binding'
-            Assert-Equal $validatedBinding.resolutionRunId $productionGuid.ToString() 'The trusted launch binding must carry the supervisor-generated run ID.'
+            Assert-Equal $validatedBinding.resolutionRunId $runIdText 'The trusted launch binding must carry the supervisor-generated N-format run ID.'
             Assert-StandardValidationLaunchBindingUnchanged -Binding $validatedBinding
 
             $spec = [pscustomobject][ordered]@{
@@ -1048,6 +1048,81 @@ $result | ConvertTo-Json -Depth 10 -Compress
             Assert-Equal $validated.toolReceipt.runId.ToString('N') $runIdText 'The full production command validation must preserve the derived run ID.'
         }
         finally { $rsa.Dispose() }
+    }
+
+    # Scenario: The public production runner must consume the exact run-ID format emitted by the authenticated launch-binding helper.
+    # Purpose: Exercise Invoke-StandardValidationRun through the launch-binding handoff before the authority gate, so a format mismatch cannot hide behind helper-only coverage.
+    It 'UnitT02_public_production_path_preserves_authenticated_launch_run_id_format' {
+        $root = Join-Path $TestDrive 'public-production-launch-binding'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        $bindingPath = Join-Path $root 'launch-binding.json'
+        $outputPath = Join-Path $artifactsRoot 'evidence.json'
+        . $script:RunnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+        Write-TestUtf8File -Path $adapterPath -Text '{"schemaVersion":1}'
+        Write-TestUtf8File -Path $bindingPath -Text '{"fixture":true}'
+        $bindingSha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context 'public launch binding fixture'
+        $publicRunGuid = [guid]::NewGuid()
+        $publicRunIdText = $publicRunGuid.ToString('N')
+        $issuedAt = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o')
+        $expiresAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString('o')
+
+        $script:PublicLaunchBindingPath = $bindingPath
+        $script:PublicLaunchBindingSha256 = $bindingSha256
+        $script:PublicLaunchBindingRunIdText = $publicRunIdText
+        $script:PublicLaunchBindingIssuedAt = $issuedAt
+        $script:PublicLaunchBindingExpiresAt = $expiresAt
+        function Assert-StandardValidationSupervisorLaunchBinding {
+            return [pscustomobject][ordered]@{
+                status = 'verified'
+                verified = $true
+                path = $script:PublicLaunchBindingPath
+                sha256 = $script:PublicLaunchBindingSha256
+                resolutionRunId = $script:PublicLaunchBindingRunIdText
+                issuedAt = $script:PublicLaunchBindingIssuedAt
+                expiresAt = $script:PublicLaunchBindingExpiresAt
+            }
+        }
+        function Assert-StandardValidationAuthoritySnapshot {
+            throw 'BLOCKED|public launch-binding handoff reached the authority gate.'
+        }
+
+        $result = Invoke-StandardValidationRun `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -OutputPath $outputPath `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -CandidateArchiveSha256 ('d' * 64) `
+            -SupervisorLaunchBindingPath $bindingPath `
+            -AuthorityRevision ('c' * 40) `
+            -AuthorityArchivePath (Join-Path $root 'authority.zip') `
+            -AuthoritySnapshotEvidencePath (Join-Path $root 'authority.json') `
+            -TrustedToolRoot $trustedRoot `
+            -DevelopmentHarness:$false
+
+        Assert-True (Test-Path -LiteralPath $outputPath -PathType Leaf) 'The public production path must write terminal evidence after the test authority boundary.'
+        $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $outputPath | ConvertFrom-Json
+        Assert-Equal $evidence.state 'BLOCKED' 'The public production path must reach the authority boundary after launch binding authentication.'
+        Assert-Match ([string]$evidence.failure.message) 'public launch-binding handoff reached the authority gate' 'The public production path must not fail on an N-format launch run ID before the authority boundary.'
     }
 
     # Scenario: A child emits more data than the supervisor can safely retain on either redirected stream.

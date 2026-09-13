@@ -939,7 +939,7 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         verified = $true
         path = $bindingPath
         sha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context "$Context file"
-        resolutionRunId = $runId.ToString()
+        resolutionRunId = $runId.ToString('N')
         issuedAt = $issuedAt
         expiresAt = $expiresAt
     }
