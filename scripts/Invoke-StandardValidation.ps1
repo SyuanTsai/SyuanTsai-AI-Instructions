@@ -3939,8 +3939,13 @@ function Invoke-StandardValidationCommandAndRecord {
     $eventStderr = [string]$processResult.stderr
     if ($eventStdout.Length -gt $eventStreamQuota) { $eventStdout = $eventStdout.Substring(0, $eventStreamQuota) }
     if ($eventStderr.Length -gt $eventStreamQuota) { $eventStderr = $eventStderr.Substring(0, $eventStreamQuota) }
-    $processResult.stdout = $eventStdout
-    $processResult.stderr = $eventStderr
+    $boundedProcessResult = [ordered]@{}
+    foreach ($property in $processResult.PSObject.Properties) {
+        $boundedProcessResult[$property.Name] = $property.Value
+    }
+    $boundedProcessResult.stdout = $eventStdout
+    $boundedProcessResult.stderr = $eventStderr
+    $processResult = [pscustomobject]$boundedProcessResult
     if ($null -ne $OutputReservationStream) {
         Assert-StandardValidationOutputReservation `
             -Path $OutputReservationPath `
