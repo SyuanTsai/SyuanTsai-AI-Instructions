@@ -3269,6 +3269,12 @@ function Invoke-StandardValidationProcess {
             $stderr = [string]$stderrCaptureResult.Text
         }
         catch { $stderr = '' }
+        # The bounded reader is the primary memory guard. Normalize the values
+        # once more before evidence serialization so platform-specific stream
+        # decoding can never make a retained prefix exceed the contract quota.
+        $streamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
+        if ($stdout.Length -gt $streamQuota) { $stdout = $stdout.Substring(0, $streamQuota) }
+        if ($stderr.Length -gt $streamQuota) { $stderr = $stderr.Substring(0, $streamQuota) }
         $quotaStreams = @()
         if ($null -ne $stdoutCaptureResult -and [bool]$stdoutCaptureResult.Exceeded) { $quotaStreams += 'stdout' }
         if ($null -ne $stderrCaptureResult -and [bool]$stderrCaptureResult.Exceeded) { $quotaStreams += 'stderr' }
