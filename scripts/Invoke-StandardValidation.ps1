@@ -72,6 +72,7 @@ $script:StandardValidationExitCodes = [ordered]@{
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
+$script:StandardValidationUnixPidNamespaceCapability = $null
 $script:StandardValidationMaxReceiptAgeMinutes = 15
 $script:StandardValidationRepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:StandardValidationAuthorityRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
@@ -220,6 +221,46 @@ public static class StandardValidationProcessControlNative
         int result = kill(-processGroupId, 0);
         if (result == 0) return true;
         return Marshal.GetLastWin32Error() != 3; // ESRCH means the group is gone.
+    }
+}
+'@
+    }
+}
+elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+    if ($null -eq ('StandardValidationUnixProcessControlNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class StandardValidationUnixProcessControlNative
+{
+    private const int PrSetChildSubreaper = 36;
+    private const int WaitNoHang = 1;
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int waitpid(int processId, out int status, int options);
+
+    public static void SetChildSubreaper()
+    {
+        if (prctl(PrSetChildSubreaper, 1, 0, 0, 0) != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "prctl(PR_SET_CHILD_SUBREAPER) failed.");
+        }
+    }
+
+    public static bool TryReapProcess(int processId)
+    {
+        int status;
+        int result = waitpid(processId, out status, WaitNoHang);
+        if (result == processId) return true;
+        if (result == 0) return false;
+        int error = Marshal.GetLastWin32Error();
+        if (error == 3 || error == 10) return false; // ESRCH/ECHILD: no owned child remains.
+        throw new Win32Exception(error, "waitpid failed while reaping an owned Unix child.");
     }
 }
 '@
@@ -2079,7 +2120,9 @@ function Stop-StandardValidationProcessTree {
         [IntPtr] $JobHandle = [IntPtr]::Zero,
         [Parameter(Mandatory = $true)][int] $WaitMilliseconds,
         [string] $PidNamespaceId,
-        [bool] $PidNamespaceRequired = $false
+        [bool] $PidNamespaceRequired = $false,
+        [int] $SubreaperProcessId = 0,
+        [bool] $SubreaperRequired = $false
     )
 
     $known = New-Object 'System.Collections.Generic.HashSet[int]'
@@ -2102,6 +2145,31 @@ function Stop-StandardValidationProcessTree {
             try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
         }
         catch { }
+    }
+    $subreaperLookupFailed = $false
+    $subreaperProcessIds = @()
+    if ($SubreaperRequired -and $SubreaperProcessId -le 0) {
+        $subreaperLookupFailed = $true
+    }
+    elseif ($SubreaperProcessId -gt 0) {
+        try {
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+                -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
+                throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
+            }
+            $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
+        }
+        catch { $subreaperLookupFailed = $true }
+    }
+    foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
+        try {
+            $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+            try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
+        }
+        catch { }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
+        }
     }
     if ($JobHandle -ne [IntPtr]::Zero) {
         try {
@@ -2168,6 +2236,26 @@ function Stop-StandardValidationProcessTree {
                 catch { }
             }
         }
+        if ($SubreaperRequired -or $SubreaperProcessId -gt 0) {
+            try {
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+                    -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
+                    throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
+                }
+                $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
+            }
+            catch { $subreaperLookupFailed = $true; $subreaperProcessIds = @() }
+            foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
+                try {
+                    $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+                    try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
+                }
+                catch { }
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                    try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
+                }
+            }
+        }
         $rootAlive = $false
         if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
         $processGroupAlive = $false
@@ -2183,7 +2271,8 @@ function Stop-StandardValidationProcessTree {
             catch { $processGroupAlive = $true }
         }
         if (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
-            -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0) { return $true }
+            -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
+            -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0) { return $true }
         if ((Get-Date) -ge $deadline) { break }
         Start-Sleep -Milliseconds 50
     } while ($true)
@@ -2206,8 +2295,29 @@ function Stop-StandardValidationProcessTree {
         try { $pidNamespaceProcessIds = @(Get-StandardValidationUnixPidNamespaceProcessIds -NamespaceId $PidNamespaceId) }
         catch { $pidNamespaceLookupFailed = $true; $pidNamespaceProcessIds = @() }
     }
+    if ($SubreaperRequired -or $SubreaperProcessId -gt 0) {
+        try {
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+                -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
+                throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
+            }
+            $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
+        }
+        catch { $subreaperLookupFailed = $true; $subreaperProcessIds = @() }
+        foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
+            try {
+                $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+                try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
+            }
+            catch { }
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+                try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
+            }
+        }
+    }
     return (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
-        -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0)
+        -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
+        -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0)
 }
 
 function Get-StandardValidationUnixProcessGroupLauncher {
@@ -2234,6 +2344,59 @@ function Get-StandardValidationUnixPidNamespaceLauncher {
         }
     }
     return $null
+}
+
+function Get-StandardValidationUnixTrueLauncher {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
+    foreach ($candidate in @('/usr/bin/true', '/bin/true')) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
+            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                return [string]$item.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Test-StandardValidationUnixPidNamespaceCapability {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $false }
+    if ($null -ne $script:StandardValidationUnixPidNamespaceCapability) {
+        return [bool]$script:StandardValidationUnixPidNamespaceCapability
+    }
+    $script:StandardValidationUnixPidNamespaceCapability = $false
+    try {
+        $unshare = Get-StandardValidationUnixPidNamespaceLauncher
+        $trueCommand = Get-StandardValidationUnixTrueLauncher
+        if ([string]::IsNullOrWhiteSpace([string]$unshare) -or [string]::IsNullOrWhiteSpace([string]$trueCommand)) {
+            return $false
+        }
+        $probeInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $probeInfo.FileName = $unshare
+        $probeInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments @(
+            '--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--', $trueCommand
+        )
+        $probeInfo.WorkingDirectory = '/'
+        $probeInfo.UseShellExecute = $false
+        $probeInfo.CreateNoWindow = $true
+        $probeInfo.RedirectStandardOutput = $true
+        $probeInfo.RedirectStandardError = $true
+        $probeInfo.EnvironmentVariables.Clear()
+        $probe = New-Object System.Diagnostics.Process
+        $probe.StartInfo = $probeInfo
+        try {
+            if (-not $probe.Start()) { return $false }
+            [void]$probe.WaitForExit(3000)
+            if (-not $probe.HasExited) {
+                try { [void]$probe.Kill($true) } catch { try { [void]$probe.Kill() } catch { } }
+                return $false
+            }
+            $script:StandardValidationUnixPidNamespaceCapability = [int]$probe.ExitCode -eq 0
+        }
+        finally { $probe.Dispose() }
+    }
+    catch { $script:StandardValidationUnixPidNamespaceCapability = $false }
+    return [bool]$script:StandardValidationUnixPidNamespaceCapability
 }
 
 function Get-StandardValidationUnixPidNamespaceIdentity {
@@ -2370,6 +2533,8 @@ function Invoke-StandardValidationProcess {
     $processGroupLaunch = $false
     $pidNamespaceLaunch = $false
     $pidNamespaceId = $null
+    $subreaperLaunch = $false
+    $subreaperProcessId = 0
     $windowsBootstrapLaunch = $false
     $windowsBootstrapReleasePath = $null
     $unixBootstrapLaunch = $false
@@ -2418,36 +2583,62 @@ function Invoke-StandardValidationProcess {
                 if ([string]::IsNullOrWhiteSpace([string]$unixLauncher)) {
                     throw 'No trusted setsid launcher is available for an owned Unix process group.'
                 }
-                if ([string]::IsNullOrWhiteSpace([string]$unixNamespaceLauncher)) {
-                    throw 'No trusted unshare launcher is available for an owned Unix PID namespace.'
-                }
                 $bootstrapHost = Get-StandardValidationUnixBootstrapHost
                 $unixBootstrapReleasePath = Join-Path $WorkingDirectory ("process-bootstrap-{0}.signal" -f ([guid]::NewGuid().ToString('N')))
                 if (Test-Path -LiteralPath $unixBootstrapReleasePath) {
                     throw 'The owned Unix process bootstrap signal path already exists.'
                 }
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = [string]$unixLauncher
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = ConvertTo-Json -InputObject ([string[]](@('--wait', $Command) + @($Arguments))) -Compress
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $unixBootstrapReleasePath
                 $bootstrapCode = Get-StandardValidationProcessBootstrapCode
                 $encodedBootstrapCode = [Convert]::ToBase64String(([Text.Encoding]::Unicode).GetBytes($bootstrapCode))
-                $launchCommand = [string]$unixNamespaceLauncher
-                # A user+PID namespace makes every candidate descendant belong
-                # to a kernel-owned lifetime boundary. unshare --kill-child
-                # also kills the namespace init if the supervisor is killed.
-                $launchArguments = @(
-                    '--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--',
-                    $bootstrapHost, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                    '-EncodedCommand', $encodedBootstrapCode
-                )
+                if (Test-StandardValidationUnixPidNamespaceCapability) {
+                    if ([string]::IsNullOrWhiteSpace([string]$unixNamespaceLauncher)) {
+                        throw 'The Unix PID namespace capability probe passed without a trusted unshare launcher.'
+                    }
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = [string]$unixLauncher
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = ConvertTo-Json -InputObject ([string[]](@('--wait', $Command) + @($Arguments))) -Compress
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $unixBootstrapReleasePath
+                    $launchCommand = [string]$unixNamespaceLauncher
+                    # A user+PID namespace makes every candidate descendant belong
+                    # to a kernel-owned lifetime boundary. unshare --kill-child
+                    # also kills the namespace init if the supervisor is killed.
+                    $launchArguments = @(
+                        '--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--',
+                        $bootstrapHost, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                        '-EncodedCommand', $encodedBootstrapCode
+                    )
+                    $pidNamespaceLaunch = $true
+                }
+                else {
+                    if (-not (Test-Path -LiteralPath '/proc' -PathType Container)) {
+                        throw 'No kernel process containment boundary is available on this Unix host.'
+                    }
+                    # Some hosted Linux runners expose /proc but deny unshare's
+                    # user/PID namespace operation. PR_SET_CHILD_SUBREAPER keeps
+                    # daemonized descendants attached to this supervisor so the
+                    # cleanup pass can terminate and verify every owned process.
+                    [StandardValidationUnixProcessControlNative]::SetChildSubreaper()
+                    $subreaperProcessId = [int]$PID
+                    $preexistingChildren = @(Get-StandardValidationDescendantProcessIds -RootProcessId $subreaperProcessId)
+                    if ($preexistingChildren.Count -gt 0) {
+                        throw 'The Unix subreaper boundary has pre-existing child processes.'
+                    }
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = [string]$Command
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = if (@($Arguments).Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress }
+                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $unixBootstrapReleasePath
+                    $launchCommand = [string]$unixLauncher
+                    $launchArguments = @(
+                        '--wait', $bootstrapHost, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                        '-EncodedCommand', $encodedBootstrapCode
+                    )
+                    $subreaperLaunch = $true
+                }
                 $processGroupLaunch = $true
-                $pidNamespaceLaunch = $true
                 $unixBootstrapLaunch = $true
             }
             catch {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix PID namespace: $($_.Exception.Message)"; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true
                 }
             }
         }
@@ -2517,6 +2708,8 @@ function Invoke-StandardValidationProcess {
                     -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
                     -PidNamespaceId $pidNamespaceId `
                     -PidNamespaceRequired $true `
+                    -SubreaperProcessId $subreaperProcessId `
+                    -SubreaperRequired $subreaperLaunch `
                     -WaitMilliseconds 5000
             }
         }
@@ -2637,6 +2830,8 @@ function Invoke-StandardValidationProcess {
                         -ProcessGroupId $processGroupId `
                         -PidNamespaceId $pidNamespaceId `
                         -PidNamespaceRequired $pidNamespaceLaunch `
+                        -SubreaperProcessId $subreaperProcessId `
+                        -SubreaperRequired $subreaperLaunch `
                         -WaitMilliseconds 5000
                 }
                 else {
@@ -2651,12 +2846,12 @@ function Invoke-StandardValidationProcess {
             foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
             if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
                 $terminationStatus = 'cancelled'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -WaitMilliseconds 5000)
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break
             }
             if ((Get-Date) -gt $deadline) {
                 $terminationStatus = 'timeout'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -WaitMilliseconds 5000)
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break
             }
             Start-Sleep -Milliseconds 50
@@ -2664,14 +2859,14 @@ function Invoke-StandardValidationProcess {
         if ($protectionSetupFailed) {
             # The failed protection setup was already terminated above; keep a
             # second cleanup pass to catch descendants spawned during startup.
-            $cleanedUp = $cleanedUp -and (Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -WaitMilliseconds 5000)
+            $cleanedUp = $cleanedUp -and (Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
         }
         elseif ($null -ne $terminationStatus) {
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -WaitMilliseconds 5000
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000
         }
         else {
             $process.WaitForExit()
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -WaitMilliseconds 1000
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 1000
         }
         try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch { $stdout = '' }
         try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { $stderr = '' }

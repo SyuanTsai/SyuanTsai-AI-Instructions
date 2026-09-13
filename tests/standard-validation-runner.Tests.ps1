@@ -641,6 +641,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $runnerSource 'Get-StandardValidationDescendantProcessIds|Kill\(\$true\)' 'Child cleanup must account for the complete owned process tree.'
         Assert-Match $runnerSource 'unshare|--pid|--fork|--kill-child' 'Unix child execution must use a kernel-enforced PID namespace boundary.'
         Assert-Match $runnerSource 'Get-StandardValidationUnixPidNamespaceProcessIds|PidNamespaceRequired' 'Unix cleanup must verify the owned PID namespace is empty before passing an event.'
+        Assert-Match $runnerSource 'PR_SET_CHILD_SUBREAPER|SetChildSubreaper|SubreaperRequired' 'Restricted Unix hosts must use a kernel-enforced subreaper boundary and verify its descendants.'
         Assert-Match $runnerSource 'EnvironmentVariables\.Clear\(\)' 'Child processes must not inherit the supervisor environment wholesale.'
         Assert-Match $runnerSource 'New-StandardValidationOutputReservation' 'The runner must reserve the final evidence path.'
         Assert-Match $runnerSource 'Get-StandardValidationSemanticRequirement' 'Semantic trigger decisions must include typed analyzer requirements.'

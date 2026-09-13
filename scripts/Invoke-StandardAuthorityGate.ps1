@@ -914,6 +914,41 @@ function Remove-AuthorityConsumerShellComments {
     return $Line
 }
 
+function Test-AuthorityConsumerWorkflowStepRunnable {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines,
+        [Parameter(Mandatory = $true)][int] $StepStartIndex,
+        [Parameter(Mandatory = $true)][int] $StepEndIndex,
+        [Parameter(Mandatory = $true)][int] $StepIndent
+    )
+
+    $conditions = New-Object 'System.Collections.Generic.List[string]'
+    $stepLine = [string]$Lines[$StepStartIndex]
+    $inlineIf = [regex]::Match($stepLine, '^\s*-\s*(?:"if"|''if''|if)\s*:\s*(?<value>.*)$')
+    if ($inlineIf.Success) { [void]$conditions.Add([string]$inlineIf.Groups['value'].Value) }
+    for ($index = $StepStartIndex + 1; $index -le $StepEndIndex; $index++) {
+        $line = [string]$Lines[$index]
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        $indent = ([regex]::Match($line, '^[ \t]*')).Value.Length
+        if ($indent -ne ($StepIndent + 2)) { continue }
+        $ifMatch = [regex]::Match($line, '^[ \t]*(?:"if"|''if''|if)\s*:\s*(?<value>.*)$')
+        if ($ifMatch.Success) { [void]$conditions.Add([string]$ifMatch.Groups['value'].Value) }
+    }
+    if ($conditions.Count -eq 0) { return $true }
+    if ($conditions.Count -ne 1) { return $false }
+
+    $condition = (Remove-AuthorityConsumerShellComments -Line $conditions[0]).Trim()
+    if ([string]::IsNullOrWhiteSpace($condition) -or $condition -match '^[|>][+-]?\s*$') { return $false }
+    if ($condition -match '^\$\{\{(?<expression>.*)\}\}$') {
+        $condition = $Matches.expression.Trim()
+    }
+    # Only conditions that are statically runnable on a successful release path
+    # are counted. An arbitrary expression may disable the canonical step for
+    # the release event, so it must fail closed until the workflow is parsed
+    # with a full GitHub Actions expression evaluator.
+    return $condition -match '^(?i:true|success\(\))$'
+}
+
 function Get-AuthorityConsumerExecutableText {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -924,7 +959,45 @@ function Get-AuthorityConsumerExecutableText {
         $line = [string]$lines[$index]
         if ($line -notmatch '^\s*(?:-\s+)?(?:"run"|''run''|run|"uses"|''uses''|uses)\s*:\s*(?<value>.*)$') { continue }
         $keyIndent = ([regex]::Match($line, '^\s*')).Value.Length
-        $value = (Remove-AuthorityConsumerShellComments -Line ([string]$Matches.value)).Trim()
+        $valueRaw = [string]$Matches.value
+        $stepStartIndex = -1
+        $stepIndent = -1
+        for ($backward = $index; $backward -ge 0; $backward--) {
+            $candidateLine = [string]$lines[$backward]
+            if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+            $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+            if ($candidateMatch.Success -and $candidateMatch.Groups['indent'].Value.Length -le $keyIndent) {
+                $stepStartIndex = $backward
+                $stepIndent = $candidateMatch.Groups['indent'].Value.Length
+                break
+            }
+            $candidateIndent = ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length
+            if ($candidateIndent -lt $keyIndent) { break }
+        }
+        $stepEndIndex = $lines.Count - 1
+        if ($stepStartIndex -ge 0) {
+            for ($forward = $stepStartIndex + 1; $forward -lt $lines.Count; $forward++) {
+                $candidateLine = [string]$lines[$forward]
+                if ($candidateLine -match '^\s*$' -or $candidateLine -match '^\s*#') { continue }
+                $candidateMatch = [regex]::Match($candidateLine, '^(?<indent>[ \t]*)-\s*(?<rest>.*)$')
+                if (($candidateMatch.Success -and $candidateMatch.Groups['indent'].Value.Length -eq $stepIndent) -or
+                    (-not $candidateMatch.Success -and ([regex]::Match($candidateLine, '^[ \t]*')).Value.Length -lt $stepIndent)) {
+                    $stepEndIndex = $forward - 1
+                    break
+                }
+            }
+            if (-not (Test-AuthorityConsumerWorkflowStepRunnable `
+                        -Lines $lines `
+                        -StepStartIndex $stepStartIndex `
+                        -StepEndIndex $stepEndIndex `
+                        -StepIndent $stepIndent)) {
+                if ((Remove-AuthorityConsumerShellComments -Line $valueRaw).Trim() -match '^[|>][+-]?\s*$') {
+                    $index = $stepEndIndex
+                }
+                continue
+            }
+        }
+        $value = (Remove-AuthorityConsumerShellComments -Line $valueRaw).Trim()
         if ($value -match '^[|>][+-]?\s*$') {
             $blockLines = New-Object 'System.Collections.Generic.List[string]'
             $nestedIndex = $index + 1
@@ -1142,7 +1215,8 @@ function Get-AuthorityConsumerReleaseAffectingMatch {
     # docker/build-push-action can publish when its push input is true. The
     # executable extractor intentionally keeps action uses values but not
     # arbitrary with: fields, so classify every invocation conservatively.
-    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|--mirror\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|docker/build-push-action@[A-Za-z0-9_./-]+|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
+    # `docker buildx build --push` is the equivalent CLI publish surface.
+    $releasePattern = '(?im)(?<![A-Za-z0-9_.-])(?:gh\s+release\b|git\s+tag\b|git\s+push\b[^\r\n]*(?:--tags?\b|--follow-tags\b|--mirror\b|refs/tags/)|(?:npm|pnpm|yarn|cargo)\s+(?:publish\b|run\s+(?:deploy|release|publish)\b)|dotnet\s+(?:publish\b|nuget\s+push\b)|twine\s+upload\b|docker\s+push\b|docker\s+buildx\s+build\b[^\r\n]*\s--push(?:=(?!false(?:\b|$))[^\s;&|]*)?(?=\s|$)|docker/build-push-action@[A-Za-z0-9_./-]+|helm\s+push\b|semantic-release\b|(?:make|just|task)\s+(?:deploy|release|publish)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]*(?:release|publish|deploy)[A-Za-z0-9_.-]*(?:@[A-Za-z0-9_./-]+)?|[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+/)*(?:ship|release|publish|deploy)(?:/[A-Za-z0-9_.-]+)?@[A-Za-z0-9][A-Za-z0-9_./-]*)(?![A-Za-z0-9_.-])'
     # A non-option argument after git push may be a remote, a direct refspec,
     # or a configured shorthand whose branch-vs-tag meaning cannot be proven
     # from workflow text. Classify it as release-affecting and fail closed;

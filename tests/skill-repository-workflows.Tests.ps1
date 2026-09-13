@@ -376,6 +376,23 @@ jobs:
 '@
             },
             @{
+                Name = 'release-workflow-disables-canonical-step'
+                RelativePath = '.github/workflows/release-disabled-canonical.yml'
+                Text = @'
+name: Release with disabled canonical validation
+on:
+  push:
+    tags:
+      - v*
+jobs:
+  release:
+    steps:
+      - if: ${{ false }}
+        run: ./scripts/Validate.ps1
+      - run: gh release create $env:GITHUB_REF_NAME
+'@
+            },
+            @{
                 Name = 'release-workflow-with-unbound-validation'
                 RelativePath = '.github/workflows/release-unbound.yml'
                 Text = @'
