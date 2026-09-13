@@ -10,4 +10,4 @@
 - 依 Testing 規則判斷變更是否需要測試，以及單元測試、整合測試或其他既有驗證方式是否適合。
 - 若執行或引用測試及 coverage，優先採用 Repository 或使用者指定的命令、計算方式與門檻，並回報命令、量測範圍、排除項目及結果。Repository 未定義門檻時，回報實際數值及未涵蓋的高風險行為，作為風險判斷依據。
 - Review 涉及 EF、SQL、query 或資料存取效能時，載入 `.codex/AI-Rules/Database.md`。效能 finding 應說明尚未解決的資料載入或 round-trip 根因及其實際影響，而不只指出查詢寫法不同。 <!-- ai-invariant:code-review.database-route -->
-- Review 預設只提供審查結果；使用者明確要求修正時，再進入修改與驗證流程。 <!-- ai-invariant:code-review.review-only-default -->
+- 使用者只要求 Review 時，預設只提供審查結果；已授權的實作任務中處理 PR findings，依 `.codex/AI-Rules/DevelopmentWorkflow.md` 主動修正、驗證、回覆證據並完成處置，不把每輪 feedback 視為新的修正授權。 <!-- ai-invariant:code-review.review-only-default -->

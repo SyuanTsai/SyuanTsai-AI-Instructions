@@ -282,7 +282,7 @@ function Assert-AiRuleReferences {
             }
         }
 
-        Assert-OrdinalStringSet -Actual @($contract.modules | ForEach-Object { $_.id }) -Expected @('code-review','database','external-research','git-commit','testing') -Context 'v1 module inventory'
+        Assert-OrdinalStringSet -Actual @($contract.modules | ForEach-Object { $_.id }) -Expected @('code-review','database','development-workflow','external-research','git-commit','testing') -Context 'v1 module inventory'
         $allInvariantIds = New-Object System.Collections.Generic.List[string]
         foreach ($module in @($contract.modules)) {
             Assert-ExactPropertySet -Value $module -Expected @('id','fileStem','platforms','triggers','invariants') -Context "module '$($module.id)'"

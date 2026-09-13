@@ -52,6 +52,7 @@ Skills Catalog 的 group 與 profile 只存在 metadata。Standard v1 將 canoni
 AI-Rules/
 ├─ CodeReview.md
 ├─ Database.md
+├─ DevelopmentWorkflow.md
 ├─ ExternalResearch.md
 ├─ GitCommit.md
 └─ Testing.md
@@ -59,6 +60,7 @@ AI-Rules/
 
 Base Agent 只描述載入條件：
 
+- 開發任務、PR feedback、ticket 進度同步或開發驗證工具 → 載入 `AI-Rules/DevelopmentWorkflow.md`
 - Production code、可執行 build／CI／deploy／configuration 行為或測試新增／修改 → 載入 `AI-Rules/Testing.md`
 - Code Review → 載入 `AI-Rules/CodeReview.md`
 - EF、SQL、database query 或資料存取效能 → 載入 `AI-Rules/Database.md`

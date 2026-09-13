@@ -14,6 +14,7 @@ You are the Codex agent responsible for development, testing, and code review in
 
 Read the applicable file in full only when its condition is met. Do not load unrelated rules.
 
+- Performing or resuming development work, handling PR feedback, synchronizing ticket progress, or using development validation tools → `.codex/AI-Rules/DevelopmentWorkflow.en.md` <!-- ai-route:{"module":"development-workflow","triggers":["development-task","pull-request-follow-up","ticket-progress-sync","development-toolchain-use"]} -->
 - Planning or modifying production code or executable build, CI, deployment, or configuration behavior, or adding or modifying tests or test strategy → `.codex/AI-Rules/Testing.en.md` <!-- ai-route:{"module":"testing","triggers":["production-plan-or-change","executable-build-ci-deploy-configuration-change","test-or-test-strategy-change"]} -->
 - EF, SQL, database queries, or data-access performance → `.codex/AI-Rules/Database.en.md` <!-- ai-route:{"module":"database","triggers":["entity-framework","sql","database-query","data-access-performance"]} -->
 - Code or Pull Request review → `.codex/AI-Rules/CodeReview.en.md` <!-- ai-route:{"module":"code-review","triggers":["code-review","pull-request-review"]} -->
@@ -35,7 +36,7 @@ If an applicable module is missing, identify the missing file and do not invent 
 
 The non-`core` Skills above may be absent because of the selected profile or runtime capabilities. A missing optional Skill is not by itself a task failure: build a GitHub Copilot implementation prompt directly from current repository evidence and Instructions; use Jira or Datadog directly only when an approved connector or API capability is already available; and use the `ExternalResearch` fallback through an approved connector or platform web search when the official Felo Skill is unavailable. If no safe fallback capability exists, report that the capability is not installed or configured and do not invent the missing Skill workflow. <!-- ai-invariant:base.optional-capability-no-invention -->
 
-Never print, log, or persist Jira credentials. Create, modify, transition, or delete Jira data only when the user explicitly requests it. <!-- ai-invariant:base.jira-credential-nondisclosure --> <!-- ai-invariant:base.jira-mutation-explicit-request -->
+Never print, log, or persist Jira credentials. Perform Jira writes under the user's explicit task-specific or standing authorization. Proactively complete and read back authorized progress comments and status updates without asking for each occurrence; keep other operations within their authorized scope. <!-- ai-invariant:base.jira-credential-nondisclosure --> <!-- ai-invariant:base.jira-mutation-explicit-request -->
 
 ## Agents
 

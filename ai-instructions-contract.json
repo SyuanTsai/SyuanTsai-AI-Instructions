@@ -42,6 +42,24 @@
   ],
   "modules": [
     {
+      "id": "development-workflow",
+      "fileStem": "DevelopmentWorkflow",
+      "platforms": ["codex", "github-copilot"],
+      "triggers": ["development-task", "pull-request-follow-up", "ticket-progress-sync", "development-toolchain-use"],
+      "invariants": [
+        "development-workflow.scope-and-authority",
+        "development-workflow.complete-feedback-inventory",
+        "development-workflow.finding-evidence-loop",
+        "development-workflow.final-head-review",
+        "development-workflow.ticket-progress-sync",
+        "development-workflow.ticket-authority-and-verification",
+        "development-workflow.latest-stable-toolchain",
+        "development-workflow.frozen-run-evidence",
+        "development-workflow.version-boundaries",
+        "development-workflow.handoff-continuity"
+      ]
+    },
+    {
       "id": "code-review",
       "fileStem": "CodeReview",
       "platforms": [
