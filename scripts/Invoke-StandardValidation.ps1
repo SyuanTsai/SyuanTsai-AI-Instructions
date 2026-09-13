@@ -847,7 +847,8 @@ function Assert-StandardValidationSupervisorLaunchBinding {
     Assert-StandardValidationOutsideRoot -Path $bindingPath -Root $CandidateRoot -Context "$Context path"
     Assert-StandardValidationOutsideRoot -Path $bindingPath -Root $ArtifactsRoot -Context "$Context path"
     Assert-StandardValidationRegularFile -Path $bindingPath -Context $Context
-    $binding = Get-StandardValidationJson -Path $bindingPath -Context $Context
+    $bindingSnapshot = Get-StandardValidationJsonSnapshot -Path $bindingPath -Context $Context
+    $binding = $bindingSnapshot.value
     Assert-StandardValidationExactPropertySet -Object $binding -Expected @(
         'schemaVersion', 'evidenceType', 'status', 'candidateRoot', 'adapterPath',
         'artifactsRoot', 'outputPath', 'trustedToolRoot', 'sourceRepository',
@@ -976,7 +977,7 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         status = 'verified'
         verified = $true
         path = $bindingPath
-        sha256 = Get-StandardValidationFileSha256 -Path $bindingPath -Context "$Context file"
+        sha256 = [string]$bindingSnapshot.sha256
         resolutionRunId = $runId.ToString('N')
         issuedAt = $issuedAt
         expiresAt = $expiresAt
@@ -3447,7 +3448,8 @@ function Write-StandardValidationJsonReserved {
 function Register-StandardValidationEvidenceArtifact {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string] $Context
+        [Parameter(Mandatory = $true)][string] $Context,
+        [string] $ExpectedSha256
     )
 
     if ($null -eq $script:StandardValidationEvidenceArtifactLedger) {
@@ -3455,9 +3457,16 @@ function Register-StandardValidationEvidenceArtifact {
     }
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
     Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+    $actualSha256 = Get-StandardValidationFileSha256 -Path $fullPath -Context $Context
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+        Assert-StandardValidationSha256 -Value $ExpectedSha256 -Context "$Context expected hash"
+        if ($actualSha256 -cne $ExpectedSha256) {
+            throw "FAILED|Previously authenticated validation evidence artifact '$Context' changed before registration."
+        }
+    }
     [void]$script:StandardValidationEvidenceArtifactLedger.Add([pscustomobject][ordered]@{
         path = $fullPath
-        sha256 = Get-StandardValidationFileSha256 -Path $fullPath -Context $Context
+        sha256 = $actualSha256
         context = $Context
     })
 }
@@ -4920,12 +4929,15 @@ function Invoke-StandardValidationRun {
                 -AuthorityRevision $AuthorityRevision `
                 -TrustAnchorRoot $trustAnchorRootFull `
                 -Context 'trusted supervisor launch binding'
+            $runId = [guid]::ParseExact([string]$launchBinding.resolutionRunId, 'N')
             $adapterSha256AfterBinding = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter launch handoff revalidation'
             if ($adapterSha256AfterBinding -cne $adapterSnapshotSha256) {
                 throw 'BLOCKED|Adapter changed during the trusted supervisor launch handoff.'
             }
-            $runId = [guid]::ParseExact([string]$launchBinding.resolutionRunId, 'N')
-            [void](Register-StandardValidationEvidenceArtifact -Path $launchBinding.path -Context 'trusted supervisor launch binding')
+            [void](Register-StandardValidationEvidenceArtifact `
+                -Path $launchBinding.path `
+                -ExpectedSha256 ([string]$launchBinding.sha256) `
+                -Context 'trusted supervisor launch binding')
             $script:StandardValidationLaunchBinding = $launchBinding
         }
         if ($DevelopmentHarness) {
