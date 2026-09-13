@@ -631,6 +631,16 @@ function Get-StandardValidationTextSha256 {
     finally { $sha.Dispose() }
 }
 
+function Get-StandardValidationBytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
 function Get-StandardValidationJson {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
 
@@ -641,6 +651,33 @@ function Get-StandardValidationJson {
         return Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
     }
     catch { throw "INVALID|$Context is not parseable JSON: $($_.Exception.Message)" }
+}
+
+function Get-StandardValidationJsonSnapshot {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "INVALID|$Context JSON file is missing: $Path"
+    }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $sha256 = Get-StandardValidationBytesSha256 -Bytes $bytes
+        $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        $text = $utf8.GetString($bytes)
+        if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+            $text = $text.Substring(1)
+        }
+        $value = ConvertFrom-Json -InputObject $text
+        return [pscustomobject][ordered]@{
+            bytes = $bytes
+            sha256 = $sha256
+            value = $value
+        }
+    }
+    catch {
+        if ($_.Exception.Message -like 'INVALID|*') { throw }
+        throw "INVALID|$Context could not be read or parsed as JSON: $($_.Exception.Message)"
+    }
 }
 
 function Assert-StandardValidationRegularFile {
@@ -792,6 +829,7 @@ function Assert-StandardValidationSupervisorLaunchBinding {
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $AdapterPath,
+        [Parameter(Mandatory = $true)][string] $AdapterSha256,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $OutputPath,
         [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
@@ -876,9 +914,9 @@ function Assert-StandardValidationSupervisorLaunchBinding {
     }
     $bindingAdapterSha256 = Get-StandardValidationRequiredProperty -Object $binding -Name 'adapterSha256' -Context $Context
     Assert-StandardValidationSha256 -Value $bindingAdapterSha256 -Context "$Context adapterSha256"
-    $actualAdapterSha256 = Get-StandardValidationFileSha256 -Path $AdapterPath -Context "$Context adapter"
-    if ([string]$bindingAdapterSha256 -cne $actualAdapterSha256) {
-        throw "BLOCKED|$Context is bound to a different adapter."
+    Assert-StandardValidationSha256 -Value $AdapterSha256 -Context "$Context adapter snapshot"
+    if ([string]$bindingAdapterSha256 -cne $AdapterSha256) {
+        throw "BLOCKED|$Context is bound to a different adapter snapshot."
     }
 
     $issuedAt = Assert-StandardValidationFreshTimestamp `
@@ -4782,6 +4820,8 @@ function Invoke-StandardValidationRun {
     $candidateInventory = $null
     $candidateAcquisition = $null
     $adapter = $null
+    $adapterSnapshot = $null
+    $adapterSnapshotSha256 = $null
     $adapterResult = $null
     $contractResult = $null
     $authorityEvidence = $null
@@ -4853,7 +4893,9 @@ function Invoke-StandardValidationRun {
                 [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $trustAnchorRootFull)
             }
         }
-        $adapter = Get-StandardValidationJson -Path $adapterFull -Context 'standard validation adapter'
+        $adapterSnapshot = Get-StandardValidationJsonSnapshot -Path $adapterFull -Context 'standard validation adapter'
+        $adapter = $adapterSnapshot.value
+        $adapterSnapshotSha256 = [string]$adapterSnapshot.sha256
         if (-not $DevelopmentHarness) {
             if ([string]::IsNullOrWhiteSpace($SupervisorLaunchBindingPath)) {
                 throw 'INVALID|Production validation requires SupervisorLaunchBindingPath from the trusted supervisor.'
@@ -4866,6 +4908,7 @@ function Invoke-StandardValidationRun {
                 -Path $SupervisorLaunchBindingPath `
                 -CandidateRoot $originalCandidateRoot `
                 -AdapterPath $adapterFull `
+                -AdapterSha256 $adapterSnapshotSha256 `
                 -ArtifactsRoot $artifactRootFull `
                 -OutputPath $outputFull `
                 -TrustedToolRoot $trustedToolRootFull `
@@ -4877,6 +4920,10 @@ function Invoke-StandardValidationRun {
                 -AuthorityRevision $AuthorityRevision `
                 -TrustAnchorRoot $trustAnchorRootFull `
                 -Context 'trusted supervisor launch binding'
+            $adapterSha256AfterBinding = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter launch handoff revalidation'
+            if ($adapterSha256AfterBinding -cne $adapterSnapshotSha256) {
+                throw 'BLOCKED|Adapter changed during the trusted supervisor launch handoff.'
+            }
             $runId = [guid]::ParseExact([string]$launchBinding.resolutionRunId, 'N')
             [void](Register-StandardValidationEvidenceArtifact -Path $launchBinding.path -Context 'trusted supervisor launch binding')
             $script:StandardValidationLaunchBinding = $launchBinding
@@ -4967,7 +5014,7 @@ function Invoke-StandardValidationRun {
         $candidateArchiveSha256ForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.archiveSha256 }
         $candidateAcquisitionEvidencePathForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.evidencePath }
         $candidateAcquisitionEvidenceSha256ForChildren = if ($DevelopmentHarness) { $null } else { [string]$candidateAcquisition.evidenceSha256 }
-        $expectedAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'adapter'
+        $expectedAdapterSha256 = $adapterSnapshotSha256
         $candidateId = Get-StandardValidationTextSha256 -Value (
             "$SourceRepository`n$SourceRevision`n$BaseRevision`n$EventName`n$expectedCandidateContentSha256`n$expectedAdapterSha256`n$CandidateArchiveSha256"
         )
