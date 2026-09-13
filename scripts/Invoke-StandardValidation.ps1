@@ -3931,6 +3931,16 @@ function Invoke-StandardValidationCommandAndRecord {
         -Environment $environment `
         -TimeoutSeconds $TimeoutSeconds `
         -CancellationPath $CancellationPath
+    # Keep the raw event's process object bounded as well as the capture
+    # implementation. This is the final serialization boundary and prevents
+    # any platform-specific result mutation from exceeding the contract quota.
+    $eventStreamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
+    $eventStdout = [string]$processResult.stdout
+    $eventStderr = [string]$processResult.stderr
+    if ($eventStdout.Length -gt $eventStreamQuota) { $eventStdout = $eventStdout.Substring(0, $eventStreamQuota) }
+    if ($eventStderr.Length -gt $eventStreamQuota) { $eventStderr = $eventStderr.Substring(0, $eventStreamQuota) }
+    $processResult.stdout = $eventStdout
+    $processResult.stderr = $eventStderr
     if ($null -ne $OutputReservationStream) {
         Assert-StandardValidationOutputReservation `
             -Path $OutputReservationPath `
