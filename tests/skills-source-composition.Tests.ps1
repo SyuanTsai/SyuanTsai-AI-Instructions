@@ -56,6 +56,21 @@ Describe 'Skills source composition' {
         Test-Path (Join-Path $destination '.agents/skills/skill-b/SKILL.md') | Should Be $true
         Test-Path (Join-Path $destination '.agents/skills/legacy-skill') | Should Be $false
     }
+
+    # Scenario: A resolved Skill carries the v2 explicit runtime target after canonical source acquisition.
+    # Purpose: Ensure composition writes only to the declared flat runtime projection.
+    It 'UnitT11_composes_canonical_source_using_the_explicit_runtime_target' {
+        $instructionRoot = Join-Path $TestDrive 'canonical-instructions'
+        New-Item -ItemType Directory -Force -Path $instructionRoot | Out-Null
+        $source = New-TestSkill (Join-Path $TestDrive 'canonical-source') 'skill-a' 'canonical source'
+        $source | Add-Member -NotePropertyName targetPath -NotePropertyValue '.agents/skills/skill-a'
+        $destination = Join-Path $TestDrive 'canonical-composed'
+
+        New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @($source) -DestinationRoot $destination | Out-Null
+
+        Test-Path -LiteralPath (Join-Path $destination '.agents/skills/skill-a/SKILL.md') -PathType Leaf | Should Be $true
+    }
+
     # Scenario: Selection resolves to no Skills while the instruction source still contains an old bundled Skill.
     # Purpose: Produce a valid instruction-only source with an empty .agents/skills directory.
     It 'UnitT20_allows_instruction_only_composition_with_no_selected_skills' {

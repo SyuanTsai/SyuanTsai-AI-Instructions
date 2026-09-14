@@ -148,7 +148,12 @@ function New-ComposedBootstrapSource {
             throw "Resolved Skill '$skillId' is missing SKILL.md before composition."
         }
 
-        $targetSkillRoot = Join-Path $skillsRoot $skillId
+        $targetPathProperty = $skill.PSObject.Properties['targetPath']
+        $targetPath = if ($null -ne $targetPathProperty) { [string]$targetPathProperty.Value } else { ".agents/skills/$skillId" }
+        if ($targetPath -cne ".agents/skills/$skillId") {
+            throw "Resolved Skill '$skillId' has an unsafe runtime target path: $targetPath"
+        }
+        $targetSkillRoot = Join-Path $destination ($targetPath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
         if (Test-Path -LiteralPath (Join-Path $skillRoot '.ai-instructions-licenses')) { throw "Skill source already owns the license delivery namespace: $skillId" }
         $sourceRoot = [IO.Path]::GetFullPath([string]$skill.sourceRootPath).TrimEnd([char[]]@('\','/'))
         $artifactPaths = @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force | ForEach-Object {

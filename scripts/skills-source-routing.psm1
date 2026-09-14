@@ -62,6 +62,20 @@ function Resolve-SkillsSourcePlan {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $SkillIds
     )
 
+    $catalogVersionProperty = $Catalog.PSObject.Properties['schemaVersion']
+    $lockVersionProperty = $Lock.PSObject.Properties['schemaVersion']
+    if ($null -ne $catalogVersionProperty -and $catalogVersionProperty.Value -isnot [int] -and $catalogVersionProperty.Value -isnot [long]) {
+        throw 'Skills Catalog schemaVersion must be an integer.'
+    }
+    if ($null -ne $lockVersionProperty -and $lockVersionProperty.Value -isnot [int] -and $lockVersionProperty.Value -isnot [long]) {
+        throw 'Skills Catalog lock schemaVersion must be an integer.'
+    }
+    $catalogVersion = if ($null -eq $catalogVersionProperty) { 1 } else { [int64]$catalogVersionProperty.Value }
+    $lockVersion = if ($null -eq $lockVersionProperty) { 1 } else { [int64]$lockVersionProperty.Value }
+    if ($catalogVersion -notin @(1,2)) { throw "Unsupported Skills Catalog schemaVersion '$catalogVersion'." }
+    if ($lockVersion -notin @(1,2)) { throw "Unsupported Skills Catalog lock schemaVersion '$lockVersion'." }
+    if ($catalogVersion -ne $lockVersion) { throw "Skills Catalog lock schemaVersion '$lockVersion' does not match Skills Catalog schemaVersion '$catalogVersion'." }
+
     $catalogSourcesById = @{}
     foreach ($source in @(Get-RoutingProperty -Object $Catalog -Name 'sources' -Context 'Skills Catalog')) {
         $sourceId = [string] (Get-RoutingProperty -Object $source -Name 'id' -Context 'Skills Catalog source')
@@ -135,9 +149,24 @@ function Resolve-SkillsSourcePlan {
 
         $catalogSource = Get-RoutingProperty -Object $catalogSkill -Name 'source' -Context "Skills Catalog Skill '$skillId'"
         $sourceId = [string] (Get-RoutingProperty -Object $catalogSource -Name 'sourceId' -Context "Skills Catalog Skill '$skillId' source")
-        $sourcePath = [string] (Get-RoutingProperty -Object $catalogSource -Name 'path' -Context "Skills Catalog Skill '$skillId' source")
+        $sourcePath = if ($catalogVersion -eq 2) {
+            [string] (Get-RoutingProperty -Object $catalogSource -Name 'sourcePath' -Context "Skills Catalog Skill '$skillId' source")
+        }
+        else {
+            [string] (Get-RoutingProperty -Object $catalogSource -Name 'path' -Context "Skills Catalog Skill '$skillId' source")
+        }
+        $targetPath = if ($catalogVersion -eq 2) {
+            [string] (Get-RoutingProperty -Object $catalogSource -Name 'targetPath' -Context "Skills Catalog Skill '$skillId' source")
+        }
+        else {
+            ".agents/skills/$skillId"
+        }
         Assert-RoutingStableId -Value $sourceId -Context "Skills Catalog Skill '$skillId' sourceId"
         Assert-RoutingSafeRepositoryPath -Value $sourcePath -Context "Skill '$skillId' source"
+        Assert-RoutingSafeRepositoryPath -Value $targetPath -Context "Skill '$skillId' target"
+        if ($catalogVersion -eq 2 -and ($sourcePath -cne "skills/$skillId" -or $targetPath -cne ".agents/skills/$skillId")) {
+            throw "Skills Catalog v2 Skill '$skillId' source/target mapping is not canonical."
+        }
 
         if (-not $catalogSourcesById.ContainsKey($sourceId)) {
             throw "Skills Catalog Skill '$skillId' references unknown source '$sourceId'."
@@ -149,7 +178,13 @@ function Resolve-SkillsSourcePlan {
         $lockedSkill = $lockedSkillsById[$skillId]
         $lockedSourceId = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'")
         $lockedSourcePath = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'")
-        if ($lockedSourceId -cne $sourceId -or $lockedSourcePath -cne $sourcePath) {
+        $lockedTargetPath = if ($lockVersion -eq 2) {
+            [string] (Get-RoutingProperty -Object $lockedSkill -Name 'targetPath' -Context "Skills Catalog lock Skill '$skillId'")
+        }
+        else {
+            ".agents/skills/$skillId"
+        }
+        if ($lockedSourceId -cne $sourceId -or $lockedSourcePath -cne $sourcePath -or $lockedTargetPath -cne $targetPath) {
             throw "Skills Catalog lock source does not match catalog Skill '$skillId'."
         }
 
@@ -158,6 +193,8 @@ function Resolve-SkillsSourcePlan {
             id = $skillId
             sourceId = $sourceId
             sourcePath = $sourcePath
+            targetPath = $targetPath
+            sourceLayoutVersion = $catalogVersion
             contentSha256 = [string] (Get-RoutingProperty -Object $lockedSkill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'")
         }
     }

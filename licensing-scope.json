@@ -172,6 +172,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/managed-manifest-v3.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/examples/runtime-bundle-v2.example.json",
       "license": "Apache-2.0"
     },
@@ -180,11 +184,23 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/skills-catalog-lock-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/examples/skills-catalog.example.json",
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/skills-catalog-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/examples/user-skills-managed-manifest-v1.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/user-skills-managed-manifest-v2.example.json",
       "license": "Apache-2.0"
     },
     {
@@ -200,11 +216,19 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/schemas/managed-manifest-v3.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/schemas/runtime-bundle-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
       "path": "catalog/schemas/skills-catalog-lock.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/skills-catalog-lock-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -216,7 +240,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/schemas/skills-catalog-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/schemas/user-skills-managed-manifest-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/user-skills-managed-manifest-v2.schema.json",
       "license": "Apache-2.0"
     },
     {

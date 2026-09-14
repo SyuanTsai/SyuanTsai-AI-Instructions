@@ -7,6 +7,10 @@ $script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skil
 $script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
 $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
 $script:UserManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v1.example.json'
+$script:CatalogV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v2.example.json'
+$script:LockV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v2.example.json'
+$script:ManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v3.example.json'
+$script:UserManifestV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json'
 $script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
 $script:FixtureRoot = Join-Path $PSScriptRoot 'fixtures\skills-catalog-contract'
 
@@ -72,7 +76,7 @@ function Get-TestRawSha256 {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 8
+        $schemaFiles.Count | Should Be 12
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -117,6 +121,89 @@ function Get-TestRawSha256 {
         $expectedProfileIds = @('ai-memory', 'atlassian', 'code-collaboration', 'core', 'external-research', 'knowledge-capture', 'observability')
         $catalogProfileIds = @($catalog.profiles | Select-Object -ExpandProperty id | Sort-Object)
         ($catalogProfileIds -join "`n") | Should Be ($expectedProfileIds -join "`n")
+    }
+
+    # Scenario: Version 2 Catalog/Lock and version 3 manifests separate canonical source paths from runtime targets.
+    # Purpose: Establish the executable contract before production pins migrate away from the legacy layout.
+    It 'UnitT11_accepts_the_versioned_canonical_source_and_runtime_target_examples' {
+        $catalogV2 = Import-SkillsCatalogJson -Path $script:CatalogV2Example -DocumentName 'Skills Catalog v2'
+        $lockV2 = Import-SkillsCatalogJson -Path $script:LockV2Example -DocumentName 'Skills Catalog lock v2'
+        $manifestV3 = Import-SkillsCatalogJson -Path $script:ManifestV3Example -DocumentName 'managed manifest v3'
+        $userManifestV2 = Import-SkillsCatalogJson -Path $script:UserManifestV2Example -DocumentName 'user Skills managed manifest v2'
+
+        { Assert-SkillsCatalogV2 -Catalog $catalogV2 } | Should Not Throw
+        { Assert-SkillsCatalogLockV2 -Lock $lockV2 -Catalog $catalogV2 } | Should Not Throw
+        { Assert-ManagedManifest -Manifest $manifestV3 } | Should Not Throw
+        { Assert-UserSkillsManagedManifest -Manifest $userManifestV2 } | Should Not Throw
+
+        @($catalogV2.skills)[0].source.sourcePath | Should Be 'skills/work-with-jira'
+        @($catalogV2.skills)[0].source.targetPath | Should Be '.agents/skills/work-with-jira'
+        @($lockV2.skills)[0].targetPath | Should Be '.agents/skills/work-with-jira'
+        @($manifestV3.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
+        @($manifestV3.files)[0].targetPath | Should Match '^\.agents/skills/work-with-jira/'
+        @($userManifestV2.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
+    }
+
+    # Scenario: A user Skills v2 manifest carries source-root licensing documents and its generated delivery receipt.
+    # Purpose: Keep license provenance explicit without weakening canonical source validation for ordinary Skill files.
+    It 'UnitT14_accepts_v2_license_delivery_provenance_and_rejects_it_on_payload_files' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV2Example -DocumentName 'user Skills managed manifest v2'
+        $base = @($manifest.files)[0]
+        $newEntry = {
+            param([string]$SourcePath,[string]$TargetPath)
+            [pscustomobject][ordered]@{
+                skillId = [string]$base.skillId
+                sourceId = [string]$base.sourceId
+                sourceRepository = [string]$base.sourceRepository
+                sourceRef = [string]$base.sourceRef
+                sourceCommit = [string]$base.sourceCommit
+                sourceVersion = [string]$base.sourceVersion
+                sourcePath = $SourcePath
+                targetPath = $TargetPath
+                sha256 = ('2' * 64)
+            }
+        }
+        $licenseEntry = & $newEntry 'LICENSE' '.agents/skills/work-with-jira/.ai-instructions-licenses/source/LICENSE'
+        $receiptEntry = & $newEntry '.ai-instructions-generated/delivery.json' '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
+        $manifest.files = @($base,$licenseEntry,$receiptEntry)
+
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+
+        $licenseEntry.targetPath = '.agents/skills/work-with-jira/references/LICENSE'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+
+        $licenseEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/LICENSE'
+        $receiptEntry.sourcePath = 'LICENSE'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A versioned document claims a schema or source/target mapping outside the published contract.
+    # Purpose: Fail closed rather than silently interpreting a future schema as the current one.
+    It 'UnitT12_rejects_unknown_versions_and_noncanonical_versioned_mappings' {
+        $catalogV2 = Import-SkillsCatalogJson -Path $script:CatalogV2Example -DocumentName 'Skills Catalog v2'
+        $catalogV2.schemaVersion = 99
+        { Assert-SkillsCatalogV2 -Catalog $catalogV2 } | Should Throw
+
+        $manifestV3 = Import-SkillsCatalogJson -Path $script:ManifestV3Example -DocumentName 'managed manifest v3'
+        $manifestV3.schemaVersion = 99
+        { Assert-ManagedManifest -Manifest $manifestV3 } | Should Throw
+
+        $canonicalManifest = Import-SkillsCatalogJson -Path $script:ManifestV3Example -DocumentName 'managed manifest v3'
+        @($canonicalManifest.files)[0].sourcePath = '.agents/skills/work-with-jira/SKILL.md'
+        { Assert-ManagedManifestV3 -Manifest $canonicalManifest } | Should Throw
+    }
+
+    # Scenario: Existing production manifest v2 remains readable while canonical source paths require manifest v3.
+    # Purpose: Preserve old ownership evidence and prevent a global path rewrite from changing legacy semantics.
+    It 'UnitT13_preserves_legacy_manifest_read_semantics_during_the_versioned_migration' {
+        $legacyManifest = Import-SkillsCatalogJson -Path $script:ManifestExample -DocumentName 'managed manifest v2'
+        { Assert-ManagedManifest -Manifest $legacyManifest } | Should Not Throw
+
+        $legacyManifest.files = @($legacyManifest.files)
+        $legacyManifest.files | Where-Object { $_.artifactType -eq 'skill' } | ForEach-Object {
+            $_.sourcePath = 'skills/work-with-jira/SKILL.md'
+        }
+        { Assert-ManagedManifestV2 -Manifest $legacyManifest } | Should Throw
     }
 
     # Scenario: A Skill is renamed while its immutable old ID remains as a removed tombstone.

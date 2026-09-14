@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 2,
+  "catalogId": "example-agent-skills-v2",
+  "sources": [
+    {
+      "id": "agent-skills",
+      "repository": "https://github.com/example/agent-skills-catalog.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "core",
+      "description": "Canonical source-layout migration fixture.",
+      "default": true,
+      "includes": ["work-with-jira"],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "work-with-jira",
+      "group": "work-management",
+      "source": {
+        "sourceId": "agent-skills",
+        "sourcePath": "skills/work-with-jira",
+        "targetPath": ".agents/skills/work-with-jira"
+      },
+      "profiles": ["core"],
+      "compatibility": {
+        "platforms": ["any"],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    }
+  ]
+}

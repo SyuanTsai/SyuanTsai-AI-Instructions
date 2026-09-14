@@ -1233,7 +1233,7 @@ function Get-SharedManagedExcludePaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 2) { Assert-ManagedManifestV2 -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -1556,6 +1556,31 @@ function New-ManifestEntry {
         targetPath = $TargetPath
         sha256 = $Sha256
     }
+}
+
+function Convert-ManifestEntryForSchema {
+    param(
+        [Parameter(Mandatory = $true)][object] $Entry,
+        [Parameter(Mandatory = $true)][int] $SchemaVersion
+    )
+
+    if ($SchemaVersion -ne 3 -or [string]$Entry.artifactType -ne 'skill') {
+        return $Entry
+    }
+
+    $artifactId = [string]$Entry.artifactId
+    $legacyPrefix = ".agents/skills/$artifactId/"
+    $canonicalPrefix = "skills/$artifactId/"
+    $sourcePath = [string]$Entry.sourcePath
+    if ($sourcePath.StartsWith($canonicalPrefix, [System.StringComparison]::Ordinal)) {
+        return $Entry
+    }
+    if (-not $sourcePath.StartsWith($legacyPrefix, [System.StringComparison]::Ordinal)) {
+        throw "Managed Skill '$artifactId' cannot be emitted in manifest v3 with source path '$sourcePath'."
+    }
+
+    $Entry.sourcePath = $canonicalPrefix + $sourcePath.Substring($legacyPrefix.Length)
+    return $Entry
 }
 
 function Copy-ExistingManifestEntry {
@@ -2584,16 +2609,16 @@ if ($manifestExists) {
     }
 
     $manifestSchemaVersion = $manifest.schemaVersion
-    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2)) {
+    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
 
-    if ($manifestSchemaVersion -eq 2) {
-        Assert-ManagedManifestV2 -Manifest $manifest
+    if ($manifestSchemaVersion -in @(2,3)) {
+        Assert-ManagedManifest -Manifest $manifest
     }
     else { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
-    if ($manifestSchemaVersion -eq 2 -and
+    if ($manifestSchemaVersion -in @(2,3) -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
@@ -2880,6 +2905,9 @@ try {
         }
 
         $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256
+        $desiredManifestSchemaVersion = 2
+        if ($manifestExists) { $desiredManifestSchemaVersion = [int]$manifestSchemaVersion }
+        $desiredManifestEntry = Convert-ManifestEntryForSchema -Entry $desiredManifestEntry -SchemaVersion $desiredManifestSchemaVersion
 
         if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
@@ -2993,7 +3021,7 @@ try {
         $manifestChanged = $false
         if ($shouldWriteManifest) {
         $manifestObject = [ordered]@{
-            schemaVersion = 2
+            schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
             catalogId = [string] $provenance.catalogId
             lockSha256 = [string] $provenance.lockSha256
             files = @($nextManifestEntries | Sort-Object targetPath)

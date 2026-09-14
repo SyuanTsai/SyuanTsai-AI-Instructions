@@ -1120,6 +1120,38 @@ exit /b 0
         [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).files[0].artifactType | Should Be 'skill'
     }
 
+    # Scenario: A prior canonical v3 manifest retains a locally customized Skill while the bootstrap source still uses the legacy archive layout.
+    # Purpose: Preserve v3 provenance during reconciliation so the next run can validate and reuse the customized entry.
+    It 'InterT117_preserves_a_v3_manifest_when_a_customized_Skill_is_retained' {
+        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\existing-skill'
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
+        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value '# Shared skill'
+        Set-TestText -Path (Join-Path $sourceSkillPath 'references\shared.md') -Value '# Shared reference'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifest.schemaVersion = 3
+        foreach ($entry in @($manifest.files | Where-Object artifactType -eq 'skill')) {
+            $entry.sourcePath = ([string]$entry.sourcePath).Replace('.agents/skills/existing-skill/','skills/existing-skill/')
+        }
+        $manifestJson = ($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n") + "`n"
+        [System.IO.File]::WriteAllText($manifestPath,$manifestJson,(New-Object System.Text.UTF8Encoding($false)))
+        Set-TestText -Path (Join-Path $targetRoot '.agents\skills\existing-skill\SKILL.md') -Value '# Customized skill'
+
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+
+        $updated = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $updated.schemaVersion | Should Be 3
+        $skillEntry = @($updated.files | Where-Object targetPath -eq '.agents/skills/existing-skill/SKILL.md')[0]
+        $skillEntry.sourcePath | Should Be 'skills/existing-skill/SKILL.md'
+        (Get-Content -Raw -LiteralPath (Join-Path $targetRoot '.agents\skills\existing-skill\SKILL.md')).Trim() | Should Be '# Customized skill'
+
+        { Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null } | Should Not Throw
+        (Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).schemaVersion | Should Be 3
+    }
+
     # Scenario: A previously materialized read-only rule remains byte-identical when the immutable source removes it.
     # Purpose: Remove obsolete manifest-owned content through the same handle without treating a read-only attribute as byte customization.
     It 'InterT79_removes_an_unchanged_managed_rule_deleted_from_the_source' {

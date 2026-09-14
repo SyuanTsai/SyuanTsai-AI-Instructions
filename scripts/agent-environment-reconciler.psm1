@@ -490,6 +490,9 @@ function Get-UserSkillsDesiredState {
         $source = $sourceById[[string]$skill.sourceId]
         $skillRoot = [System.IO.Path]::GetFullPath([string]$skill.skillRootPath).TrimEnd([char[]]@('\','/'))
         $repositoryRoot = [System.IO.Path]::GetFullPath([string]$skill.sourceRootPath).TrimEnd([char[]]@('\','/'))
+        $targetPathProperty = $skill.PSObject.Properties['targetPath']
+        $targetRoot = if ($null -ne $targetPathProperty) { [string]$targetPathProperty.Value } else { ".agents/skills/$([string]$skill.id)" }
+        if ($targetRoot -cne ".agents/skills/$([string]$skill.id)") { throw "Skill '$($skill.id)' has an unsafe runtime target path: $targetRoot" }
         if (Test-Path -LiteralPath (Join-Path $skillRoot '.ai-instructions-licenses')) { throw "Skill source already owns the license delivery namespace: $($skill.id)" }
         foreach ($file in @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force | Sort-Object FullName)) {
             $skillRelative = $file.FullName.Substring($skillRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
@@ -502,7 +505,7 @@ function Get-UserSkillsDesiredState {
                 sourceCommit = [string]$source.resolvedCommit
                 sourceVersion = [string]$source.resolvedVersion
                 sourcePath = $sourceRelative
-                targetPath = ".agents/skills/$([string]$skill.id)/$skillRelative"
+                targetPath = "$targetRoot/$skillRelative"
                 sha256 = Get-AgentEnvironmentSha256 -Path $file.FullName
                 stagedPath = $file.FullName
             })
@@ -520,7 +523,7 @@ function Get-UserSkillsDesiredState {
                 sourceRepository = [string]$source.repository; sourceRef = [string]$source.requestedRef
                 sourceCommit = [string]$source.resolvedCommit; sourceVersion = [string]$source.resolvedVersion
                 sourcePath = [string]$licenseFile.sourcePath
-                targetPath = ".agents/skills/$($skill.id)/.ai-instructions-licenses/$($licenseFile.relativePath)"
+                targetPath = "$targetRoot/.ai-instructions-licenses/$($licenseFile.relativePath)"
                 sha256 = [string]$licenseFile.sha256; stagedPath = (Join-Path $licenseRoot $licenseFile.relativePath)
             })
         }
@@ -533,14 +536,14 @@ function Get-UserSkillsDesiredState {
         }
     })
     $manifest = [pscustomobject][ordered]@{
-        schemaVersion = 1
+        schemaVersion = if ([int64]$catalog.schemaVersion -eq 2) { 2 } else { 1 }
         catalogRepository = $CatalogRepository
         catalogCommit = $CatalogCommit
         catalogId = [string]$catalog.catalogId
         lockSha256 = Get-AgentEnvironmentSha256 -Path $lockPath
         files = $manifestFiles
     }
-    Assert-UserSkillsManagedManifestV1 -Manifest $manifest
+    Assert-UserSkillsManagedManifest -Manifest $manifest
     return [pscustomobject][ordered]@{
         RuntimeRoot=$RuntimeRoot; Catalog=$catalog; Lock=$lock; SkillIds=$skillIds; Files=[object[]]$files.ToArray(); Manifest=$manifest
         LicenseWarnings=[string[]]$licenseWarnings.ToArray()
@@ -552,7 +555,7 @@ function Get-AgentEnvironmentManifest {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json }
     catch { throw "User Skills managed manifest is not valid JSON: $($_.Exception.Message)" }
-    Assert-UserSkillsManagedManifestV1 -Manifest $manifest
+    Assert-UserSkillsManagedManifest -Manifest $manifest
     return $manifest
 }
 
@@ -815,7 +818,8 @@ function Invoke-UserSkillsReconciliation {
             $managedClassification = if ($managedDrift) { 'managed-drift' } else { 'managed' }
             $managedDestructiveAllowed = [bool](-not $managedDrift -or $ForceReinstallManagedSkills)
             $managedOperation = if ($desiredByPath.ContainsKey($path)) { 'replace' } else { 'remove' }
-            $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$oldByPath[$path].skillId) -Path $path -Classification $managedClassification -Owner 'managed-manifest-v1' -Evidence ("Validated .agents/catalog-skills.manifest.json schemaVersion 1 entry; expected SHA-256 $managedExpected, observed SHA-256 $managedActual.") -DestructiveChangeAllowed $managedDestructiveAllowed -Operation $managedOperation))
+            $manifestSchemaVersion = if ($null -ne $existing.PSObject.Properties['schemaVersion']) { [string]$existing.schemaVersion } else { 'unknown' }
+            $ownership.Add((New-AgentEnvironmentOwnershipEvidence -SkillId ([string]$oldByPath[$path].skillId) -Path $path -Classification $managedClassification -Owner "managed-manifest-v$manifestSchemaVersion" -Evidence ("Validated .agents/catalog-skills.manifest.json schemaVersion $manifestSchemaVersion entry; expected SHA-256 $managedExpected, observed SHA-256 $managedActual.") -DestructiveChangeAllowed $managedDestructiveAllowed -Operation $managedOperation))
             if ([bool]$observation.existed) {
                 $actual = [string]$observation.sha256
                 if ($actual -cne $managedExpected -and -not $ForceReinstallManagedSkills) {
