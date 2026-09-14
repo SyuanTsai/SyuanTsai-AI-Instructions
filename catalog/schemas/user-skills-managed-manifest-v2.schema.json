@@ -14,7 +14,38 @@
       "type": "object", "additionalProperties": false, "required": ["skillId", "sourceId", "sourceRepository", "sourceRef", "sourceCommit", "sourceVersion", "sourcePath", "targetPath", "sha256"],
       "properties": {
         "skillId": { "$ref": "#/$defs/stableId" }, "sourceId": { "$ref": "#/$defs/stableId" }, "sourceRepository": { "type": "string", "format": "uri", "pattern": "^https://" }, "sourceRef": { "type": "string", "minLength": 1 }, "sourceCommit": { "$ref": "#/$defs/commit" }, "sourceVersion": { "type": "string", "minLength": 1 }, "sourcePath": { "$ref": "#/$defs/repositoryPath" }, "targetPath": { "allOf": [{ "$ref": "#/$defs/repositoryPath" }, { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" }] }, "sha256": { "$ref": "#/$defs/sha256" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "targetPath": { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/" }
+            },
+            "required": ["targetPath"]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+                  "targetPath": { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/source/.+" }
+                }
+              },
+              {
+                "properties": {
+                  "sourcePath": { "const": ".ai-instructions-generated/delivery.json" },
+                  "targetPath": { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/delivery\\.json$" }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "sourcePath": { "pattern": "^skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" }
+            }
+          }
+        }
+      ]
     }
   }
 }

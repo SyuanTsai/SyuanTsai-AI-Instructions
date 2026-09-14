@@ -116,6 +116,21 @@ function Test-IsSafeRepositoryPath {
     return $true
 }
 
+function Test-IsLicenseDeliverySourcePath {
+    param([object] $Value)
+
+    if (-not (Test-IsSafeRepositoryPath -Value $Value)) { return $false }
+    $path = [string]$Value
+    if ($path -ceq '.ai-instructions-generated/delivery.json') { return $false }
+
+    $segments = @($path.Split('/'))
+    $fileName = $segments[$segments.Count - 1]
+    $isNamedLicenseDocument = $fileName -imatch '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or
+        $fileName -ieq 'licensing-scope.json'
+    $isInsideLicenseDirectory = @($segments | Where-Object { $_ -ieq 'LICENSES' }).Count -gt 0
+    return $isNamedLicenseDocument -or $isInsideLicenseDirectory
+}
+
 function Assert-HttpsRepositoryUrl {
     param([object] $Value,[string] $Context)
     Assert-NonEmptyString -Value $Value -Context $Context
@@ -689,11 +704,27 @@ function Assert-UserSkillsManagedManifestV2 {
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceVersion"
         $sourcePath = Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context "user Skills managed manifest file '$skillId'"
         $targetPath = Get-RequiredProperty -Object $entry -Name 'targetPath' -Context "user Skills managed manifest file '$skillId'"
-        if (-not (Test-IsSafeRepositoryPath -Value $sourcePath) -or -not ([string]$sourcePath).StartsWith("skills/$skillId/",[System.StringComparison]::Ordinal)) {
-            throw "User-managed Skill '$skillId' must preserve the canonical skills source path."
-        }
         if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or -not ([string]$targetPath).StartsWith(".agents/skills/$skillId/",[System.StringComparison]::Ordinal)) {
             throw "User-managed Skill '$skillId' must preserve the flat .agents/skills target path."
+        }
+        $targetPrefix = ".agents/skills/$skillId/"
+        $licenseNamespacePrefix = "$targetPrefix.ai-instructions-licenses/"
+        $licenseTargetPattern = '^' + [regex]::Escape($licenseNamespacePrefix) + '(?:source/.+|delivery\.json)$'
+        if ([string]$targetPath -ceq ($licenseNamespacePrefix + 'delivery.json')) {
+            if ([string]$sourcePath -cne '.ai-instructions-generated/delivery.json') {
+                throw "User-managed Skill '$skillId' delivery receipt must use the synthetic source path '.ai-instructions-generated/delivery.json'."
+            }
+        }
+        elseif ([string]$targetPath -cmatch $licenseTargetPattern) {
+            if (-not (Test-IsLicenseDeliverySourcePath -Value $sourcePath)) {
+                throw "User-managed Skill '$skillId' license delivery source must identify a license document or LICENSES path."
+            }
+        }
+        elseif (([string]$targetPath).StartsWith($licenseNamespacePrefix,[System.StringComparison]::Ordinal)) {
+            throw "User-managed Skill '$skillId' has an invalid license delivery target path."
+        }
+        elseif (-not ([string]$sourcePath).StartsWith("skills/$skillId/",[System.StringComparison]::Ordinal)) {
+            throw "User-managed Skill '$skillId' must preserve the canonical skills source path."
         }
         if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in user Skills managed manifest: $targetPath" }
         $targetPaths[[string]$targetPath] = $true

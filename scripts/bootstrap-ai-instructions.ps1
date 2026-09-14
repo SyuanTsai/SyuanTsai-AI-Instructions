@@ -1558,6 +1558,31 @@ function New-ManifestEntry {
     }
 }
 
+function Convert-ManifestEntryForSchema {
+    param(
+        [Parameter(Mandatory = $true)][object] $Entry,
+        [Parameter(Mandatory = $true)][int] $SchemaVersion
+    )
+
+    if ($SchemaVersion -ne 3 -or [string]$Entry.artifactType -ne 'skill') {
+        return $Entry
+    }
+
+    $artifactId = [string]$Entry.artifactId
+    $legacyPrefix = ".agents/skills/$artifactId/"
+    $canonicalPrefix = "skills/$artifactId/"
+    $sourcePath = [string]$Entry.sourcePath
+    if ($sourcePath.StartsWith($canonicalPrefix, [System.StringComparison]::Ordinal)) {
+        return $Entry
+    }
+    if (-not $sourcePath.StartsWith($legacyPrefix, [System.StringComparison]::Ordinal)) {
+        throw "Managed Skill '$artifactId' cannot be emitted in manifest v3 with source path '$sourcePath'."
+    }
+
+    $Entry.sourcePath = $canonicalPrefix + $sourcePath.Substring($legacyPrefix.Length)
+    return $Entry
+}
+
 function Copy-ExistingManifestEntry {
     param([Parameter(Mandatory = $true)][object] $Entry)
 
@@ -2880,6 +2905,9 @@ try {
         }
 
         $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256
+        $desiredManifestSchemaVersion = 2
+        if ($manifestExists) { $desiredManifestSchemaVersion = [int]$manifestSchemaVersion }
+        $desiredManifestEntry = Convert-ManifestEntryForSchema -Entry $desiredManifestEntry -SchemaVersion $desiredManifestSchemaVersion
 
         if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
@@ -2993,7 +3021,7 @@ try {
         $manifestChanged = $false
         if ($shouldWriteManifest) {
         $manifestObject = [ordered]@{
-            schemaVersion = 2
+            schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
             catalogId = [string] $provenance.catalogId
             lockSha256 = [string] $provenance.lockSha256
             files = @($nextManifestEntries | Sort-Object targetPath)

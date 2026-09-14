@@ -144,6 +144,39 @@ function Get-TestRawSha256 {
         @($userManifestV2.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
     }
 
+    # Scenario: A user Skills v2 manifest carries source-root licensing documents and its generated delivery receipt.
+    # Purpose: Keep license provenance explicit without weakening canonical source validation for ordinary Skill files.
+    It 'UnitT14_accepts_v2_license_delivery_provenance_and_rejects_it_on_payload_files' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV2Example -DocumentName 'user Skills managed manifest v2'
+        $base = @($manifest.files)[0]
+        $newEntry = {
+            param([string]$SourcePath,[string]$TargetPath)
+            [pscustomobject][ordered]@{
+                skillId = [string]$base.skillId
+                sourceId = [string]$base.sourceId
+                sourceRepository = [string]$base.sourceRepository
+                sourceRef = [string]$base.sourceRef
+                sourceCommit = [string]$base.sourceCommit
+                sourceVersion = [string]$base.sourceVersion
+                sourcePath = $SourcePath
+                targetPath = $TargetPath
+                sha256 = ('2' * 64)
+            }
+        }
+        $licenseEntry = & $newEntry 'LICENSE' '.agents/skills/work-with-jira/.ai-instructions-licenses/source/LICENSE'
+        $receiptEntry = & $newEntry '.ai-instructions-generated/delivery.json' '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
+        $manifest.files = @($base,$licenseEntry,$receiptEntry)
+
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+
+        $licenseEntry.targetPath = '.agents/skills/work-with-jira/references/LICENSE'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+
+        $licenseEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/LICENSE'
+        $receiptEntry.sourcePath = 'LICENSE'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
     # Scenario: A versioned document claims a schema or source/target mapping outside the published contract.
     # Purpose: Fail closed rather than silently interpreting a future schema as the current one.
     It 'UnitT12_rejects_unknown_versions_and_noncanonical_versioned_mappings' {
