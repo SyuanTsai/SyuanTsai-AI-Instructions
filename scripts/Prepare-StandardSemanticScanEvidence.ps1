@@ -98,23 +98,106 @@ function Assert-PreflightExactSet {
 }
 
 function Assert-PreflightUniqueJsonProperties {
-    param([System.Text.Json.JsonElement] $Element)
-    switch ($Element.ValueKind) {
-        Object {
-            $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-            foreach ($property in $Element.EnumerateObject()) {
-                if (-not $names.Add($property.Name)) {
-                    throw "Semantic preflight scanner JSON contains duplicate property '$($property.Name)'."
-                }
-                Assert-PreflightUniqueJsonProperties -Element $property.Value
-            }
-        }
-        Array {
-            foreach ($item in $Element.EnumerateArray()) {
-                Assert-PreflightUniqueJsonProperties -Element $item
-            }
+    param([string] $JsonText)
+
+    function Skip-JsonWhitespace {
+        param([string] $Text, [ref] $Cursor)
+        while ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -in @(' ', "`t", "`r", "`n")) {
+            $Cursor.Value++
         }
     }
+
+    function Read-JsonString {
+        param([string] $Text, [ref] $Cursor, [bool] $Decode)
+        if ($Cursor.Value -ge $Text.Length -or $Text[$Cursor.Value] -ne '"') {
+            throw 'Semantic preflight scanner JSON expected a string.'
+        }
+        $start = $Cursor.Value++
+        while ($Cursor.Value -lt $Text.Length) {
+            $character = $Text[$Cursor.Value++]
+            if ($character -eq '\') {
+                if ($Cursor.Value -ge $Text.Length) { throw 'Semantic preflight scanner JSON has an unfinished escape.' }
+                $Cursor.Value++
+            }
+            elseif ($character -eq '"') {
+                if ($Decode) {
+                    return [string](ConvertFrom-Json -InputObject $Text.Substring($start, $Cursor.Value - $start))
+                }
+                return
+            }
+        }
+        throw 'Semantic preflight scanner JSON has an unfinished string.'
+    }
+
+    function Read-JsonValue {
+        param([string] $Text, [ref] $Cursor, [int] $Depth)
+        if ($Depth -gt 64) { throw 'Semantic preflight scanner JSON nesting exceeds 64 levels.' }
+        Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+        if ($Cursor.Value -ge $Text.Length) { throw 'Semantic preflight scanner JSON ended unexpectedly.' }
+        $character = $Text[$Cursor.Value]
+        if ($character -eq '{') {
+            $Cursor.Value++
+            $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+            while ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -ne '}') {
+                $name = Read-JsonString -Text $Text -Cursor $Cursor -Decode $true
+                if (-not $names.Add($name)) {
+                    throw "Semantic preflight scanner JSON contains duplicate property '$name'."
+                }
+                Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+                if ($Cursor.Value -ge $Text.Length -or $Text[$Cursor.Value] -ne ':') {
+                    throw 'Semantic preflight scanner JSON expected a property separator.'
+                }
+                $Cursor.Value++
+                Read-JsonValue -Text $Text -Cursor $Cursor -Depth ($Depth + 1)
+                Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+                if ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -eq ',') {
+                    $Cursor.Value++
+                    Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+                }
+                elseif ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -ne '}') {
+                    throw 'Semantic preflight scanner JSON expected another property or object end.'
+                }
+            }
+            if ($Cursor.Value -ge $Text.Length) { throw 'Semantic preflight scanner JSON has an unfinished object.' }
+            $Cursor.Value++
+        }
+        elseif ($character -eq '[') {
+            $Cursor.Value++
+            Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+            while ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -ne ']') {
+                Read-JsonValue -Text $Text -Cursor $Cursor -Depth ($Depth + 1)
+                Skip-JsonWhitespace -Text $Text -Cursor $Cursor
+                if ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -eq ',') {
+                    $Cursor.Value++
+                }
+                elseif ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -ne ']') {
+                    throw 'Semantic preflight scanner JSON expected another value or array end.'
+                }
+            }
+            if ($Cursor.Value -ge $Text.Length) { throw 'Semantic preflight scanner JSON has an unfinished array.' }
+            $Cursor.Value++
+        }
+        elseif ($character -eq '"') {
+            Read-JsonString -Text $Text -Cursor $Cursor -Decode $false
+        }
+        else {
+            $start = $Cursor.Value
+            while ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -notin @(',', '}', ']', ' ', "`t", "`r", "`n")) {
+                $Cursor.Value++
+            }
+            if ($Cursor.Value -eq $start) { throw 'Semantic preflight scanner JSON has an invalid value.' }
+        }
+    }
+
+    $cursor = 0
+    Skip-JsonWhitespace -Text $JsonText -Cursor ([ref]$cursor)
+    if ($cursor -ge $JsonText.Length -or $JsonText[$cursor] -ne '{') {
+        throw 'Semantic preflight scanner result root must be an object.'
+    }
+    Read-JsonValue -Text $JsonText -Cursor ([ref]$cursor) -Depth 0
+    Skip-JsonWhitespace -Text $JsonText -Cursor ([ref]$cursor)
+    if ($cursor -ne $JsonText.Length) { throw 'Semantic preflight scanner JSON contains trailing content.' }
 }
 
 function Get-PreflightFileSnapshot {
@@ -140,19 +223,12 @@ function Get-PreflightFileSnapshot {
     }
     $utf8 = [Text.UTF8Encoding]::new($false, $true)
     $jsonText = $utf8.GetString($bytes)
-    $document = [System.Text.Json.JsonDocument]::Parse($jsonText)
-    try {
-        if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
-            throw 'Semantic preflight scanner result root must be an object.'
-        }
-        Assert-PreflightUniqueJsonProperties -Element $document.RootElement
-    }
-    finally { $document.Dispose() }
+    Assert-PreflightUniqueJsonProperties -JsonText $jsonText
     $sha = [Security.Cryptography.SHA256]::Create()
-    try { $digest = [Convert]::ToHexString($sha.ComputeHash($bytes)).ToLowerInvariant() }
+    try { $digest = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
     return [pscustomobject]@{
-        value = ConvertFrom-Json -InputObject $jsonText -Depth 64
+        value = ConvertFrom-Json -InputObject $jsonText
         sha256 = $digest
     }
 }
@@ -241,7 +317,7 @@ foreach ($id in $ExpectedAnalyzerIds) {
 $findings = [object[]]$allFindings.ToArray()
 $canonicalJson = if ($findings.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $findings -Compress -Depth 20 }
 $sha = [Security.Cryptography.SHA256]::Create()
-try { $findingsDigest = [Convert]::ToHexString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonicalJson))).ToLowerInvariant() }
+try { $findingsDigest = [BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonicalJson))).Replace('-', '').ToLowerInvariant() }
 finally { $sha.Dispose() }
 
 # This artifact is a scanner preflight, never a semantic receipt. A protected

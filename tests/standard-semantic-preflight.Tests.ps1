@@ -1,5 +1,6 @@
 Describe 'Standard semantic scan preflight' {
     BeforeAll {
+        . (Join-Path $PSScriptRoot 'standard-semantic-assertions.ps1')
         $script:Producer = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\Prepare-StandardSemanticScanEvidence.ps1'
 
         function Write-PreflightJson {
@@ -62,16 +63,16 @@ Describe 'Standard semantic scan preflight' {
             -ExpectedAnalyzerIds @('semantic-intent', 'semantic-security') | Out-Null
 
         $preflight = Get-Content -Raw -LiteralPath $outputPath | ConvertFrom-Json
-        $preflight.candidateId | Should -Be ('b' * 64)
-        $preflight.preflightType | Should -Be 'semantic-scan-preflight-v1'
-        $preflight.analyzerCompleteness | Should -Be 'declared-set-complete'
-        $preflight.analyzerInventoryVerified | Should -BeFalse
-        $preflight.consentStatus | Should -Be 'pending'
-        $preflight.signed | Should -BeFalse
-        $preflight.releaseEligible | Should -BeFalse
-        @($preflight.analyzerIdentity).Count | Should -Be 2
-        @($preflight.findings).Count | Should -Be 1
-        $preflight.findings[0].fingerprint | Should -Be 'finding-1'
+        $preflight.candidateId | Assert-SemanticEqual -Expected ('b' * 64)
+        $preflight.preflightType | Assert-SemanticEqual -Expected 'semantic-scan-preflight-v1'
+        $preflight.analyzerCompleteness | Assert-SemanticEqual -Expected 'declared-set-complete'
+        $preflight.analyzerInventoryVerified | Assert-SemanticFalse
+        $preflight.consentStatus | Assert-SemanticEqual -Expected 'pending'
+        $preflight.signed | Assert-SemanticFalse
+        $preflight.releaseEligible | Assert-SemanticFalse
+        @($preflight.analyzerIdentity).Count | Assert-SemanticEqual -Expected 2
+        @($preflight.findings).Count | Assert-SemanticEqual -Expected 1
+        $preflight.findings[0].fingerprint | Assert-SemanticEqual -Expected 'finding-1'
 
         $expectedFinding = [pscustomobject][ordered]@{
             severity = 'low'
@@ -83,10 +84,10 @@ Describe 'Standard semantic scan preflight' {
         $expectedJson = ConvertTo-Json -InputObject ([object[]]@($expectedFinding)) -Compress -Depth 20
         $sha = [Security.Cryptography.SHA256]::Create()
         try {
-            $expectedDigest = [Convert]::ToHexString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($expectedJson))).ToLowerInvariant()
+            $expectedDigest = [BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($expectedJson))).Replace('-', '').ToLowerInvariant()
         }
         finally { $sha.Dispose() }
-        $preflight.findingsSha256 | Should -Be $expectedDigest
+        $preflight.findingsSha256 | Assert-SemanticEqual -Expected $expectedDigest
     }
 
     # Scenario: One analyzer claims complete status but omits a required active package.
@@ -107,8 +108,8 @@ Describe 'Standard semantic scan preflight' {
             -Purpose 'validate alpha and beta skills' `
             -Scope 'fixture packages only' `
             -ExpectedActiveSkills @('alpha-skill', 'beta-skill') `
-            -ExpectedAnalyzerIds @('semantic-intent', 'semantic-security') | Out-Null } | Should -Throw
-        Test-Path -LiteralPath $outputPath | Should -BeFalse
+            -ExpectedAnalyzerIds @('semantic-intent', 'semantic-security') | Out-Null } | Assert-SemanticThrows
+        Test-Path -LiteralPath $outputPath | Assert-SemanticFalse
     }
 
     # Scenario: A complete analyzer reports a High finding against one Skill.
@@ -126,9 +127,9 @@ Describe 'Standard semantic scan preflight' {
             -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
             -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null
         $preflight = Get-Content -Raw -LiteralPath $outputPath | ConvertFrom-Json
-        $preflight.severityGate | Should -Be 'blocked'
-        $preflight.findings[0].severity | Should -Be 'high'
-        $preflight.releaseEligible | Should -BeFalse
+        $preflight.severityGate | Assert-SemanticEqual -Expected 'blocked'
+        $preflight.findings[0].severity | Assert-SemanticEqual -Expected 'high'
+        $preflight.releaseEligible | Assert-SemanticFalse
     }
 
     # Scenario: A scanner result is bound to a different immutable candidate than the supervisor request.
@@ -144,8 +145,8 @@ Describe 'Standard semantic scan preflight' {
             -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
             -Provider 'fixture-provider' -Purpose 'validate alpha and beta skills' `
             -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
-            -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Should -Throw
-        Test-Path -LiteralPath $outputPath | Should -BeFalse
+            -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Assert-SemanticThrows
+        Test-Path -LiteralPath $outputPath | Assert-SemanticFalse
     }
 
     # Scenario: The machine-readable scanner document repeats candidateId with a different value.
@@ -153,17 +154,28 @@ Describe 'Standard semantic scan preflight' {
     It 'UnitT50_rejects_duplicate_json_keys_before_parsing_analyzer_claims' {
         $resultPath = Join-Path $TestDrive 'duplicate-key-scan.json'
         $outputPath = Join-Path $TestDrive 'duplicate-key-preflight.json'
-        $json = (New-CompleteSemanticResult | ConvertTo-Json -Depth 30)
-        if ($json -notmatch '"candidateId"') { throw 'Fixture has no candidateId key.' }
-        $json = $json -replace '("schemaVersion"\s*:\s*1\s*,)', '$1 "candidateId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
-        [IO.File]::WriteAllText($resultPath, $json, (New-Object Text.UTF8Encoding($false)))
+        foreach ($key in @('candidateId', 'candidate\u0049d')) {
+            $json = (New-CompleteSemanticResult | ConvertTo-Json -Depth 30)
+            if ($json -notmatch '"candidateId"') { throw 'Fixture has no candidateId key.' }
+            $json = $json -replace '("schemaVersion"\s*:\s*1\s*,)', ('$1 "' + $key + '":"' + ('b' * 64) + '",')
+            [IO.File]::WriteAllText($resultPath, $json, (New-Object Text.UTF8Encoding($false)))
 
+            { & $script:Producer -ScannerResultPath $resultPath -OutputPath $outputPath `
+                -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
+                -Provider 'fixture-provider' -Purpose 'validate alpha and beta skills' `
+                -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
+                -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Assert-SemanticThrows -Pattern '*duplicate property*'
+            Test-Path -LiteralPath $outputPath | Assert-SemanticFalse
+        }
+        $json = (New-CompleteSemanticResult | ConvertTo-Json -Depth 30)
+        $json = $json -replace '("status"\s*:\s*"passed"\s*,)', '$1 "status":"passed",'
+        [IO.File]::WriteAllText($resultPath, $json, (New-Object Text.UTF8Encoding($false)))
         { & $script:Producer -ScannerResultPath $resultPath -OutputPath $outputPath `
             -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
             -Provider 'fixture-provider' -Purpose 'validate alpha and beta skills' `
             -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
-            -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Should -Throw '*duplicate property*'
-        Test-Path -LiteralPath $outputPath | Should -BeFalse
+            -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Assert-SemanticThrows -Pattern '*duplicate property*'
+        Test-Path -LiteralPath $outputPath | Assert-SemanticFalse
     }
 
     # Scenario: A caller points the preflight artifact at the authority repository's tracked tests directory.
@@ -178,8 +190,8 @@ Describe 'Standard semantic scan preflight' {
                 -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
                 -Provider 'fixture-provider' -Purpose 'validate alpha and beta skills' `
                 -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
-                -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Should -Throw '*outside*authority*'
-            Test-Path -LiteralPath $outputPath | Should -BeFalse
+                -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Assert-SemanticThrows -Pattern '*outside*authority*'
+            Test-Path -LiteralPath $outputPath | Assert-SemanticFalse
         }
         finally {
             if (Test-Path -LiteralPath $outputPath) { Remove-Item -LiteralPath $outputPath -Force }
@@ -206,7 +218,7 @@ Describe 'Standard semantic scan preflight' {
             -DefineFunctionsOnly
         { Assert-StandardValidationSemanticEvidence -Evidence $preflight `
             -CandidateId ('b' * 64) -TrustAnchorRoot $TestDrive `
-            -Context 'unsigned preflight probe' | Out-Null } | Should -Throw
+            -Context 'unsigned preflight probe' | Out-Null } | Assert-SemanticThrows
     }
 
     # Scenario: A junction under TestDrive redirects an apparently external output parent into the authority tests directory.
@@ -226,12 +238,17 @@ Describe 'Standard semantic scan preflight' {
                 -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
                 -Provider 'fixture-provider' -Purpose 'validate alpha and beta skills' `
                 -Scope 'fixture packages only' -ExpectedActiveSkills @('alpha-skill','beta-skill') `
-                -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Should -Throw '*reparse*'
-            Test-Path -LiteralPath $targetFile | Should -BeFalse
+                -ExpectedAnalyzerIds @('semantic-intent','semantic-security') | Out-Null } | Assert-SemanticThrows -Pattern '*reparse*'
+            Test-Path -LiteralPath $targetFile | Assert-SemanticFalse
         }
         finally {
             if (Test-Path -LiteralPath $targetFile) { Remove-Item -LiteralPath $targetFile -Force }
-            if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
+            if (Test-Path -LiteralPath $junction) {
+                if (([IO.File]::GetAttributes($junction) -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                    throw 'Semantic test junction path changed before cleanup.'
+                }
+                [IO.Directory]::Delete($junction)
+            }
         }
     }
 }

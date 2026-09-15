@@ -1,5 +1,6 @@
 Describe 'Unsigned raw SkillSpector graph normalization' {
     BeforeAll {
+        . (Join-Path $PSScriptRoot 'standard-semantic-assertions.ps1')
         $pythonApplications = @(Get-Command -Name python -CommandType Application -ErrorAction Stop)
         $script:Python = [string]$pythonApplications[0].Source
         $script:Fixture = Join-Path $PSScriptRoot 'semantic-raw-graph-normalizer-unit.py'
@@ -12,8 +13,8 @@ Describe 'Unsigned raw SkillSpector graph normalization' {
         $scannerPath = Join-Path $TestDrive 'semantic-normalized.json'
         $preflightPath = Join-Path $TestDrive 'semantic-preflight.json'
         & $script:Python -B $script:Fixture --emit-fixture $scannerPath | Out-Null
-        $LASTEXITCODE | Should -Be 0
-        Test-Path -LiteralPath $scannerPath | Should -BeTrue
+        $LASTEXITCODE | Assert-SemanticEqual -Expected 0
+        Test-Path -LiteralPath $scannerPath | Assert-SemanticTrue
 
         & $script:Preflight -ScannerResultPath $scannerPath -OutputPath $preflightPath `
             -CandidateId ('a' * 64) -InputInventorySha256 ('b' * 64) `
@@ -23,11 +24,11 @@ Describe 'Unsigned raw SkillSpector graph normalization' {
             -ExpectedAnalyzerIds @('semantic_alpha', 'semantic_beta') | Out-Null
 
         $result = Get-Content -LiteralPath $preflightPath -Raw | ConvertFrom-Json
-        $result.findings.Count | Should -Be 1
-        $result.findings[0].severity | Should -Be 'high'
-        $result.severityGate | Should -Be 'blocked'
-        $result.signed | Should -BeFalse
-        $result.releaseEligible | Should -BeFalse
-        $result.analyzerInventoryVerified | Should -BeFalse
+        $result.findings.Count | Assert-SemanticEqual -Expected 1
+        $result.findings[0].severity | Assert-SemanticEqual -Expected 'high'
+        $result.severityGate | Assert-SemanticEqual -Expected 'blocked'
+        $result.signed | Assert-SemanticFalse
+        $result.releaseEligible | Assert-SemanticFalse
+        $result.analyzerInventoryVerified | Assert-SemanticFalse
     }
 }
