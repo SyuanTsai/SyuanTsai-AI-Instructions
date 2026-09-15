@@ -245,7 +245,7 @@ Describe 'Standard validation resolver hardening' {
         $canonical = (@($expectedEntries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
         $sha = [Security.Cryptography.SHA256]::Create()
         try {
-            $expectedHash = [Convert]::ToHexString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))).ToLowerInvariant()
+            $expectedHash = [BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))).Replace('-', '').ToLowerInvariant()
         }
         finally { $sha.Dispose() }
         Assert-Equal $closure.sha256 $expectedHash 'Installed closure SHA-256 must retain the previous canonical bytes.'
