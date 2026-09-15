@@ -216,6 +216,41 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $manifest.closureSha256 '^[0-9a-f]{64}$' 'Dependency closure must retain a deterministic SHA-256 identity.'
     }
 
+    # Scenario: Installed tool files are created in reverse/mixed-case order, while the closure contains nested paths.
+    # Purpose: Preserve the exact ordinal path inventory and canonical SHA-256 when the resolver uses bounded ordering.
+    It 'UnitT45_preserves_installed_closure_bytes_with_bounded_ordinal_ordering' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $fixtureRoot = Join-Path $TestDrive 'installed-closure-order'
+        foreach ($relative in @('zeta/record.txt','beta.txt','Alpha.txt','alpha/nested.txt')) {
+            $path = Join-Path $fixtureRoot $relative
+            Write-TestUtf8File -Path $path -Text $relative
+        }
+        $expectedPaths = @('Alpha.txt','alpha/nested.txt','beta.txt','zeta/record.txt')
+        $expectedEntries = @(
+            foreach ($relative in $expectedPaths) {
+                [pscustomobject]@{
+                    path = $relative
+                    sha256 = (Get-FileHash -LiteralPath (Join-Path $fixtureRoot $relative) -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+            }
+        )
+        $orderedSynthetic = @(Get-ResolverOrderedClosureEntries -Entries @(
+            foreach ($entry in @($expectedEntries | Sort-Object path -Descending)) { $entry }
+        ))
+        Assert-Equal (@($orderedSynthetic | ForEach-Object path) -join ',') ($expectedPaths -join ',') 'Native ordering must use ordinal path order.'
+
+        $closure = Get-DirectoryClosureIdentity -Path $fixtureRoot
+        Assert-Equal (@($closure.entries | ForEach-Object path) -join ',') ($expectedPaths -join ',') 'Installed closure inventory must use the same ordinal order.'
+        $canonical = (@($expectedEntries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expectedHash = [Convert]::ToHexString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))).ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+        Assert-Equal $closure.sha256 $expectedHash 'Installed closure SHA-256 must retain the previous canonical bytes.'
+    }
+
     # Scenario: Wheel metadata contains unsafe identity text, duplicate headers or body text that resembles headers.
     # Purpose: Reject unsafe or ambiguous header identity without parsing description-body content as metadata.
     It 'UnitT50_rejects_unsafe_or_ambiguous_metadata_identity_text_before_lock_generation' {
