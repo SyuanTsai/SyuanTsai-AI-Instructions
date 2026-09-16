@@ -111,19 +111,45 @@ def bound_invocation() -> dict[str, object]:
         }
     inputs["expected_skill_paths"] = source_paths
     inputs["expected_committed_source_by_skill"] = source_manifests
+    inputs["expected_provider_components_by_skill"] = {
+        skill_id: ["SKILL.md"] for skill_id in inputs["graphs_by_skill"]
+    }
     return inputs
+
+
+def expected_provider_inventory_digest(inputs: dict[str, object]) -> str:
+    rows = []
+    for skill_id in sorted(inputs["expected_provider_components_by_skill"]):
+        state = inputs["graphs_by_skill"][skill_id]
+        for path in sorted(inputs["expected_provider_components_by_skill"][skill_id]):
+            payload = state["raw_file_cache"][path]
+            text = payload.decode("utf-8", errors="strict")
+            rows.append({
+                "skillId": skill_id,
+                "path": path,
+                "sourceSha256": sha256(payload).hexdigest(),
+                "sourceBytes": len(payload),
+                "transformation": "strict-utf8-v1",
+                "providerTextSha256": sha256(text.encode("utf-8")).hexdigest(),
+            })
+    canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class RawGraphNormalizationContract(unittest.TestCase):
     # Scenario: Two active Skills have every installed semantic node completed and one raw finding.
     # Purpose: Keep the finding and both Skill coverage rows in the unsigned scanner result.
     def test_UnitT10_preserves_complete_peer_skill_coverage_and_finding(self) -> None:
-        result = module.normalize_candidate_scan(**bound_invocation())
+        inputs = bound_invocation()
+        result = module.normalize_candidate_scan(**inputs)
         self.assertEqual(result["activeSkills"], ["alpha-skill", "beta-skill"])
         self.assertEqual([row["identity"] for row in result["analyzers"]], IDS)
         self.assertEqual(result["analyzers"][0]["coveredSkills"], result["activeSkills"])
         self.assertEqual(result["analyzers"][0]["findings"][0]["severity"], "high")
         self.assertEqual(result["analyzers"][1]["findings"], [])
+        self.assertEqual(
+            result["providerTextInventorySha256"], expected_provider_inventory_digest(inputs)
+        )
 
     # Scenario: A single completed whole-file batch covers every line in a multi-line LLM input.
     # Purpose: Permit full-file work without requiring artificial chunks.
@@ -184,6 +210,35 @@ class RawGraphNormalizationContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.normalize_candidate_scan(**inputs)
 
+    # Scenario: The complete committed package contains a PNG that the frozen scanner inventories but does not send to the provider.
+    # Purpose: Keep binary assets byte-bound without forcing them into the authenticated provider-text inventory.
+    def test_UnitT24_accepts_binary_outside_provider_text_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "alpha-skill"
+            package.mkdir()
+            text = (FIXTURES / "alpha-skill" / "SKILL.md").read_bytes()
+            binary = b"\x89PNG\r\n\x1a\n\x00fixture-binary"
+            (package / "SKILL.md").write_bytes(text)
+            (package / "assets.png").write_bytes(binary)
+            inputs = bound_invocation()
+            state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["input_path"] = str(package)
+            state["skill_path"] = str(package)
+            state["raw_file_cache"] = {"SKILL.md": text, "assets.png": binary}
+            inputs["expected_skill_paths"]["alpha-skill"] = str(package)
+            inputs["expected_committed_source_by_skill"]["alpha-skill"] = {
+                "SKILL.md": {"sha256": sha256(text).hexdigest(), "bytes": len(text)},
+                "assets.png": {"sha256": sha256(binary).hexdigest(), "bytes": len(binary)},
+            }
+            result = module.normalize_candidate_scan(**inputs)
+            self.assertRegex(result["providerTextInventorySha256"], r"^[0-9a-f]{64}$")
+
+            inputs["expected_provider_components_by_skill"]["alpha-skill"].append("assets.png")
+            state["llm_components"].append("assets.png")
+            state["llm_file_cache"]["assets.png"] = "misclassified binary"
+            with self.assertRaisesRegex(ValueError, "strict UTF-8"):
+                module.normalize_candidate_scan(**inputs)
+
     # Scenario: A raw cached file differs by one byte from the exact committed source manifest.
     # Purpose: Stop source transformations that would otherwise inherit the wrong immutable candidate SHA.
     def test_UnitT25_rejects_changed_raw_source_byte(self) -> None:
@@ -206,6 +261,7 @@ class RawGraphNormalizationContract(unittest.TestCase):
                 "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
             }
             inputs["graphs_by_skill"]["alpha-skill"]["raw_file_cache"]["additional.md"] = payload
+            inputs["expected_provider_components_by_skill"]["alpha-skill"].append("additional.md")
             with self.assertRaises(ValueError):
                 module.normalize_candidate_scan(**inputs)
         finally:

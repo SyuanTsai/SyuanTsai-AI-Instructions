@@ -270,7 +270,7 @@ $outputFull = Assert-PreflightOutsideAuthoritySource -Path $OutputPath -Context 
 $snapshot = Get-PreflightFileSnapshot -Path $scannerFull
 $result = $snapshot.value
 Assert-PreflightExactProperties -Object $result -Expected @(
-    'schemaVersion', 'resultType', 'candidateId', 'inputInventorySha256',
+    'schemaVersion', 'resultType', 'candidateId', 'inputInventorySha256', 'providerTextInventorySha256',
     'provider', 'purpose', 'scope', 'activeSkills', 'analyzers'
 ) -Context 'scanner result'
 if ($result.schemaVersion -isnot [int] -and $result.schemaVersion -isnot [long]) {
@@ -281,6 +281,7 @@ if ([int64]$result.schemaVersion -ne 1 -or $result.resultType -cne 'standard-sem
     $result.provider -cne $Provider -or $result.purpose -cne $Purpose -or $result.scope -cne $Scope) {
     throw 'Semantic preflight scanner result does not match this candidate, provider, purpose, scope or inventory.'
 }
+Assert-PreflightSha256 -Value $result.providerTextInventorySha256 -Name 'providerTextInventorySha256'
 Assert-PreflightExactSet -Actual $result.activeSkills -Expected $ExpectedActiveSkills -Context 'activeSkills' -Pattern '^[a-z0-9]+(?:-[a-z0-9]+)*$'
 if ($result.analyzers -isnot [array] -or @($result.analyzers).Count -ne $ExpectedAnalyzerIds.Count) {
     throw 'Semantic preflight scanner result does not contain every expected analyzer.'
@@ -327,6 +328,7 @@ $preflight = [ordered]@{
     preflightType = 'semantic-scan-preflight-v1'
     candidateId = $CandidateId
     inputInventorySha256 = $InputInventorySha256
+    providerTextInventorySha256 = [string]$result.providerTextInventorySha256
     scanOutputSha256 = $snapshot.sha256
     provider = $Provider
     purpose = $Purpose

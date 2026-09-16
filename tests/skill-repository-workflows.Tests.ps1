@@ -252,6 +252,7 @@ jobs:
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
         Assert-Match $gate 'semanticPreflight' 'Shared authority gate must enforce the semantic preflight policy.'
         Assert-Match $gate 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Shared authority gate must enforce the semantic provider-input binding.'
+        Assert-Match $gate 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Shared authority gate must enforce the separate provider-text inventory binding.'
         Assert-Match $gate 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Shared authority gate must enforce per-work provider-call binding.'
         Assert-Match $gate 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Shared authority gate must enforce scanner JSON property-collision handling.'
         Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'

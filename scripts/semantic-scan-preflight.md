@@ -9,9 +9,13 @@ an attestation, or invoke the canonical Standard v1 runner. Its output has
 semantic receipt verifier rejects it.
 
 The normative boundary is defined by `docs/standards/skill-repository-standard.md`
-and `docs/standards/validation-security-gate.json`. Provider text must equal the
-strict UTF-8 decoding of verified candidate source bytes. A stale or substituted
-text cache fails before the provider result can inherit the candidate identity.
+and `docs/standards/validation-security-gate.json`. The complete candidate byte
+manifest still includes binary assets. The protected caller separately derives
+the expected provider-text paths from the frozen scanner policy; only that exact
+authenticated subset is decoded as `strict-utf8-v1`. A stale, substituted,
+missing, extra, or binary provider component fails before the result can inherit
+the candidate identity. The normalized scanner result binds the canonical
+provider rows as `providerTextInventorySha256`.
 
 ## Trusted caller inputs
 
@@ -32,6 +36,7 @@ source checkout. Its exact input shape is:
   "resultType": "standard-semantic-scan-result-v1",
   "candidateId": "<64 lowercase hex>",
   "inputInventorySha256": "<64 lowercase hex>",
+  "providerTextInventorySha256": "<64 lowercase hex>",
   "provider": "<actual provider>",
   "purpose": "<approved purpose>",
   "scope": "<approved input scope>",
@@ -94,11 +99,14 @@ call `normalize_candidate_scan` with the candidate/inventory identities,
 provider/purpose/scope, exact registered and graph-wired semantic IDs, and
 the map of Skill IDs to those raw states. It also requires the protected
 caller to provide one expected immutable package directory and complete
-per-file committed byte SHA-256/length manifest for every active Skill.
+per-file committed byte SHA-256/length manifest for every active Skill, plus
+the exact provider-text component paths derived from the frozen scanner policy.
 It compares each graph's `input_path` and `skill_path` with that package,
 rejects linked paths and extra/missing package files, and checks that both
-the graph's raw byte cache **and** LLM-applicable file paths cover exactly
-the reviewed manifest. The protected supervisor must still authenticate
+the graph's raw byte cache covers the complete reviewed manifest while the
+LLM-applicable paths cover exactly the authenticated text subset. Binary files
+remain byte-bound in the full manifest and are not decoded. The adapter records
+the canonical text-subset digest as `providerTextInventorySha256`. The protected supervisor must still authenticate
 the archive/acquisition and these caller inputs; this check cannot sign
 itself or attest the provider's exact outbound prompt bytes. It rejects an
 unwired node, global

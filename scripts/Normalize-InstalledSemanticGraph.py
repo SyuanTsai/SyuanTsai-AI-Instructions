@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -81,7 +82,7 @@ def _package_path(value: Any, context: str) -> Path:
 def _assert_source_binding(
     skill_id: str, state: Mapping[str, Any], expected_path: Any,
     expected_files: Mapping[str, Any],
-) -> dict[str, str]:
+) -> dict[str, bytes]:
     package = _package_path(expected_path, f"{skill_id} expected source")
     for field in ("input_path", "skill_path"):
         observed = _package_path(state.get(field), f"{skill_id} graph {field}")
@@ -102,7 +103,7 @@ def _assert_source_binding(
     raw_cache = _mapping(state.get("raw_file_cache"), f"{skill_id} raw byte cache")
     if set(raw_cache) != set(paths):
         raise ValueError("raw graph cache differs from committed source file set")
-    provider_text: dict[str, str] = {}
+    verified_source: dict[str, bytes] = {}
     for path in paths:
         descriptor = _mapping(manifest[path], f"{skill_id} source descriptor")
         digest, size = descriptor.get("sha256"), descriptor.get("bytes")
@@ -120,11 +121,8 @@ def _assert_source_binding(
             or len(raw_bytes) != size or sha256(raw_bytes).hexdigest() != digest
         ):
             raise ValueError("Skill package or graph raw cache bytes differ from committed source")
-        try:
-            provider_text[path] = raw_bytes.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as error:
-            raise ValueError("verified Skill source is not strict UTF-8 provider input") from error
-    return provider_text
+        verified_source[path] = raw_bytes
+    return verified_source
 
 
 def _finding(item: Any, skill_id: str) -> tuple[str, dict[str, str]]:
@@ -150,9 +148,10 @@ def _finding(item: Any, skill_id: str) -> tuple[str, dict[str, str]]:
 def _normalize_skill(
     skill_id: str, graph_state: Mapping[str, Any], analyzer_ids: list[str],
     expected_path: Any, expected_files: Mapping[str, Any],
-) -> dict[str, list[dict[str, str]]]:
+    expected_provider_components: Any,
+) -> tuple[dict[str, list[dict[str, str]]], list[dict[str, Any]]]:
     state = _mapping(graph_state, f"{skill_id} raw graph")
-    provider_text = _assert_source_binding(skill_id, state, expected_path, expected_files)
+    verified_source = _assert_source_binding(skill_id, state, expected_path, expected_files)
     completeness = _mapping(state.get("analysis_completeness"), "graph completeness")
     if (
         state.get("use_llm") is not True
@@ -166,14 +165,32 @@ def _normalize_skill(
         if completeness.get(field, []) not in ([], None):
             raise ValueError(f"raw graph contains {field}")
 
+    expected_components = _component_paths(expected_provider_components)
     components = _component_paths(state.get("llm_components"))
     cache = _mapping(state.get("llm_file_cache"), "LLM file cache")
-    if set(cache) != set(components) or set(components) != set(expected_files):
-        raise ValueError("raw graph LLM cache does not cover every committed source component")
+    if components != expected_components or set(cache) != set(components):
+        raise ValueError("raw graph LLM cache differs from the authenticated provider-text inventory")
+    if not set(components).issubset(verified_source):
+        raise ValueError("provider-text inventory contains a path outside the committed source manifest")
     if any(not isinstance(cache[path], str) for path in components):
         raise ValueError("raw graph LLM cache contains a non-text component")
-    if any(cache[path] != provider_text[path] for path in components):
-        raise ValueError("raw graph LLM input differs from strict UTF-8 verified source bytes")
+    provider_inventory: list[dict[str, Any]] = []
+    for path in components:
+        raw_bytes = verified_source[path]
+        try:
+            provider_text = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError("authenticated provider component is not strict UTF-8 source") from error
+        if cache[path] != provider_text:
+            raise ValueError("raw graph LLM input differs from strict UTF-8 verified source bytes")
+        provider_inventory.append({
+            "skillId": skill_id,
+            "path": path,
+            "sourceSha256": sha256(raw_bytes).hexdigest(),
+            "sourceBytes": len(raw_bytes),
+            "transformation": "strict-utf8-v1",
+            "providerTextSha256": sha256(provider_text.encode("utf-8")).hexdigest(),
+        })
 
     statuses = _list(state.get("analyzer_status_events"), "analyzer statuses")
     semantic_statuses: dict[str, Mapping[str, Any]] = {}
@@ -304,7 +321,7 @@ def _normalize_skill(
             by_analyzer[identity].append(canonical)
     if set(origins) != seen_findings:
         raise ValueError("inspection ledger references a missing raw finding")
-    return by_analyzer
+    return by_analyzer, provider_inventory
 
 
 def normalize_candidate_scan(
@@ -314,6 +331,7 @@ def normalize_candidate_scan(
     graphs_by_skill: Mapping[str, Mapping[str, Any]],
     expected_skill_paths: Mapping[str, str],
     expected_committed_source_by_skill: Mapping[str, Mapping[str, Any]],
+    expected_provider_components_by_skill: Mapping[str, Sequence[str]],
 ) -> dict[str, object]:
     """Aggregate one raw graph per active Skill without signing or provider calls."""
     if not isinstance(candidate_id, str) or not SHA256.fullmatch(candidate_id):
@@ -330,18 +348,31 @@ def normalize_candidate_scan(
     graphs = _mapping(graphs_by_skill, "active Skill graph results")
     paths = _mapping(expected_skill_paths, "expected active Skill package paths")
     manifests = _mapping(expected_committed_source_by_skill, "committed active Skill source manifests")
-    if set(graphs) != set(skills) or set(paths) != set(skills) or set(manifests) != set(skills):
+    provider_components = _mapping(
+        expected_provider_components_by_skill, "authenticated provider-text component inventories"
+    )
+    if (
+        set(graphs) != set(skills) or set(paths) != set(skills)
+        or set(manifests) != set(skills) or set(provider_components) != set(skills)
+    ):
         raise ValueError("raw graph/source identities do not cover the exact active Skill set")
     all_findings: dict[str, list[dict[str, str]]] = {identity: [] for identity in registered}
+    provider_inventory: list[dict[str, Any]] = []
     for skill_id in skills:
-        per_skill = _normalize_skill(
-            skill_id, graphs[skill_id], registered, paths[skill_id], manifests[skill_id]
+        per_skill, per_skill_provider_inventory = _normalize_skill(
+            skill_id, graphs[skill_id], registered, paths[skill_id], manifests[skill_id],
+            provider_components[skill_id],
         )
+        provider_inventory.extend(per_skill_provider_inventory)
         for identity in registered:
             all_findings[identity].extend(per_skill[identity])
+    provider_inventory_json = json.dumps(
+        provider_inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return {
         "schemaVersion": 1, "resultType": "standard-semantic-scan-result-v1",
         "candidateId": candidate_id, "inputInventorySha256": input_inventory_sha256,
+        "providerTextInventorySha256": sha256(provider_inventory_json).hexdigest(),
         "provider": provider, "purpose": purpose, "scope": scope,
         "activeSkills": skills,
         "analyzers": [

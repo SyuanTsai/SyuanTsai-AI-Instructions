@@ -14,6 +14,7 @@ Describe 'Standard semantic scan preflight' {
                 resultType = 'standard-semantic-scan-result-v1'
                 candidateId = ('b' * 64)
                 inputInventorySha256 = ('a' * 64)
+                providerTextInventorySha256 = ('c' * 64)
                 provider = 'fixture-provider'
                 purpose = 'validate alpha and beta skills'
                 scope = 'fixture packages only'
@@ -64,6 +65,7 @@ Describe 'Standard semantic scan preflight' {
 
         $preflight = Get-Content -Raw -LiteralPath $outputPath | ConvertFrom-Json
         $preflight.candidateId | Assert-SemanticEqual -Expected ('b' * 64)
+        $preflight.providerTextInventorySha256 | Assert-SemanticEqual -Expected ('c' * 64)
         $preflight.preflightType | Assert-SemanticEqual -Expected 'semantic-scan-preflight-v1'
         $preflight.analyzerCompleteness | Assert-SemanticEqual -Expected 'declared-set-complete'
         $preflight.analyzerInventoryVerified | Assert-SemanticFalse

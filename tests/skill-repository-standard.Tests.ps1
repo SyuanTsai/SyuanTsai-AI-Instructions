@@ -2917,6 +2917,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $policy.security.semanticPreflight.artifactType 'semantic-scan-preflight-v1' 'Semantic preflight must use the canonical unsigned artifact type.'
         Assert-Equal $policy.security.semanticPreflight.authentication 'unsigned-provider-output' 'Semantic preflight must remain explicitly unsigned.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic provider input must be bound to verified source bytes.'
+        Assert-Equal $policy.security.semanticPreflight.providerInventoryBinding 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Semantic provider inventory must separate complete package bytes from provider text.'
         Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Every planned semantic work item must bind to its own provider call.'
         Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Scanner JSON must reject property names that the supported PowerShell parser would collapse.'
         Assert-ExactStringSequence $policy.security.semanticPreflight.nonAuthority @('cannot-satisfy-semantic-evidence', 'cannot-authorize-release') 'Semantic preflight must not become release authority.'
@@ -2924,7 +2925,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
         Assert-Match $standard 'validation-security-gate\.json' 'Normative Standard must bind the canonical validation/security gate policy.'
-        Assert-Match $standard 'strict UTF-8' 'Normative Standard must bind provider text to a deterministic decoding of verified source bytes.'
+        Assert-Match $standard 'strict-utf8-v1' 'Normative Standard must bind provider text to the versioned deterministic decoding of verified source bytes.'
+        Assert-Match $standard 'binary.*provider text inventory' 'Normative Standard must keep binary assets byte-bound outside the provider text inventory.'
         Assert-Match $standard 'planned work item.*provider call' 'Normative Standard must bind provider telemetry to every planned work item.'
         Assert-Match $standard 'OrdinalIgnoreCase' 'Normative Standard must define supported PowerShell JSON property-collision semantics.'
         Assert-Match $standard 'semantic-scan-preflight-v1' 'Normative Standard must define the unsigned semantic preflight boundary.'

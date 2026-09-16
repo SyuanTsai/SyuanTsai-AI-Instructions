@@ -24,6 +24,7 @@ Describe 'Unsigned raw SkillSpector graph normalization' {
             -ExpectedAnalyzerIds @('semantic_alpha', 'semantic_beta') | Out-Null
 
         $result = Get-Content -LiteralPath $preflightPath -Raw | ConvertFrom-Json
+        [string]$result.providerTextInventorySha256 | Assert-SemanticMatch -Pattern '^[0-9a-f]{64}$'
         $result.findings.Count | Assert-SemanticEqual -Expected 1
         $result.findings[0].severity | Assert-SemanticEqual -Expected 'high'
         $result.severityGate | Assert-SemanticEqual -Expected 'blocked'

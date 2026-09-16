@@ -99,6 +99,7 @@
     "semanticPreflight": {
       "type": "semantic-scan-preflight-v1",
       "sourceBinding": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes",
+      "providerInventoryBinding": "full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest",
       "workBinding": "one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval",
       "jsonPropertyBinding": "reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization",
       "fixedState": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"],

@@ -273,14 +273,15 @@
     "semanticPreflight": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifactType", "authentication", "sourceBinding", "workBinding", "jsonPropertyBinding", "requiredFields", "fixedState", "nonAuthority"],
+      "required": ["artifactType", "authentication", "sourceBinding", "providerInventoryBinding", "workBinding", "jsonPropertyBinding", "requiredFields", "fixedState", "nonAuthority"],
       "properties": {
         "artifactType": { "const": "semantic-scan-preflight-v1" },
         "authentication": { "const": "unsigned-provider-output" },
         "sourceBinding": { "const": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes" },
+        "providerInventoryBinding": { "const": "full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest" },
         "workBinding": { "const": "one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval" },
         "jsonPropertyBinding": { "const": "reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization" },
-        "requiredFields": { "const": ["candidateId", "inputInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"] },
+        "requiredFields": { "const": ["candidateId", "inputInventorySha256", "providerTextInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"] },
         "fixedState": { "const": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"] },
         "nonAuthority": { "const": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"] }
       }
