@@ -688,6 +688,20 @@ function Get-ResolverSafeUnixSymlinkEntry {
     }
 }
 
+function Sort-ResolverClosureEntriesByOrdinalPath {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Entries)
+
+    $entriesByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($entry in $Entries) {
+        $path = [string]$entry.path
+        if ($entriesByPath.ContainsKey($path)) { throw "Installed tool closure contains a duplicate path: '$path'." }
+        $entriesByPath.Add($path, $entry)
+    }
+    $orderedPaths = [string[]]@($entriesByPath.Keys)
+    [Array]::Sort($orderedPaths, [StringComparer]::Ordinal)
+    foreach ($path in $orderedPaths) { $entriesByPath[$path] }
+}
+
 function Get-DirectoryClosureIdentity {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -752,15 +766,7 @@ function Get-DirectoryClosureIdentity {
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
     }
-    $ordered = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($entry in $entries) {
-        $insertAt = 0
-        while ($insertAt -lt $ordered.Count -and
-            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
-            $insertAt++
-        }
-        [void]$ordered.Insert($insertAt, $entry)
-    }
+    $ordered = @(Sort-ResolverClosureEntriesByOrdinalPath -Entries $entries.ToArray())
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
@@ -771,7 +777,7 @@ function Get-DirectoryClosureIdentity {
     }
     return [ordered]@{
         sha256 = $closureHash
-        entries = $ordered.ToArray()
+        entries = $ordered
     }
 }
 

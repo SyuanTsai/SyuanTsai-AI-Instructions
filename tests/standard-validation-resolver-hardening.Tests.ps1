@@ -987,6 +987,46 @@ Describe 'Installed closure path identity' {
         . $resolver -ValidatePolicyOnly | Out-Null
     }
 
+    # Scenario: A large installed inventory and a smaller identical old/new algorithm sample are sorted.
+    # Purpose: Verify byte-identical Ordinal output and reproduce the bounded sorting improvement.
+    It 'UnitT30_PreservesLargeOrdinalInventoryAndImprovesSorting' {
+        $entries = @(0..15278 | ForEach-Object { [pscustomobject]@{ path = ('lib/{0:D5}.py' -f (($_ * 7919) % 15279)); sha256 = ('a' * 64) } })
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $actual = @(Sort-ResolverClosureEntriesByOrdinalPath -Entries $entries)
+        $watch.Stop()
+        $largeMs = $watch.Elapsed.TotalMilliseconds
+        $expectedPaths = [string[]]@($entries | ForEach-Object { $_.path })
+        [Array]::Sort($expectedPaths, [StringComparer]::Ordinal)
+        $actualBytes = [Text.Encoding]::UTF8.GetBytes(($actual | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+        $expectedBytes = [Text.Encoding]::UTF8.GetBytes(($expectedPaths | ForEach-Object { "$_`t$('a' * 64)`n" }) -join '')
+        [Convert]::ToBase64String($actualBytes) | Should -BeExactly ([Convert]::ToBase64String($expectedBytes))
+        $largeMs | Should -BeLessThan 10000
+        $sample = @($entries | Select-Object -First 1024)
+        $watch.Restart()
+        $old = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($entry in $sample) {
+            $insertAt = 0
+            while ($insertAt -lt $old.Count -and [string]::Compare([string]$old[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) { $insertAt++ }
+            $old.Insert($insertAt, $entry)
+        }
+        $watch.Stop()
+        $oldMs = $watch.Elapsed.TotalMilliseconds
+        $watch.Restart()
+        $new = @(Sort-ResolverClosureEntriesByOrdinalPath -Entries $sample)
+        $watch.Stop()
+        $newMs = $watch.Elapsed.TotalMilliseconds
+        ($new.path -join "`n") | Should -BeExactly ($old.path -join "`n")
+        $newMs | Should -BeLessThan $oldMs
+        Write-Host "Ordinal sort: 15279 entries=$largeMs ms; identical 1024 entries old=$oldMs ms, new=$newMs ms."
+    }
+
+    # Scenario: Sorting is called with duplicate ordinal paths, or no entries.
+    # Purpose: Preserve fail-closed duplicate detection and an empty helper result.
+    It 'UnitT40_RejectsDuplicateSortPathsAndAcceptsEmptyInput' {
+        { Sort-ResolverClosureEntriesByOrdinalPath -Entries @(@{ path = 'a' }, @{ path = 'a' }) } | Should -Throw '*duplicate*'
+        @(Sort-ResolverClosureEntriesByOrdinalPath -Entries @()).Count | Should -Be 0
+    }
+
     # Scenario: Two real filenames are ordinally different but normalize to the same Unicode NFC path.
     # Purpose: Enforce the existing collision contract independently of PowerShell culture comparisons.
     It 'InterT10_RejectsDistinctUnicodeNormalizedFilenames' {
