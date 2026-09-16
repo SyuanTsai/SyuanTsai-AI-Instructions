@@ -249,7 +249,7 @@ def _normalize_skill(
 
     ledger = _list(state.get("inspection_ledger"), "inspection ledger")
     terminal: dict[str, Mapping[str, Any]] = {}
-    origins: dict[str, list[str]] = defaultdict(list)
+    origins: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for raw in ledger:
         row = _mapping(raw, "inspection ledger row")
         if row.get("phase") == "ledger_output" or row.get("reason_code") == "output_limit":
@@ -264,7 +264,10 @@ def _normalize_skill(
                 raise ValueError("raw finding lacks a primary producer work row")
             if row.get("outcome") != "completed":
                 raise ValueError("raw finding was emitted by incomplete work")
-            origins[finding_id].append(_scalar(row.get("analyzer_id"), "producer analyzer ID"))
+            origins[finding_id].append((
+                _scalar(row.get("analyzer_id"), "producer analyzer ID"),
+                _scalar(row.get("path"), "producer work path"),
+            ))
         if row.get("phase") == "semantic" or str(row.get("analyzer_id", "")).startswith("semantic_"):
             work_id = _scalar(row.get("work_id"), "semantic terminal work ID")
             if work_id not in planned or work_id in terminal:
@@ -314,10 +317,10 @@ def _normalize_skill(
         if finding_id in seen_findings or len(origins.get(finding_id, [])) != 1:
             raise ValueError("raw finding has missing, duplicate or ambiguous producer")
         seen_findings.add(finding_id)
-        identity = origins[finding_id][0]
+        identity, producer_path = origins[finding_id][0]
         if identity in by_analyzer:
-            if raw.file not in components:
-                raise ValueError("semantic finding path is outside scanned LLM components")
+            if raw.file != producer_path or raw.file not in components:
+                raise ValueError("semantic finding path differs from its producer work path")
             by_analyzer[identity].append(canonical)
     if set(origins) != seen_findings:
         raise ValueError("inspection ledger references a missing raw finding")

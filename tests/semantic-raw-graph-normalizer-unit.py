@@ -379,6 +379,42 @@ class RawGraphNormalizationContract(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "provider call"):
                 module.normalize_candidate_scan(**inputs)
 
+    # Scenario: One analyzer scans two files, but a finding emitted by the first work row names the second file.
+    # Purpose: Bind every normalized finding path to the exact provider work item that produced it.
+    def test_UnitT48_rejects_finding_path_different_from_producer_work(self) -> None:
+        extra = FIXTURES / "alpha-skill" / "additional.md"
+        payload = b"additional semantic input\n"
+        extra.write_bytes(payload)
+        try:
+            inputs = bound_invocation()
+            state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["raw_file_cache"]["additional.md"] = payload
+            state["llm_components"].append("additional.md")
+            state["llm_file_cache"]["additional.md"] = payload.decode("utf-8")
+            inputs["expected_provider_components_by_skill"]["alpha-skill"].append("additional.md")
+            inputs["expected_committed_source_by_skill"]["alpha-skill"]["additional.md"] = {
+                "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
+            }
+            for status, row, call in zip(
+                state["analyzer_status_events"], state["inspection_ledger"], state["llm_call_log"]
+            ):
+                second_work = dict(status["planned_work"][0])
+                second_work.update({"work_id": second_work["work_id"] + "-additional",
+                                    "path": "additional.md"})
+                status["planned_work"].append(second_work)
+                second_row = dict(row)
+                second_row.update({"work_id": second_work["work_id"], "path": "additional.md",
+                                   "emitted_finding_ids": []})
+                state["inspection_ledger"].append(second_row)
+                second_call = dict(call)
+                second_call.update({"work_id": second_work["work_id"], "path": "additional.md"})
+                state["llm_call_log"].append(second_call)
+            state["findings"][0].file = "additional.md"
+            with self.assertRaisesRegex(ValueError, "producer work path"):
+                module.normalize_candidate_scan(**inputs)
+        finally:
+            extra.unlink(missing_ok=True)
+
     # Scenario: One analyzer's LLM call failed after its work row claimed complete.
     # Purpose: Reconcile provider telemetry with work accounting.
     def test_UnitT50_rejects_failed_provider_call(self) -> None:
