@@ -382,15 +382,22 @@ class RawGraphNormalizationContract(unittest.TestCase):
     # Scenario: One analyzer scans two files, but a finding emitted by the first work row names the second file.
     # Purpose: Bind every normalized finding path to the exact provider work item that produced it.
     def test_UnitT48_rejects_finding_path_different_from_producer_work(self) -> None:
-        extra = FIXTURES / "alpha-skill" / "additional.md"
-        payload = b"additional semantic input\n"
-        extra.write_bytes(payload)
-        try:
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "alpha-skill"
+            package.mkdir()
+            skill_payload = (FIXTURES / "alpha-skill" / "SKILL.md").read_bytes()
+            payload = b"additional semantic input\n"
+            (package / "SKILL.md").write_bytes(skill_payload)
+            (package / "additional.md").write_bytes(payload)
             inputs = bound_invocation()
             state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["input_path"] = str(package)
+            state["skill_path"] = str(package)
+            state["raw_file_cache"]["SKILL.md"] = skill_payload
             state["raw_file_cache"]["additional.md"] = payload
             state["llm_components"].append("additional.md")
             state["llm_file_cache"]["additional.md"] = payload.decode("utf-8")
+            inputs["expected_skill_paths"]["alpha-skill"] = str(package)
             inputs["expected_provider_components_by_skill"]["alpha-skill"].append("additional.md")
             inputs["expected_committed_source_by_skill"]["alpha-skill"]["additional.md"] = {
                 "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
@@ -412,8 +419,6 @@ class RawGraphNormalizationContract(unittest.TestCase):
             state["findings"][0].file = "additional.md"
             with self.assertRaisesRegex(ValueError, "producer work path"):
                 module.normalize_candidate_scan(**inputs)
-        finally:
-            extra.unlink(missing_ok=True)
 
     # Scenario: One analyzer's LLM call failed after its work row claimed complete.
     # Purpose: Reconcile provider telemetry with work accounting.
