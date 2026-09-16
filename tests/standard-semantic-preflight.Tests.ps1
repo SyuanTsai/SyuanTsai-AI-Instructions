@@ -223,10 +223,9 @@ Describe 'Standard semantic scan preflight' {
             -Context 'unsigned preflight probe' | Out-Null } | Assert-SemanticThrows
     }
 
-    # Scenario: A junction under TestDrive redirects an apparently external output parent into the authority tests directory.
-    # Purpose: Prevent a reparse path from bypassing the source-tree artifact boundary.
-    It 'UnitT80_rejects_a_junction_output_parent_before_writing_to_source' {
-        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { Set-ItResult -Skipped -Because 'Windows junction-specific test'; return }
+    # Scenario: A directory link under TestDrive redirects an apparently external output parent into the authority tests directory.
+    # Purpose: Prevent a junction or symbolic-link path from bypassing the source-tree artifact boundary on every gate platform.
+    It 'UnitT80_rejects_a_linked_output_parent_before_writing_to_source' {
         $resultPath = Join-Path $TestDrive 'junction-scan.json'
         Write-PreflightJson -Path $resultPath -Value (New-CompleteSemanticResult)
         $sourceRoot = Split-Path -Parent $PSScriptRoot
@@ -234,7 +233,8 @@ Describe 'Standard semantic scan preflight' {
         $junction = Join-Path $TestDrive 'redirect-to-authority'
         $targetFile = Join-Path $target 'semantic-preflight-junction-must-not-write.json'
         $outputPath = Join-Path $junction 'semantic-preflight-junction-must-not-write.json'
-        New-Item -ItemType Junction -Path $junction -Target $target | Out-Null
+        $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $junction -Target $target | Out-Null
         try {
             { & $script:Producer -ScannerResultPath $resultPath -OutputPath $outputPath `
                 -CandidateId ('b' * 64) -InputInventorySha256 ('a' * 64) `
