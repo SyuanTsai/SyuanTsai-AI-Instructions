@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
 
 
@@ -100,6 +101,7 @@ def bound_invocation() -> dict[str, object]:
         state["input_path"] = str(package)
         state["skill_path"] = str(package)
         state["raw_file_cache"] = {"SKILL.md": payload}
+        state["llm_file_cache"] = {"SKILL.md": payload.decode("utf-8")}
         source_paths[skill_id] = str(package)
         source_manifests[skill_id] = {
             "SKILL.md": {"sha256": sha256(payload).hexdigest(), "bytes": len(payload)}
@@ -123,15 +125,27 @@ class RawGraphNormalizationContract(unittest.TestCase):
     # Scenario: A single completed whole-file batch covers every line in a multi-line LLM input.
     # Purpose: Permit full-file work without requiring artificial chunks.
     def test_UnitT15_accepts_full_multiline_work(self) -> None:
-        inputs = bound_invocation()
-        state = inputs["graphs_by_skill"]["alpha-skill"]
-        state["llm_file_cache"]["SKILL.md"] = "first\nsecond\nthird\n"
-        for status in state["analyzer_status_events"]:
-            status["planned_work"][0]["end_line"] = 3
-        for row in state["inspection_ledger"]:
-            row["end_line"] = 3
-        result = module.normalize_candidate_scan(**inputs)
-        self.assertEqual(result["analyzers"][0]["coveredSkills"], result["activeSkills"])
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "alpha-skill"
+            package.mkdir()
+            payload = b"first\nsecond\nthird\n"
+            (package / "SKILL.md").write_bytes(payload)
+            inputs = bound_invocation()
+            state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["input_path"] = str(package)
+            state["skill_path"] = str(package)
+            state["raw_file_cache"]["SKILL.md"] = payload
+            state["llm_file_cache"]["SKILL.md"] = payload.decode("utf-8")
+            inputs["expected_skill_paths"]["alpha-skill"] = str(package)
+            inputs["expected_committed_source_by_skill"]["alpha-skill"]["SKILL.md"] = {
+                "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
+            }
+            for status in state["analyzer_status_events"]:
+                status["planned_work"][0]["end_line"] = 3
+            for row in state["inspection_ledger"]:
+                row["end_line"] = 3
+            result = module.normalize_candidate_scan(**inputs)
+            self.assertEqual(result["analyzers"][0]["coveredSkills"], result["activeSkills"])
 
     # Scenario: The installed registry has two semantic nodes, but the frozen graph wired only one.
     # Purpose: Block scanner normalization despite an otherwise complete static projection.
@@ -146,6 +160,14 @@ class RawGraphNormalizationContract(unittest.TestCase):
     def test_UnitT21_accepts_exact_source_path_and_raw_byte_binding(self) -> None:
         result = module.normalize_candidate_scan(**bound_invocation())
         self.assertEqual(result["activeSkills"], ["alpha-skill", "beta-skill"])
+
+    # Scenario: Verified raw bytes still match the committed source, but the text cache passed to the LLM is replaced.
+    # Purpose: Prevent stale or substituted provider input from inheriting the verified candidate identity.
+    def test_UnitT22_rejects_llm_text_that_is_not_the_verified_source_bytes(self) -> None:
+        inputs = bound_invocation()
+        inputs["graphs_by_skill"]["alpha-skill"]["llm_file_cache"]["SKILL.md"] = "substituted input"
+        with self.assertRaises(ValueError):
+            module.normalize_candidate_scan(**inputs)
 
     # Scenario: A valid alpha graph is relabelled as beta while the beta expected package path remains frozen.
     # Purpose: Prevent one Skill's scan from claiming another Skill's complete coverage.

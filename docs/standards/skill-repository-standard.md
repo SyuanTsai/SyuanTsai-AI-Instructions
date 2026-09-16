@@ -491,6 +491,10 @@ Semantic Scan **MUST** 在下列任一情況觸發：
 
 Semantic trigger decision **MUST** be derived from typed analyzer/candidate-diff evidence OR an explicit caller addition; the caller **MUST NOT** be able to suppress an analyzer-required trigger, and the effective decision and sources **MUST** be recorded. Semantic Scan failure、timeout、unavailable 或 unparsable result，在已觸發的情況 **MUST** fail closed；不得退化成「略過但 pass」。
 
+當 provider adapter 以 source file text 建立 semantic work 時，實際交給 provider 的每個文字輸入 **MUST** 等於已依 immutable candidate manifest 驗證之 source bytes 的 strict UTF-8 解碼結果；invalid UTF-8、stale cache、substituted text、遺漏或額外 component **MUST** BLOCK。若未來需要其他轉換，該轉換 **MUST** 先成為本 Standard 與 `validation-security-gate.json` 的版本化 deterministic contract，並以原始位元組、轉換識別與轉換後 digest 完整綁定；adapter 不得自行採用未授權轉換。
+
+`semantic-scan-preflight-v1` 是 provider output 的 unsigned preparation artifact。它 **MUST** 綁定 `candidateId`、`inputInventorySha256`、`scanOutputSha256`、provider/purpose/scope、完整 active Skill/analyzer declarations、完整 findings 與 `findingsSha256`；並且 **MUST** 固定記錄 `analyzerInventoryVerified=false`、`consentStatus=pending`、`signed=false`、`releaseEligible=false`。這個 preflight **MUST NOT** 滿足 canonical `semanticEvidence`，也 **MUST NOT** 授權 release/install；只有 trusted supervisor 完成 analyzer inventory verification、取得明確 consent，並簽署 exact candidate 的 `trusted-supervisor-signed-semantic-v1` evidence 後，Semantic Scan stage 才能通過。
+
 ## 12. Repository tests and validation
 
 ### 12.1 Repository validation

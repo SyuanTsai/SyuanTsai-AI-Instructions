@@ -81,7 +81,7 @@ def _package_path(value: Any, context: str) -> Path:
 def _assert_source_binding(
     skill_id: str, state: Mapping[str, Any], expected_path: Any,
     expected_files: Mapping[str, Any],
-) -> None:
+) -> dict[str, str]:
     package = _package_path(expected_path, f"{skill_id} expected source")
     for field in ("input_path", "skill_path"):
         observed = _package_path(state.get(field), f"{skill_id} graph {field}")
@@ -102,6 +102,7 @@ def _assert_source_binding(
     raw_cache = _mapping(state.get("raw_file_cache"), f"{skill_id} raw byte cache")
     if set(raw_cache) != set(paths):
         raise ValueError("raw graph cache differs from committed source file set")
+    provider_text: dict[str, str] = {}
     for path in paths:
         descriptor = _mapping(manifest[path], f"{skill_id} source descriptor")
         digest, size = descriptor.get("sha256"), descriptor.get("bytes")
@@ -119,6 +120,11 @@ def _assert_source_binding(
             or len(raw_bytes) != size or sha256(raw_bytes).hexdigest() != digest
         ):
             raise ValueError("Skill package or graph raw cache bytes differ from committed source")
+        try:
+            provider_text[path] = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ValueError("verified Skill source is not strict UTF-8 provider input") from error
+    return provider_text
 
 
 def _finding(item: Any, skill_id: str) -> tuple[str, dict[str, str]]:
@@ -146,7 +152,7 @@ def _normalize_skill(
     expected_path: Any, expected_files: Mapping[str, Any],
 ) -> dict[str, list[dict[str, str]]]:
     state = _mapping(graph_state, f"{skill_id} raw graph")
-    _assert_source_binding(skill_id, state, expected_path, expected_files)
+    provider_text = _assert_source_binding(skill_id, state, expected_path, expected_files)
     completeness = _mapping(state.get("analysis_completeness"), "graph completeness")
     if (
         state.get("use_llm") is not True
@@ -166,6 +172,8 @@ def _normalize_skill(
         raise ValueError("raw graph LLM cache does not cover every committed source component")
     if any(not isinstance(cache[path], str) for path in components):
         raise ValueError("raw graph LLM cache contains a non-text component")
+    if any(cache[path] != provider_text[path] for path in components):
+        raise ValueError("raw graph LLM input differs from strict UTF-8 verified source bytes")
 
     statuses = _list(state.get("analyzer_status_events"), "analyzer statuses")
     semantic_statuses: dict[str, Mapping[str, Any]] = {}

@@ -8,6 +8,11 @@ an attestation, or invoke the canonical Standard v1 runner. Its output has
 `analyzerInventoryVerified=false`, and `releaseEligible=false`; the canonical
 semantic receipt verifier rejects it.
 
+The normative boundary is defined by `docs/standards/skill-repository-standard.md`
+and `docs/standards/validation-security-gate.json`. Provider text must equal the
+strict UTF-8 decoding of verified candidate source bytes. A stale or substituted
+text cache fails before the provider result can inherit the candidate identity.
+
 ## Trusted caller inputs
 
 The protected supervisor must get `CandidateId` and `InputInventorySha256` from

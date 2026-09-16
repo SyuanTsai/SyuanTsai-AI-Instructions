@@ -282,7 +282,10 @@ Version: this line also belongs to the description body
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
         Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
 
-        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.exe' } else { 'invalid-native' })
+        # An invalid .exe can enter Windows application-error handling and wait for
+        # a hidden UI. An unregistered extension reaches the same process-launch
+        # failure deterministically without invoking that host-specific handler.
+        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.invalid' } else { 'invalid-native' })
         [IO.File]::WriteAllBytes($invalidNativePath, [byte[]]@(0, 1, 2, 3))
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
             $chmodCommand = Assert-Command -Name 'chmod'
@@ -919,11 +922,16 @@ catch {
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
 
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
+        Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
+        $semanticPreflightNonAuthority = @($policy.security.semanticPreflight.nonAuthority)
+        Assert-Equal $semanticPreflightNonAuthority.Count 2 'Unsigned preflight must declare both non-authority boundaries.'
+        Assert-Equal $semanticPreflightNonAuthority[0] 'cannot-satisfy-semantic-evidence' 'Unsigned preflight must not satisfy semantic evidence.'
+        Assert-Equal $semanticPreflightNonAuthority[1] 'cannot-authorize-release' 'Unsigned preflight must not authorize release.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must enforce the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the canonical validation/security policy.'
         Assert-Match $gate 'Package Validation' 'Authority gate must identify the Package Validation stage.'
         Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
-        Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate' 'Validation-tool resolver must not become a stage/severity policy engine.'
+        Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate|semantic-scan-preflight-v1' 'Validation-tool resolver must not become a stage/severity or semantic-preflight policy engine.'
     }
 
     # Scenario: A still-fresh signed package-adapter receipt from an earlier run is presented to the central runner.

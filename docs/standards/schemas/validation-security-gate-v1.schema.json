@@ -169,6 +169,7 @@
         "outputReservation",
         "semanticTrigger",
         "semanticEvidence",
+        "semanticPreflight",
         "aiReview",
         "trustAnchors"
       ],
@@ -218,6 +219,9 @@
         "semanticEvidence": {
           "$ref": "#/$defs/semanticEvidence"
         },
+        "semanticPreflight": {
+          "$ref": "#/$defs/semanticPreflight"
+        },
         "aiReview": {
           "$ref": "#/$defs/aiReview"
         },
@@ -264,6 +268,19 @@
         "authentication": { "const": "trusted-supervisor-signed-semantic-v1" },
         "requiredFields": { "const": ["provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256"] },
         "success": { "const": ["status=passed", "decision=PASS", "consentGranted=true", "analyzerCompleteness=complete", "findings=array", "findingsSha256=verified"] }
+      }
+    },
+    "semanticPreflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactType", "authentication", "sourceBinding", "requiredFields", "fixedState", "nonAuthority"],
+      "properties": {
+        "artifactType": { "const": "semantic-scan-preflight-v1" },
+        "authentication": { "const": "unsigned-provider-output" },
+        "sourceBinding": { "const": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes" },
+        "requiredFields": { "const": ["candidateId", "inputInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"] },
+        "fixedState": { "const": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"] },
+        "nonAuthority": { "const": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"] }
       }
     },
     "aiReview": {

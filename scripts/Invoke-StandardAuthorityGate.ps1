@@ -691,6 +691,25 @@ function Assert-AuthorityValidationSecurityGate {
         'status=passed', 'decision=PASS', 'consentGranted=true', 'analyzerCompleteness=complete', 'findings=array', 'findingsSha256=verified'
     ) -Context 'Validation/security gate semantic evidence success conditions'
 
+    $semanticPreflight = Get-AuthorityRequiredProperty -Object $security -Name 'semanticPreflight' -Context 'Validation/security gate semantic preflight policy'
+    Assert-AuthorityJsonPropertySet -Object $semanticPreflight -Expected @(
+        'artifactType', 'authentication', 'sourceBinding', 'requiredFields', 'fixedState', 'nonAuthority'
+    ) -Context 'Validation/security gate semantic preflight policy'
+    Assert-AuthorityExactString -Value $semanticPreflight.artifactType -Expected 'semantic-scan-preflight-v1' -Context 'Validation/security gate semantic preflight artifact type'
+    Assert-AuthorityExactString -Value $semanticPreflight.authentication -Expected 'unsigned-provider-output' -Context 'Validation/security gate semantic preflight authentication'
+    Assert-AuthorityExactString -Value $semanticPreflight.sourceBinding -Expected 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' -Context 'Validation/security gate semantic preflight source binding'
+    Assert-AuthorityExactStringSequence -Value $semanticPreflight.requiredFields -Expected @(
+        'candidateId', 'inputInventorySha256', 'scanOutputSha256', 'provider', 'purpose', 'scope', 'activeSkills',
+        'analyzerIdentity', 'analyzerCompleteness', 'analyzerInventoryVerified', 'findings', 'findingsSha256',
+        'severityGate', 'consentStatus', 'signed', 'releaseEligible'
+    ) -Context 'Validation/security gate semantic preflight required fields'
+    Assert-AuthorityExactStringSequence -Value $semanticPreflight.fixedState -Expected @(
+        'analyzerInventoryVerified=false', 'consentStatus=pending', 'signed=false', 'releaseEligible=false'
+    ) -Context 'Validation/security gate semantic preflight fixed state'
+    Assert-AuthorityExactStringSequence -Value $semanticPreflight.nonAuthority -Expected @(
+        'cannot-satisfy-semantic-evidence', 'cannot-authorize-release'
+    ) -Context 'Validation/security gate semantic preflight authority boundary'
+
     $aiReview = Get-AuthorityRequiredProperty -Object $security -Name 'aiReview' -Context 'Validation/security gate AI review policy'
     Assert-AuthorityJsonPropertySet -Object $aiReview -Expected @('status', 'decision', 'candidateBinding', 'arrayFields', 'equalCounts', 'severityPolicy', 'authentication', 'digestFields', 'attestation') -Context 'Validation/security gate AI review policy'
     Assert-AuthorityExactString -Value $aiReview.status -Expected 'passed' -Context 'Validation/security gate AI review status'
