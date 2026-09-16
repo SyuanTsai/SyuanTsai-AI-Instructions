@@ -162,8 +162,8 @@ def _normalize_skill(
     ):
         raise ValueError("raw graph lacks successful complete LLM execution")
     for field in ("ledger_exceptions", "limitations", "scope_exclusions"):
-        if completeness.get(field, []) not in ([], None):
-            raise ValueError(f"raw graph contains {field}")
+        if field not in completeness or type(completeness[field]) is not list or completeness[field]:
+            raise ValueError(f"raw graph {field} must be an explicit empty array")
 
     expected_components = _component_paths(expected_provider_components)
     components = _component_paths(state.get("llm_components"))

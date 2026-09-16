@@ -66,7 +66,7 @@ def graph_result(skill: str, with_finding: bool = True) -> dict[str, object]:
         "analysis_completeness": {
             "status": "complete", "is_complete": True,
             "execution_successful": True, "ledger_exceptions": [],
-            "limitations": [],
+            "limitations": [], "scope_exclusions": [],
         },
         "llm_components": ["SKILL.md"],
         "llm_file_cache": {"SKILL.md": "synthetic input"},
@@ -419,6 +419,20 @@ class RawGraphNormalizationContract(unittest.TestCase):
             state["findings"][0].file = "additional.md"
             with self.assertRaisesRegex(ValueError, "producer work path"):
                 module.normalize_candidate_scan(**inputs)
+
+    # Scenario: A scanner omits or nulls a completeness exception field after a version change.
+    # Purpose: Require affirmative empty-array evidence instead of treating malformed absence as no exclusions.
+    def test_UnitT49_requires_explicit_empty_completeness_exception_arrays(self) -> None:
+        for field in ("ledger_exceptions", "limitations", "scope_exclusions"):
+            missing = bound_invocation()
+            missing["graphs_by_skill"]["alpha-skill"]["analysis_completeness"].pop(field)
+            with self.assertRaisesRegex(ValueError, "explicit empty array"):
+                module.normalize_candidate_scan(**missing)
+
+            nulled = bound_invocation()
+            nulled["graphs_by_skill"]["alpha-skill"]["analysis_completeness"][field] = None
+            with self.assertRaisesRegex(ValueError, "explicit empty array"):
+                module.normalize_candidate_scan(**nulled)
 
     # Scenario: One analyzer's LLM call failed after its work row claimed complete.
     # Purpose: Reconcile provider telemetry with work accounting.
