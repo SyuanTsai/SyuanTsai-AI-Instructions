@@ -712,12 +712,12 @@ function Get-DirectoryClosureIdentity {
                 throw "Installed tool closure contains a duplicate path: '$($symlinkEntry.path)'."
             }
             $nfcSymlinkPath = ([string]$symlinkEntry.path).Normalize([Text.NormalizationForm]::FormC)
-            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne [string]$symlinkEntry.path) {
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and -not [string]::Equals([string]$nfcPaths[$nfcSymlinkPath], [string]$symlinkEntry.path, [StringComparison]::Ordinal)) {
                 throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$($symlinkEntry.path)'."
             }
             $nfcPaths[$nfcSymlinkPath] = [string]$symlinkEntry.path
             $asciiCaseSymlinkPath = Get-ResolverAsciiCaseFold -Value $nfcSymlinkPath
-            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne [string]$symlinkEntry.path) {
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and -not [string]::Equals([string]$asciiCasePaths[$asciiCaseSymlinkPath], [string]$symlinkEntry.path, [StringComparison]::Ordinal)) {
                 throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$($symlinkEntry.path)'."
             }
             $asciiCasePaths[$asciiCaseSymlinkPath] = [string]$symlinkEntry.path
@@ -735,12 +735,12 @@ function Get-DirectoryClosureIdentity {
             throw "Installed tool closure contains a duplicate path: '$relative'."
         }
         $nfc = $relative.Normalize([Text.NormalizationForm]::FormC)
-        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+        if ($nfcPaths.ContainsKey($nfc) -and -not [string]::Equals([string]$nfcPaths[$nfc], $relative, [StringComparison]::Ordinal)) {
             throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
         }
         $nfcPaths[$nfc] = $relative
         $asciiCase = Get-ResolverAsciiCaseFold -Value $nfc
-        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and -not [string]::Equals([string]$asciiCasePaths[$asciiCase], $relative, [StringComparison]::Ordinal)) {
             throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
         }
         $asciiCasePaths[$asciiCase] = $relative

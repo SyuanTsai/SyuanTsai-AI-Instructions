@@ -981,3 +981,40 @@ catch {
         Assert-False ((Get-StandardValidationFileSha256 -Path $receiptPath -Context 'replacement resolver receipt') -ceq $snapshotSha256) 'The regression must replace the live receipt path after snapshot capture.'
     }
 }
+Describe 'Installed closure path identity' {
+    BeforeAll {
+        $resolver = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1'
+        . $resolver -ValidatePolicyOnly | Out-Null
+    }
+
+    # Scenario: Two real filenames are ordinally different but normalize to the same Unicode NFC path.
+    # Purpose: Enforce the existing collision contract independently of PowerShell culture comparisons.
+    It 'InterT10_RejectsDistinctUnicodeNormalizedFilenames' {
+        $root = Join-Path $TestDrive 'unicode-collision'
+        [void](New-Item -ItemType Directory -Path $root)
+        [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"), 'one')
+        [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"), 'two')
+        @(Get-ChildItem -LiteralPath $root -File).Count | Should -Be 2
+        { Get-DirectoryClosureIdentity -Path $root } | Should -Throw '*Unicode-normalization-colliding*'
+    }
+
+    # Scenario: Case-varied and non-ASCII filenames have no normalization collision.
+    # Purpose: Preserve exact Ordinal ordering, canonical UTF-8 bytes and final SHA-256.
+    It 'InterT20_PreservesCanonicalClosureBytes' {
+        $root = Join-Path $TestDrive 'ordinal-closure'
+        [void](New-Item -ItemType Directory -Path $root)
+        $names = [string[]]@('a.txt', 'Z.txt', "$([char]0xE9).txt", "$([char]0x4E2D).txt")
+        foreach ($name in $names) { [IO.File]::WriteAllText((Join-Path $root $name), $name, [Text.UTF8Encoding]::new($false)) }
+        $identity = Get-DirectoryClosureIdentity -Path $root
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $expected = ($names | ForEach-Object { "$_`t$((Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant())`n" }) -join ''
+        $actual = ($identity.entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($actual)) | Should -BeExactly ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected)))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $expectedHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($expected))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        $identity.sha256 | Should -BeExactly $expectedHash
+        [IO.File]::AppendAllText((Join-Path $root 'a.txt'), 'changed')
+        (Get-DirectoryClosureIdentity -Path $root).sha256 | Should -Not -BeExactly $identity.sha256
+    }
+}
