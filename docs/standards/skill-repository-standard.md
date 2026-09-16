@@ -539,6 +539,8 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 - Standard self-conformance requirement；
 - review matrix 與 SYP-167 authority deliverables 不得過期。
 
+Authority gate **MUST** 另外透過同一個 frozen Pester invocation 執行 `tests/standard-semantic-inventory-probe.Tests.ps1`、`tests/standard-semantic-preflight.Tests.ps1` 與 `tests/standard-semantic-raw-graph.Tests.ps1`，使 installed analyzer inventory、unsigned preflight 與 raw graph source/work/finding bindings 的 executable behavior 與本 Standard 及 machine-readable policy 在同一 gate 失敗或通過；只檢查 policy 字串不足以證明 semantic behavior conformance。
+
 每個 conformant Skill repository **MUST** 有：
 
 - Standard v1 conformance regression；

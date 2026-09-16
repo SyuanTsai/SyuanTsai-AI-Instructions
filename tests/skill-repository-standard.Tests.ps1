@@ -1207,8 +1207,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'installedMetadataVerification=static-dist-info-metadata' 'Shared gate must verify static installed metadata inspection.'
         Assert-Match $gate 'resolutionRounds=\$\(\$skillSpectorReceipt\.resolutionRounds\)' 'Shared gate must bind resolution rounds into the resolver identity.'
         Assert-Match $gate 'consoleEntryPoint=\$\(\$skillSpectorReceipt\.consoleEntryPoint\)' 'Shared gate must bind the static console entry point into the resolver identity.'
-        Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute all three authority regressions through frozen Pester.'
-        Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 45\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the complete combined authority inventory with the resolved Pester result shape.'
+        Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute the complete authority regression inventory through frozen Pester.'
+        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
+        }
+        Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 55\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the expanded combined authority inventory with the resolved Pester result shape.'
 
         # Scenario: External validators return clean-looking reports for a different package, incomplete inventory, or downgraded findings.
         # Purpose: Bind every report to this exact fixture and interpret native report severity without PowerShell coercion.

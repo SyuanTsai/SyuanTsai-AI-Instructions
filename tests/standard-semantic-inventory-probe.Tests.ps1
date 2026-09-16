@@ -11,7 +11,7 @@ Describe 'Installed semantic scanner inventory probe' {
     It 'InterT10_runs_semantic_inventory_probe_contract_without_an_llm' {
         $result = @(& $script:Python -B $script:UnitFile 2>&1)
         $LASTEXITCODE | Assert-SemanticEqual -Expected 0
-        ($result -join "`n") | Assert-SemanticMatch -Pattern 'Ran 5 tests'
+        ($result -join "`n") | Assert-SemanticMatch -Pattern 'Ran 6 tests'
         ($result -join "`n") | Assert-SemanticMatch -Pattern '(?m)^OK$'
     }
 }

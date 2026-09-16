@@ -114,13 +114,13 @@ def validate_module_source(source_value: str | Path, install_prefix: str | Path)
 
 
 def _installed_graph_inventory() -> tuple[str, list[str], list[str], dict[str, str]]:
+    if sys.prefix == sys.base_prefix or sys.flags.isolated != 1:
+        raise ValueError("semantic scanner probe requires the resolver venv in Python isolated mode")
     # Import creates SkillSpector's graph and applies its current provider gate.
     # A newly available provider therefore needs a fresh frozen tool process.
     from skillspector.graph import graph
     from skillspector.nodes.analyzers import ANALYZER_MODULES, ANALYZER_NODE_IDS
 
-    if sys.prefix == sys.base_prefix:
-        raise ValueError("semantic scanner probe requires the resolver's isolated Python venv")
     distribution = importlib.metadata.distribution("skillspector")
     metadata_root = Path(str(distribution.locate_file(""))).resolve(strict=True)
     install_prefix = Path(sys.prefix).resolve(strict=True)

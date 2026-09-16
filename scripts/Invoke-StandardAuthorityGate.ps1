@@ -2855,6 +2855,9 @@ $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-semantic-inventory-probe.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-semantic-preflight.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-semantic-raw-graph.Tests.ps1')
 )
 foreach ($requiredPath in @($validationSecurityGatePath, $upstreamAdapterPolicyPath, $upstreamAdapterValidatorPath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -3367,7 +3370,7 @@ if ($null -eq $loadedPester -or [string]$loadedPester.Version -cne [string]$pest
 $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
 Assert-AuthorityPesterResult `
     -Result $authorityResult `
-    -MinimumTotalCount 45 `
+    -MinimumTotalCount 55 `
     -PesterMajorVersion ([version]$pesterReceipt.resolvedVersion).Major
 
 $candidateCommit = Get-AuthorityCandidateCommit -RepositoryRoot $repositoryRoot
