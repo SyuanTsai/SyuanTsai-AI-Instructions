@@ -251,6 +251,26 @@ Describe 'Standard validation resolver hardening' {
         Assert-Equal $closure.sha256 $expectedHash 'Installed closure SHA-256 must retain the previous canonical bytes.'
     }
 
+    # Scenario: A Unix tool closure contains a root-level file whose name consists only of non-control whitespace.
+    # Purpose: Keep native ordering aligned with the authority path contract, which rejects empty paths but permits this legal filename.
+    It 'UnitT46_preserves_contract_valid_whitespace_only_relative_paths' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $ordered = @(Get-ResolverOrderedClosureEntries -Entries @(
+            [pscustomobject]@{ path = 'zeta'; sha256 = ('1' * 64) },
+            [pscustomobject]@{ path = '   '; sha256 = ('0' * 64) }
+        ))
+        Assert-Equal $ordered.Count 2 'Native ordering must retain every contract-valid path.'
+        Assert-Equal ([string]$ordered[0].path) '   ' 'Whitespace-only paths must participate in ordinal ordering.'
+
+        $errorMessage = $null
+        try {
+            Get-ResolverOrderedClosureEntries -Entries @([pscustomobject]@{ path = ''; sha256 = ('2' * 64) }) | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'without a path' 'Empty paths must remain invalid.'
+    }
+
     # Scenario: Wheel metadata contains unsafe identity text, duplicate headers or body text that resembles headers.
     # Purpose: Reject unsafe or ambiguous header identity without parsing description-body content as metadata.
     It 'UnitT50_rejects_unsafe_or_ambiguous_metadata_identity_text_before_lock_generation' {

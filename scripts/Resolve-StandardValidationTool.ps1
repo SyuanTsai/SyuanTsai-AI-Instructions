@@ -696,7 +696,7 @@ function Get-ResolverOrderedClosureEntries {
     # the growing PowerShell list once for every insertion.
     $sorted = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([StringComparer]::Ordinal)
     foreach ($entry in $Entries) {
-        if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.path)) {
+        if ($null -eq $entry -or [string]::IsNullOrEmpty([string]$entry.path)) {
             throw 'Installed tool closure contains an entry without a path.'
         }
         $sorted.Add([string]$entry.path, $entry)
