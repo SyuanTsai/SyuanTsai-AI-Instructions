@@ -249,19 +249,33 @@ class RawGraphNormalizationContract(unittest.TestCase):
     # Scenario: Completed chunks cover lines 1 and 3 of a three-line file but omit line 2.
     # Purpose: Refuse falsely complete planned work when the graph silently lost a range.
     def test_UnitT45_rejects_gap_between_completed_chunks(self) -> None:
-        inputs = bound_invocation()
-        state = inputs["graphs_by_skill"]["alpha-skill"]
-        state["llm_file_cache"]["SKILL.md"] = "first\nsecond\nthird\n"
-        for status, row in zip(state["analyzer_status_events"], state["inspection_ledger"]):
-            target = dict(status["planned_work"][0])
-            target.update({"work_id": target["work_id"] + "-third", "start_line": 3, "end_line": 3})
-            status["planned_work"].append(target)
-            terminal = dict(row)
-            terminal.update({"work_id": target["work_id"], "start_line": 3,
-                             "end_line": 3, "emitted_finding_ids": []})
-            state["inspection_ledger"].append(terminal)
-        with self.assertRaises(ValueError):
-            module.normalize_candidate_scan(**inputs)
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "alpha-skill"
+            package.mkdir()
+            payload = b"first\nsecond\nthird\n"
+            (package / "SKILL.md").write_bytes(payload)
+            inputs = bound_invocation()
+            state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["input_path"] = str(package)
+            state["skill_path"] = str(package)
+            state["raw_file_cache"]["SKILL.md"] = payload
+            state["llm_file_cache"]["SKILL.md"] = payload.decode("utf-8")
+            inputs["expected_skill_paths"]["alpha-skill"] = str(package)
+            inputs["expected_committed_source_by_skill"]["alpha-skill"]["SKILL.md"] = {
+                "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
+            }
+            for status, row in zip(state["analyzer_status_events"], state["inspection_ledger"]):
+                status["planned_work"][0].update({"start_line": 1, "end_line": 1})
+                row.update({"start_line": 1, "end_line": 1})
+                target = dict(status["planned_work"][0])
+                target.update({"work_id": target["work_id"] + "-third", "start_line": 3, "end_line": 3})
+                status["planned_work"].append(target)
+                terminal = dict(row)
+                terminal.update({"work_id": target["work_id"], "start_line": 3,
+                                 "end_line": 3, "emitted_finding_ids": []})
+                state["inspection_ledger"].append(terminal)
+            with self.assertRaisesRegex(ValueError, "chunks omit"):
+                module.normalize_candidate_scan(**inputs)
 
     # Scenario: One analyzer's LLM call failed after its work row claimed complete.
     # Purpose: Reconcile provider telemetry with work accounting.
