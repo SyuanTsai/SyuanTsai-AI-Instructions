@@ -923,6 +923,8 @@ catch {
 
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
+        Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Semantic preflight per-work provider-call binding must remain central.'
+        Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Semantic preflight JSON property-collision handling must remain central.'
         $semanticPreflightNonAuthority = @($policy.security.semanticPreflight.nonAuthority)
         Assert-Equal $semanticPreflightNonAuthority.Count 2 'Unsigned preflight must declare both non-authority boundaries.'
         Assert-Equal $semanticPreflightNonAuthority[0] 'cannot-satisfy-semantic-evidence' 'Unsigned preflight must not satisfy semantic evidence.'

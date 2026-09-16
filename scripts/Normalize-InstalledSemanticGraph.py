@@ -275,11 +275,20 @@ def _normalize_skill(
         if call.get("ok") is not True or call.get("error") is not None:
             raise ValueError("LLM call did not complete successfully")
         if identity.startswith("semantic_"):
-            if identity not in analyzer_ids or identity in semantic_calls:
-                raise ValueError("LLM call has an unexpected or duplicate semantic node")
-            semantic_calls[identity] = call
-    if set(semantic_calls) != set(analyzer_ids):
-        raise ValueError("registered semantic analyzer has no successful provider call")
+            work_id = _scalar(call.get("work_id"), "LLM call work ID")
+            if identity not in analyzer_ids or work_id not in planned or work_id in semantic_calls:
+                raise ValueError("LLM call has an unexpected or duplicate semantic work item")
+            expected_identity, expected_path, expected_start, expected_end = planned[work_id]
+            if (
+                identity != expected_identity
+                or call.get("path") != expected_path
+                or call.get("start_line") != expected_start
+                or call.get("end_line") != expected_end
+            ):
+                raise ValueError("LLM provider call disagrees with its planned work item")
+            semantic_calls[work_id] = call
+    if set(semantic_calls) != set(planned):
+        raise ValueError("semantic planned work has no unique successful provider call")
 
     by_analyzer: dict[str, list[dict[str, str]]] = {identity: [] for identity in analyzer_ids}
     seen_findings: set[str] = set()

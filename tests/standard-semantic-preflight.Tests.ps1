@@ -154,7 +154,7 @@ Describe 'Standard semantic scan preflight' {
     It 'UnitT50_rejects_duplicate_json_keys_before_parsing_analyzer_claims' {
         $resultPath = Join-Path $TestDrive 'duplicate-key-scan.json'
         $outputPath = Join-Path $TestDrive 'duplicate-key-preflight.json'
-        foreach ($key in @('candidateId', 'candidate\u0049d')) {
+        foreach ($key in @('candidateId', 'candidate\u0049d', 'CandidateId')) {
             $json = (New-CompleteSemanticResult | ConvertTo-Json -Depth 30)
             if ($json -notmatch '"candidateId"') { throw 'Fixture has no candidateId key.' }
             $json = $json -replace '("schemaVersion"\s*:\s*1\s*,)', ('$1 "' + $key + '":"' + ('b' * 64) + '",')

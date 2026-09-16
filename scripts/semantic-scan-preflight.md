@@ -49,7 +49,9 @@ source checkout. Its exact input shape is:
 ```
 
 Every required analyzer must report `passed`, `complete`, and the exact active
-Skill set. The helper rejects unknown/duplicate JSON properties, missing or
+Skill set. The helper rejects unknown JSON properties and decoded duplicate or
+case-colliding properties with `OrdinalIgnoreCase` semantics before PowerShell
+deserialization, missing or
 extra analyzer identities, wrong candidate/inventory/provider/purpose/scope,
 partial Skill coverage, unknown finding severity, unsupported finding fields,
 and reparse files or parent paths. It reads and hashes the same exclusively
@@ -101,8 +103,10 @@ the archive/acquisition and these caller inputs; this check cannot sign
 itself or attest the provider's exact outbound prompt bytes. It rejects an
 unwired node, global
 `complete` without per-analyzer completed status, missing/partial/duplicate
-planned work, gaps between completed file chunks, failed or missing provider
-calls, output bounds, missing or ambiguous raw finding producer IDs, and a
+planned work, gaps between completed file chunks, and any planned work item
+without exactly one successful provider call matching its `work_id`, analyzer,
+path, and line interval. It also rejects failed or extra provider calls, output
+bounds, missing or ambiguous raw finding producer IDs, and a
 missing active Skill graph. It maps every attributed semantic finding into
 the existing scanner-result JSON shape, preserving one record per finding;
 the **raw Finding objects and full ledger must also be retained** by the

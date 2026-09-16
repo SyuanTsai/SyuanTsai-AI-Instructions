@@ -693,11 +693,13 @@ function Assert-AuthorityValidationSecurityGate {
 
     $semanticPreflight = Get-AuthorityRequiredProperty -Object $security -Name 'semanticPreflight' -Context 'Validation/security gate semantic preflight policy'
     Assert-AuthorityJsonPropertySet -Object $semanticPreflight -Expected @(
-        'artifactType', 'authentication', 'sourceBinding', 'requiredFields', 'fixedState', 'nonAuthority'
+        'artifactType', 'authentication', 'sourceBinding', 'workBinding', 'jsonPropertyBinding', 'requiredFields', 'fixedState', 'nonAuthority'
     ) -Context 'Validation/security gate semantic preflight policy'
     Assert-AuthorityExactString -Value $semanticPreflight.artifactType -Expected 'semantic-scan-preflight-v1' -Context 'Validation/security gate semantic preflight artifact type'
     Assert-AuthorityExactString -Value $semanticPreflight.authentication -Expected 'unsigned-provider-output' -Context 'Validation/security gate semantic preflight authentication'
     Assert-AuthorityExactString -Value $semanticPreflight.sourceBinding -Expected 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' -Context 'Validation/security gate semantic preflight source binding'
+    Assert-AuthorityExactString -Value $semanticPreflight.workBinding -Expected 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' -Context 'Validation/security gate semantic preflight work binding'
+    Assert-AuthorityExactString -Value $semanticPreflight.jsonPropertyBinding -Expected 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' -Context 'Validation/security gate semantic preflight JSON property binding'
     Assert-AuthorityExactStringSequence -Value $semanticPreflight.requiredFields -Expected @(
         'candidateId', 'inputInventorySha256', 'scanOutputSha256', 'provider', 'purpose', 'scope', 'activeSkills',
         'analyzerIdentity', 'analyzerCompleteness', 'analyzerInventoryVerified', 'findings', 'findingsSha256',

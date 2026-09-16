@@ -137,7 +137,7 @@ function Assert-PreflightUniqueJsonProperties {
         $character = $Text[$Cursor.Value]
         if ($character -eq '{') {
             $Cursor.Value++
-            $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             Skip-JsonWhitespace -Text $Text -Cursor $Cursor
             while ($Cursor.Value -lt $Text.Length -and $Text[$Cursor.Value] -ne '}') {
                 $name = Read-JsonString -Text $Text -Cursor $Cursor -Decode $true

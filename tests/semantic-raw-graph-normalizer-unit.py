@@ -57,7 +57,10 @@ def graph_result(skill: str, with_finding: bool = True) -> dict[str, object]:
             "planned_work": [{"work_id": work_id, "path": "SKILL.md",
                               "start_line": 1, "end_line": 1}],
         })
-        calls.append({"node": identity, "ok": True, "error": None})
+        calls.append({
+            "node": identity, "work_id": work_id, "path": "SKILL.md",
+            "start_line": 1, "end_line": 1, "ok": True, "error": None,
+        })
     return {
         "execution_successful": True, "use_llm": True,
         "analysis_completeness": {
@@ -144,6 +147,8 @@ class RawGraphNormalizationContract(unittest.TestCase):
                 status["planned_work"][0]["end_line"] = 3
             for row in state["inspection_ledger"]:
                 row["end_line"] = 3
+            for call in state["llm_call_log"]:
+                call["end_line"] = 3
             result = module.normalize_candidate_scan(**inputs)
             self.assertEqual(result["analyzers"][0]["coveredSkills"], result["activeSkills"])
 
@@ -275,6 +280,47 @@ class RawGraphNormalizationContract(unittest.TestCase):
                                  "end_line": 3, "emitted_finding_ids": []})
                 state["inspection_ledger"].append(terminal)
             with self.assertRaisesRegex(ValueError, "chunks omit"):
+                module.normalize_candidate_scan(**inputs)
+
+    # Scenario: One analyzer plans and completes two chunks but records a provider call for only the first.
+    # Purpose: Prevent a completed work row from inheriting another chunk's successful provider telemetry.
+    def test_UnitT47_rejects_planned_work_without_its_own_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "alpha-skill"
+            package.mkdir()
+            payload = b"first\nsecond\n"
+            (package / "SKILL.md").write_bytes(payload)
+            inputs = bound_invocation()
+            state = inputs["graphs_by_skill"]["alpha-skill"]
+            state["input_path"] = str(package)
+            state["skill_path"] = str(package)
+            state["raw_file_cache"]["SKILL.md"] = payload
+            state["llm_file_cache"]["SKILL.md"] = payload.decode("utf-8")
+            inputs["expected_skill_paths"]["alpha-skill"] = str(package)
+            inputs["expected_committed_source_by_skill"]["alpha-skill"]["SKILL.md"] = {
+                "sha256": sha256(payload).hexdigest(), "bytes": len(payload)
+            }
+            for status, row, call in zip(
+                state["analyzer_status_events"], state["inspection_ledger"], state["llm_call_log"]
+            ):
+                status["planned_work"][0]["end_line"] = 2
+                row["end_line"] = 2
+                call["end_line"] = 2
+            first_status = state["analyzer_status_events"][0]
+            first_row = state["inspection_ledger"][0]
+            first_call = state["llm_call_log"][0]
+            first_status["planned_work"][0]["end_line"] = 1
+            first_row["end_line"] = 1
+            first_call["end_line"] = 1
+            second_work = dict(first_status["planned_work"][0])
+            second_work.update({"work_id": second_work["work_id"] + "-second",
+                                "start_line": 2, "end_line": 2})
+            first_status["planned_work"].append(second_work)
+            second_row = dict(first_row)
+            second_row.update({"work_id": second_work["work_id"], "start_line": 2,
+                               "end_line": 2, "emitted_finding_ids": []})
+            state["inspection_ledger"].append(second_row)
+            with self.assertRaisesRegex(ValueError, "provider call"):
                 module.normalize_candidate_scan(**inputs)
 
     # Scenario: One analyzer's LLM call failed after its work row claimed complete.

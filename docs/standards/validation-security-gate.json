@@ -136,6 +136,8 @@
       "artifactType": "semantic-scan-preflight-v1",
       "authentication": "unsigned-provider-output",
       "sourceBinding": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes",
+      "workBinding": "one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval",
+      "jsonPropertyBinding": "reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization",
       "requiredFields": ["candidateId", "inputInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"],
       "fixedState": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"],
       "nonAuthority": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"]
