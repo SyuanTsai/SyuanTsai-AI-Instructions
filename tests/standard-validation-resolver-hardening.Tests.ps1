@@ -985,6 +985,19 @@ Describe 'Installed closure path identity' {
     BeforeAll {
         $resolver = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1'
         . $resolver -ValidatePolicyOnly | Out-Null
+        function Assert-ClosureCondition {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+        function Assert-ClosureFailure {
+            param([scriptblock] $Action, [string] $MessageFragment)
+            $failure = ''
+            try { & $Action } catch { $failure = $_.Exception.Message }
+            if ([string]::IsNullOrEmpty($failure) -or
+                $failure.IndexOf($MessageFragment, [StringComparison]::Ordinal) -lt 0) {
+                throw "Expected closure failure containing '$MessageFragment'; actual='$failure'."
+            }
+        }
     }
 
     # Scenario: A large installed inventory and a smaller identical old/new algorithm sample are sorted.
@@ -999,8 +1012,8 @@ Describe 'Installed closure path identity' {
         [Array]::Sort($expectedPaths, [StringComparer]::Ordinal)
         $actualBytes = [Text.Encoding]::UTF8.GetBytes(($actual | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
         $expectedBytes = [Text.Encoding]::UTF8.GetBytes(($expectedPaths | ForEach-Object { "$_`t$('a' * 64)`n" }) -join '')
-        [Convert]::ToBase64String($actualBytes) | Should -BeExactly ([Convert]::ToBase64String($expectedBytes))
-        $largeMs | Should -BeLessThan 10000
+        Assert-ClosureCondition ([string]::Equals([Convert]::ToBase64String($actualBytes), [Convert]::ToBase64String($expectedBytes), [StringComparison]::Ordinal)) 'Large closure canonical bytes differ.'
+        Assert-ClosureCondition ($largeMs -lt 10000) 'Large Ordinal sort exceeded its bounded time.'
         $sample = @($entries | Select-Object -First 1024)
         $watch.Restart()
         $old = New-Object 'System.Collections.Generic.List[object]'
@@ -1015,16 +1028,16 @@ Describe 'Installed closure path identity' {
         $new = @(Sort-ResolverClosureEntriesByOrdinalPath -Entries $sample)
         $watch.Stop()
         $newMs = $watch.Elapsed.TotalMilliseconds
-        ($new.path -join "`n") | Should -BeExactly ($old.path -join "`n")
-        $newMs | Should -BeLessThan $oldMs
+        Assert-ClosureCondition ([string]::Equals(($new.path -join "`n"), ($old.path -join "`n"), [StringComparison]::Ordinal)) 'Old and new Ordinal order differ.'
+        Assert-ClosureCondition ($newMs -lt $oldMs) 'The bounded sample did not improve over insertion sorting.'
         Write-Host "Ordinal sort: 15279 entries=$largeMs ms; identical 1024 entries old=$oldMs ms, new=$newMs ms."
     }
 
     # Scenario: Sorting is called with duplicate ordinal paths, or no entries.
     # Purpose: Preserve fail-closed duplicate detection and an empty helper result.
     It 'UnitT40_RejectsDuplicateSortPathsAndAcceptsEmptyInput' {
-        { Sort-ResolverClosureEntriesByOrdinalPath -Entries @(@{ path = 'a' }, @{ path = 'a' }) } | Should -Throw '*duplicate*'
-        @(Sort-ResolverClosureEntriesByOrdinalPath -Entries @()).Count | Should -Be 0
+        Assert-ClosureFailure { Sort-ResolverClosureEntriesByOrdinalPath -Entries @(@{ path = 'a' }, @{ path = 'a' }) } 'duplicate path'
+        Assert-ClosureCondition (@(Sort-ResolverClosureEntriesByOrdinalPath -Entries @()).Count -eq 0) 'Empty input must yield no closure entries.'
     }
 
     # Scenario: Two real filenames are ordinally different but normalize to the same Unicode NFC path.
@@ -1034,8 +1047,8 @@ Describe 'Installed closure path identity' {
         [void](New-Item -ItemType Directory -Path $root)
         [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"), 'one')
         [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"), 'two')
-        @(Get-ChildItem -LiteralPath $root -File).Count | Should -Be 2
-        { Get-DirectoryClosureIdentity -Path $root } | Should -Throw '*Unicode-normalization-colliding*'
+        Assert-ClosureCondition (@(Get-ChildItem -LiteralPath $root -File).Count -eq 2) 'The Unicode fixture requires two distinct filenames.'
+        Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root } 'Unicode-normalization-colliding'
     }
 
     # Scenario: Case-varied and non-ASCII filenames have no normalization collision.
@@ -1049,12 +1062,12 @@ Describe 'Installed closure path identity' {
         [Array]::Sort($names, [StringComparer]::Ordinal)
         $expected = ($names | ForEach-Object { "$_`t$((Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant())`n" }) -join ''
         $actual = ($identity.entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
-        [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($actual)) | Should -BeExactly ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected)))
+        Assert-ClosureCondition ([string]::Equals([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($actual)), [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected)), [StringComparison]::Ordinal)) 'Canonical UTF-8 bytes differ.'
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $expectedHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($expected))).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        $identity.sha256 | Should -BeExactly $expectedHash
+        Assert-ClosureCondition ([string]::Equals($identity.sha256, $expectedHash, [StringComparison]::Ordinal)) 'Canonical closure digest differs.'
         [IO.File]::AppendAllText((Join-Path $root 'a.txt'), 'changed')
-        (Get-DirectoryClosureIdentity -Path $root).sha256 | Should -Not -BeExactly $identity.sha256
+        Assert-ClosureCondition (-not [string]::Equals((Get-DirectoryClosureIdentity -Path $root).sha256, $identity.sha256, [StringComparison]::Ordinal)) 'Content tampering must change the closure digest.'
     }
 }
