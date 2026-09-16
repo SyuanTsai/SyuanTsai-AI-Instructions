@@ -1,8 +1,13 @@
 Describe 'Unsigned raw SkillSpector graph normalization' {
     BeforeAll {
         . (Join-Path $PSScriptRoot 'standard-semantic-assertions.ps1')
-        $pythonApplications = @(Get-Command -Name python -CommandType Application -ErrorAction Stop)
-        $script:Python = [string]$pythonApplications[0].Source
+        $approvedPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
+        if ([string]::IsNullOrWhiteSpace($approvedPython)) {
+            $pythonApplications = @(Get-Command -Name python -CommandType Application -ErrorAction Stop)
+            $approvedPython = [string]$pythonApplications[0].Source
+        }
+        $script:Python = [IO.Path]::GetFullPath($approvedPython)
+        if (-not (Test-Path -LiteralPath $script:Python -PathType Leaf)) { throw 'Approved semantic test Python is unavailable.' }
         $script:Fixture = Join-Path $PSScriptRoot 'semantic-raw-graph-normalizer-unit.py'
         $script:Preflight = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Prepare-StandardSemanticScanEvidence.ps1'
     }
@@ -12,7 +17,7 @@ Describe 'Unsigned raw SkillSpector graph normalization' {
     It 'InterT10_passes_complete_synthetic_raw_graph_through_unsigned_preflight' {
         $scannerPath = Join-Path $TestDrive 'semantic-normalized.json'
         $preflightPath = Join-Path $TestDrive 'semantic-preflight.json'
-        & $script:Python -B $script:Fixture --emit-fixture $scannerPath | Out-Null
+        & $script:Python -I -B $script:Fixture --emit-fixture $scannerPath | Out-Null
         $LASTEXITCODE | Assert-SemanticEqual -Expected 0
         Test-Path -LiteralPath $scannerPath | Assert-SemanticTrue
 

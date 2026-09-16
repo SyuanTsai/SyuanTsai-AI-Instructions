@@ -113,9 +113,14 @@ def validate_module_source(source_value: str | Path, install_prefix: str | Path)
     return actual
 
 
-def _installed_graph_inventory() -> tuple[str, list[str], list[str], dict[str, str]]:
-    if sys.prefix == sys.base_prefix or sys.flags.isolated != 1:
+def validate_runtime_isolation(prefix: str, base_prefix: str, isolated: int) -> None:
+    """Require the resolver-owned venv and Python isolated startup before imports."""
+    if prefix == base_prefix or isolated != 1:
         raise ValueError("semantic scanner probe requires the resolver venv in Python isolated mode")
+
+
+def _installed_graph_inventory() -> tuple[str, list[str], list[str], dict[str, str]]:
+    validate_runtime_isolation(sys.prefix, sys.base_prefix, sys.flags.isolated)
     # Import creates SkillSpector's graph and applies its current provider gate.
     # A newly available provider therefore needs a fresh frozen tool process.
     from skillspector.graph import graph

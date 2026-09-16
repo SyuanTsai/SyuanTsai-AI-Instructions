@@ -3367,7 +3367,25 @@ $loadedPester = Get-Module Pester | Where-Object {
 if ($null -eq $loadedPester -or [string]$loadedPester.Version -cne [string]$pesterReceipt.resolvedVersion) {
     throw 'The exact frozen Pester module was not imported.'
 }
-$authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
+$approvedSemanticPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    Join-Path ([string]$skillSpectorReceipt.installRoot) 'venv\Scripts\python.exe'
+}
+else { Join-Path ([string]$skillSpectorReceipt.installRoot) 'venv/bin/python' }
+$approvedSemanticPython = [IO.Path]::GetFullPath($approvedSemanticPython)
+$approvedPythonItem = Get-Item -Force -LiteralPath $approvedSemanticPython -ErrorAction SilentlyContinue
+if ($null -eq $approvedPythonItem -or $approvedPythonItem.PSIsContainer -or
+    ($approvedPythonItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    -not $approvedSemanticPython.StartsWith(([IO.Path]::GetFullPath([string]$skillSpectorReceipt.installRoot) + [IO.Path]::DirectorySeparatorChar),[StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The frozen SkillSpector receipt does not expose a regular in-closure Python for semantic authority tests.'
+}
+$priorAuthorityPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
+try {
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$approvedSemanticPython,'Process')
+    $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
+}
+finally {
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
+}
 Assert-AuthorityPesterResult `
     -Result $authorityResult `
     -MinimumTotalCount 55 `

@@ -1211,6 +1211,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
         }
+        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared gate must bind semantic Python tests to the frozen SkillSpector environment.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
+            Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must start Python in isolated mode."
+        }
         Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 55\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the expanded combined authority inventory with the resolved Pester result shape.'
 
         # Scenario: External validators return clean-looking reports for a different package, incomplete inventory, or downgraded findings.

@@ -927,6 +927,11 @@ catch {
         foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             Assert-Match $gate ([regex]::Escape($semanticSuite)) "Authority resolution must retain semantic behavior suite '$semanticSuite'."
         }
+        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Authority resolution must route semantic regressions through the frozen SkillSpector Python.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
+            Assert-Match $suiteText '& \$script:Python -I -B' "Authority semantic suite '$isolatedPythonSuite' must request isolated Python startup."
+        }
         Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Semantic preflight per-work provider-call binding must remain central.'
         Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Semantic preflight JSON property-collision handling must remain central.'
         $semanticPreflightNonAuthority = @($policy.security.semanticPreflight.nonAuthority)

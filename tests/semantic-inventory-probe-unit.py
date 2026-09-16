@@ -18,7 +18,7 @@ SPEC.loader.exec_module(module)
 class InstalledSemanticInventoryContract(unittest.TestCase):
     def test_UnitT05_rejects_nonisolated_runtime_before_scanner_import(self) -> None:
         with self.assertRaisesRegex(ValueError, "isolated"):
-            module._installed_graph_inventory()
+            module.validate_runtime_isolation("/system/python", "/system/python", 0)
 
     # Scenario: Every registered semantic module was actually wired into the frozen graph.
     # Purpose: Permit a ready pre-scan probe only for the exact resolved analyzer set.
