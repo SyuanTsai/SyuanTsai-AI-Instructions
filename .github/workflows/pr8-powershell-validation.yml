@@ -73,11 +73,11 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 522) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 522." }
+          if ([int]$result.TotalCount -ne 523) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 523." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 6) { throw "Windows PowerShell 5.1 expected exactly 6 platform/version skips; got $($result.SkippedCount)." }
+          if ([int]$result.SkippedCount -ne 7) { throw "Windows PowerShell 5.1 expected exactly 7 platform/version skips; got $($result.SkippedCount)." }
           if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
             throw 'Pester result counts are incomplete.'
           }
@@ -137,11 +137,11 @@ jobs:
           $result = & $invokePester -Script ./tests -PassThru
           if ($null -eq $result) { throw 'Pester did not return a result object.' }
           Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 522) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 522." }
+          if ([int]$result.TotalCount -ne 523) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 523." }
           if ($result.FailedCount -gt 0) { exit 1 }
           if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
           if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 5) { throw "PowerShell 7 on Windows expected exactly 5 platform skips; got $($result.SkippedCount)." }
+          if ([int]$result.SkippedCount -ne 6) { throw "PowerShell 7 on Windows expected exactly 6 platform skips; got $($result.SkippedCount)." }
           if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
             throw 'Pester result counts are incomplete.'
           }
