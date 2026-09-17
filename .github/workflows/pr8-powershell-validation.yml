@@ -80,7 +80,6 @@ jobs:
             ExpectedTotalCount = 530
             ExpectedSkippedCount = 7
             OuterTimeoutSeconds = 1800
-            CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }
@@ -148,7 +147,6 @@ jobs:
             ExpectedTotalCount = 530
             ExpectedSkippedCount = 6
             OuterTimeoutSeconds = 1800
-            CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }

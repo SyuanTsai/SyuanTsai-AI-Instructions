@@ -27,7 +27,10 @@ Describe 'Standard validation resolver hardening' {
 
         function Assert-Match {
             param([string] $Actual, [string] $Pattern, [string] $Message)
-            if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
+            if ($Actual -notmatch $Pattern) {
+                $actualDisplay = if ($null -eq $Actual) { '<null>' } else { [string]$Actual }
+                throw "$Message Actual='$actualDisplay' Pattern='$Pattern'."
+            }
         }
 
         function Assert-NotMatch {
@@ -776,30 +779,114 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
     # Scenario: A caller points either public report writer at an existing file containing unrelated bytes.
     # Purpose: Prove fail-closed existing-file behavior and byte preservation for both OutputPath contracts.
     It 'UnitT91_rejects_existing_caller_output_without_mutation' {
-        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
-
-        $sentinel = (New-Object Text.UTF8Encoding($false)).GetBytes('existing-report-must-remain-byte-identical')
-        $resolverOutput = Join-Path $TestDrive 'existing-resolver-output.json'
-        [IO.File]::WriteAllBytes($resolverOutput, $sentinel)
-        $resolverBefore = [IO.File]::ReadAllBytes($resolverOutput)
-        $resolverError = $null
-        try { & $script:ResolverPath -ValidatePolicyOnly -OutputPath $resolverOutput | Out-Null }
-        catch { $resolverError = $_.Exception.Message }
-        Assert-Match $resolverError 'exists|already' 'The resolver must fail closed when caller OutputPath already exists.'
-        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($resolverOutput)) -Expected $resolverBefore -Message 'The resolver must not mutate an existing caller output file.'
-
-        $adapterRoot = Join-Path $TestDrive 'existing-adapter-package'
-        [void](New-Item -ItemType Directory -Path $adapterRoot -Force)
-        $adapterOutput = Join-Path $TestDrive 'existing-adapter-output.json'
-        [IO.File]::WriteAllBytes($adapterOutput, $sentinel)
-        $adapterBefore = [IO.File]::ReadAllBytes($adapterOutput)
-        $adapterError = $null
+        $previousErrorActionPreference = $ErrorActionPreference
         try {
-            & $script:UpstreamAdapterValidatorPath -PackageRoot $adapterRoot -OutputPath $adapterOutput | Out-Null
+            $ErrorActionPreference = 'Stop'
+            $sentinel = (New-Object Text.UTF8Encoding($false)).GetBytes('existing-report-must-remain-byte-identical')
+            $childScript = Join-Path $TestDrive 'existing-output-conflict-child.ps1'
+            Write-TestUtf8File -Path $childScript -Text @'
+param(
+    [Parameter(Mandatory = $true)][ValidateSet('resolver', 'adapter')][string] $Mode,
+    [Parameter(Mandatory = $true)][string] $ResolverPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPath,
+    [Parameter(Mandatory = $true)][string] $ResolverPolicyPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPolicyPath,
+    [Parameter(Mandatory = $true)][string] $PackageRoot,
+    [Parameter(Mandatory = $true)][string] $OutputPath
+)
+$ErrorActionPreference = 'Stop'
+$failureText = $null
+try {
+    if ($Mode -ceq 'resolver') {
+        & $ResolverPath -PolicyPath $ResolverPolicyPath -ValidatePolicyOnly -OutputPath $OutputPath -ErrorAction Stop | Out-Null
+    }
+    else {
+        & $AdapterPath -PackageRoot $PackageRoot -PolicyPath $AdapterPolicyPath -OutputPath $OutputPath -ErrorAction Stop | Out-Null
+    }
+}
+catch {
+    $failureText = $_.Exception.ToString()
+}
+if ([string]::IsNullOrWhiteSpace($failureText)) {
+    [Console]::Error.WriteLine('Expected an existing OutputPath conflict, but the command completed successfully.')
+    exit 2
+}
+[Console]::Error.WriteLine($failureText)
+if ($failureText -match 'writer-error-kind=existing-output') {
+    exit 0
+}
+exit 1
+'@
+
+            $powerShellExecutable = Get-TestPowerShellExecutable
+            $adapterRoot = Join-Path $TestDrive 'existing-adapter-package'
+            [void](New-Item -ItemType Directory -Path $adapterRoot -Force)
+            foreach ($case in @(
+                [pscustomobject]@{
+                    Mode = 'resolver'
+                    OutputPath = Join-Path $TestDrive 'existing-resolver-output.json'
+                    PackageRoot = $adapterRoot
+                    PolicyPath = $script:ToolchainPath
+                    AdapterPolicyPath = $script:UpstreamAdapterPolicyPath
+                    ErrorMessage = 'The resolver must report a stable existing-output conflict marker.'
+                    BytesMessage = 'The resolver must not mutate an existing caller output file.'
+                }
+                [pscustomobject]@{
+                    Mode = 'adapter'
+                    OutputPath = Join-Path $TestDrive 'existing-adapter-output.json'
+                    PackageRoot = $adapterRoot
+                    PolicyPath = $script:ToolchainPath
+                    AdapterPolicyPath = $script:UpstreamAdapterPolicyPath
+                    ErrorMessage = 'The upstream adapter must report a stable existing-output conflict marker.'
+                    BytesMessage = 'The upstream adapter must not mutate an existing caller output file.'
+                }
+            )) {
+                [IO.File]::WriteAllBytes($case.OutputPath, $sentinel)
+                $before = [IO.File]::ReadAllBytes($case.OutputPath)
+                $arguments = @(
+                    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"' + $childScript + '"'),
+                    '-Mode', [string]$case.Mode,
+                    '-ResolverPath', ('"' + $script:ResolverPath + '"'),
+                    '-AdapterPath', ('"' + $script:UpstreamAdapterValidatorPath + '"'),
+                    '-ResolverPolicyPath', ('"' + $case.PolicyPath + '"'),
+                    '-AdapterPolicyPath', ('"' + $case.AdapterPolicyPath + '"'),
+                    '-PackageRoot', ('"' + $case.PackageRoot + '"'),
+                    '-OutputPath', ('"' + $case.OutputPath + '"')
+                )
+                $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $startInfo.FileName = $powerShellExecutable
+                $startInfo.Arguments = $arguments -join ' '
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $true
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError = $true
+                $process = New-Object System.Diagnostics.Process
+                $process.StartInfo = $startInfo
+                try {
+                    if (-not $process.Start()) { throw "Unable to start existing $($case.Mode) output conflict probe." }
+                    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                    $stderrTask = $process.StandardError.ReadToEndAsync()
+                    if (-not $process.WaitForExit(15000)) {
+                        try { $process.Kill() } catch { }
+                        throw "Existing $($case.Mode) output conflict probe did not finish within 15 seconds."
+                    }
+                    $process.WaitForExit()
+                    $exitCode = [int]$process.ExitCode
+                    $stdout = [string]$stdoutTask.Result
+                    $stderr = [string]$stderrTask.Result
+                }
+                finally {
+                    $process.Dispose()
+                }
+                Assert-Equal $exitCode 0 "The isolated $($case.Mode) output conflict probe must catch the expected writer error. stdout='$stdout' stderr='$stderr'."
+                Assert-Match $stderr 'writer-error-kind=existing-output' $case.ErrorMessage
+                Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($case.OutputPath)) -Expected $before -Message $case.BytesMessage
+            }
         }
-        catch { $adapterError = $_.Exception.Message }
-        Assert-Match $adapterError 'exists|already' 'The upstream adapter must fail closed when caller OutputPath already exists.'
-        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($adapterOutput)) -Expected $adapterBefore -Message 'The upstream adapter must not mutate an existing caller output file.'
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
     }
 
     # Scenario: Two processes pass the same not-yet-created OutputPath after a deterministic file barrier.
