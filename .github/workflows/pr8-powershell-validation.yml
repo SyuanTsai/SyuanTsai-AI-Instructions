@@ -85,7 +85,6 @@ jobs:
               'syp101-production-smoke-contract.Tests.ps1'
             )
             OuterTimeoutSeconds = 1800
-            CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }
@@ -158,7 +157,6 @@ jobs:
               'syp101-production-smoke-contract.Tests.ps1'
             )
             OuterTimeoutSeconds = 1800
-            CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }

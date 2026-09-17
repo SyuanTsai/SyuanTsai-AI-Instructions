@@ -14,7 +14,7 @@ param(
     [AllowEmptyCollection()][string[]] $ValidatorArguments = @(),
     [int] $TimeoutSeconds = 300,
     [int] $CandidateTimeoutSeconds = 0,
-    [string] $CancellationPath
+    [switch] $CancellationStdin
 )
 
 Set-StrictMode -Version Latest
@@ -35,8 +35,9 @@ $barrierProcessResult = $null
 $barrierEvidence = $null
     $candidateProcessResult = $null
     $candidateContentSha256 = $null
-    $candidateValidatorSha256 = $null
+$candidateValidatorSha256 = $null
     $candidateAdapterSha256 = $null
+$validatorArgumentsSha256 = $null
 $candidateId = $null
 $candidateFull = $null
 $adapterFull = $null
@@ -77,7 +78,47 @@ $harnessEventName = [string]$EventName
 $harnessValidatorArguments = @($ValidatorArguments)
 $harnessTimeoutSeconds = [int]$TimeoutSeconds
 $harnessCandidateTimeoutSeconds = if ($CandidateTimeoutSeconds -eq 0) { $harnessTimeoutSeconds } else { [int]$CandidateTimeoutSeconds }
-$harnessCancellationPath = [string]$CancellationPath
+$cancellationInputStream = $null
+$cancellationInputTask = $null
+$cancellationInputBuffer = New-Object byte[] 1
+$cancellationRequested = $false
+$cancellationProbe = $null
+
+function Start-DevelopmentHarnessCancellationReader {
+    if (-not $CancellationStdin) { return }
+    if (-not [Console]::IsInputRedirected) {
+        throw 'INVALID|CancellationStdin requires supervisor standard input to be redirected.'
+    }
+    try {
+        $script:cancellationInputStream = [Console]::OpenStandardInput()
+        $script:cancellationInputTask = $script:cancellationInputStream.ReadAsync($script:cancellationInputBuffer, 0, 1)
+    }
+    catch {
+        throw "INVALID|Could not initialize the supervisor-only cancellation input: $($_.Exception.Message)"
+    }
+}
+
+function Test-DevelopmentHarnessCancellationRequested {
+    if (-not $CancellationStdin) { return $false }
+    if ($script:cancellationRequested) { return $true }
+    if ($null -eq $script:cancellationInputTask -or -not $script:cancellationInputTask.IsCompleted) { return $false }
+    try {
+        $bytesRead = [int]$script:cancellationInputTask.GetAwaiter().GetResult()
+        if ($bytesRead -gt 0) { $script:cancellationRequested = $true }
+    }
+    catch {
+        throw "Cancellation input read failed: $($_.Exception.Message)"
+    }
+    return [bool]$script:cancellationRequested
+}
+
+function Stop-DevelopmentHarnessCancellationReader {
+    if ($null -ne $script:cancellationInputStream) {
+        try { $script:cancellationInputStream.Dispose() } catch { }
+        $script:cancellationInputStream = $null
+    }
+    $script:cancellationInputTask = $null
+}
 
 function Get-DevelopmentHarnessFailureClassification {
     param([Parameter(Mandatory = $true)][string] $Message)
@@ -274,10 +315,6 @@ try {
     $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
     $candidateValidatorSha256 = Get-StandardValidationFileSha256 -Path $validatorFull -Context 'CandidateValidatorPath'
     $candidateAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'development harness adapter'
-    $candidateId = Get-StandardValidationTextSha256 -Value (
-        "$harnessSourceRepository`n$harnessSourceRevision`n$harnessBaseRevision`n$harnessEventName`n$candidateContentSha256`n$candidateValidatorSha256"
-    )
-
     $candidateSnapshotRoot = Join-Path $runRoot 'candidate-snapshot'
     Copy-StandardValidationSnapshot -Source $candidateFull -Destination $candidateSnapshotRoot
     Assert-StandardValidationNoReparsePoints -Root $candidateSnapshotRoot -Context 'candidate snapshot'
@@ -292,6 +329,11 @@ try {
     $candidateValidatorArguments = Convert-DevelopmentHarnessValidatorArguments `
         -Arguments $harnessValidatorArguments `
         -SnapshotRoot $candidateSnapshotRoot
+    $validatorArgumentsCanonical = ConvertTo-Json -InputObject ([string[]]$candidateValidatorArguments) -Compress
+    $validatorArgumentsSha256 = Get-StandardValidationTextSha256 -Value $validatorArgumentsCanonical
+    $candidateId = Get-StandardValidationTextSha256 -Value (
+        "$harnessSourceRepository`n$harnessSourceRevision`n$harnessBaseRevision`n$harnessEventName`n$candidateContentSha256`n$candidateValidatorSha256`n$candidateAdapterSha256`n$validatorArgumentsSha256"
+    )
 
     $standardArtifactsRoot = Join-Path $runRoot 'std'
     $standardOutputPath = Join-Path $standardArtifactsRoot 'evidence.json'
@@ -307,6 +349,10 @@ try {
     $powerShellPath = Get-DevelopmentHarnessPowerShellPath
     $powerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellPath -Context 'development harness PowerShell host'
     $runnerSha256 = Get-StandardValidationFileSha256 -Path $runnerPath -Context 'central validation runner'
+    if ($CancellationStdin) {
+        Start-DevelopmentHarnessCancellationReader
+        $cancellationProbe = { Test-DevelopmentHarnessCancellationRequested }
+    }
 
     # The central development runner is the independent pre-candidate oracle.
     # Its adapter/tool roots are caller-supplied but remain outside the
@@ -339,7 +385,7 @@ try {
         -WorkingDirectory $barrierWorkingRoot `
         -Environment $barrierEnvironment `
         -TimeoutSeconds $harnessTimeoutSeconds `
-        -CancellationPath $harnessCancellationPath
+        -CancellationProbe $cancellationProbe
 
     $candidateBarrierStatus = [string]$barrierProcessResult.status
     if ([string]$barrierProcessResult.status -eq 'cancelled') { throw 'CANCELLED|The trusted pre-candidate barrier was cancelled.' }
@@ -386,6 +432,7 @@ try {
         STANDARD_VALIDATION_STAGE_ID = 'candidate-validator-development-harness'
         STANDARD_VALIDATION_TOOL_ID = 'candidate-validator'
         STANDARD_VALIDATION_CANDIDATE_ID = $candidateId
+        STANDARD_VALIDATION_CANDIDATE_ARGUMENTS_SHA256 = $validatorArgumentsSha256
         STANDARD_VALIDATION_CANDIDATE_ROOT = $candidateSnapshotRoot
         STANDARD_VALIDATION_SOURCE_REPOSITORY = $harnessSourceRepository
         STANDARD_VALIDATION_SOURCE_REVISION = $harnessSourceRevision
@@ -404,7 +451,7 @@ try {
             -WorkingDirectory $candidateWorkingRoot `
             -Environment $candidateCandidateEnvironment `
             -TimeoutSeconds $harnessCandidateTimeoutSeconds `
-            -CancellationPath $harnessCancellationPath
+            -CancellationProbe $cancellationProbe
         if ($candidateProcessResult.PSObject.Properties.Name -contains 'processStarted') {
             $candidateCodeExecuted = [bool]$candidateProcessResult.processStarted
         }
@@ -460,7 +507,10 @@ try {
             }
             catch {
                 $sourceCheckoutValidationError = [string]$_.Exception.Message
-                $sourceCheckoutMutated = ($sourceCheckoutValidationError -match 'Candidate content changed|Adapter configuration changed')
+                # Any failed revalidation leaves the source trust state
+                # unknown, even when the diagnostic is a missing/reparse/
+                # permission error rather than a content-diff message.
+                $sourceCheckoutMutated = $true
             }
         }
         if (-not [string]::IsNullOrWhiteSpace($barrierRevalidationError)) {
@@ -484,7 +534,10 @@ try {
 }
 catch {
     $failureMessage = [string]$_.Exception.Message
-    if ($failureMessage -match 'Candidate content changed|Adapter configuration changed') { $sourceCheckoutMutated = $true }
+    if ($failureMessage -match 'Candidate content changed|Adapter configuration changed' -or
+        -not [string]::IsNullOrWhiteSpace($sourceCheckoutValidationError)) {
+        $sourceCheckoutMutated = $true
+    }
     if (-not [string]::IsNullOrWhiteSpace($sourceCheckoutValidationError) -and
         $failureMessage -notmatch [regex]::Escape($sourceCheckoutValidationError)) {
         $failureMessage = "$failureMessage | post-candidate source revalidation: $sourceCheckoutValidationError"
@@ -494,6 +547,7 @@ catch {
     $exitCode = [int]$classification.ExitCode
 }
 finally {
+    Stop-DevelopmentHarnessCancellationReader
     $snapshotEvidence = [ordered]@{
         sourcePath = if ($null -eq $candidateFull) { $null } else { [string]$candidateFull }
         snapshotPath = if ($null -eq $candidateSnapshotRoot) { $null } else { [string]$candidateSnapshotRoot }
@@ -519,6 +573,9 @@ finally {
             baseRevision = $harnessBaseRevision
             eventName = $harnessEventName
             contentSha256 = $candidateContentSha256
+            validatorSha256 = $candidateValidatorSha256
+            adapterSha256 = $candidateAdapterSha256
+            validatorArgumentsSha256 = $validatorArgumentsSha256
         }
         authority = [ordered]@{
             status = 'local-development-only-unpinned'

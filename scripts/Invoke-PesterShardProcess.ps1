@@ -197,13 +197,7 @@ $resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
-$ownsCancellationPath = $false
-if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
-    do {
-        $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}.cancel" -f ([guid]::NewGuid().ToString('N')))
-    } while (Test-Path -LiteralPath $CancellationPath)
-    $ownsCancellationPath = $true
-}
+$callerCancellationPath = [string]$CancellationPath
 
 function Test-PesterShardProcessAlive {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
@@ -1350,7 +1344,7 @@ else {
 }
 $childScript = @(
     '$ErrorActionPreference = ''Stop'''
-    '$paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)'
+    '$paths = ConvertFrom-Json -InputObject $env:SYP154_PESTER_SHARD_PATHS'
     'if ($paths.Count -eq 0) { throw ''Pester shard has no test paths.'' }'
     'Import-Module $env:SYP154_PESTER_MODULE_PATH -Force'
     ('$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object {{ $_.Module.Version -eq [version]''{0}'' }} | Select-Object -First 1' -f $PesterVersion)
@@ -1390,13 +1384,24 @@ $failedShardProcess = $false
 foreach ($shard in @($shards.ToArray())) {
     $runToken = [guid]::NewGuid().ToString('N')
     $safeName = ($shard.Name -replace '[^A-Za-z0-9_.-]', '-')
+    $CancellationPath = $callerCancellationPath
+    $ownsCancellationPath = $false
+    if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
+        do {
+            # The normal CI path is supervisor-owned and unique to this shard
+            # run; callers that need an external cancellation request must
+            # explicitly provide a caller-owned path.
+            $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}-{1}-{2}.cancel" -f $safeName, $runToken, ([guid]::NewGuid().ToString('N')))
+        } while (Test-Path -LiteralPath $CancellationPath)
+        $ownsCancellationPath = $true
+    }
     $resultPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.json" -f $safeName, $runToken)
     $processEvidencePath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.process.json" -f $safeName, $runToken)
     $stdoutPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.stdout.log" -f $safeName, $runToken)
     $stderrPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.stderr.log" -f $safeName, $runToken)
     $previous = @{}
     $environment = @{
-        SYP154_PESTER_SHARD_PATHS = ($shard.Paths | ConvertTo-Json -Compress)
+        SYP154_PESTER_SHARD_PATHS = ConvertTo-Json -InputObject ([string[]]$shard.Paths) -Compress
         SYP154_PESTER_MODULE_PATH = [string]$PesterModulePath
         SYP154_PESTER_RESULT_PATH = $resultPath
     }
@@ -1424,6 +1429,9 @@ foreach ($shard in @($shards.ToArray())) {
     finally {
         foreach ($entry in $environment.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable($entry.Key, $previous[$entry.Key], 'Process')
+        }
+        if ($ownsCancellationPath -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $CancellationPath -Force -ErrorAction SilentlyContinue
         }
     }
 

@@ -2960,6 +2960,27 @@ function Get-StandardValidationChildEnvironment {
     return $childEnvironment
 }
 
+function Get-StandardValidationCancellationState {
+    param(
+        [string] $CancellationPath,
+        [scriptblock] $CancellationProbe
+    )
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and
+            (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            return [pscustomobject]@{ requested = $true; error = $null }
+        }
+        if ($null -ne $CancellationProbe -and [bool](& $CancellationProbe)) {
+            return [pscustomobject]@{ requested = $true; error = $null }
+        }
+        return [pscustomobject]@{ requested = $false; error = $null }
+    }
+    catch {
+        return [pscustomobject]@{ requested = $false; error = [string]$_.Exception.Message }
+    }
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -2967,7 +2988,8 @@ function Invoke-StandardValidationProcess {
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [Parameter(Mandatory = $true)][hashtable] $Environment,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
-        [string] $CancellationPath
+        [string] $CancellationPath,
+        [scriptblock] $CancellationProbe
     )
 
     $startedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -2995,7 +3017,16 @@ function Invoke-StandardValidationProcess {
     $unixBootstrapReleasePath = $null
     $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
     try {
-        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+        $cancellationBeforeStart = Get-StandardValidationCancellationState `
+            -CancellationPath $CancellationPath `
+            -CancellationProbe $CancellationProbe
+        if (-not [string]::IsNullOrWhiteSpace([string]$cancellationBeforeStart.error)) {
+            return [pscustomobject][ordered]@{
+                startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
+                status = 'startup-failed'; stdout = ''; stderr = "Cancellation probe failed before process start: $($cancellationBeforeStart.error)"; cleanedUp = $true; processStarted = $false
+            }
+        }
+        if ([bool]$cancellationBeforeStart.requested) {
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
                 status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true; processStarted = $false
@@ -3102,6 +3133,7 @@ function Invoke-StandardValidationProcess {
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.EnvironmentVariables.Clear()
@@ -3128,7 +3160,18 @@ function Invoke-StandardValidationProcess {
         $rootProcessId = [int]$process.Id
         $protectionSetupFailed = $false
         $terminationStatus = $null
-        if ($pidNamespaceLaunch) {
+        # Never let a candidate inherit the supervisor's private cancellation
+        # channel. The bootstrap process is held until the trusted boundary is
+        # installed, so closing stdin here is before the real child is released.
+        try {
+            $process.StandardInput.Close()
+        }
+        catch {
+            $protectionSetupFailed = $true
+            $terminationStatus = 'startup-failed'
+            $stderr = "Could not close the owned child standard input: $($_.Exception.Message)"
+        }
+        if (-not $protectionSetupFailed -and $pidNamespaceLaunch) {
             try {
                 $supervisorNamespaceId = Get-StandardValidationUnixPidNamespaceIdentity `
                     -ProcessId $PID
@@ -3317,7 +3360,16 @@ function Invoke-StandardValidationProcess {
                 [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break
             }
-            if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            $cancellationState = Get-StandardValidationCancellationState `
+                -CancellationPath $CancellationPath `
+                -CancellationProbe $CancellationProbe
+            if (-not [string]::IsNullOrWhiteSpace([string]$cancellationState.error)) {
+                $terminationStatus = 'failed'
+                $stderr = "Cancellation probe failed while the owned process was running: $($cancellationState.error)"
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
+                break
+            }
+            if ([bool]$cancellationState.requested) {
                 $terminationStatus = 'cancelled'
                 [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break

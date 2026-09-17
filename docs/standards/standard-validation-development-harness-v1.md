@@ -32,7 +32,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -ValidatorArguments __CANDIDATE_ROOT__
 ```
 
-The normal `TimeoutSeconds` bounds the central barrier. `CandidateTimeoutSeconds` is optional and exists to exercise candidate timeout behavior independently; when omitted it uses the same bound. A timeout, cancellation, startup failure, cleanup failure, mutation, or nonzero candidate result is never promoted to `PASS`.
+The normal `TimeoutSeconds` bounds the central barrier. `CandidateTimeoutSeconds` is optional and exists to exercise candidate timeout behavior independently; when omitted it uses the same bound. A timeout, cancellation, startup failure, cleanup failure, mutation, or nonzero candidate result is never promoted to `PASS`. When the trusted test driver needs to cancel after launch, it uses the development-only supervisor stdin relay (`-CancellationStdin`); the candidate receives closed standard input and no cancellation path or marker identity.
 
 ## Formal adoption remains a separate gate
 
