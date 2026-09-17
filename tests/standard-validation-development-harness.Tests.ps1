@@ -126,9 +126,9 @@ if ($fixtureBehavior -eq 'mutate') {
 }
 if ($fixtureBehavior -eq 'barrier-tamper') {
     $runRoot = Split-Path -Parent $root
-    $nestedBarrierArtifact = @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'std') -Recurse -File -Force |
+    $nestedBarrierArtifact = Get-ChildItem -LiteralPath (Join-Path $runRoot 'std') -Recurse -File -Force |
         Where-Object { $_.FullName -ne (Join-Path $runRoot 'std/evidence.json') } |
-        Select-Object -First 1)[0]
+        Select-Object -First 1
     if ($null -eq $nestedBarrierArtifact) { exit 15 }
     Add-Content -LiteralPath $nestedBarrierArtifact.FullName -Value 'tampered-by-candidate' -Encoding UTF8
 }
@@ -315,7 +315,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                     $stderrTask = $process.StandardError.ReadToEndAsync()
                     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
                     while (-not $process.HasExited) {
-                        $startSignal = @(Get-ChildItem -LiteralPath $Fixture.Artifacts -Filter 'candidate-started.signal' -File -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 1)[0]
+                        $startSignal = Get-ChildItem -LiteralPath $Fixture.Artifacts -Filter 'candidate-started.signal' -File -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 1
                         if ($null -ne $startSignal -and -not $stdinClosed) {
                             $process.StandardInput.WriteLine('cancel')
                             $process.StandardInput.Flush()
