@@ -197,7 +197,13 @@ $resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
-$callerCancellationPath = [string]$CancellationPath
+if (-not [string]::IsNullOrWhiteSpace([string]$CancellationPath)) {
+    # A caller-supplied marker is visible in the supervisor command line to a
+    # same-user candidate. Preserve the parameter for compatibility, but
+    # reject it before any child starts; normal shards always receive a
+    # supervisor-owned marker generated below.
+    throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation channel.'
+}
 
 function Test-PesterShardProcessAlive {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
@@ -1384,17 +1390,13 @@ $failedShardProcess = $false
 foreach ($shard in @($shards.ToArray())) {
     $runToken = [guid]::NewGuid().ToString('N')
     $safeName = ($shard.Name -replace '[^A-Za-z0-9_.-]', '-')
-    $CancellationPath = $callerCancellationPath
     $ownsCancellationPath = $false
-    if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
-        do {
-            # The normal CI path is supervisor-owned and unique to this shard
-            # run; callers that need an external cancellation request must
-            # explicitly provide a caller-owned path.
-            $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}-{1}-{2}.cancel" -f $safeName, $runToken, ([guid]::NewGuid().ToString('N')))
-        } while (Test-Path -LiteralPath $CancellationPath)
-        $ownsCancellationPath = $true
-    }
+    do {
+        # The normal CI path is supervisor-owned and unique to this shard run.
+        # Caller-visible marker paths are rejected before any child starts.
+        $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}-{1}-{2}.cancel" -f $safeName, $runToken, ([guid]::NewGuid().ToString('N')))
+    } while (Test-Path -LiteralPath $CancellationPath)
+    $ownsCancellationPath = $true
     $resultPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.json" -f $safeName, $runToken)
     $processEvidencePath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.process.json" -f $safeName, $runToken)
     $stdoutPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.stdout.log" -f $safeName, $runToken)

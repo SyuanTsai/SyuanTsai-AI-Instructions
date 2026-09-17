@@ -260,6 +260,21 @@ function Assert-DevelopmentHarnessBarrierArtifactsUnchanged {
     }
 }
 
+function Assert-DevelopmentHarnessAuthorityPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    # Hashing a symlink target is not enough for a trust-root input: a
+    # candidate-controlled process could replace the leaf or an ancestor after
+    # the original identity was captured. Reuse the central canonical-path
+    # contract before every authority hash so the path itself remains direct.
+    $fullPath = Assert-StandardValidationCanonicalRootPath -Path $Path -Context $Context
+    Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+    return [string]$fullPath
+}
+
 function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
     param(
         [Parameter(Mandatory = $true)][string] $RunnerPath,
@@ -274,19 +289,23 @@ function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
         [Parameter(Mandatory = $true)][string] $ExpectedTrustedToolInventorySha256
     )
 
-    $currentRunnerSha256 = Get-StandardValidationFileSha256 -Path $RunnerPath -Context 'central validation runner revalidation'
+    $runnerFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $RunnerPath -Context 'central validation runner revalidation'
+    $launcherFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $LauncherPath -Context 'development harness launcher revalidation'
+    $powerShellFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
+    $adapterFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $AdapterPath -Context 'authority adapter revalidation'
+    $currentRunnerSha256 = Get-StandardValidationFileSha256 -Path $runnerFullPath -Context 'central validation runner revalidation'
     if ($currentRunnerSha256 -cne $ExpectedRunnerSha256) {
         throw 'FAILED|Trusted authority runner changed during validation.'
     }
-    $currentLauncherSha256 = Get-StandardValidationFileSha256 -Path $LauncherPath -Context 'development harness launcher revalidation'
+    $currentLauncherSha256 = Get-StandardValidationFileSha256 -Path $launcherFullPath -Context 'development harness launcher revalidation'
     if ($currentLauncherSha256 -cne $ExpectedLauncherSha256) {
         throw 'FAILED|Trusted development harness launcher changed during validation.'
     }
-    $currentPowerShellSha256 = Get-StandardValidationFileSha256 -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
+    $currentPowerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellFullPath -Context 'development harness PowerShell host revalidation'
     if ($currentPowerShellSha256 -cne $ExpectedPowerShellSha256) {
         throw 'FAILED|Trusted authority PowerShell host changed during validation.'
     }
-    $currentAdapterSha256 = Get-StandardValidationFileSha256 -Path $AdapterPath -Context 'authority adapter revalidation'
+    $currentAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFullPath -Context 'authority adapter revalidation'
     if ($currentAdapterSha256 -cne $ExpectedAdapterSha256) {
         throw 'FAILED|Trusted authority adapter changed during validation.'
     }
