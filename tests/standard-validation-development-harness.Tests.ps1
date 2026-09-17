@@ -279,9 +279,12 @@ $result | ConvertTo-Json -Depth 10 -Compress
                         WorkingDirectory = $script:RepositoryRoot
                         RedirectStandardOutput = $stdoutPath
                         RedirectStandardError = $stderrPath
-                        WindowStyle = 'Hidden'
                         PassThru = $true
                         ErrorAction = 'Stop'
+                    }
+                    if ($PSVersionTable.Platform -notmatch 'Unix|Linux|MacOS' -and
+                        $PSVersionTable.PSEdition -eq 'Desktop') {
+                        $startParameters.WindowStyle = 'Hidden'
                     }
                     $process = Start-Process @startParameters
                     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

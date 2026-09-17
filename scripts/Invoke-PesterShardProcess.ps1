@@ -1272,11 +1272,17 @@ function Invoke-PesterShardProcess {
             Write-Host ("Pester shard cleanup errors: {0}" -f (@($cleanup.errors) -join ' | '))
         }
     }
+    $firstFailureContext = if ([string]::IsNullOrWhiteSpace([string]$diagnostic.failureSummary)) {
+        ''
+    }
+    else {
+        " firstFailure=$($diagnostic.failureSummary)"
+    }
     if ($status -notin @('completed', 'failed')) {
-        throw "Pester shard process ended with status '$status'; evidence='$ProcessEvidencePath'. $exceptionText"
+        throw "Pester shard process ended with status '$status'; evidence='$ProcessEvidencePath'.$firstFailureContext $exceptionText"
     }
     if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-        throw "Pester shard process '$status' exited without a result file; evidence='$ProcessEvidencePath'; exit='$exitCode'."
+        throw "Pester shard process '$status' exited without a result file; evidence='$ProcessEvidencePath'; exit='$exitCode'.$firstFailureContext"
     }
     if (-not $cleanup.cleanedUp) {
         throw "Pester shard process cleanup failed; evidence='$ProcessEvidencePath'."
@@ -1350,7 +1356,15 @@ $childScript = @(
     ('$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object {{ $_.Module.Version -eq [version]''{0}'' }} | Select-Object -First 1' -f $PesterVersion)
     ('if ($null -eq $invoke) {{ throw ''Pester shard could not resolve version {0}.'' }}' -f $PesterVersion)
     '$invokeParameters = @{ Script = $paths; PassThru = $true }'
-    '$result = & $invoke @invokeParameters'
+    '$savedPesterErrorActionPreference = $ErrorActionPreference'
+    'try {'
+    '    # Preserve the original workflow contract: Pester and its fixtures may emit non-terminating native stderr warnings.'
+    '    $ErrorActionPreference = ''Continue'''
+    '    $result = & $invoke @invokeParameters'
+    '}'
+    'finally {'
+    '    $ErrorActionPreference = $savedPesterErrorActionPreference'
+    '}'
     'if ($null -eq $result) { throw ''Pester shard did not return a result object.'' }'
     '$summary = [ordered]@{'
     '    TotalCount = [int]$result.TotalCount'
