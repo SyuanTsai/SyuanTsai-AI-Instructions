@@ -744,6 +744,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId \(\[int\]\$process\.Id\)')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-False ($shardExecutorSource -match 'Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor must not delete a caller-owned cancellation marker.'
+        Assert-False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
+        Assert-Match $shardExecutorSource 'System\.Diagnostics\.Process\.Kill|Stop-Process' 'The shard executor must use a direct process termination API.'
+        Assert-Match $shardExecutorSource 'Get-PesterShardFailureSummary|failureSummary' 'A failed shard must retain a sanitized first-failure summary.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,

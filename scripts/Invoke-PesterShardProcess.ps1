@@ -102,15 +102,54 @@ function Read-PesterShardOutputPrefix {
     }
 }
 
+function Get-PesterShardFailureSummary {
+    param(
+        [Parameter(Mandatory = $true)][string[]] $Paths,
+        [int] $MaxLines = 8,
+        [int] $MaxLineLength = 512,
+        [int] $MaxTotalLength = 4096
+    )
+
+    $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
+    foreach ($path in $Paths) {
+        $text = Read-PesterShardOutputPrefix -Path $path
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $lines = @($text -split "`r?`n")
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $candidate = [regex]::Replace([string]$lines[$index], $ansiPattern, '')
+            if ($candidate -notmatch '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+') { continue }
+            $selected = New-Object 'System.Collections.Generic.List[string]'
+            $start = [Math]::Max(0, $index - 1)
+            $end = [Math]::Min($lines.Count - 1, $index + $MaxLines - 2)
+            for ($lineIndex = $start; $lineIndex -le $end -and $selected.Count -lt $MaxLines; $lineIndex++) {
+                $line = [regex]::Replace([string]$lines[$lineIndex], $ansiPattern, '').Trim()
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                    $line = '[redacted sensitive diagnostic line]'
+                }
+                if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
+                if (-not $selected.Contains($line)) { $selected.Add($line) }
+            }
+            $summary = ($selected.ToArray() -join ' | ')
+            if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
+            return $summary
+        }
+    }
+    return ''
+}
+
 function Stop-PesterShardOwnedProcessTree {
     param(
         [Parameter(Mandatory = $true)][int] $RootProcessId,
-        [int[]] $ObservedDescendantProcessIds = @()
+        [int[]] $ObservedDescendantProcessIds = @(),
+        [int] $CleanupTimeoutSeconds = 15
     )
 
+    if ($CleanupTimeoutSeconds -le 0) { throw 'CleanupTimeoutSeconds must be positive.' }
     $errors = New-Object 'System.Collections.Generic.List[string]'
-    $taskKillExitCodes = New-Object 'System.Collections.Generic.List[int]'
     $knownIds = New-Object 'System.Collections.Generic.List[int]'
+    $processKillResults = New-Object 'System.Collections.Generic.List[object]'
+    $lastKillErrors = New-Object 'System.Collections.Generic.Dictionary[int,string]'
     foreach ($processId in @($RootProcessId) + @($ObservedDescendantProcessIds)) {
         if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
             $knownIds.Add([int]$processId)
@@ -130,36 +169,10 @@ function Stop-PesterShardOwnedProcessTree {
         $errors.Add("initial descendant enumeration failed: $($_.Exception.Message)")
     }
 
-    for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $liveIds = @($knownIds.ToArray() | Where-Object {
-            Test-PesterShardProcessAlive -ProcessId ([int]$_)
-        })
-        if ($liveIds.Count -eq 0) { break }
-
-        foreach ($processId in $liveIds) {
-            $taskKillOutput = @()
-            $taskKillExitCode = -1
-            $previousErrorActionPreference = $ErrorActionPreference
-            try {
-                $ErrorActionPreference = 'Continue'
-                $taskKillOutput = @(& taskkill.exe '/PID' ([string]$processId) '/T' '/F' 2>&1)
-                $taskKillExitCode = [int]$LASTEXITCODE
-            }
-            catch {
-                $taskKillOutput += $_.Exception.Message
-                $errors.Add("taskkill invocation failed for owned process ${processId}: $($_.Exception.Message)")
-            }
-            finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
-            $taskKillExitCodes.Add($taskKillExitCode)
-            if (($taskKillExitCode -ne 0) -and
-                (Test-PesterShardProcessAlive -ProcessId ([int]$processId))) {
-                $errors.Add("taskkill failed for owned process $processId (exit $taskKillExitCode): $($taskKillOutput -join ' ')")
-            }
-        }
-        Start-Sleep -Milliseconds 200
-
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds($CleanupTimeoutSeconds)
+    $cleanupTimedOut = $false
+    while ([DateTime]::UtcNow -lt $cleanupDeadline) {
+        $currentDescendants = @()
         try {
             $currentDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId)
             foreach ($processId in $currentDescendants) {
@@ -170,8 +183,110 @@ function Stop-PesterShardOwnedProcessTree {
         }
         catch {
             $errors.Add("descendant enumeration after cleanup failed: $($_.Exception.Message)")
-            break
         }
+
+        $liveIds = @($knownIds.ToArray() | Where-Object {
+            Test-PesterShardProcessAlive -ProcessId ([int]$_)
+        })
+        if ($liveIds.Count -eq 0 -and $currentDescendants.Count -eq 0) { break }
+
+        # Kill descendants before the root. Direct Process.Kill works in both
+        # Windows PowerShell 5.1 and PowerShell 7; taskkill is not a reliable
+        # owned-process primitive on hosted Windows runners.
+        $killOrder = New-Object 'System.Collections.Generic.List[int]'
+        $killOrderSeen = New-Object 'System.Collections.Generic.HashSet[int]'
+        for ($index = $currentDescendants.Count - 1; $index -ge 0; $index--) {
+            $processId = [int]$currentDescendants[$index]
+            if ($processId -gt 0 -and $killOrderSeen.Add($processId)) { $killOrder.Add($processId) }
+        }
+        $knownSnapshot = @($knownIds.ToArray())
+        for ($index = $knownSnapshot.Count - 1; $index -ge 0; $index--) {
+            $processId = [int]$knownSnapshot[$index]
+            if ($processId -ne $RootProcessId -and $processId -gt 0 -and $killOrderSeen.Add($processId)) {
+                $killOrder.Add($processId)
+            }
+        }
+        if ($RootProcessId -gt 0 -and $killOrderSeen.Add($RootProcessId)) { $killOrder.Add($RootProcessId) }
+
+        foreach ($processId in @($killOrder.ToArray())) {
+            if (-not (Test-PesterShardProcessAlive -ProcessId ([int]$processId))) { continue }
+            $method = 'none'
+            $errorText = $null
+            $target = $null
+            try {
+                $target = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+                if ($target.HasExited) {
+                    $method = 'already-exited'
+                }
+                else {
+                    try {
+                        $target.Kill()
+                        $method = 'System.Diagnostics.Process.Kill'
+                    }
+                    catch {
+                        $errorText = $_.Exception.ToString()
+                    }
+                    try { [void]$target.WaitForExit(500) } catch { }
+                }
+            }
+            catch [ArgumentException] {
+                $method = 'already-exited'
+            }
+            catch {
+                $errorText = $_.Exception.ToString()
+            }
+            finally {
+                if ($null -ne $target) { $target.Dispose() }
+            }
+
+            if (Test-PesterShardProcessAlive -ProcessId ([int]$processId)) {
+                try {
+                    Stop-Process -Id ([int]$processId) -Force -ErrorAction Stop
+                    $method = if ($method -eq 'none') { 'Stop-Process' } else { "$method;Stop-Process" }
+                    try {
+                        $fallbackProcess = [System.Diagnostics.Process]::GetProcessById([int]$processId)
+                        try { [void]$fallbackProcess.WaitForExit(500) } finally { $fallbackProcess.Dispose() }
+                    }
+                    catch { }
+                }
+                catch {
+                    if ($null -eq $errorText) { $errorText = $_.Exception.ToString() }
+                    else { $errorText = "$errorText | fallback: $($_.Exception.ToString())" }
+                }
+            }
+
+            $stillAlive = Test-PesterShardProcessAlive -ProcessId ([int]$processId)
+            $processKillResults.Add([pscustomobject][ordered]@{
+                    processId = [int]$processId
+                    method = $method
+                    error = $errorText
+                    stillAlive = $stillAlive
+                })
+            if ($stillAlive) {
+                $lastKillErrors[[int]$processId] = if ($null -eq $errorText) { 'process remained alive after direct termination attempts.' } else { $errorText }
+            }
+            elseif ($lastKillErrors.ContainsKey([int]$processId)) {
+                [void]$lastKillErrors.Remove([int]$processId)
+            }
+        }
+
+        $liveAfterKill = @($knownIds.ToArray() | Where-Object {
+            Test-PesterShardProcessAlive -ProcessId ([int]$_)
+        })
+        if ($liveAfterKill.Count -eq 0) {
+            try {
+                $remainingDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId)
+                foreach ($processId in $remainingDescendants) {
+                    if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) { $knownIds.Add([int]$processId) }
+                }
+                if ($remainingDescendants.Count -eq 0) { break }
+            }
+            catch {
+                $errors.Add("descendant enumeration after termination failed: $($_.Exception.Message)")
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 100
     }
 
     $remainingIds = @($knownIds.ToArray() | Where-Object {
@@ -184,6 +299,15 @@ function Stop-PesterShardOwnedProcessTree {
     catch {
         $errors.Add("final descendant enumeration failed: $($_.Exception.Message)")
     }
+    if (($remainingIds.Count -gt 0 -or $finalDescendants.Count -gt 0) -and [DateTime]::UtcNow -ge $cleanupDeadline) {
+        $cleanupTimedOut = $true
+        $errors.Add("owned process cleanup deadline exceeded after $CleanupTimeoutSeconds seconds.")
+    }
+    foreach ($entry in @($lastKillErrors.GetEnumerator())) {
+        if ($remainingIds -contains [int]$entry.Key) {
+            $errors.Add("direct process termination failed for owned process $($entry.Key): $($entry.Value)")
+        }
+    }
     $cleanedUp = ($errors.Count -eq 0 -and $remainingIds.Count -eq 0 -and $finalDescendants.Count -eq 0)
     return [pscustomobject][ordered]@{
         rootProcessId = $RootProcessId
@@ -191,7 +315,9 @@ function Stop-PesterShardOwnedProcessTree {
         observedProcessIds = @($knownIds.ToArray())
         remainingProcessIds = @($remainingIds)
         finalDescendantProcessIds = @($finalDescendants)
-        taskKillExitCodes = @($taskKillExitCodes.ToArray())
+        cleanupTimeoutSeconds = $CleanupTimeoutSeconds
+        cleanupTimedOut = $cleanupTimedOut
+        processKillResults = @($processKillResults.ToArray())
         errors = @($errors.ToArray())
         cleanedUp = $cleanedUp
     }
@@ -310,7 +436,9 @@ function Invoke-PesterShardProcess {
                     observedProcessIds = @([int]$process.Id)
                     remainingProcessIds = @()
                     finalDescendantProcessIds = @()
-                    taskKillExitCodes = @()
+                    cleanupTimeoutSeconds = 15
+                    cleanupTimedOut = $true
+                    processKillResults = @()
                     errors = @("cleanup executor exception: $($_.Exception.ToString())")
                     cleanedUp = $false
                 }
@@ -358,6 +486,7 @@ function Invoke-PesterShardProcess {
             }
             cleanup = $cleanup
             exception = $exceptionText
+            failureSummary = Get-PesterShardFailureSummary -Paths @($StdoutPath, $StderrPath)
             stdoutPrefix = Read-PesterShardOutputPrefix -Path $StdoutPath
             stderrPrefix = Read-PesterShardOutputPrefix -Path $StderrPath
         }
@@ -526,6 +655,12 @@ foreach ($shard in @($shards.ToArray())) {
 
     $resultPath = [string]$shardRun.resultPath
     $summary = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $processEvidence = Get-Content -LiteralPath ([string]$shardRun.processEvidencePath) -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$shardRun.exitCode -ne 0 -or [int]$summary.FailedCount -gt 0) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$processEvidence.failureSummary)) {
+            Write-Host "Pester shard first failure (sanitized): $($processEvidence.failureSummary)"
+        }
+    }
     foreach ($field in @('TotalCount', 'PassedCount', 'FailedCount', 'SkippedCount', 'PendingCount', 'InconclusiveCount')) {
         if ($summary.$field -isnot [int] -and $summary.$field -isnot [long]) {
             throw "Pester shard '$($shard.Name)' returned a non-integer $field. Process evidence='$($shardRun.processEvidencePath)'."
