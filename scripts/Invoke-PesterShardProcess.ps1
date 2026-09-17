@@ -26,10 +26,13 @@ $resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+$ownsCancellationPath = $false
 if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
-    $CancellationPath = Join-Path $EvidenceRoot 'syp154-pester-shard.cancel'
+    do {
+        $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}.cancel" -f ([guid]::NewGuid().ToString('N')))
+    } while (Test-Path -LiteralPath $CancellationPath)
+    $ownsCancellationPath = $true
 }
-Remove-Item -LiteralPath $CancellationPath -Force -ErrorAction SilentlyContinue
 
 function Test-PesterShardProcessAlive {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
@@ -216,6 +219,8 @@ function Invoke-PesterShardProcess {
     $startedAt = $null
     $finishedAt = $null
     $exceptionText = $null
+    $observedDescendantProcessIds = New-Object 'System.Collections.Generic.List[int]'
+    $observationErrors = New-Object 'System.Collections.Generic.List[string]'
     $cleanup = [pscustomobject][ordered]@{
         cleanedUp = $true
         reason = 'process-not-started'
@@ -242,7 +247,27 @@ function Invoke-PesterShardProcess {
             $process = Start-Process @startParameters
             $status = 'running'
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            try {
+                foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId ([int]$process.Id))) {
+                    if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
+                        $observedDescendantProcessIds.Add([int]$processId)
+                    }
+                }
+            }
+            catch {
+                $observationErrors.Add("initial live descendant observation failed: $($_.Exception.Message)")
+            }
             while (-not $process.HasExited) {
+                try {
+                    foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId ([int]$process.Id))) {
+                        if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
+                            $observedDescendantProcessIds.Add([int]$processId)
+                        }
+                    }
+                }
+                catch {
+                    $observationErrors.Add("live descendant observation failed: $($_.Exception.Message)")
+                }
                 if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
                     $status = 'cancelled'
                     $exceptionText = "Cancellation marker observed: $CancelPath"
@@ -253,7 +278,7 @@ function Invoke-PesterShardProcess {
                     $exceptionText = "Outer shard deadline exceeded after $TimeoutSeconds seconds."
                     break
                 }
-                [void]$process.WaitForExit(1000)
+                [void]$process.WaitForExit(500)
             }
             if ($process.HasExited -and $status -notin @('cancelled', 'timeout')) {
                 [void]$process.WaitForExit()
@@ -270,7 +295,13 @@ function Invoke-PesterShardProcess {
     finally {
         if ($null -ne $process) {
             try {
-                $cleanup = Stop-PesterShardOwnedProcessTree -RootProcessId ([int]$process.Id)
+                $cleanup = Stop-PesterShardOwnedProcessTree `
+                    -RootProcessId ([int]$process.Id) `
+                    -ObservedDescendantProcessIds @($observedDescendantProcessIds.ToArray())
+                if ($observationErrors.Count -gt 0) {
+                    $cleanup.errors = @($cleanup.errors) + @($observationErrors.ToArray())
+                    $cleanup.cleanedUp = $false
+                }
             }
             catch {
                 $cleanup = [pscustomobject][ordered]@{
@@ -305,6 +336,7 @@ function Invoke-PesterShardProcess {
             childPowerShell = $ChildPowerShell
             timeoutSeconds = $TimeoutSeconds
             cancellationPath = $CancelPath
+            cancellationPathOwnership = if ($ownsCancellationPath) { 'runner-owned' } else { 'caller-owned' }
             environmentNames = @(
                 'SYP154_PESTER_SHARD_PATHS',
                 'SYP154_PESTER_MODULE_PATH',

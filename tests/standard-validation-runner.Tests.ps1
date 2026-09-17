@@ -741,6 +741,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True ($cleanupFirst.Length -le 64) 'Cleanup-priority stderr must remain within the process evidence quota.'
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
+        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId \(\[int\]\$process\.Id\)')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-False ($shardExecutorSource -match 'Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor must not delete a caller-owned cancellation marker.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
