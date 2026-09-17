@@ -279,14 +279,14 @@ $result | ConvertTo-Json -Depth 10 -Compress
             param([Parameter(Mandatory = $true)][string] $Name)
             # Keep the fixture root short enough for the central runner's
             # per-event child working directory on Windows.
-            $root = Join-Path ([IO.Path]::GetTempPath()) ("c1-{0}-{1}" -f ([guid]::NewGuid().ToString('N')), $Name)
+            $root = Join-Path ([IO.Path]::GetTempPath()) ("c1-{0}-{1}" -f ([guid]::NewGuid().ToString('N').Substring(0, 12)), $Name)
             [void](New-Item -ItemType Directory -Path $root -Force)
             return $root
         }
     }
 
     BeforeEach {
-        $script:Ci1CaseRoot = New-Ci1CaseRoot -Name 'case'
+        $script:Ci1CaseRoot = New-Ci1CaseRoot -Name 'c'
     }
 
     AfterEach {
@@ -296,7 +296,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
     }
 
     It 'InterT01_executes_candidate_only_after_the_central_development_barrier' {
-        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'pass')
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'p')
         $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('__CANDIDATE_ROOT__')
 
         Assert-Ci1Equal $result.ExitCode 0 'A passing CI1 development fixture must return zero.'
@@ -316,7 +316,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
     }
 
     It 'InterT02_stops_before_candidate_execution_when_the_central_barrier_fails' {
-        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'static-fail') -Behavior 'static-fail'
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 's') -Behavior 'static-fail'
         $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('__CANDIDATE_ROOT__')
 
         Assert-Ci1True ($result.ExitCode -ne 0) 'A failed static barrier must be nonzero.'
@@ -328,14 +328,14 @@ $result | ConvertTo-Json -Depth 10 -Compress
     }
 
     It 'InterT03_fails_closed_on_candidate_mutation_and_timeout' {
-        $mutationFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'candidate-mutate') -Behavior 'mutate'
+        $mutationFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'm') -Behavior 'mutate'
         $mutationResult = Invoke-Ci1HarnessFixture -Fixture $mutationFixture -ValidatorArguments @('__CANDIDATE_ROOT__')
         Assert-Ci1True ($mutationResult.ExitCode -ne 0) 'A mutated candidate snapshot must be nonzero.'
         Assert-Ci1Equal $mutationResult.Evidence.state 'FAILED' 'Candidate snapshot mutation must fail closed.'
         Assert-Ci1True ([bool]$mutationResult.Evidence.candidateCodeExecuted) 'Mutation must prove the candidate was actually attempted.'
         Assert-Ci1Match ([string]$mutationResult.Output) 'snapshot.*changed|snapshot.*drift' 'The mutation failure must identify snapshot drift.'
 
-        $timeoutFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'candidate-timeout') -Behavior 'timeout'
+        $timeoutFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 't') -Behavior 'timeout'
         $timeoutResult = Invoke-Ci1HarnessFixture -Fixture $timeoutFixture -TimeoutSeconds 300 -CandidateTimeoutSeconds 1 -ValidatorArguments @('__CANDIDATE_ROOT__')
         Assert-Ci1True ($timeoutResult.ExitCode -ne 0) 'A timed-out candidate validator must be nonzero.'
         Assert-Ci1Equal $timeoutResult.Evidence.state 'FAILED' 'A timed-out candidate validator must fail closed.'
@@ -343,7 +343,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1Equal $timeoutResult.Evidence.recovery.status 'fail-closed' 'Timeout recovery must remain fail-closed.'
         Assert-Ci1Match ([string]$timeoutResult.Output) 'timed out|timeout' 'The timeout diagnosis must be retained.'
 
-        $tamperFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'barrier-tamper') -Behavior 'barrier-tamper'
+        $tamperFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'b') -Behavior 'barrier-tamper'
         $tamperResult = Invoke-Ci1HarnessFixture -Fixture $tamperFixture -ValidatorArguments @('__CANDIDATE_ROOT__')
         Assert-Ci1True ($tamperResult.ExitCode -ne 0) 'A candidate that tampers with barrier artifacts must be nonzero.'
         Assert-Ci1Equal $tamperResult.Evidence.state 'FAILED' 'Barrier artifact tampering must fail closed.'
@@ -353,8 +353,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1False ([bool]$tamperResult.Evidence.preCandidateBarrier.evidenceUnchangedAfterCandidate) 'Tampered barrier evidence must not be reported unchanged.'
         Assert-Ci1Match ([string]$tamperResult.Output) 'barrier artifacts changed|barrier evidence changed' 'The barrier artifact diagnosis must be retained.'
 
-        $cancellationPath = Join-Path $script:Ci1CaseRoot 'cancel-after-start.signal'
-        $cancelFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'cancel-after-start') -Behavior 'cancel-after-start'
+        $cancellationPath = Join-Path $script:Ci1CaseRoot 'x.signal'
+        $cancelFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'x') -Behavior 'cancel-after-start'
         $cancelResult = Invoke-Ci1HarnessFixture -Fixture $cancelFixture -CancellationPath $cancellationPath -ValidatorArguments @('__CANDIDATE_ROOT__')
         Assert-Ci1Equal $cancelResult.Evidence.state 'CANCELLED' 'Cancellation after process start must remain a cancelled result.'
         Assert-Ci1True ([bool]$cancelResult.Evidence.candidateCodeExecuted) 'Cancellation after process start must conservatively report candidate execution.'
@@ -362,7 +362,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
     }
 
     It 'InterT04_rejects_unsafe_candidate_arguments_before_execution' {
-        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'unsafe-arguments')
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'u')
         $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('..\outside')
         Assert-Ci1True ($result.ExitCode -ne 0) 'Unsafe candidate arguments must be nonzero.'
         Assert-Ci1Equal $result.Evidence.state 'INVALID' 'Unsafe candidate arguments must be invalid.'
