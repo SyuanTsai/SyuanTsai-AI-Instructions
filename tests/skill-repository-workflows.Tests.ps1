@@ -250,6 +250,19 @@ jobs:
         }
         Assert-Match $gate 'validation-security-gate\.json' 'Shared authority gate must load the canonical validation/security policy.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
+        Assert-Match $gate 'semanticPreflight' 'Shared authority gate must enforce the semantic preflight policy.'
+        Assert-Match $gate 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Shared authority gate must enforce the semantic provider-input binding.'
+        Assert-Match $gate 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Shared authority gate must enforce the separate provider-text inventory binding.'
+        Assert-Match $gate 'standard-semantic-inventory-probe\.Tests\.ps1' 'Shared authority gate must execute semantic inventory behavior regressions.'
+        Assert-Match $gate 'standard-semantic-preflight\.Tests\.ps1' 'Shared authority gate must execute semantic preflight behavior regressions.'
+        Assert-Match $gate 'standard-semantic-raw-graph\.Tests\.ps1' 'Shared authority gate must execute raw-graph behavior regressions.'
+        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared authority gate must supply the frozen SkillSpector Python to semantic behavior suites.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
+            Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must use isolated Python startup."
+        }
+        Assert-Match $gate 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Shared authority gate must enforce per-work provider-call binding.'
+        Assert-Match $gate 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Shared authority gate must enforce scanner JSON property-collision handling.'
         Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'
     }
 

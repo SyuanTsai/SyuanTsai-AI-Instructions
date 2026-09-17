@@ -77,8 +77,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 517
-            ExpectedSkippedCount = 6
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 7
             OuterTimeoutSeconds = 1800
             CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'
@@ -145,8 +145,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 517
-            ExpectedSkippedCount = 5
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 6
             OuterTimeoutSeconds = 1800
             CancellationPath = (Join-Path $env:RUNNER_TEMP 'syp154-pester-shard.cancel')
             TestRoot = './tests'

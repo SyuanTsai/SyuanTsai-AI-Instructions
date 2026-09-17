@@ -132,6 +132,17 @@
       "requiredFields": ["provider", "purpose", "scope", "consentGranted", "analyzerIdentity", "analyzerCompleteness", "findings", "findingsSha256"],
       "success": ["status=passed", "decision=PASS", "consentGranted=true", "analyzerCompleteness=complete", "findings=array", "findingsSha256=verified"]
     },
+    "semanticPreflight": {
+      "artifactType": "semantic-scan-preflight-v1",
+      "authentication": "unsigned-provider-output",
+      "sourceBinding": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes",
+      "providerInventoryBinding": "full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest",
+      "workBinding": "one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval",
+      "jsonPropertyBinding": "reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization",
+      "requiredFields": ["candidateId", "inputInventorySha256", "providerTextInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"],
+      "fixedState": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"],
+      "nonAuthority": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"]
+    },
     "aiReview": {
       "status": "passed",
       "decision": "PASS",

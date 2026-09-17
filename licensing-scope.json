@@ -388,6 +388,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Inspect-InstalledSemanticScanner.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
       "license": "Apache-2.0"
     },
@@ -397,6 +401,14 @@
     },
     {
       "path": "scripts/Invoke-PesterShardProcess.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Normalize-InstalledSemanticGraph.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Prepare-StandardSemanticScanEvidence.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -465,6 +477,10 @@
     },
     {
       "path": "scripts/safe-zip.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/semantic-scan-preflight.md",
       "license": "Apache-2.0"
     },
     {
@@ -548,6 +564,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/semantic-raw-graph/alpha-skill/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/semantic-raw-graph/beta-skill/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/skills-catalog-contract/duplicate-stable-id.json",
       "license": "Apache-2.0"
     },
@@ -596,6 +620,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/semantic-inventory-probe-unit.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/semantic-raw-graph-normalizer-unit.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/skill-repository-standard.Tests.ps1",
       "license": "Apache-2.0"
     },
@@ -629,6 +661,22 @@
     },
     {
       "path": "tests/skills-source-routing.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-semantic-assertions.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-semantic-inventory-probe.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-semantic-preflight.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-semantic-raw-graph.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

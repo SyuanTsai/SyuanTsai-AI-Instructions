@@ -688,18 +688,24 @@ function Get-ResolverSafeUnixSymlinkEntry {
     }
 }
 
-function Sort-ResolverClosureEntriesByOrdinalPath {
+function Get-ResolverOrderedClosureEntries {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Entries)
 
-    $entriesByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    # The installed tool tree can contain many thousands of files. Keep the
+    # canonical ordinal ordering in a native balanced tree instead of scanning
+    # the growing PowerShell list once for every insertion.
+    $sorted = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([StringComparer]::Ordinal)
     foreach ($entry in $Entries) {
+        if ($null -eq $entry -or [string]::IsNullOrEmpty([string]$entry.path)) {
+            throw 'Installed tool closure contains an entry without a path.'
+        }
         $path = [string]$entry.path
-        if ($entriesByPath.ContainsKey($path)) { throw "Installed tool closure contains a duplicate path: '$path'." }
-        $entriesByPath.Add($path, $entry)
+        if ($sorted.ContainsKey($path)) {
+            throw "Installed tool closure contains a duplicate path: '$path'."
+        }
+        $sorted.Add($path, $entry)
     }
-    $orderedPaths = [string[]]@($entriesByPath.Keys)
-    [Array]::Sort($orderedPaths, [StringComparer]::Ordinal)
-    foreach ($path in $orderedPaths) { $entriesByPath[$path] }
+    foreach ($entry in $sorted.Values) { $entry }
 }
 
 function Get-DirectoryClosureIdentity {
@@ -766,7 +772,7 @@ function Get-DirectoryClosureIdentity {
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
     }
-    $ordered = @(Sort-ResolverClosureEntriesByOrdinalPath -Entries $entries.ToArray())
+    $ordered = @(Get-ResolverOrderedClosureEntries -Entries $entries.ToArray())
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
@@ -777,7 +783,7 @@ function Get-DirectoryClosureIdentity {
     }
     return [ordered]@{
         sha256 = $closureHash
-        entries = $ordered
+        entries = @($ordered)
     }
 }
 
