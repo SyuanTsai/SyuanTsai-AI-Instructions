@@ -20,6 +20,7 @@
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
 - Central validation runner: `scripts/Invoke-StandardValidation.ps1`
 - Central runner contract: `docs/standards/standard-validation-contract-v1.json`
+- CI1 development harness (non-production): `scripts/Invoke-StandardValidationDevelopmentHarness.ps1` and `docs/standards/standard-validation-development-harness-v1.md`
 - Consumer adapter schema: `docs/standards/schemas/standard-validation-adapter-v1.schema.json`
 - Candidate evidence schema: `docs/standards/schemas/standard-validation-evidence-v1.schema.json`
 - Standard authority regression: `tests/skill-repository-standard.Tests.ps1`
