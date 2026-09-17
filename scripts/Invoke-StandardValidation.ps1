@@ -2978,6 +2978,7 @@ function Invoke-StandardValidationProcess {
     $outputQuotaExceeded = $false
     $outputQuotaDiagnostic = $null
     $cleanedUp = $true
+    $processStarted = $false
     $process = $null
     $rootProcessId = $null
     $jobHandle = [IntPtr]::Zero
@@ -2997,7 +2998,7 @@ function Invoke-StandardValidationProcess {
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true
+                status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true; processStarted = $false
             }
         }
         $launchCommand = $Command
@@ -3025,7 +3026,7 @@ function Invoke-StandardValidationProcess {
             catch {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true; processStarted = $false
                 }
             }
         }
@@ -3091,7 +3092,7 @@ function Invoke-StandardValidationProcess {
             catch {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true; processStarted = $false
                 }
             }
         }
@@ -3113,16 +3114,17 @@ function Invoke-StandardValidationProcess {
             if (-not $process.Start()) {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = 'Process.Start returned false.'; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = 'Process.Start returned false.'; cleanedUp = $true; processStarted = $false
                 }
             }
         }
         catch {
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true
+                status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true; processStarted = $false
             }
         }
+        $processStarted = $true
         $rootProcessId = [int]$process.Id
         $protectionSetupFailed = $false
         $terminationStatus = $null
@@ -3421,6 +3423,7 @@ function Invoke-StandardValidationProcess {
         outputQuotaExceeded = [bool]$outputQuotaExceeded
         outputQuotaDiagnostic = if ($null -eq $outputQuotaDiagnostic) { $null } else { [string]$outputQuotaDiagnostic }
         cleanedUp = [bool]$cleanedUp
+        processStarted = [bool]$processStarted
     }
 }
 
@@ -4050,6 +4053,9 @@ function Invoke-StandardValidationCommandAndRecord {
     }
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaDiagnostic') {
         $boundedProcessResult.outputQuotaDiagnostic = if ($null -eq $processResult.outputQuotaDiagnostic) { $null } else { [string]$processResult.outputQuotaDiagnostic }
+    }
+    if ($processResult.PSObject.Properties.Name -contains 'processStarted') {
+        $boundedProcessResult.processStarted = [bool]$processResult.processStarted
     }
     $processResult = [pscustomobject]$boundedProcessResult
     if ($null -ne $OutputReservationStream) {

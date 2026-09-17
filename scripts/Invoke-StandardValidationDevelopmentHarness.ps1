@@ -48,6 +48,8 @@ $sourceCheckoutMutated = $null
 $outputFull = $null
 $standardOutputPath = $null
 $barrierEvidenceSha256 = $null
+$barrierEvidencePostExecutionSha256 = $null
+$barrierEvidenceRevalidated = $null
 $runnerSha256 = $null
 $powerShellSha256 = $null
 $outputReservationStream = $null
@@ -86,9 +88,15 @@ function Get-DevelopmentHarnessPowerShellPath {
     if (-not [string]::IsNullOrWhiteSpace([string]$PSHOME)) {
         $candidatePaths += Join-Path $PSHOME $hostName
     }
-    if ($hostName -ceq 'pwsh') {
-        $command = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue
-        if ($null -ne $command) { $candidatePaths += [string]$command.Source }
+    # A Windows PowerShell host can itself be a hardlink or a reparse alias.
+    # Prefer a separately installed direct pwsh binary when the current host
+    # cannot satisfy the non-reparse identity check.
+    if ($hostName -ceq 'pwsh' -or [string]$PSVersionTable.PSEdition -ceq 'Desktop') {
+        foreach ($command in @(Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue)) {
+            if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+                $candidatePaths += [string]$command.Source
+            }
+        }
     }
     foreach ($path in @($candidatePaths | Select-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace([string]$path)) { continue }
@@ -147,6 +155,23 @@ function Get-DevelopmentHarnessStageSummary {
     return @($stages | Select-Object -First 5 | ForEach-Object {
         [ordered]@{ order = [int]$_.order; id = [string]$_.id; status = [string]$_.status }
     })
+}
+
+function Assert-DevelopmentHarnessBarrierArtifactsUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $EvidencePath,
+        [Parameter(Mandatory = $true)][string] $ExpectedEvidenceSha256
+    )
+
+    Assert-StandardValidationNoReparsePoints -Root $ArtifactsRoot -Context 'standard barrier artifacts after candidate execution'
+    Assert-StandardValidationRegularFile -Path $EvidencePath -Context 'trusted pre-candidate barrier evidence after candidate execution'
+    $currentEvidenceSha256 = Get-StandardValidationFileSha256 -Path $EvidencePath -Context 'trusted pre-candidate barrier evidence after candidate execution'
+    if ($currentEvidenceSha256 -cne $ExpectedEvidenceSha256) {
+        throw 'FAILED|Previously authenticated trusted pre-candidate barrier evidence changed after candidate execution.'
+    }
+    $null = Get-StandardValidationJson -Path $EvidencePath -Context 'trusted pre-candidate barrier evidence after candidate execution'
+    return [string]$currentEvidenceSha256
 }
 
 try {
@@ -241,6 +266,12 @@ try {
     if ($candidateSnapshotContentSha256 -cne $candidateContentSha256) {
         throw 'FAILED|Candidate snapshot identity does not match CandidateRoot.'
     }
+    # Reject unsafe candidate arguments before spending time on the trusted
+    # barrier; the snapshot root is already fixed and is the only substitution
+    # target accepted by the argument contract.
+    $candidateValidatorArguments = Convert-DevelopmentHarnessValidatorArguments `
+        -Arguments $harnessValidatorArguments `
+        -SnapshotRoot $candidateSnapshotRoot
 
     $standardArtifactsRoot = Join-Path $runRoot 'std'
     $standardOutputPath = Join-Path $standardArtifactsRoot 'evidence.json'
@@ -290,6 +321,7 @@ try {
         -TimeoutSeconds $harnessTimeoutSeconds `
         -CancellationPath $harnessCancellationPath
 
+    $candidateBarrierStatus = [string]$barrierProcessResult.status
     if ([string]$barrierProcessResult.status -eq 'cancelled') { throw 'CANCELLED|The trusted pre-candidate barrier was cancelled.' }
     if ([string]$barrierProcessResult.status -ne 'passed' -or [int]$barrierProcessResult.exitCode -ne 0 -or
         -not [bool]$barrierProcessResult.cleanedUp) {
@@ -323,13 +355,14 @@ try {
         throw 'FAILED|Candidate snapshot validator identity changed before execution.'
     }
     $candidateArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $candidateSnapshotValidatorFull)
-    $candidateArguments += Convert-DevelopmentHarnessValidatorArguments -Arguments $harnessValidatorArguments -SnapshotRoot $candidateSnapshotRoot
+    $candidateArguments += @($candidateValidatorArguments)
     $candidateCandidateEnvironment = @{
         STANDARD_VALIDATION_DEVELOPMENT_ONLY = 'true'
         STANDARD_VALIDATION_RELEASE_ELIGIBLE = 'false'
         STANDARD_VALIDATION_CI1_PHASE = 'candidate-validator'
         STANDARD_VALIDATION_CI1_RUN_ID = $runIdText
         STANDARD_VALIDATION_CI1_BARRIER_EVIDENCE_SHA256 = $barrierEvidenceSha256
+        STANDARD_VALIDATION_CI1_CANCELLATION_PATH = $harnessCancellationPath
         STANDARD_VALIDATION_STAGE_ID = 'candidate-validator-development-harness'
         STANDARD_VALIDATION_TOOL_ID = 'candidate-validator'
         STANDARD_VALIDATION_CANDIDATE_ID = $candidateId
@@ -340,19 +373,53 @@ try {
         STANDARD_VALIDATION_EVENT_NAME = $harnessEventName
     }
     $candidateExecutionAttempted = $true
-    $candidateProcessResult = Invoke-StandardValidationProcess `
-        -Command $powerShellPath `
-        -Arguments $candidateArguments `
-        -WorkingDirectory $candidateWorkingRoot `
-        -Environment $candidateCandidateEnvironment `
-        -TimeoutSeconds $harnessCandidateTimeoutSeconds `
-        -CancellationPath $harnessCancellationPath
-    $candidateCodeExecuted = [string]$candidateProcessResult.status -notin @('startup-failed', 'cancelled')
-    $candidateOutcome = [ordered]@{
-        status = [string]$candidateProcessResult.status
-        exitCode = [int]$candidateProcessResult.exitCode
-        cleanedUp = [bool]$candidateProcessResult.cleanedUp
-        outputQuotaExceeded = [bool]$candidateProcessResult.outputQuotaExceeded
+    # Keep this conservative until the process primitive reports whether its
+    # owned process actually started. If invocation itself throws, the evidence
+    # must not claim that candidate side effects were impossible.
+    $candidateCodeExecuted = $true
+    try {
+        $candidateProcessResult = Invoke-StandardValidationProcess `
+            -Command $powerShellPath `
+            -Arguments $candidateArguments `
+            -WorkingDirectory $candidateWorkingRoot `
+            -Environment $candidateCandidateEnvironment `
+            -TimeoutSeconds $harnessCandidateTimeoutSeconds `
+            -CancellationPath $harnessCancellationPath
+        if ($candidateProcessResult.PSObject.Properties.Name -contains 'processStarted') {
+            $candidateCodeExecuted = [bool]$candidateProcessResult.processStarted
+        }
+        $candidateOutcome = [ordered]@{
+            status = [string]$candidateProcessResult.status
+            exitCode = [int]$candidateProcessResult.exitCode
+            cleanedUp = [bool]$candidateProcessResult.cleanedUp
+            processStarted = if ($candidateProcessResult.PSObject.Properties.Name -contains 'processStarted') {
+                [bool]$candidateProcessResult.processStarted
+            }
+            else {
+                $false
+            }
+            outputQuotaExceeded = if ($candidateProcessResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
+                [bool]$candidateProcessResult.outputQuotaExceeded
+            }
+            else {
+                $false
+            }
+        }
+    }
+    finally {
+        if ($candidateExecutionAttempted -and $null -ne $barrierEvidenceSha256) {
+            try {
+                $barrierEvidencePostExecutionSha256 = Assert-DevelopmentHarnessBarrierArtifactsUnchanged `
+                    -ArtifactsRoot $standardArtifactsRoot `
+                    -EvidencePath $standardOutputPath `
+                    -ExpectedEvidenceSha256 $barrierEvidenceSha256
+                $barrierEvidenceRevalidated = $true
+            }
+            catch {
+                $barrierEvidenceRevalidated = $false
+                throw
+            }
+        }
     }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $candidateSnapshotRoot -ExpectedSnapshotContentSha256 $candidateSnapshotContentSha256
     if ([string]$candidateProcessResult.status -eq 'cancelled') { throw 'CANCELLED|The candidate validator was cancelled.' }
@@ -422,6 +489,8 @@ finally {
             oracle = 'central-development-runner'
             evidencePath = if ($null -eq $standardOutputPath) { $null } else { [string]$standardOutputPath }
             evidenceSha256 = if ($null -eq $barrierEvidenceSha256) { $null } else { [string]$barrierEvidenceSha256 }
+            evidencePostExecutionSha256 = if ($null -eq $barrierEvidencePostExecutionSha256) { $null } else { [string]$barrierEvidencePostExecutionSha256 }
+            evidenceUnchangedAfterCandidate = $barrierEvidenceRevalidated
             firstFiveStages = @($barrierStages)
         }
         candidateOutcome = $candidateOutcome

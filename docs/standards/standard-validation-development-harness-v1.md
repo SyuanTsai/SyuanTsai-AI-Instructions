@@ -10,7 +10,7 @@ This document describes the non-production harness used to obtain CI1 behavior e
 2. The adapter and harmless tool fixtures are supplied outside the candidate and artifact roots. The harness rejects reparse roots, overlapping roots, unsafe paths, changed source or adapter bytes, and a barrier that is not a development-only `PASS` with `releaseEligible=false`.
 3. Only after that barrier passes, the harness copies the candidate to an external run-owned snapshot and invokes the candidate's adapter-declared `canonicalValidatorPath` through the same central process-containment primitive. The source checkout is never used as the candidate execution directory.
 
-The evidence records the central runner and process-host hashes, candidate identity, barrier evidence hash, candidate execution result, bounded child output, and fail-closed recovery state. The authority is intentionally labelled `local-development-only-unpinned`; `candidateIsTrustRoot=false`, `releaseEligible=false`, and `formalAdoption=not-authorized` are invariant results of this entry point. Network isolation is not claimed by the harness, so fixtures must not depend on network access.
+The evidence records the central runner and process-host hashes, candidate identity, canonical barrier evidence hash before and after candidate execution, the explicit owned-process-started indicator, bounded child output, and fail-closed recovery state. The decision-bearing barrier evidence is revalidated after every candidate execution attempt; any changed, missing, unparsable, or reparse-substituted evidence blocks the run. The authority is intentionally labelled `local-development-only-unpinned`; `candidateIsTrustRoot=false`, `releaseEligible=false`, and `formalAdoption=not-authorized` are invariant results of this entry point. Network isolation is not claimed by the harness, so fixtures must not depend on network access.
 
 ## Invocation contract
 
@@ -44,7 +44,7 @@ The harness does not perform production wiring. Formal adoption still requires a
 
 - successful barrier-before-candidate execution and canonical first-five stage order;
 - failed Static barrier with no candidate dispatch;
-- candidate snapshot mutation and candidate timeout fail-closed behavior; and
+- candidate snapshot mutation, barrier-artifact tampering, candidate timeout, and post-start cancellation fail-closed behavior; and
 - unsafe argument rejection before candidate execution.
 
-The tests also verify that inherited secret-shaped environment variables are not visible to either owned child process.
+The tests also verify that inherited secret-shaped environment variables are not visible to either owned child process and that cancellation before process start is distinguished from cancellation after process start.
