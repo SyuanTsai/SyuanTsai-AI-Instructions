@@ -320,6 +320,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardExecutorPath
         Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId \(\[int\]\$process\.Id\)')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Ci1False ($shardExecutorSource -match 'Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor must not delete a caller-owned cancellation marker.'
+        Assert-Ci1False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
+        Assert-Ci1True ($shardExecutorSource -match 'System\.Diagnostics\.Process\.Kill|Stop-Process') 'The shard executor must use a direct process termination API.'
+        Assert-Ci1True ($shardExecutorSource -match 'Get-PesterShardFailureSummary|failureSummary') 'A failed shard must retain a sanitized first-failure summary.'
         Assert-Ci1True (-not [string]::IsNullOrWhiteSpace([string]$result.Evidence.preCandidateBarrier.artifactInventorySha256)) 'The barrier must retain a complete artifact inventory hash.'
         Assert-Ci1Equal $result.Evidence.preCandidateBarrier.artifactInventorySha256 $result.Evidence.preCandidateBarrier.artifactInventoryPostExecutionSha256 'The barrier artifact inventory must remain unchanged after candidate execution.'
         Assert-Ci1Equal $result.Evidence.recovery.status 'fail-closed' 'Recovery must remain fail-closed.'
