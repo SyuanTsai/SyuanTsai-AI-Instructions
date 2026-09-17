@@ -261,6 +261,10 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
                 [Environment]::SetEnvironmentVariable($name, "ci1-test-secret-$name", 'Process')
             }
+            # Pester 6 runs this helper under StrictMode on Linux as well as
+            # Windows. Initialize the optional async-process handle so every
+            # early-return path can execute the finally cleanup safely.
+            $process = $null
             try {
                 if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
                     $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
