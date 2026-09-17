@@ -39,6 +39,9 @@ $candidateValidatorSha256 = $null
     $candidateAdapterSha256 = $null
 $validatorArgumentsSha256 = $null
 $candidateId = $null
+$trustedToolInventorySha256 = $null
+$authorityInputRevalidatedAfterCandidate = $false
+$authorityInputValidationError = $null
 $candidateFull = $null
 $adapterFull = $null
 $trustedToolRootFull = $null
@@ -186,6 +189,27 @@ function Convert-DevelopmentHarnessValidatorArguments {
     return @($result)
 }
 
+function Assert-DevelopmentHarnessValidatorArguments {
+    param([Parameter(Mandatory = $true)][string[]] $Arguments)
+
+    foreach ($argument in @($Arguments)) {
+        if ($argument -isnot [string] -or [string]$argument -match '[\x00-\x1F\x7F]') {
+            throw 'INVALID|Candidate validator arguments must be strings without control characters.'
+        }
+        $text = [string]$argument
+        if ($text -match '(^|[\\/])\.\.([\\/]|$)') {
+            throw 'INVALID|Candidate validator arguments may not contain parent-directory traversal.'
+        }
+        if ($text -match '__ARTIFACTS_ROOT__') {
+            throw 'INVALID|The development harness does not expose its artifact root to candidate code.'
+        }
+        if ([System.IO.Path]::IsPathRooted($text) -and $text -ne '__CANDIDATE_ROOT__') {
+            throw 'INVALID|Candidate validator arguments may not introduce absolute paths; use __CANDIDATE_ROOT__.'
+        }
+    }
+    return ,([string[]]$Arguments)
+}
+
 function Get-DevelopmentHarnessStageSummary {
     param([Parameter(Mandatory = $true)] $Evidence)
 
@@ -231,6 +255,43 @@ function Assert-DevelopmentHarnessBarrierArtifactsUnchanged {
     return [pscustomobject][ordered]@{
         evidenceSha256 = [string]$currentEvidenceSha256
         inventorySha256 = [string]$currentInventorySha256
+    }
+}
+
+function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunnerPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedRunnerSha256,
+        [Parameter(Mandatory = $true)][string] $PowerShellPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedPowerShellSha256,
+        [Parameter(Mandatory = $true)][string] $AdapterPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedAdapterSha256,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedTrustedToolInventorySha256
+    )
+
+    $currentRunnerSha256 = Get-StandardValidationFileSha256 -Path $RunnerPath -Context 'central validation runner revalidation'
+    if ($currentRunnerSha256 -cne $ExpectedRunnerSha256) {
+        throw 'FAILED|Trusted authority runner changed during validation.'
+    }
+    $currentPowerShellSha256 = Get-StandardValidationFileSha256 -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
+    if ($currentPowerShellSha256 -cne $ExpectedPowerShellSha256) {
+        throw 'FAILED|Trusted authority PowerShell host changed during validation.'
+    }
+    $currentAdapterSha256 = Get-StandardValidationFileSha256 -Path $AdapterPath -Context 'authority adapter revalidation'
+    if ($currentAdapterSha256 -cne $ExpectedAdapterSha256) {
+        throw 'FAILED|Trusted authority adapter changed during validation.'
+    }
+    $currentTrustedToolInventory = @(Get-StandardValidationInventory -Root $TrustedToolRoot -Context 'trusted tool root revalidation')
+    $currentTrustedToolInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $currentTrustedToolInventory
+    if ($currentTrustedToolInventorySha256 -cne $ExpectedTrustedToolInventorySha256) {
+        throw 'FAILED|Trusted tool root changed during validation.'
+    }
+    return [pscustomobject][ordered]@{
+        runnerSha256 = [string]$currentRunnerSha256
+        powerShellSha256 = [string]$currentPowerShellSha256
+        adapterSha256 = [string]$currentAdapterSha256
+        trustedToolInventorySha256 = [string]$currentTrustedToolInventorySha256
     }
 }
 
@@ -327,9 +388,10 @@ try {
     # barrier; the snapshot root is already fixed and is the only substitution
     # target accepted by the argument contract.
     $candidateValidatorArguments = Convert-DevelopmentHarnessValidatorArguments `
-        -Arguments $harnessValidatorArguments `
+        -Arguments (Assert-DevelopmentHarnessValidatorArguments -Arguments $harnessValidatorArguments) `
         -SnapshotRoot $candidateSnapshotRoot
-    $validatorArgumentsCanonical = ConvertTo-Json -InputObject ([string[]]$candidateValidatorArguments) -Compress
+    $validatorArgumentsLogical = Assert-DevelopmentHarnessValidatorArguments -Arguments $harnessValidatorArguments
+    $validatorArgumentsCanonical = ConvertTo-Json -InputObject ([string[]]$validatorArgumentsLogical) -Compress
     $validatorArgumentsSha256 = Get-StandardValidationTextSha256 -Value $validatorArgumentsCanonical
     $candidateId = Get-StandardValidationTextSha256 -Value (
         "$harnessSourceRepository`n$harnessSourceRevision`n$harnessBaseRevision`n$harnessEventName`n$candidateContentSha256`n$candidateValidatorSha256`n$candidateAdapterSha256`n$validatorArgumentsSha256"
@@ -349,6 +411,8 @@ try {
     $powerShellPath = Get-DevelopmentHarnessPowerShellPath
     $powerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellPath -Context 'development harness PowerShell host'
     $runnerSha256 = Get-StandardValidationFileSha256 -Path $runnerPath -Context 'central validation runner'
+    $trustedToolInventory = @(Get-StandardValidationInventory -Root $trustedToolRootFull -Context 'trusted tool root')
+    $trustedToolInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $trustedToolInventory
     if ($CancellationStdin) {
         Start-DevelopmentHarnessCancellationReader
         $cancellationProbe = { Test-DevelopmentHarnessCancellationRequested }
@@ -415,6 +479,15 @@ try {
         -ExpectedContentSha256 $candidateContentSha256 `
         -AdapterPath $adapterFull `
         -ExpectedAdapterSha256 $candidateAdapterSha256
+    $null = Assert-DevelopmentHarnessAuthorityInputsUnchanged `
+        -RunnerPath $runnerPath `
+        -ExpectedRunnerSha256 $runnerSha256 `
+        -PowerShellPath $powerShellPath `
+        -ExpectedPowerShellSha256 $powerShellSha256 `
+        -AdapterPath $adapterFull `
+        -ExpectedAdapterSha256 $candidateAdapterSha256 `
+        -TrustedToolRoot $trustedToolRootFull `
+        -ExpectedTrustedToolInventorySha256 $trustedToolInventorySha256
     $candidateSnapshotValidatorFull = Get-StandardValidationFullPath `
         -Path (Join-Path $candidateSnapshotRoot ($validatorRelative -replace '/', [IO.Path]::DirectorySeparatorChar)) `
         -Context 'candidate snapshot validator'
@@ -513,12 +586,36 @@ try {
                 $sourceCheckoutMutated = $true
             }
         }
-        if (-not [string]::IsNullOrWhiteSpace($barrierRevalidationError)) {
-            throw $barrierRevalidationError
+        if ($candidateExecutionAttempted) {
+            try {
+                $authorityInputRevalidation = Assert-DevelopmentHarnessAuthorityInputsUnchanged `
+                    -RunnerPath $runnerPath `
+                    -ExpectedRunnerSha256 $runnerSha256 `
+                    -PowerShellPath $powerShellPath `
+                    -ExpectedPowerShellSha256 $powerShellSha256 `
+                    -AdapterPath $adapterFull `
+                    -ExpectedAdapterSha256 $candidateAdapterSha256 `
+                    -TrustedToolRoot $trustedToolRootFull `
+                    -ExpectedTrustedToolInventorySha256 $trustedToolInventorySha256
+                $authorityInputRevalidatedAfterCandidate = $true
+            }
+            catch {
+                $authorityInputValidationError = [string]$_.Exception.Message
+            }
         }
     }
+    $postCandidateRevalidationErrors = @()
+    if (-not [string]::IsNullOrWhiteSpace($barrierRevalidationError)) {
+        $postCandidateRevalidationErrors += $barrierRevalidationError
+    }
     if (-not [string]::IsNullOrWhiteSpace($sourceCheckoutValidationError)) {
-        throw "FAILED|Post-candidate source checkout revalidation failed: $sourceCheckoutValidationError"
+        $postCandidateRevalidationErrors += "FAILED|Post-candidate source checkout revalidation failed: $sourceCheckoutValidationError"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($authorityInputValidationError)) {
+        $postCandidateRevalidationErrors += "FAILED|Post-candidate authority input revalidation failed: $authorityInputValidationError"
+    }
+    if ($postCandidateRevalidationErrors.Count -gt 0) {
+        throw ($postCandidateRevalidationErrors -join ' | ')
     }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $candidateSnapshotRoot -ExpectedSnapshotContentSha256 $candidateSnapshotContentSha256
     if ([string]$candidateProcessResult.status -eq 'cancelled') { throw 'CANCELLED|The candidate validator was cancelled.' }
@@ -582,6 +679,10 @@ finally {
             repository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
             runnerPath = 'scripts/Invoke-StandardValidation.ps1'
             runnerSha256 = if ($null -eq $runnerSha256) { $null } else { [string]$runnerSha256 }
+            trustedToolRoot = if ($null -eq $trustedToolRootFull) { $null } else { [string]$trustedToolRootFull }
+            trustedToolInventorySha256 = if ($null -eq $trustedToolInventorySha256) { $null } else { [string]$trustedToolInventorySha256 }
+            inputsRevalidatedAfterCandidate = [bool]$authorityInputRevalidatedAfterCandidate
+            inputRevalidationError = $authorityInputValidationError
             candidateIsTrustRoot = $false
             formalAdoption = 'not-authorized'
         }

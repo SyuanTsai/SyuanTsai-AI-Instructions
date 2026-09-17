@@ -403,6 +403,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1Match ([string]$result.Evidence.process.candidate.stdout) 'candidate-validator-executed' 'Candidate execution must leave bounded evidence.'
         Assert-Ci1False ([string]$result.Output -match 'ci1-test-secret|SYP154_INHERITED_SECRET|STANDARD_VALIDATION_INHERITED_SECRET') 'Inherited secrets must not cross either owned child boundary.'
         Assert-Ci1False ([bool]$result.Evidence.authority.candidateIsTrustRoot) 'The candidate must not be treated as the authority trust root.'
+        Assert-Ci1Match ([string]$result.Evidence.authority.trustedToolInventorySha256) '^[0-9a-f]{64}$' 'The trusted tool root inventory must be bound in authority evidence.'
+        Assert-Ci1True ([bool]$result.Evidence.authority.inputsRevalidatedAfterCandidate) 'Recorded authority inputs must be revalidated after candidate execution.'
+        Assert-Ci1True ([string]::IsNullOrWhiteSpace([string]$result.Evidence.authority.inputRevalidationError)) 'A passing harness must not retain an authority revalidation error.'
         $shardExecutorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardExecutorPath
         Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
@@ -416,9 +419,20 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
         $harnessSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1')
         Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-StandardValidationCandidateUnchanged')).Count -ge 2) 'The development harness must revalidate the source checkout before and after candidate execution.'
+        Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-DevelopmentHarnessAuthorityInputsUnchanged')).Count -ge 2) 'The development harness must revalidate recorded authority inputs before and after candidate execution.'
         Assert-Ci1False ($harnessSource -match 'CancellationPath') 'The development launcher must not expose a cancellation path in its command line contract.'
         Assert-Ci1True ($harnessSource -match 'CancellationStdin|CancellationProbe') 'Cancellation must use a supervisor-only private control channel.'
         Assert-Ci1Match ([string]$result.Evidence.identity.validatorArgumentsSha256) '^[0-9a-f]{64}$' 'Candidate identity must bind the canonical validator arguments.'
+        $logicalArgumentsCanonical = ConvertTo-Json -InputObject ([string[]]@('__CANDIDATE_ROOT__')) -Compress
+        $logicalArgumentsSha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $logicalArgumentBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($logicalArgumentsCanonical)
+            $expectedLogicalArgumentsSha = ([BitConverter]::ToString($logicalArgumentsSha.ComputeHash($logicalArgumentBytes)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $logicalArgumentsSha.Dispose()
+        }
+        Assert-Ci1Equal $result.Evidence.identity.validatorArgumentsSha256 $expectedLogicalArgumentsSha 'Candidate identity must hash logical validator arguments before snapshot path substitution.'
         Assert-Ci1True (-not [string]::IsNullOrWhiteSpace([string]$result.Evidence.preCandidateBarrier.artifactInventorySha256)) 'The barrier must retain a complete artifact inventory hash.'
         Assert-Ci1Equal $result.Evidence.preCandidateBarrier.artifactInventorySha256 $result.Evidence.preCandidateBarrier.artifactInventoryPostExecutionSha256 'The barrier artifact inventory must remain unchanged after candidate execution.'
         Assert-Ci1Equal $result.Evidence.recovery.status 'fail-closed' 'Recovery must remain fail-closed.'
