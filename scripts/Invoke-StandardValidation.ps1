@@ -5268,7 +5268,13 @@ function Invoke-StandardValidationRun {
         catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
-        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey
+        # Keep the process-boundary path compact for Windows PowerShell 5.1.
+        # The full execution key remains the canonical lock/run identity; the
+        # child directory is ephemeral and uses a fresh supervisor-generated
+        # N-format GUID so it cannot inherit caller-controlled identity or
+        # collide with a stale execution root.
+        $childWorkingKey = [guid]::NewGuid().ToString('N')
+        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $childWorkingKey
         $childWorkingRoot = Assert-StandardValidationCanonicalRootPath -Path $childWorkingRoot -Context 'child working root'
         [void](New-Item -ItemType Directory -Path $childWorkingRoot -Force)
         Assert-StandardValidationNoReparsePoints -Root $childWorkingRoot -Context 'child working root'
