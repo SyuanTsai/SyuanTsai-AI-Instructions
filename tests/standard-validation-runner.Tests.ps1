@@ -714,6 +714,29 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
     }
 
+    # Scenario: Supervisor setup reports an error before the child output streams are drained.
+    # Purpose: Preserve the first supervisor diagnostic when a child emits no stderr, while keeping the merged stream bounded.
+    It 'UnitT04_preserves_first_supervisor_diagnostic_during_child_capture' {
+        . $script:RunnerPath `
+            -CandidateRoot (Join-Path $TestDrive 'stderr-preservation-candidate') `
+            -AdapterPath (Join-Path $TestDrive 'stderr-preservation-adapter.json') `
+            -ArtifactsRoot (Join-Path $TestDrive 'stderr-preservation-artifacts') `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+        $firstError = 'Could not assign the validator to the owned Windows job object: AssignProcessToJobObject returned false.'
+        Assert-Equal (Merge-StandardValidationProcessStderr -Existing $firstError -Captured '' -Quota 200) $firstError 'An empty child stderr stream must not erase the first supervisor diagnostic.'
+        $merged = Merge-StandardValidationProcessStderr -Existing $firstError -Captured 'child stderr detail' -Quota 200
+        Assert-Match $merged '(?s)Could not assign the validator.*child stderr detail' 'A non-empty child stderr stream must be appended after the first supervisor diagnostic.'
+        Assert-True ($merged.Length -le 200) 'Merged supervisor and child stderr must remain within the process evidence quota.'
+        Assert-Equal (Merge-StandardValidationProcessStderr -Existing '' -Captured 'child-only stderr' -Quota 200) 'child-only stderr' 'A child stderr stream must remain available when no supervisor diagnostic exists.'
+        $nearQuota = Merge-StandardValidationProcessStderr -Existing 'first supervisor error' -Captured ('x' * 400) -Quota 64
+        Assert-True ($nearQuota.StartsWith('first supervisor error')) 'Quota trimming must preserve the first supervisor diagnostic prefix.'
+        Assert-True ($nearQuota.Length -le 64) 'Quota trimming must never exceed the process evidence quota.'
+    }
+
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
     # or reaches the artifact root through a symlinked ancestor.
     # Purpose: Keep tool-role provenance and checkout-external artifact boundaries authoritative.
