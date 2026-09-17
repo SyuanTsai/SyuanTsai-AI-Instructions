@@ -1207,8 +1207,16 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'installedMetadataVerification=static-dist-info-metadata' 'Shared gate must verify static installed metadata inspection.'
         Assert-Match $gate 'resolutionRounds=\$\(\$skillSpectorReceipt\.resolutionRounds\)' 'Shared gate must bind resolution rounds into the resolver identity.'
         Assert-Match $gate 'consoleEntryPoint=\$\(\$skillSpectorReceipt\.consoleEntryPoint\)' 'Shared gate must bind the static console entry point into the resolver identity.'
-        Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute all three authority regressions through frozen Pester.'
-        Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 45\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the complete combined authority inventory with the resolved Pester result shape.'
+        Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute the complete authority regression inventory through frozen Pester.'
+        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
+        }
+        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared gate must bind semantic Python tests to the frozen SkillSpector environment.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
+            Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must start Python in isolated mode."
+        }
+        Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 55\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the expanded combined authority inventory with the resolved Pester result shape.'
 
         # Scenario: External validators return clean-looking reports for a different package, incomplete inventory, or downgraded findings.
         # Purpose: Bind every report to this exact fixture and interpret native report severity without PowerShell coercion.
@@ -2914,10 +2922,22 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $policy.security.aiReview.authentication 'trusted-supervisor-signed-ai-review-v1' 'AI review must require trusted-supervisor authentication.'
         Assert-ExactStringSequence $policy.security.aiReview.digestFields @('reviewFindingsSha256', 'findingDispositionSha256') 'AI review must bind both complete result digests.'
         Assert-Equal $policy.security.aiReview.attestation 'trusted-supervisor-ai-review-v1' 'AI review must use the canonical attestation type.'
+        Assert-Equal $policy.security.semanticPreflight.artifactType 'semantic-scan-preflight-v1' 'Semantic preflight must use the canonical unsigned artifact type.'
+        Assert-Equal $policy.security.semanticPreflight.authentication 'unsigned-provider-output' 'Semantic preflight must remain explicitly unsigned.'
+        Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic provider input must be bound to verified source bytes.'
+        Assert-Equal $policy.security.semanticPreflight.providerInventoryBinding 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Semantic provider inventory must separate complete package bytes from provider text.'
+        Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Every planned semantic work item must bind to its own provider call.'
+        Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Scanner JSON must reject property names that the supported PowerShell parser would collapse.'
+        Assert-ExactStringSequence $policy.security.semanticPreflight.nonAuthority @('cannot-satisfy-semantic-evidence', 'cannot-authorize-release') 'Semantic preflight must not become release authority.'
         Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
 
         Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
         Assert-Match $standard 'validation-security-gate\.json' 'Normative Standard must bind the canonical validation/security gate policy.'
+        Assert-Match $standard 'strict-utf8-v1' 'Normative Standard must bind provider text to the versioned deterministic decoding of verified source bytes.'
+        Assert-Match $standard 'binary.*provider text inventory' 'Normative Standard must keep binary assets byte-bound outside the provider text inventory.'
+        Assert-Match $standard 'planned work item.*provider call' 'Normative Standard must bind provider telemetry to every planned work item.'
+        Assert-Match $standard 'OrdinalIgnoreCase' 'Normative Standard must define supported PowerShell JSON property-collision semantics.'
+        Assert-Match $standard 'semantic-scan-preflight-v1' 'Normative Standard must define the unsigned semantic preflight boundary.'
         Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'

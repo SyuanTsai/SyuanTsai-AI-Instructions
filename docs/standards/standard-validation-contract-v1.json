@@ -96,6 +96,15 @@
     "semanticEvidence": {
       "required": ["candidateId", "status=passed", "decision=PASS", "provider", "purpose", "scope", "consentGranted=true", "analyzerIdentity", "analyzerCompleteness=complete", "findings", "findingsSha256", "trusted-supervisor-signed-attestation"]
     },
+    "semanticPreflight": {
+      "type": "semantic-scan-preflight-v1",
+      "sourceBinding": "llm-input-equals-strict-utf8-decoding-of-verified-source-bytes",
+      "providerInventoryBinding": "full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest",
+      "workBinding": "one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval",
+      "jsonPropertyBinding": "reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization",
+      "fixedState": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"],
+      "authority": "none"
+    },
     "releaseEligibility": {
       "trueOnlyWhen": ["state=PASS", "exitCode=0", "adapter.mode=production", "candidate.acquisition.status=verified", "candidate.acquisition.verified=true", "authority.binding.status=verified", "authority.binding.verified=true", "launchBinding.status=verified", "launchBinding.verified=true", "stages[1..5].status=passed", "stages[6].id=conditional-semantic-scan-and-status=passed-or-not-applicable", "stages[7].id=ai-review-and-status=passed", "stages[8].id=human-approval-and-status=passed", "stages[9].id=publish-or-install-and-status=passed", "stages[10].id=post-install-verification-and-status=passed"]
     },
