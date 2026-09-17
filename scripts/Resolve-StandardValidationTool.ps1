@@ -688,6 +688,22 @@ function Get-ResolverSafeUnixSymlinkEntry {
     }
 }
 
+function Get-ResolverOrderedClosureEntries {
+    param([Parameter(Mandatory = $true)][object[]] $Entries)
+
+    # The installed tool tree can contain many thousands of files. Keep the
+    # canonical ordinal ordering in a native balanced tree instead of scanning
+    # the growing PowerShell list once for every insertion.
+    $sorted = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($entry in $Entries) {
+        if ($null -eq $entry -or [string]::IsNullOrEmpty([string]$entry.path)) {
+            throw 'Installed tool closure contains an entry without a path.'
+        }
+        $sorted.Add([string]$entry.path, $entry)
+    }
+    foreach ($entry in $sorted.Values) { $entry }
+}
+
 function Get-DirectoryClosureIdentity {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -752,15 +768,7 @@ function Get-DirectoryClosureIdentity {
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
     }
-    $ordered = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($entry in $entries) {
-        $insertAt = 0
-        while ($insertAt -lt $ordered.Count -and
-            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
-            $insertAt++
-        }
-        [void]$ordered.Insert($insertAt, $entry)
-    }
+    $ordered = @(Get-ResolverOrderedClosureEntries -Entries $entries.ToArray())
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
@@ -771,7 +779,7 @@ function Get-DirectoryClosureIdentity {
     }
     return [ordered]@{
         sha256 = $closureHash
-        entries = $ordered.ToArray()
+        entries = @($ordered)
     }
 }
 
