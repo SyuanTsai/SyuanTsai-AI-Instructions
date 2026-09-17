@@ -33,9 +33,10 @@ $candidateCodeExecuted = $false
 $candidateExecutionAttempted = $false
 $barrierProcessResult = $null
 $barrierEvidence = $null
-$candidateProcessResult = $null
-$candidateContentSha256 = $null
-$candidateValidatorSha256 = $null
+    $candidateProcessResult = $null
+    $candidateContentSha256 = $null
+    $candidateValidatorSha256 = $null
+    $candidateAdapterSha256 = $null
 $candidateId = $null
 $candidateFull = $null
 $adapterFull = $null
@@ -44,7 +45,9 @@ $artifactRootFull = $null
 $runRoot = $null
 $candidateSnapshotRoot = $null
 $candidateSnapshotContentSha256 = $null
-$sourceCheckoutMutated = $null
+    $sourceCheckoutMutated = $false
+    $sourceCheckoutRevalidatedAfterCandidate = $false
+    $sourceCheckoutValidationError = $null
 $outputFull = $null
 $standardOutputPath = $null
 $barrierEvidenceSha256 = $null
@@ -270,6 +273,7 @@ try {
     $candidateInventory = Get-StandardValidationInventory -Root $candidateFull -Context 'development harness candidate'
     $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
     $candidateValidatorSha256 = Get-StandardValidationFileSha256 -Path $validatorFull -Context 'CandidateValidatorPath'
+    $candidateAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'development harness adapter'
     $candidateId = Get-StandardValidationTextSha256 -Value (
         "$harnessSourceRepository`n$harnessSourceRevision`n$harnessBaseRevision`n$harnessEventName`n$candidateContentSha256`n$candidateValidatorSha256"
     )
@@ -364,8 +368,7 @@ try {
         -CandidateRoot $candidateFull `
         -ExpectedContentSha256 $candidateContentSha256 `
         -AdapterPath $adapterFull `
-        -ExpectedAdapterSha256 (Get-StandardValidationFileSha256 -Path $adapterFull -Context 'development harness adapter')
-    $sourceCheckoutMutated = $false
+        -ExpectedAdapterSha256 $candidateAdapterSha256
     $candidateSnapshotValidatorFull = Get-StandardValidationFullPath `
         -Path (Join-Path $candidateSnapshotRoot ($validatorRelative -replace '/', [IO.Path]::DirectorySeparatorChar)) `
         -Context 'candidate snapshot validator'
@@ -380,7 +383,6 @@ try {
         STANDARD_VALIDATION_CI1_PHASE = 'candidate-validator'
         STANDARD_VALIDATION_CI1_RUN_ID = $runIdText
         STANDARD_VALIDATION_CI1_BARRIER_EVIDENCE_SHA256 = $barrierEvidenceSha256
-        STANDARD_VALIDATION_CI1_CANCELLATION_PATH = $harnessCancellationPath
         STANDARD_VALIDATION_STAGE_ID = 'candidate-validator-development-harness'
         STANDARD_VALIDATION_TOOL_ID = 'candidate-validator'
         STANDARD_VALIDATION_CANDIDATE_ID = $candidateId
@@ -425,6 +427,7 @@ try {
         }
     }
     finally {
+        $barrierRevalidationError = $null
         if ($candidateExecutionAttempted -and $null -ne $barrierEvidenceSha256) {
             try {
                 $barrierRevalidation = Assert-DevelopmentHarnessBarrierArtifactsUnchanged `
@@ -439,9 +442,33 @@ try {
             }
             catch {
                 $barrierEvidenceRevalidated = $false
-                throw
+                $barrierRevalidationError = [string]$_.Exception.Message
             }
         }
+        # The candidate is executed from an immutable snapshot, but the source
+        # checkout and adapter remain untrusted inputs to this development
+        # harness. Revalidate them after every attempted candidate execution,
+        # including timeout/cancellation and barrier-revalidation failures.
+        if ($candidateExecutionAttempted) {
+            try {
+                Assert-StandardValidationCandidateUnchanged `
+                    -CandidateRoot $candidateFull `
+                    -ExpectedContentSha256 $candidateContentSha256 `
+                    -AdapterPath $adapterFull `
+                    -ExpectedAdapterSha256 $candidateAdapterSha256
+                $sourceCheckoutRevalidatedAfterCandidate = $true
+            }
+            catch {
+                $sourceCheckoutValidationError = [string]$_.Exception.Message
+                $sourceCheckoutMutated = ($sourceCheckoutValidationError -match 'Candidate content changed|Adapter configuration changed')
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($barrierRevalidationError)) {
+            throw $barrierRevalidationError
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($sourceCheckoutValidationError)) {
+        throw "FAILED|Post-candidate source checkout revalidation failed: $sourceCheckoutValidationError"
     }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $candidateSnapshotRoot -ExpectedSnapshotContentSha256 $candidateSnapshotContentSha256
     if ([string]$candidateProcessResult.status -eq 'cancelled') { throw 'CANCELLED|The candidate validator was cancelled.' }
@@ -457,7 +484,11 @@ try {
 }
 catch {
     $failureMessage = [string]$_.Exception.Message
-    if ($failureMessage -match 'Candidate content changed') { $sourceCheckoutMutated = $true }
+    if ($failureMessage -match 'Candidate content changed|Adapter configuration changed') { $sourceCheckoutMutated = $true }
+    if (-not [string]::IsNullOrWhiteSpace($sourceCheckoutValidationError) -and
+        $failureMessage -notmatch [regex]::Escape($sourceCheckoutValidationError)) {
+        $failureMessage = "$failureMessage | post-candidate source revalidation: $sourceCheckoutValidationError"
+    }
     $classification = Get-DevelopmentHarnessFailureClassification -Message $failureMessage
     $state = [string]$classification.State
     $exitCode = [int]$classification.ExitCode
@@ -527,6 +558,8 @@ finally {
             status = 'fail-closed'
             onFailure = 'stop-candidate-promotion-preserve-external-evidence-and-require-a-new-reviewed-run'
             sourceCheckoutMutated = $sourceCheckoutMutated
+            sourceCheckoutRevalidatedAfterCandidate = $sourceCheckoutRevalidatedAfterCandidate
+            sourceCheckoutValidationError = $sourceCheckoutValidationError
             rollback = 'development-only; no release or install side effect performed'
         }
         failure = if ([string]::IsNullOrWhiteSpace([string]$failureMessage)) { $null } else { [ordered]@{ state = $state; message = [string]$failureMessage } }

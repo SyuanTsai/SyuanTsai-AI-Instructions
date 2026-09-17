@@ -117,7 +117,12 @@ if ($fixtureBehavior -eq 'barrier-tamper') {
     Add-Content -LiteralPath $nestedBarrierArtifact.FullName -Value 'tampered-by-candidate' -Encoding UTF8
 }
 if ($fixtureBehavior -eq 'cancel-after-start') {
-    [IO.File]::WriteAllText($env:STANDARD_VALIDATION_CI1_CANCELLATION_PATH, 'cancel')
+    # This is a harmless candidate-owned start signal. The trusted test driver
+    # watches it and creates the private cancellation marker after process
+    # start; candidate code never receives the cancellation path. It is written
+    # in the owned working directory rather than the immutable candidate
+    # snapshot so the signal cannot itself create snapshot drift.
+    [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'candidate-started.signal'), 'started')
     Start-Sleep -Seconds 10
 }
 if ($fixtureBehavior -eq 'timeout') {
@@ -257,10 +262,50 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [Environment]::SetEnvironmentVariable($name, "ci1-test-secret-$name", 'Process')
             }
             try {
-                $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
-                $exitCode = $LASTEXITCODE
+                if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
+                    $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
+                    $exitCode = $LASTEXITCODE
+                }
+                else {
+                    $stdoutPath = Join-Path $Fixture.Root 'harness.stdout.log'
+                    $stderrPath = Join-Path $Fixture.Root 'harness.stderr.log'
+                    $startParameters = @{
+                        FilePath = $script:PowerShellPath
+                        ArgumentList = $arguments
+                        WorkingDirectory = $script:RepositoryRoot
+                        RedirectStandardOutput = $stdoutPath
+                        RedirectStandardError = $stderrPath
+                        WindowStyle = 'Hidden'
+                        PassThru = $true
+                        ErrorAction = 'Stop'
+                    }
+                    $process = Start-Process @startParameters
+                    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+                    while (-not $process.HasExited) {
+                        $startSignal = @(Get-ChildItem -LiteralPath $Fixture.Artifacts -Filter 'candidate-started.signal' -File -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 1)[0]
+                        if ($null -ne $startSignal -and -not (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+                            Write-Ci1Utf8File -Path $CancellationPath -Text 'cancelled-by-trusted-test-driver'
+                        }
+                        if ([DateTime]::UtcNow -ge $deadline) {
+                            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+                            throw 'CI1 test driver timed out while waiting for the harness process.'
+                        }
+                        [void]$process.WaitForExit(100)
+                    }
+                    [void]$process.WaitForExit()
+                    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -Raw -Encoding UTF8 -LiteralPath $stdoutPath } else { '' }
+                    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -Raw -Encoding UTF8 -LiteralPath $stderrPath } else { '' }
+                    $captured = "$stdout`n$stderr"
+                    $exitCode = $process.ExitCode
+                    $process.Dispose()
+                    $process = $null
+                }
             }
             finally {
+                if ($null -ne $process) {
+                    try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+                    try { $process.Dispose() } catch { }
+                }
                 foreach ($name in $environmentNames) {
                     [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
                 }
@@ -318,11 +363,17 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1False ([bool]$result.Evidence.authority.candidateIsTrustRoot) 'The candidate must not be treated as the authority trust root.'
         $shardExecutorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardExecutorPath
-        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId \(\[int\]\$process\.Id\)')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Ci1False ($shardExecutorSource -match 'Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor must not delete a caller-owned cancellation marker.'
         Assert-Ci1False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
         Assert-Ci1True ($shardExecutorSource -match 'System\.Diagnostics\.Process\.Kill|Stop-Process') 'The shard executor must use a direct process termination API.'
         Assert-Ci1True ($shardExecutorSource -match 'Get-PesterShardFailureSummary|failureSummary') 'A failed shard must retain a sanitized first-failure summary.'
+        Assert-Ci1True ($shardExecutorSource -match 'CreateKillOnCloseJob|AssignProcessToJobObject') 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
+        Assert-Ci1True ($shardExecutorSource -match 'PesterShardBoundedCapture|outputQuotaCharacters') 'The shard executor must bound redirected child output.'
+        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
+        $harnessSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1')
+        Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-StandardValidationCandidateUnchanged')).Count -ge 2) 'The development harness must revalidate the source checkout before and after candidate execution.'
+        Assert-Ci1False ($harnessSource -match 'STANDARD_VALIDATION_CI1_CANCELLATION_PATH\s*=') 'The candidate environment must not expose the trusted cancellation marker path.'
         Assert-Ci1True (-not [string]::IsNullOrWhiteSpace([string]$result.Evidence.preCandidateBarrier.artifactInventorySha256)) 'The barrier must retain a complete artifact inventory hash.'
         Assert-Ci1Equal $result.Evidence.preCandidateBarrier.artifactInventorySha256 $result.Evidence.preCandidateBarrier.artifactInventoryPostExecutionSha256 'The barrier artifact inventory must remain unchanged after candidate execution.'
         Assert-Ci1Equal $result.Evidence.recovery.status 'fail-closed' 'Recovery must remain fail-closed.'
