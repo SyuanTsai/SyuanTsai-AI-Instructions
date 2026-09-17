@@ -70,17 +70,116 @@ jobs:
           $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
           if ($null -eq $invokePester) { throw 'Invoke-Pester 3.4.0 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
-          $result = & $invokePester -Script ./tests -PassThru
-          if ($null -eq $result) { throw 'Pester did not return a result object.' }
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 517) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 517." }
-          if ($result.FailedCount -gt 0) { exit 1 }
-          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
-          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 6) { throw "Windows PowerShell 5.1 expected exactly 6 platform/version skips; got $($result.SkippedCount)." }
-          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
-            throw 'Pester result counts are incomplete.'
+          # Run the two process-heavy contracts in fresh PowerShell children. The old
+          # single-process invocation could exhaust the hosted Windows process boundary
+          # after InterT60 and make later tests observe empty child output. Every tracked
+          # test file remains covered exactly once, and the aggregate counts remain the
+          # required gate; this only changes process lifetime, not coverage or thresholds.
+          $allTestPaths = @(
+            Get-ChildItem -LiteralPath ./tests -Filter '*.Tests.ps1' -File |
+              Sort-Object FullName |
+              ForEach-Object { [string]$_.FullName }
+          )
+          if ($allTestPaths.Count -eq 0) { throw 'No Pester test files were discovered.' }
+          $isolatedNames = @(
+            'standard-validation-runner.Tests.ps1',
+            'syp101-production-smoke-contract.Tests.ps1'
+          )
+          $isolatedPaths = @($allTestPaths | Where-Object { $isolatedNames -contains (Split-Path -Leaf $_) })
+          $bulkPaths = @($allTestPaths | Where-Object { $isolatedNames -notcontains (Split-Path -Leaf $_) })
+          if (($isolatedPaths.Count + $bulkPaths.Count) -ne $allTestPaths.Count -or
+              (($isolatedPaths + $bulkPaths | Sort-Object) -join "`n") -cne (($allTestPaths | Sort-Object) -join "`n")) {
+            throw 'Pester shard inventory is not an exact partition of the tracked test files.'
           }
+          $shards = @(
+            [pscustomobject]@{ Name = 'standard-validation-runner'; Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -eq 'standard-validation-runner.Tests.ps1' }) },
+            [pscustomobject]@{ Name = 'syp101-production-smoke-contract'; Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -eq 'syp101-production-smoke-contract.Tests.ps1' }) },
+            [pscustomobject]@{ Name = 'bulk'; Paths = $bulkPaths }
+          )
+          $childPowerShell = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            (Get-Command powershell -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          }
+          else {
+            (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          }
+          $childScript = @'
+$ErrorActionPreference = 'Stop'
+$paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
+if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
+Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
+$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
+if ($null -eq $invoke) { throw 'Pester shard could not resolve version 3.4.0.' }
+$result = & $invoke -Script $paths -PassThru
+if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
+$summary = [ordered]@{
+    TotalCount = [int]$result.TotalCount
+    PassedCount = [int]$result.PassedCount
+    FailedCount = [int]$result.FailedCount
+    SkippedCount = [int]$result.SkippedCount
+    PendingCount = [int]$result.PendingCount
+    InconclusiveCount = [int]$result.InconclusiveCount
+}
+[IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
+exit 0
+'@
+          $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+          $total = 0
+          $passed = 0
+          $failed = 0
+          $skipped = 0
+          $pending = 0
+          $inconclusive = 0
+          $failedShardProcess = $false
+          foreach ($shard in $shards) {
+            $resultPath = Join-Path $env:RUNNER_TEMP ("pester-shard-{0}.json" -f $shard.Name)
+            Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+            $previous = @{}
+            foreach ($entry in @{
+              SYP154_PESTER_SHARD_PATHS = ($shard.Paths | ConvertTo-Json -Compress)
+              SYP154_PESTER_MODULE_PATH = [string]$pester.Path
+              SYP154_PESTER_RESULT_PATH = $resultPath
+            }.GetEnumerator()) {
+              $previous[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
+              [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+            }
+            try {
+              & $childPowerShell -NoProfile -EncodedCommand $encodedChildScript
+              $childExit = $LASTEXITCODE
+            }
+            finally {
+              foreach ($entry in @{
+                SYP154_PESTER_SHARD_PATHS = $null
+                SYP154_PESTER_MODULE_PATH = $null
+                SYP154_PESTER_RESULT_PATH = $null
+              }.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable($entry.Key, $previous[$entry.Key], 'Process')
+              }
+            }
+            if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+              throw "Pester shard '$($shard.Name)' exited without a result file (exit $childExit)."
+            }
+            $summary = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($field in @('TotalCount','PassedCount','FailedCount','SkippedCount','PendingCount','InconclusiveCount')) {
+              if ($summary.$field -isnot [int] -and $summary.$field -isnot [long]) { throw "Pester shard '$($shard.Name)' returned a non-integer $field." }
+            }
+            Write-Host "$($shard.Name) - Total: $($summary.TotalCount) Passed: $($summary.PassedCount) Failed: $($summary.FailedCount) Skipped: $($summary.SkippedCount)"
+            $total += [int]$summary.TotalCount
+            $passed += [int]$summary.PassedCount
+            $failed += [int]$summary.FailedCount
+            $skipped += [int]$summary.SkippedCount
+            $pending += [int]$summary.PendingCount
+            $inconclusive += [int]$summary.InconclusiveCount
+            if ($childExit -ne 0) { $failedShardProcess = $true }
+          }
+          if ($failedShardProcess) { throw 'At least one isolated Pester shard exited nonzero.' }
+          if ($total -ne 517) { throw "Pester discovered $total tests across shards; expected exactly 517." }
+          if ($failed -gt 0) { throw "Pester reported $failed failed tests." }
+          if ($pending -ne 0) { throw "Pester reported $pending pending tests." }
+          if ($inconclusive -ne 0) { throw "Pester reported $inconclusive inconclusive tests." }
+          if ($skipped -ne 6) { throw "Windows PowerShell 5.1 expected exactly 6 platform/version skips; got $skipped." }
+          if (($passed + $skipped) -ne $total) { throw 'Pester aggregate result counts are incomplete.' }
+          Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped"
           exit 0
 
   powershell-7:
@@ -134,17 +233,116 @@ jobs:
           $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $invokePester) { throw 'Invoke-Pester 4.10.1 could not be resolved.' }
           Write-Host "Executing Pester $($invokePester.Module.Version)"
-          $result = & $invokePester -Script ./tests -PassThru
-          if ($null -eq $result) { throw 'Pester did not return a result object.' }
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 517) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 517." }
-          if ($result.FailedCount -gt 0) { exit 1 }
-          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
-          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 5) { throw "PowerShell 7 on Windows expected exactly 5 platform skips; got $($result.SkippedCount)." }
-          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
-            throw 'Pester result counts are incomplete.'
+          # Run the two process-heavy contracts in fresh PowerShell children. The old
+          # single-process invocation could exhaust the hosted Windows process boundary
+          # after InterT60 and make later tests observe empty child output. Every tracked
+          # test file remains covered exactly once, and the aggregate counts remain the
+          # required gate; this only changes process lifetime, not coverage or thresholds.
+          $allTestPaths = @(
+            Get-ChildItem -LiteralPath ./tests -Filter '*.Tests.ps1' -File |
+              Sort-Object FullName |
+              ForEach-Object { [string]$_.FullName }
+          )
+          if ($allTestPaths.Count -eq 0) { throw 'No Pester test files were discovered.' }
+          $isolatedNames = @(
+            'standard-validation-runner.Tests.ps1',
+            'syp101-production-smoke-contract.Tests.ps1'
+          )
+          $isolatedPaths = @($allTestPaths | Where-Object { $isolatedNames -contains (Split-Path -Leaf $_) })
+          $bulkPaths = @($allTestPaths | Where-Object { $isolatedNames -notcontains (Split-Path -Leaf $_) })
+          if (($isolatedPaths.Count + $bulkPaths.Count) -ne $allTestPaths.Count -or
+              (($isolatedPaths + $bulkPaths | Sort-Object) -join "`n") -cne (($allTestPaths | Sort-Object) -join "`n")) {
+            throw 'Pester shard inventory is not an exact partition of the tracked test files.'
           }
+          $shards = @(
+            [pscustomobject]@{ Name = 'standard-validation-runner'; Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -eq 'standard-validation-runner.Tests.ps1' }) },
+            [pscustomobject]@{ Name = 'syp101-production-smoke-contract'; Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -eq 'syp101-production-smoke-contract.Tests.ps1' }) },
+            [pscustomobject]@{ Name = 'bulk'; Paths = $bulkPaths }
+          )
+          $childPowerShell = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            (Get-Command powershell -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          }
+          else {
+            (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          }
+          $childScript = @'
+$ErrorActionPreference = 'Stop'
+$paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
+if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
+Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
+$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
+if ($null -eq $invoke) { throw 'Pester shard could not resolve version 4.10.1.' }
+$result = & $invoke -Script $paths -PassThru
+if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
+$summary = [ordered]@{
+    TotalCount = [int]$result.TotalCount
+    PassedCount = [int]$result.PassedCount
+    FailedCount = [int]$result.FailedCount
+    SkippedCount = [int]$result.SkippedCount
+    PendingCount = [int]$result.PendingCount
+    InconclusiveCount = [int]$result.InconclusiveCount
+}
+[IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
+exit 0
+'@
+          $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+          $total = 0
+          $passed = 0
+          $failed = 0
+          $skipped = 0
+          $pending = 0
+          $inconclusive = 0
+          $failedShardProcess = $false
+          foreach ($shard in $shards) {
+            $resultPath = Join-Path $env:RUNNER_TEMP ("pester-shard-{0}.json" -f $shard.Name)
+            Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+            $previous = @{}
+            foreach ($entry in @{
+              SYP154_PESTER_SHARD_PATHS = ($shard.Paths | ConvertTo-Json -Compress)
+              SYP154_PESTER_MODULE_PATH = [string]$pester.Path
+              SYP154_PESTER_RESULT_PATH = $resultPath
+            }.GetEnumerator()) {
+              $previous[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
+              [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+            }
+            try {
+              & $childPowerShell -NoProfile -EncodedCommand $encodedChildScript
+              $childExit = $LASTEXITCODE
+            }
+            finally {
+              foreach ($entry in @{
+                SYP154_PESTER_SHARD_PATHS = $null
+                SYP154_PESTER_MODULE_PATH = $null
+                SYP154_PESTER_RESULT_PATH = $null
+              }.GetEnumerator()) {
+                [Environment]::SetEnvironmentVariable($entry.Key, $previous[$entry.Key], 'Process')
+              }
+            }
+            if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+              throw "Pester shard '$($shard.Name)' exited without a result file (exit $childExit)."
+            }
+            $summary = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($field in @('TotalCount','PassedCount','FailedCount','SkippedCount','PendingCount','InconclusiveCount')) {
+              if ($summary.$field -isnot [int] -and $summary.$field -isnot [long]) { throw "Pester shard '$($shard.Name)' returned a non-integer $field." }
+            }
+            Write-Host "$($shard.Name) - Total: $($summary.TotalCount) Passed: $($summary.PassedCount) Failed: $($summary.FailedCount) Skipped: $($summary.SkippedCount)"
+            $total += [int]$summary.TotalCount
+            $passed += [int]$summary.PassedCount
+            $failed += [int]$summary.FailedCount
+            $skipped += [int]$summary.SkippedCount
+            $pending += [int]$summary.PendingCount
+            $inconclusive += [int]$summary.InconclusiveCount
+            if ($childExit -ne 0) { $failedShardProcess = $true }
+          }
+          if ($failedShardProcess) { throw 'At least one isolated Pester shard exited nonzero.' }
+          if ($total -ne 517) { throw "Pester discovered $total tests across shards; expected exactly 517." }
+          if ($failed -gt 0) { throw "Pester reported $failed failed tests." }
+          if ($pending -ne 0) { throw "Pester reported $pending pending tests." }
+          if ($inconclusive -ne 0) { throw "Pester reported $inconclusive inconclusive tests." }
+          if ($skipped -ne 5) { throw "PowerShell 7 on Windows expected exactly 5 platform skips; got $skipped." }
+          if (($passed + $skipped) -ne $total) { throw 'Pester aggregate result counts are incomplete.' }
+          Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped"
           exit 0
 
   powershell-7-unix-composition:
