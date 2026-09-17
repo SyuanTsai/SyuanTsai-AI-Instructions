@@ -103,26 +103,26 @@ jobs:
             (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           }
           $childScript = @'
-$ErrorActionPreference = 'Stop'
-$paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
-if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
-Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
-$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
-if ($null -eq $invoke) { throw 'Pester shard could not resolve version 3.4.0.' }
-$result = & $invoke -Script $paths -PassThru
-if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
-$summary = [ordered]@{
-    TotalCount = [int]$result.TotalCount
-    PassedCount = [int]$result.PassedCount
-    FailedCount = [int]$result.FailedCount
-    SkippedCount = [int]$result.SkippedCount
-    PendingCount = [int]$result.PendingCount
-    InconclusiveCount = [int]$result.InconclusiveCount
-}
-[IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
-if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
-exit 0
-'@
+          $ErrorActionPreference = 'Stop'
+          $paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
+          if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
+          Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
+          $invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          if ($null -eq $invoke) { throw 'Pester shard could not resolve version 3.4.0.' }
+          $result = & $invoke -Script $paths -PassThru
+          if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
+          $summary = [ordered]@{
+              TotalCount = [int]$result.TotalCount
+              PassedCount = [int]$result.PassedCount
+              FailedCount = [int]$result.FailedCount
+              SkippedCount = [int]$result.SkippedCount
+              PendingCount = [int]$result.PendingCount
+              InconclusiveCount = [int]$result.InconclusiveCount
+          }
+          [IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+          if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
+          exit 0
+          '@
           $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
           $total = 0
           $passed = 0
@@ -266,26 +266,26 @@ exit 0
             (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           }
           $childScript = @'
-$ErrorActionPreference = 'Stop'
-$paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
-if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
-Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
-$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
-if ($null -eq $invoke) { throw 'Pester shard could not resolve version 4.10.1.' }
-$result = & $invoke -Script $paths -PassThru
-if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
-$summary = [ordered]@{
-    TotalCount = [int]$result.TotalCount
-    PassedCount = [int]$result.PassedCount
-    FailedCount = [int]$result.FailedCount
-    SkippedCount = [int]$result.SkippedCount
-    PendingCount = [int]$result.PendingCount
-    InconclusiveCount = [int]$result.InconclusiveCount
-}
-[IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
-if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
-exit 0
-'@
+          $ErrorActionPreference = 'Stop'
+          $paths = @($env:SYP154_PESTER_SHARD_PATHS | ConvertFrom-Json)
+          if ($paths.Count -eq 0) { throw 'Pester shard has no test paths.' }
+          Import-Module $env:SYP154_PESTER_MODULE_PATH -Force
+          $invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $invoke) { throw 'Pester shard could not resolve version 4.10.1.' }
+          $result = & $invoke -Script $paths -PassThru
+          if ($null -eq $result) { throw 'Pester shard did not return a result object.' }
+          $summary = [ordered]@{
+              TotalCount = [int]$result.TotalCount
+              PassedCount = [int]$result.PassedCount
+              FailedCount = [int]$result.FailedCount
+              SkippedCount = [int]$result.SkippedCount
+              PendingCount = [int]$result.PendingCount
+              InconclusiveCount = [int]$result.InconclusiveCount
+          }
+          [IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+          if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }
+          exit 0
+          '@
           $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
           $total = 0
           $passed = 0
