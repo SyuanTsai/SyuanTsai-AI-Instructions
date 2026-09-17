@@ -46,6 +46,8 @@ $candidateFull = $null
 $adapterFull = $null
 $trustedToolRootFull = $null
 $artifactRootFull = $null
+$launcherPath = $null
+$launcherSha256 = $null
 $runRoot = $null
 $candidateSnapshotRoot = $null
 $candidateSnapshotContentSha256 = $null
@@ -262,6 +264,8 @@ function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
     param(
         [Parameter(Mandatory = $true)][string] $RunnerPath,
         [Parameter(Mandatory = $true)][string] $ExpectedRunnerSha256,
+        [Parameter(Mandatory = $true)][string] $LauncherPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedLauncherSha256,
         [Parameter(Mandatory = $true)][string] $PowerShellPath,
         [Parameter(Mandatory = $true)][string] $ExpectedPowerShellSha256,
         [Parameter(Mandatory = $true)][string] $AdapterPath,
@@ -273,6 +277,10 @@ function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
     $currentRunnerSha256 = Get-StandardValidationFileSha256 -Path $RunnerPath -Context 'central validation runner revalidation'
     if ($currentRunnerSha256 -cne $ExpectedRunnerSha256) {
         throw 'FAILED|Trusted authority runner changed during validation.'
+    }
+    $currentLauncherSha256 = Get-StandardValidationFileSha256 -Path $LauncherPath -Context 'development harness launcher revalidation'
+    if ($currentLauncherSha256 -cne $ExpectedLauncherSha256) {
+        throw 'FAILED|Trusted development harness launcher changed during validation.'
     }
     $currentPowerShellSha256 = Get-StandardValidationFileSha256 -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
     if ($currentPowerShellSha256 -cne $ExpectedPowerShellSha256) {
@@ -289,6 +297,7 @@ function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
     }
     return [pscustomobject][ordered]@{
         runnerSha256 = [string]$currentRunnerSha256
+        launcherSha256 = [string]$currentLauncherSha256
         powerShellSha256 = [string]$currentPowerShellSha256
         adapterSha256 = [string]$currentAdapterSha256
         trustedToolInventorySha256 = [string]$currentTrustedToolInventorySha256
@@ -411,6 +420,12 @@ try {
     $powerShellPath = Get-DevelopmentHarnessPowerShellPath
     $powerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellPath -Context 'development harness PowerShell host'
     $runnerSha256 = Get-StandardValidationFileSha256 -Path $runnerPath -Context 'central validation runner'
+    if ([string]::IsNullOrWhiteSpace([string]$PSCommandPath)) {
+        throw 'INVALID|The development harness launcher path is unavailable from PSCommandPath.'
+    }
+    $launcherPath = Get-StandardValidationFullPath -Path ([string]$PSCommandPath) -Context 'development harness launcher'
+    Assert-StandardValidationRegularFile -Path $launcherPath -Context 'development harness launcher'
+    $launcherSha256 = Get-StandardValidationFileSha256 -Path $launcherPath -Context 'development harness launcher'
     $trustedToolInventory = @(Get-StandardValidationInventory -Root $trustedToolRootFull -Context 'trusted tool root')
     $trustedToolInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $trustedToolInventory
     if ($CancellationStdin) {
@@ -482,6 +497,8 @@ try {
     $null = Assert-DevelopmentHarnessAuthorityInputsUnchanged `
         -RunnerPath $runnerPath `
         -ExpectedRunnerSha256 $runnerSha256 `
+        -LauncherPath $launcherPath `
+        -ExpectedLauncherSha256 $launcherSha256 `
         -PowerShellPath $powerShellPath `
         -ExpectedPowerShellSha256 $powerShellSha256 `
         -AdapterPath $adapterFull `
@@ -591,6 +608,8 @@ try {
                 $authorityInputRevalidation = Assert-DevelopmentHarnessAuthorityInputsUnchanged `
                     -RunnerPath $runnerPath `
                     -ExpectedRunnerSha256 $runnerSha256 `
+                    -LauncherPath $launcherPath `
+                    -ExpectedLauncherSha256 $launcherSha256 `
                     -PowerShellPath $powerShellPath `
                     -ExpectedPowerShellSha256 $powerShellSha256 `
                     -AdapterPath $adapterFull `
@@ -679,6 +698,8 @@ finally {
             repository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
             runnerPath = 'scripts/Invoke-StandardValidation.ps1'
             runnerSha256 = if ($null -eq $runnerSha256) { $null } else { [string]$runnerSha256 }
+            launcherPath = if ($null -eq $launcherPath) { $null } else { [string]$launcherPath }
+            launcherSha256 = if ($null -eq $launcherSha256) { $null } else { [string]$launcherSha256 }
             trustedToolRoot = if ($null -eq $trustedToolRootFull) { $null } else { [string]$trustedToolRootFull }
             trustedToolInventorySha256 = if ($null -eq $trustedToolInventorySha256) { $null } else { [string]$trustedToolInventorySha256 }
             inputsRevalidatedAfterCandidate = [bool]$authorityInputRevalidatedAfterCandidate
@@ -687,7 +708,8 @@ finally {
             formalAdoption = 'not-authorized'
         }
         launcher = [ordered]@{
-            path = 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1'
+            path = if ($null -eq $launcherPath) { $null } else { [string]$launcherPath }
+            sha256 = if ($null -eq $launcherSha256) { $null } else { [string]$launcherSha256 }
             processHostSha256 = if ($null -eq $powerShellSha256) { $null } else { [string]$powerShellSha256 }
             artifactRoot = $artifactRootFull
             networkIsolation = 'not-proven; no network-dependent candidate fixture is permitted'

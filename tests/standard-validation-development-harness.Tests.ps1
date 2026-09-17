@@ -403,6 +403,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1Match ([string]$result.Evidence.process.candidate.stdout) 'candidate-validator-executed' 'Candidate execution must leave bounded evidence.'
         Assert-Ci1False ([string]$result.Output -match 'ci1-test-secret|SYP154_INHERITED_SECRET|STANDARD_VALIDATION_INHERITED_SECRET') 'Inherited secrets must not cross either owned child boundary.'
         Assert-Ci1False ([bool]$result.Evidence.authority.candidateIsTrustRoot) 'The candidate must not be treated as the authority trust root.'
+        Assert-Ci1Match ([string]$result.Evidence.authority.launcherSha256) '^[0-9a-f]{64}$' 'The development launcher bytes must be bound in authority evidence.'
+        Assert-Ci1Match ([string]$result.Evidence.launcher.sha256) '^[0-9a-f]{64}$' 'The launcher evidence must retain its exact file identity.'
         Assert-Ci1Match ([string]$result.Evidence.authority.trustedToolInventorySha256) '^[0-9a-f]{64}$' 'The trusted tool root inventory must be bound in authority evidence.'
         Assert-Ci1True ([bool]$result.Evidence.authority.inputsRevalidatedAfterCandidate) 'Recorded authority inputs must be revalidated after candidate execution.'
         Assert-Ci1True ([string]::IsNullOrWhiteSpace([string]$result.Evidence.authority.inputRevalidationError)) 'A passing harness must not retain an authority revalidation error.'
@@ -420,6 +422,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $harnessSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1')
         Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-StandardValidationCandidateUnchanged')).Count -ge 2) 'The development harness must revalidate the source checkout before and after candidate execution.'
         Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-DevelopmentHarnessAuthorityInputsUnchanged')).Count -ge 2) 'The development harness must revalidate recorded authority inputs before and after candidate execution.'
+        Assert-Ci1True ($harnessSource -match '\$PSCommandPath') 'The development harness must bind its invoked launcher path rather than only recording a constant label.'
         Assert-Ci1False ($harnessSource -match 'CancellationPath') 'The development launcher must not expose a cancellation path in its command line contract.'
         Assert-Ci1True ($harnessSource -match 'CancellationStdin|CancellationProbe') 'Cancellation must use a supervisor-only private control channel.'
         Assert-Ci1Match ([string]$result.Evidence.identity.validatorArgumentsSha256) '^[0-9a-f]{64}$' 'Candidate identity must bind the canonical validator arguments.'
