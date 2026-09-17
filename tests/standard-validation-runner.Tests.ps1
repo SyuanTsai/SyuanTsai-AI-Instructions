@@ -714,8 +714,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
     }
 
-    # Scenario: Supervisor setup reports an error before the child output streams are drained.
-    # Purpose: Preserve the first supervisor diagnostic when a child emits no stderr, while keeping the merged stream bounded.
+    # Scenario: Supervisor setup or cleanup reports an error before or after the child output streams are drained.
+    # Purpose: Preserve the authoritative supervisor diagnostic in either direction while keeping the merged stream bounded.
     It 'UnitT04_preserves_first_supervisor_diagnostic_during_child_capture' {
         . $script:RunnerPath `
             -CandidateRoot (Join-Path $TestDrive 'stderr-preservation-candidate') `
@@ -735,6 +735,12 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $nearQuota = Merge-StandardValidationProcessStderr -Existing 'first supervisor error' -Captured ('x' * 400) -Quota 64
         Assert-True ($nearQuota.StartsWith('first supervisor error')) 'Quota trimming must preserve the first supervisor diagnostic prefix.'
         Assert-True ($nearQuota.Length -le 64) 'Quota trimming must never exceed the process evidence quota.'
+        $cleanupError = 'The owned Windows job object could not be closed safely (handle=42).'
+        $cleanupFirst = Merge-StandardValidationProcessStderr -Existing $cleanupError -Captured ('child stderr detail ' * 40) -Quota 64
+        Assert-True ($cleanupFirst.StartsWith('The owned Windows job object could not be closed safely')) 'Cleanup failure diagnostics must take precedence over child stderr.'
+        Assert-True ($cleanupFirst.Length -le 64) 'Cleanup-priority stderr must remain within the process evidence quota.'
+        $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
+        Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,

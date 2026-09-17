@@ -3425,16 +3425,16 @@ function Invoke-StandardValidationProcess {
                 $jobClosed = [bool]$jobCloseResult
                 if (-not $jobClosed) {
                     $stderr = Merge-StandardValidationProcessStderr `
-                        -Existing $stderr `
-                        -Captured "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." `
+                        -Existing "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." `
+                        -Captured $stderr `
                         -Quota $script:StandardValidationChildOutputQuotaCharacters
                 }
             }
             catch {
                 $jobClosed = $false
                 $stderr = Merge-StandardValidationProcessStderr `
-                    -Existing $stderr `
-                    -Captured "The owned Windows job object could not be closed safely: $($_.Exception.Message)" `
+                    -Existing "The owned Windows job object could not be closed safely: $($_.Exception.Message)" `
+                    -Captured $stderr `
                     -Quota $script:StandardValidationChildOutputQuotaCharacters
             }
             $jobHandle = [IntPtr]::Zero
