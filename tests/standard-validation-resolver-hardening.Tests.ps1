@@ -216,6 +216,61 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $manifest.closureSha256 '^[0-9a-f]{64}$' 'Dependency closure must retain a deterministic SHA-256 identity.'
     }
 
+    # Scenario: Installed tool files are created in reverse/mixed-case order, while the closure contains nested paths.
+    # Purpose: Preserve the exact ordinal path inventory and canonical SHA-256 when the resolver uses bounded ordering.
+    It 'UnitT45_preserves_installed_closure_bytes_with_bounded_ordinal_ordering' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $fixtureRoot = Join-Path $TestDrive 'installed-closure-order'
+        foreach ($relative in @('zeta/record.txt','beta.txt','Alpha.txt','alpha/nested.txt')) {
+            $path = Join-Path $fixtureRoot $relative
+            Write-TestUtf8File -Path $path -Text $relative
+        }
+        $expectedPaths = @('Alpha.txt','alpha/nested.txt','beta.txt','zeta/record.txt')
+        $expectedEntries = @(
+            foreach ($relative in $expectedPaths) {
+                [pscustomobject]@{
+                    path = $relative
+                    sha256 = (Get-FileHash -LiteralPath (Join-Path $fixtureRoot $relative) -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+            }
+        )
+        $orderedSynthetic = @(Get-ResolverOrderedClosureEntries -Entries @(
+            foreach ($entry in @($expectedEntries | Sort-Object path -Descending)) { $entry }
+        ))
+        Assert-Equal (@($orderedSynthetic | ForEach-Object path) -join ',') ($expectedPaths -join ',') 'Native ordering must use ordinal path order.'
+
+        $closure = Get-DirectoryClosureIdentity -Path $fixtureRoot
+        Assert-Equal (@($closure.entries | ForEach-Object path) -join ',') ($expectedPaths -join ',') 'Installed closure inventory must use the same ordinal order.'
+        $canonical = (@($expectedEntries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expectedHash = [BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($canonical))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+        Assert-Equal $closure.sha256 $expectedHash 'Installed closure SHA-256 must retain the previous canonical bytes.'
+    }
+
+    # Scenario: A Unix tool closure contains a root-level file whose name consists only of non-control whitespace.
+    # Purpose: Keep native ordering aligned with the authority path contract, which rejects empty paths but permits this legal filename.
+    It 'UnitT46_preserves_contract_valid_whitespace_only_relative_paths' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+
+        $ordered = @(Get-ResolverOrderedClosureEntries -Entries @(
+            [pscustomobject]@{ path = 'zeta'; sha256 = ('1' * 64) },
+            [pscustomobject]@{ path = '   '; sha256 = ('0' * 64) }
+        ))
+        Assert-Equal $ordered.Count 2 'Native ordering must retain every contract-valid path.'
+        Assert-Equal ([string]$ordered[0].path) '   ' 'Whitespace-only paths must participate in ordinal ordering.'
+
+        $errorMessage = $null
+        try {
+            Get-ResolverOrderedClosureEntries -Entries @([pscustomobject]@{ path = ''; sha256 = ('2' * 64) }) | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'without a path' 'Empty paths must remain invalid.'
+    }
+
     # Scenario: Wheel metadata contains unsafe identity text, duplicate headers or body text that resembles headers.
     # Purpose: Reject unsafe or ambiguous header identity without parsing description-body content as metadata.
     It 'UnitT50_rejects_unsafe_or_ambiguous_metadata_identity_text_before_lock_generation' {
@@ -282,7 +337,10 @@ Version: this line also belongs to the description body
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
         Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
 
-        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.exe' } else { 'invalid-native' })
+        # An invalid .exe can enter Windows application-error handling and wait for
+        # a hidden UI. An unregistered extension reaches the same process-launch
+        # failure deterministically without invoking that host-specific handler.
+        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.invalid' } else { 'invalid-native' })
         [IO.File]::WriteAllBytes($invalidNativePath, [byte[]]@(0, 1, 2, 3))
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
             $chmodCommand = Assert-Command -Name 'chmod'
@@ -919,11 +977,27 @@ catch {
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
 
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
+        Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
+        Assert-Equal $policy.security.semanticPreflight.providerInventoryBinding 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Semantic preflight provider-text inventory binding must remain central.'
+        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            Assert-Match $gate ([regex]::Escape($semanticSuite)) "Authority resolution must retain semantic behavior suite '$semanticSuite'."
+        }
+        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Authority resolution must route semantic regressions through the frozen SkillSpector Python.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
+            Assert-Match $suiteText '& \$script:Python -I -B' "Authority semantic suite '$isolatedPythonSuite' must request isolated Python startup."
+        }
+        Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Semantic preflight per-work provider-call binding must remain central.'
+        Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Semantic preflight JSON property-collision handling must remain central.'
+        $semanticPreflightNonAuthority = @($policy.security.semanticPreflight.nonAuthority)
+        Assert-Equal $semanticPreflightNonAuthority.Count 2 'Unsigned preflight must declare both non-authority boundaries.'
+        Assert-Equal $semanticPreflightNonAuthority[0] 'cannot-satisfy-semantic-evidence' 'Unsigned preflight must not satisfy semantic evidence.'
+        Assert-Equal $semanticPreflightNonAuthority[1] 'cannot-authorize-release' 'Unsigned preflight must not authorize release.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must enforce the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the canonical validation/security policy.'
         Assert-Match $gate 'Package Validation' 'Authority gate must identify the Package Validation stage.'
         Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
-        Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate' 'Validation-tool resolver must not become a stage/severity policy engine.'
+        Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate|semantic-scan-preflight-v1' 'Validation-tool resolver must not become a stage/severity or semantic-preflight policy engine.'
     }
 
     # Scenario: A still-fresh signed package-adapter receipt from an earlier run is presented to the central runner.

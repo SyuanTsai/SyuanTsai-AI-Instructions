@@ -77,8 +77,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 516
-            ExpectedSkippedCount = 6
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 7
             IsolatedTestFileNames = @(
               'standard-validation-runner.Tests.ps1'
               'standard-validation-development-harness.Tests.ps1'
@@ -150,8 +150,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 516
-            ExpectedSkippedCount = 5
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 6
             IsolatedTestFileNames = @(
               'standard-validation-runner.Tests.ps1'
               'standard-validation-development-harness.Tests.ps1'

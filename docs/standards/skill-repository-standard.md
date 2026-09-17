@@ -491,6 +491,10 @@ Semantic Scan **MUST** 在下列任一情況觸發：
 
 Semantic trigger decision **MUST** be derived from typed analyzer/candidate-diff evidence OR an explicit caller addition; the caller **MUST NOT** be able to suppress an analyzer-required trigger, and the effective decision and sources **MUST** be recorded. Semantic Scan failure、timeout、unavailable 或 unparsable result，在已觸發的情況 **MUST** fail closed；不得退化成「略過但 pass」。
 
+當 provider adapter 以 source file text 建立 semantic work 時，完整 immutable candidate manifest 與 raw byte cache **MUST** 涵蓋套件內所有 regular files，包括 PNG、PDF 與其他 binary assets；binary 仍綁定 candidate，但 **MUST NOT** 因此被解碼或送往 provider。受保護的 caller **MUST** 依 frozen scanner policy 另行建立並認證 deterministic provider text inventory，其路徑必須是完整 manifest 的子集合，且 raw graph 的 `llm_components` 與 `llm_file_cache` 必須完全等於該子集合。實際交給 provider 的每個文字輸入 **MUST** 等於該已驗證 source bytes 的 `strict-utf8-v1` 解碼結果；invalid UTF-8、stale cache、substituted text、遺漏或額外 provider component **MUST** BLOCK。Adapter **MUST** 以 `(skillId, path)` ordinal 排序，將每列的 `skillId`、`path`、`sourceSha256`、`sourceBytes`、`transformation=strict-utf8-v1` 與 `providerTextSha256` 編成 UTF-8、sorted-key、無多餘空白的 canonical JSON array，並將其 SHA-256 記為 `providerTextInventorySha256`。每個 planned work item **MUST** 各有一筆成功 provider call，且 `work_id`、analyzer、path 與 line interval 必須一致；不得讓未呼叫的工作項目沿用同 analyzer 其他工作的成功狀態。若未來需要其他轉換，該轉換 **MUST** 先成為本 Standard 與 `validation-security-gate.json` 的版本化 deterministic contract，並以原始位元組、轉換識別與轉換後 digest 完整綁定；adapter 不得自行採用未授權轉換。
+
+`semantic-scan-preflight-v1` 是 provider output 的 unsigned preparation artifact。Scanner JSON 在 deserialization 前 **MUST** 先解碼 property name，並以與受支援 Windows PowerShell parser 一致的 `OrdinalIgnoreCase` 規則拒絕 duplicate/case-colliding properties。它 **MUST** 綁定 `candidateId`、`inputInventorySha256`、`providerTextInventorySha256`、`scanOutputSha256`、provider/purpose/scope、完整 active Skill/analyzer declarations、完整 findings 與 `findingsSha256`；並且 **MUST** 固定記錄 `analyzerInventoryVerified=false`、`consentStatus=pending`、`signed=false`、`releaseEligible=false`。這個 preflight **MUST NOT** 滿足 canonical `semanticEvidence`，也 **MUST NOT** 授權 release/install；只有 trusted supervisor 完成 analyzer inventory verification、取得明確 consent，並簽署 exact candidate 的 `trusted-supervisor-signed-semantic-v1` evidence 後，Semantic Scan stage 才能通過。
+
 ## 12. Repository tests and validation
 
 ### 12.1 Repository validation
@@ -534,6 +538,8 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 - release/install approval boundary；
 - Standard self-conformance requirement；
 - review matrix 與 SYP-167 authority deliverables 不得過期。
+
+Authority gate **MUST** 另外透過同一個 frozen Pester invocation 執行 `tests/standard-semantic-inventory-probe.Tests.ps1`、`tests/standard-semantic-preflight.Tests.ps1` 與 `tests/standard-semantic-raw-graph.Tests.ps1`，使 installed analyzer inventory、unsigned preflight 與 raw graph source/work/finding bindings 的 executable behavior 與本 Standard 及 machine-readable policy 在同一 gate 失敗或通過；只檢查 policy 字串不足以證明 semantic behavior conformance。
 
 每個 conformant Skill repository **MUST** 有：
 
