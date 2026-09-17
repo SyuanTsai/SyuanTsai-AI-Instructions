@@ -110,7 +110,11 @@ if ($fixtureBehavior -eq 'mutate') {
 }
 if ($fixtureBehavior -eq 'barrier-tamper') {
     $runRoot = Split-Path -Parent $root
-    Add-Content -LiteralPath (Join-Path $runRoot 'std/evidence.json') -Value 'tampered-by-candidate' -Encoding UTF8
+    $nestedBarrierArtifact = @(Get-ChildItem -LiteralPath (Join-Path $runRoot 'std') -Recurse -File -Force |
+        Where-Object { $_.FullName -ne (Join-Path $runRoot 'std/evidence.json') } |
+        Select-Object -First 1)[0]
+    if ($null -eq $nestedBarrierArtifact) { exit 15 }
+    Add-Content -LiteralPath $nestedBarrierArtifact.FullName -Value 'tampered-by-candidate' -Encoding UTF8
 }
 if ($fixtureBehavior -eq 'cancel-after-start') {
     [IO.File]::WriteAllText($env:STANDARD_VALIDATION_CI1_CANCELLATION_PATH, 'cancel')
@@ -312,6 +316,12 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1Match ([string]$result.Evidence.process.candidate.stdout) 'candidate-validator-executed' 'Candidate execution must leave bounded evidence.'
         Assert-Ci1False ([string]$result.Output -match 'ci1-test-secret|SYP154_INHERITED_SECRET|STANDARD_VALIDATION_INHERITED_SECRET') 'Inherited secrets must not cross either owned child boundary.'
         Assert-Ci1False ([bool]$result.Evidence.authority.candidateIsTrustRoot) 'The candidate must not be treated as the authority trust root.'
+        $shardExecutorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardExecutorPath
+        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId \(\[int\]\$process\.Id\)')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-Ci1False ($shardExecutorSource -match 'Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor must not delete a caller-owned cancellation marker.'
+        Assert-Ci1True (-not [string]::IsNullOrWhiteSpace([string]$result.Evidence.preCandidateBarrier.artifactInventorySha256)) 'The barrier must retain a complete artifact inventory hash.'
+        Assert-Ci1Equal $result.Evidence.preCandidateBarrier.artifactInventorySha256 $result.Evidence.preCandidateBarrier.artifactInventoryPostExecutionSha256 'The barrier artifact inventory must remain unchanged after candidate execution.'
         Assert-Ci1Equal $result.Evidence.recovery.status 'fail-closed' 'Recovery must remain fail-closed.'
     }
 

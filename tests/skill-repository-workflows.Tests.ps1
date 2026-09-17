@@ -17,6 +17,7 @@ Describe 'Agent Skill authority workflow contract' {
             'skill-repository-workflows.Tests.ps1'
             'standard-validation-resolver-hardening.Tests.ps1'
             'standard-validation-runner.Tests.ps1'
+            'standard-validation-development-harness.Tests.ps1'
         )
         $script:AuthorityWorkflowDependencies = @(
             'pr8-powershell-validation.yml'

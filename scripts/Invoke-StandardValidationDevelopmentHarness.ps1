@@ -49,6 +49,9 @@ $outputFull = $null
 $standardOutputPath = $null
 $barrierEvidenceSha256 = $null
 $barrierEvidencePostExecutionSha256 = $null
+$barrierArtifactInventory = $null
+$barrierArtifactInventorySha256 = $null
+$barrierArtifactInventoryPostExecutionSha256 = $null
 $barrierEvidenceRevalidated = $null
 $runnerSha256 = $null
 $powerShellSha256 = $null
@@ -161,7 +164,9 @@ function Assert-DevelopmentHarnessBarrierArtifactsUnchanged {
     param(
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $EvidencePath,
-        [Parameter(Mandatory = $true)][string] $ExpectedEvidenceSha256
+        [Parameter(Mandatory = $true)][string] $ExpectedEvidenceSha256,
+        [Parameter(Mandatory = $true)] $ExpectedInventory,
+        [Parameter(Mandatory = $true)][string] $ExpectedInventorySha256
     )
 
     Assert-StandardValidationNoReparsePoints -Root $ArtifactsRoot -Context 'standard barrier artifacts after candidate execution'
@@ -171,7 +176,18 @@ function Assert-DevelopmentHarnessBarrierArtifactsUnchanged {
         throw 'FAILED|Previously authenticated trusted pre-candidate barrier evidence changed after candidate execution.'
     }
     $null = Get-StandardValidationJson -Path $EvidencePath -Context 'trusted pre-candidate barrier evidence after candidate execution'
-    return [string]$currentEvidenceSha256
+    $currentInventory = @(Get-StandardValidationInventory -Root $ArtifactsRoot -Context 'standard barrier artifact inventory after candidate execution')
+    $currentInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $currentInventory
+    if ($currentInventorySha256 -cne $ExpectedInventorySha256) {
+        throw 'FAILED|Standard barrier artifacts changed after candidate execution.'
+    }
+    if (@($currentInventory).Count -ne @($ExpectedInventory).Count) {
+        throw 'FAILED|Standard barrier artifact inventory count changed after candidate execution.'
+    }
+    return [pscustomobject][ordered]@{
+        evidenceSha256 = [string]$currentEvidenceSha256
+        inventorySha256 = [string]$currentInventorySha256
+    }
 }
 
 try {
@@ -337,6 +353,8 @@ try {
     }
     $barrierStages = Get-DevelopmentHarnessStageSummary -Evidence $barrierEvidence
     $barrierEvidenceSha256 = Get-StandardValidationFileSha256 -Path $standardOutputPath -Context 'trusted pre-candidate barrier evidence'
+    $barrierArtifactInventory = @(Get-StandardValidationInventory -Root $standardArtifactsRoot -Context 'standard barrier artifact inventory')
+    $barrierArtifactInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $barrierArtifactInventory
     $candidateBarrierStatus = 'passed'
 
     # Revalidate the source after the independent barrier and before executing
@@ -409,10 +427,14 @@ try {
     finally {
         if ($candidateExecutionAttempted -and $null -ne $barrierEvidenceSha256) {
             try {
-                $barrierEvidencePostExecutionSha256 = Assert-DevelopmentHarnessBarrierArtifactsUnchanged `
+                $barrierRevalidation = Assert-DevelopmentHarnessBarrierArtifactsUnchanged `
                     -ArtifactsRoot $standardArtifactsRoot `
                     -EvidencePath $standardOutputPath `
-                    -ExpectedEvidenceSha256 $barrierEvidenceSha256
+                    -ExpectedEvidenceSha256 $barrierEvidenceSha256 `
+                    -ExpectedInventory $barrierArtifactInventory `
+                    -ExpectedInventorySha256 $barrierArtifactInventorySha256
+                $barrierEvidencePostExecutionSha256 = [string]$barrierRevalidation.evidenceSha256
+                $barrierArtifactInventoryPostExecutionSha256 = [string]$barrierRevalidation.inventorySha256
                 $barrierEvidenceRevalidated = $true
             }
             catch {
@@ -490,6 +512,9 @@ finally {
             evidencePath = if ($null -eq $standardOutputPath) { $null } else { [string]$standardOutputPath }
             evidenceSha256 = if ($null -eq $barrierEvidenceSha256) { $null } else { [string]$barrierEvidenceSha256 }
             evidencePostExecutionSha256 = if ($null -eq $barrierEvidencePostExecutionSha256) { $null } else { [string]$barrierEvidencePostExecutionSha256 }
+            artifactInventory = if ($null -eq $barrierArtifactInventory) { @() } else { @($barrierArtifactInventory) }
+            artifactInventorySha256 = if ($null -eq $barrierArtifactInventorySha256) { $null } else { [string]$barrierArtifactInventorySha256 }
+            artifactInventoryPostExecutionSha256 = if ($null -eq $barrierArtifactInventoryPostExecutionSha256) { $null } else { [string]$barrierArtifactInventoryPostExecutionSha256 }
             evidenceUnchangedAfterCandidate = $barrierEvidenceRevalidated
             firstFiveStages = @($barrierStages)
         }
