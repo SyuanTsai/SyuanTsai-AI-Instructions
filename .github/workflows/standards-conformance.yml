@@ -419,7 +419,7 @@ jobs:
               /usr/bin/sleep 0.025
             done
             [[ "$cgroup_unpopulated" == '1' ]]
-            mapfile -t descendant_cgroups < <(/usr/bin/find "$cgroup_parent" -mindepth 1 -depth -type d -print)
+            mapfile -d '' -t descendant_cgroups < <(/usr/bin/find "$cgroup_parent" -mindepth 1 -depth -type d -print0)
             for descendant_cgroup in "${descendant_cgroups[@]}"; do
               /usr/bin/rmdir -- "$descendant_cgroup"
             done

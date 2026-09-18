@@ -923,6 +923,9 @@ jobs:
         Assert-Match $cleanup 'cgroup\.kill' 'Cleanup must terminate the complete outer cgroup subtree.'
         Assert-Match $cleanup 'cgroup\.events' 'Cleanup must verify that the complete outer cgroup subtree is unpopulated.'
         Assert-Match $cleanup '/usr/bin/find "\$cgroup_parent" -mindepth 1 -depth -type d' 'Cleanup must remove every descendant cgroup from deepest to shallowest.'
+        Assert-Match $cleanup "mapfile -d '' -t descendant_cgroups" 'Cleanup must parse descendant cgroup paths with a NUL delimiter.'
+        Assert-Match $cleanup '-print0' 'Cleanup must serialize descendant cgroup paths with NUL delimiters.'
+        Assert-NotMatch $cleanup '-type d -print(?:\s|\))' 'Cleanup must not serialize hostile descendant cgroup paths with newline delimiters.'
         Assert-Match $finalizer "if:\s*\$\{\{ always\(\) && steps\.cleanup_cgroup\.outcome == 'success' \}\}" 'Trusted finalization must not start unless candidate subtree cleanup succeeds.'
     }
 
