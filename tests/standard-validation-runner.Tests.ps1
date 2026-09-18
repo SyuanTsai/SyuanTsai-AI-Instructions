@@ -742,6 +742,15 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
+        Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $rejectedOutput = & $script:PowerShellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $shardPath `
+            -PesterModulePath (Join-Path $TestDrive 'missing-pester.psd1') `
+            -PesterVersion '4.10.1' `
+            -ExpectedTotalCount 1 `
+            -ExpectedSkippedCount 0 `
+            -CancellationPath (Join-Path $TestDrive 'caller-visible.cancel') 2>&1 | Out-String
+        Assert-Match $rejectedOutput 'does not accept a caller-visible CancellationPath' 'A caller-visible shard cancellation path must be rejected before any child process or shard artifact is created.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
         Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
@@ -749,6 +758,12 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $shardExecutorSource 'System\.Diagnostics\.Process\.Kill|Stop-Process' 'The shard executor must use a direct process termination API.'
         Assert-Match $shardExecutorSource 'Get-PesterShardFailureSummary|failureSummary' 'A failed shard must retain a sanitized first-failure summary.'
         Assert-Match $shardExecutorSource 'CreateKillOnCloseJob|AssignProcessToJobObject' 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Assert-PesterShardPathAncestorsNoReparse' 'The shard preflight must reject reparse-point ancestors before creating shard artifacts.'
+        Assert-Match $shardExecutorSource 'symlinked or reparse-point ancestor' 'The shard preflight must preserve a precise ancestor trust diagnostic.'
+        Assert-Match $shardExecutorSource '\$isHardLink' 'The shard preflight must not mistake a legitimate hardlink executable for symlink traversal.'
+        Assert-Match $shardExecutorSource 'Terminate the Job Object before draining inherited output pipes' 'Owned Job Object termination must precede inherited pipe draining.'
+        Assert-Match $shardExecutorSource 'Cancellation marker observed before bootstrap release' 'Cancellation must be rechecked after ownership assignment and before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Pester shard process status is not completed or output quota was exceeded' 'The aggregate must fail closed on non-completed shard evidence or output-quota overflow.'
         Assert-Match $shardExecutorSource 'PesterShardBoundedCapture|outputQuotaCharacters' 'The shard executor must bound redirected child output.'
         Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'

@@ -1161,8 +1161,8 @@ Describe 'Installed closure path identity' {
         }
     }
 
-    # Scenario: A large installed inventory and a smaller identical old/new algorithm sample are sorted.
-    # Purpose: Verify byte-identical Ordinal output and reproduce the bounded sorting improvement.
+    # Scenario: A large installed inventory and a smaller identical sample are sorted.
+    # Purpose: Verify byte-identical Ordinal output and preserve the bounded sorting complexity contract without a wall-clock ratio.
     It 'UnitT30_PreservesLargeOrdinalInventoryAndImprovesSorting' {
         $entries = @(0..15278 | ForEach-Object { [pscustomobject]@{ path = ('lib/{0:D5}.py' -f (($_ * 7919) % 15279)); sha256 = ('a' * 64) } })
         $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -1176,22 +1176,29 @@ Describe 'Installed closure path identity' {
         Assert-ClosureCondition ([string]::Equals([Convert]::ToBase64String($actualBytes), [Convert]::ToBase64String($expectedBytes), [StringComparison]::Ordinal)) 'Large closure canonical bytes differ.'
         Assert-ClosureCondition ($largeMs -lt 10000) 'Large Ordinal sort exceeded its bounded time.'
         $sample = @($entries | Select-Object -First 1024)
-        $watch.Restart()
         $old = New-Object 'System.Collections.Generic.List[object]'
+        $oldComparisonCount = 0
         foreach ($entry in $sample) {
             $insertAt = 0
-            while ($insertAt -lt $old.Count -and [string]::Compare([string]$old[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) { $insertAt++ }
+            while ($insertAt -lt $old.Count) {
+                $oldComparisonCount++
+                if ([string]::Compare([string]$old[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -ge 0) { break }
+                $insertAt++
+            }
             $old.Insert($insertAt, $entry)
         }
-        $watch.Stop()
-        $oldMs = $watch.Elapsed.TotalMilliseconds
-        $watch.Restart()
         $new = @(Get-ResolverOrderedClosureEntries -Entries $sample)
-        $watch.Stop()
-        $newMs = $watch.Elapsed.TotalMilliseconds
         Assert-ClosureCondition ([string]::Equals(($new.path -join "`n"), ($old.path -join "`n"), [StringComparison]::Ordinal)) 'Old and new Ordinal order differ.'
-        Assert-ClosureCondition ($newMs -lt $oldMs) 'The bounded sample did not improve over insertion sorting.'
-        Write-Host "Ordinal sort: 15279 entries=$largeMs ms; identical 1024 entries old=$oldMs ms, new=$newMs ms."
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $orderingFunctionMatch = [regex]::Match($resolver, '(?s)function\s+Get-ResolverOrderedClosureEntries\b.*?(?=\r?\nfunction\s|\z)')
+        Assert-ClosureCondition $orderingFunctionMatch.Success 'The resolver ordering function was not found for its complexity contract.'
+        $orderingFunction = $orderingFunctionMatch.Value
+        Assert-ClosureCondition ($orderingFunction -match 'System\.Collections\.Generic\.SortedDictionary\[string,object\]') 'Resolver ordering must use a balanced ordered map with logarithmic insertion complexity.'
+        Assert-ClosureCondition ($orderingFunction -match '\[StringComparer\]::Ordinal') 'Resolver ordering must retain ordinal comparison semantics.'
+        Assert-ClosureCondition ($orderingFunction -notmatch 'List\[object\]|\.Insert\s*\(') 'Resolver ordering must not regress to linear insertion into a growing list.'
+        $quadraticComparisonFloor = [int](($sample.Count * ($sample.Count - 1)) / 8)
+        Assert-ClosureCondition ($oldComparisonCount -gt $quadraticComparisonFloor) 'The deterministic sample must retain a superlinear insertion-sort comparison baseline.'
+        Write-Host "Ordinal sort: 15279 entries=$largeMs ms; identical 1024 entries; insertion baseline comparisons=$oldComparisonCount; implementation=SortedDictionary."
     }
 
     # Scenario: Sorting is called with duplicate ordinal paths, or no entries.

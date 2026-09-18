@@ -16,6 +16,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
+    throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation channel.'
+}
+
 # The shard boundary is deliberately self-contained.  It cannot rely on the
 # central runner being dot-sourced because this script is also the isolated
 # Windows PowerShell 5.1/7 entry point.  Keep the same kernel containment and
@@ -197,8 +201,6 @@ $resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
-$callerCancellationPath = [string]$CancellationPath
-
 function Test-PesterShardProcessAlive {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
 
@@ -325,6 +327,55 @@ function Write-PesterShardBoundedOutput {
     [IO.File]::WriteAllText($Path, [string]$Text, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Test-PesterShardReparseItem {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    $isReparse = (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    $isHardLink = ($Item.PSObject.Properties.Name -contains 'LinkType' -and
+        [string]$Item.LinkType -match '(?i)^HardLink$')
+    # A regular executable can be a hardlink on Windows. Hardlink identity is
+    # not a symlink/reparse traversal and must not invalidate the controlled
+    # child-host path; symbolic links and junctions remain fail-closed.
+    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'LinkType' -and
+        -not [string]::IsNullOrWhiteSpace([string]$Item.LinkType) -and
+        [string]$Item.LinkType -notmatch '(?i)^HardLink$') {
+        $isReparse = $true
+    }
+    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'Target' -and
+        $null -ne $Item.Target -and -not [string]::IsNullOrWhiteSpace(([string](@($Item.Target) -join '|')))) {
+        $isReparse = $true
+    }
+    return [bool]$isReparse
+}
+
+function Assert-PesterShardPathAncestorsNoReparse {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $existingPath = $fullPath
+    while (-not (Test-Path -LiteralPath $existingPath)) {
+        $parent = [IO.Path]::GetDirectoryName($existingPath)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $existingPath) { break }
+        $existingPath = $parent
+    }
+    if (-not (Test-Path -LiteralPath $existingPath)) {
+        throw "Preflight $Context has no existing ancestor: $fullPath"
+    }
+
+    $item = Get-Item -Force -LiteralPath $existingPath -ErrorAction Stop
+    while ($null -ne $item) {
+        if (Test-PesterShardReparseItem -Item $item) {
+            throw "Preflight $Context contains a symlinked or reparse-point ancestor: $($item.FullName)"
+        }
+        $parent = $item.Parent
+        if ($null -eq $parent -or $parent.FullName -ceq $item.FullName) { break }
+        $item = $parent
+    }
+}
+
 function Get-PesterShardPreflight {
     param(
         [Parameter(Mandatory = $true)][string] $PesterModulePath,
@@ -360,6 +411,12 @@ function Get-PesterShardPreflight {
             if ($null -ne $entry.Value -and [int]$entry.Value -ge 240) {
                 throw "Preflight path '$($entry.Key)' is $($entry.Value) characters; the controlled Windows shard boundary requires fewer than 240 characters."
             }
+        }
+    }
+
+    foreach ($entry in $paths.GetEnumerator()) {
+        if ($null -ne $entry.Value) {
+            Assert-PesterShardPathAncestorsNoReparse -Path ([string]$entry.Value) -Context ([string]$entry.Key)
         }
     }
 
@@ -611,13 +668,17 @@ function Stop-PesterShardOwnedProcessTree {
                 Test-PesterShardProcessAlive -ProcessId ([int]$_)
             })
         }
-        if (-not $rootAlive -and $liveKnownIds.Count -eq 0 -and $liveCurrentDescendants.Count -eq 0) { break }
+        $noLiveOwnedProcessObserved = (-not $rootAlive -and $liveKnownIds.Count -eq 0 -and $liveCurrentDescendants.Count -eq 0)
+        if ($noLiveOwnedProcessObserved -and (-not $jobObjectAvailable -or $jobObjectTerminationAttempted)) { break }
 
         if ($jobObjectAvailable) {
             # The Job Object is the authoritative containment boundary. Parent
             # enumeration is retained for diagnostics only and is never used
             # to discover the complete owned process set.
-            if (-not $jobObjectTerminationAttempted -and ($rootAlive -or $liveCurrentDescendants.Count -gt 0)) {
+            if (-not $jobObjectTerminationAttempted -and ($rootAlive -or $liveCurrentDescendants.Count -gt 0 -or $noLiveOwnedProcessObserved)) {
+                # Terminate the Job Object before draining inherited output pipes.
+                # A short-lived intermediary can hide a live grandchild from the
+                # parent tree even though the kernel-owned Job Object still owns it.
                 $jobObjectTerminationAttempted = $true
                 try {
                     $jobObjectTerminationSucceeded = [PesterShardProcessControlNative]::TryTerminateJobObject($JobHandle, 1)
@@ -955,6 +1016,11 @@ function Invoke-PesterShardProcess {
                 # The bootstrap is held in the Job Object before this release.
                 # Every candidate descendant is therefore kernel-contained even
                 # if it is created and reparented between observations.
+                if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
+                    $status = 'cancelled'
+                    $exceptionText = "Cancellation marker observed before bootstrap release: $CancelPath"
+                    throw $exceptionText
+                }
                 $releaseBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('release' + [Environment]::NewLine)
                 $releaseStream = [IO.File]::Open(
                     $windowsBootstrapReleasePath,
@@ -1384,13 +1450,13 @@ $failedShardProcess = $false
 foreach ($shard in @($shards.ToArray())) {
     $runToken = [guid]::NewGuid().ToString('N')
     $safeName = ($shard.Name -replace '[^A-Za-z0-9_.-]', '-')
-    $CancellationPath = $callerCancellationPath
+    $CancellationPath = $null
     $ownsCancellationPath = $false
     if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
         do {
             # The normal CI path is supervisor-owned and unique to this shard
-            # run; callers that need an external cancellation request must
-            # explicitly provide a caller-owned path.
+            # run. External cancellation uses the supervisor-only control
+            # channel; no caller-visible marker is accepted by this wrapper.
             $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}-{1}-{2}.cancel" -f $safeName, $runToken, ([guid]::NewGuid().ToString('N')))
         } while (Test-Path -LiteralPath $CancellationPath)
         $ownsCancellationPath = $true
@@ -1438,7 +1504,21 @@ foreach ($shard in @($shards.ToArray())) {
     $resultPath = [string]$shardRun.resultPath
     $summary = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $processEvidence = Get-Content -LiteralPath ([string]$shardRun.processEvidencePath) -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int]$shardRun.exitCode -ne 0 -or [int]$summary.FailedCount -gt 0) {
+    $shardOutputQuotaExceeded = $false
+    if ($shardRun.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
+        $shardOutputQuotaExceeded = [bool]$shardRun.outputQuotaExceeded
+    }
+    $processOutputQuotaExceeded = $false
+    if ($processEvidence.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
+        $processOutputQuotaExceeded = [bool]$processEvidence.outputQuotaExceeded
+    }
+    $shardProcessStatusInvalid = ([string]$shardRun.status -cne 'completed' -or
+        [string]$processEvidence.status -cne 'completed' -or
+        $shardOutputQuotaExceeded -or $processOutputQuotaExceeded)
+    if ($shardProcessStatusInvalid -or [int]$shardRun.exitCode -ne 0 -or [int]$summary.FailedCount -gt 0) {
+        if ($shardProcessStatusInvalid) {
+            Write-Host "Pester shard process status is not completed or output quota was exceeded: shard=$($shardRun.status), evidence=$($processEvidence.status), shardQuota=$shardOutputQuotaExceeded, evidenceQuota=$processOutputQuotaExceeded"
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$processEvidence.failureSummary)) {
             Write-Host "Pester shard first failure (sanitized): $($processEvidence.failureSummary)"
         }
@@ -1455,7 +1535,7 @@ foreach ($shard in @($shards.ToArray())) {
     $skipped += [int]$summary.SkippedCount
     $pending += [int]$summary.PendingCount
     $inconclusive += [int]$summary.InconclusiveCount
-    if ([int]$shardRun.exitCode -ne 0) { $failedShardProcess = $true }
+    if ($shardProcessStatusInvalid -or [int]$shardRun.exitCode -ne 0) { $failedShardProcess = $true }
 }
 
 if ($failedShardProcess) { throw 'At least one isolated Pester shard exited nonzero.' }
