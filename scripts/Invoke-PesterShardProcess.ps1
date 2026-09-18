@@ -600,6 +600,84 @@ function Read-PesterShardOutputTail {
     }
 }
 
+function ConvertFrom-PesterShardCliXmlDiagnostic {
+    param([Parameter()][AllowEmptyString()][string] $Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $trimmed = $Text.TrimStart()
+    $marker = '#< CLIXML'
+    if (-not $trimmed.StartsWith($marker, [StringComparison]::Ordinal)) { return $Text }
+    $payload = $trimmed.Substring($marker.Length).Trim()
+    if ([string]::IsNullOrWhiteSpace($payload)) { return $Text }
+
+    $stringReader = $null
+    $xmlReader = $null
+    try {
+        $document = New-Object Xml.XmlDocument
+        $document.PreserveWhitespace = $false
+        $settings = New-Object System.Xml.XmlReaderSettings
+        $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $settings.MaxCharactersInDocument = 131072
+        $stringReader = New-Object IO.StringReader($payload)
+        $xmlReader = [System.Xml.XmlReader]::Create($stringReader, $settings)
+        $document.Load($xmlReader)
+
+        $diagnosticLines = New-Object 'System.Collections.Generic.List[string]'
+        $sawStreamNode = $false
+        $sawNonProgressStream = $false
+        foreach ($streamNode in @($document.DocumentElement.ChildNodes)) {
+            if ($null -eq $streamNode.Attributes) { continue }
+            $streamAttribute = $streamNode.Attributes.GetNamedItem('S')
+            if ($null -eq $streamAttribute) { continue }
+            $sawStreamNode = $true
+            $streamName = [string]$streamAttribute.Value
+            if ([string]::Equals($streamName, 'progress', [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $sawNonProgressStream = $true
+            $value = ''
+            foreach ($childNode in @($streamNode.ChildNodes)) {
+                if ([string]$childNode.LocalName -ceq 'ToString') {
+                    $value = [string]$childNode.InnerText
+                    break
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($value) -and [string]$streamNode.LocalName -ceq 'S') {
+                $value = [string]$streamNode.InnerText
+            }
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                foreach ($messageNode in @($streamNode.SelectNodes('.//*[local-name()="S"]'))) {
+                    if ($null -eq $messageNode.Attributes) { continue }
+                    $nameAttribute = $messageNode.Attributes.GetNamedItem('N')
+                    if ($null -eq $nameAttribute -or [string]$nameAttribute.Value -notmatch '(?i)message|exception|error') { continue }
+                    $value = [string]$messageNode.InnerText
+                    if (-not [string]::IsNullOrWhiteSpace($value)) { break }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($value)) { continue }
+            $value = [System.Xml.XmlConvert]::DecodeName($value)
+            foreach ($line in @($value -split "`r?`n")) {
+                $line = ([string]$line).TrimEnd()
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                if (-not $diagnosticLines.Contains($line)) { [void]$diagnosticLines.Add($line) }
+            }
+        }
+        if ($diagnosticLines.Count -gt 0) { return ($diagnosticLines.ToArray() -join [Environment]::NewLine) }
+        if ($sawStreamNode -and -not $sawNonProgressStream) { return '' }
+        return $Text
+    }
+    catch {
+        # Preserve unparseable or bounded/truncated CLIXML verbatim. Losing a
+        # possible error record is worse than returning serialization markup.
+        return $Text
+    }
+    finally {
+        if ($null -ne $xmlReader) { $xmlReader.Dispose() }
+        if ($null -ne $stringReader) { $stringReader.Dispose() }
+    }
+}
+
 function Get-PesterShardFailureSummary {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -614,6 +692,7 @@ function Get-PesterShardFailureSummary {
             (Read-PesterShardOutputTail -Path $path),
             (Read-PesterShardOutputPrefix -Path $path -MaxChars 32768)
         )) {
+            $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $text
             if ([string]::IsNullOrWhiteSpace($text)) { continue }
             $lines = @($text -split "`r?`n")
             for ($index = 0; $index -lt $lines.Count; $index++) {
@@ -641,6 +720,7 @@ function Get-PesterShardFailureSummary {
     $sanitizedFallback = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
         $text = Read-PesterShardOutputTail -Path $path
+        $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $text
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
         $lines = @($text -split "`r?`n")
         for ($index = $lines.Count - 1; $index -ge 0 -and $sanitizedFallback.Count -lt $MaxLines; $index--) {

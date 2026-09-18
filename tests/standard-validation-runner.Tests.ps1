@@ -801,6 +801,50 @@ catch {
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
     }
 
+    # Scenario: Windows PowerShell writes only module-initialization progress CLIXML to stderr while the useful terminal context is on stdout.
+    # Purpose: Keep progress serialization from masking the first actionable result-less shard diagnostic.
+    It 'UnitT06_skips_progress_only_clixml_before_fallback_diagnostics' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before diagnostic helper testing.'
+        foreach ($functionName in @(
+            'Read-PesterShardOutputPrefix',
+            'Read-PesterShardOutputTail',
+            'ConvertFrom-PesterShardCliXmlDiagnostic',
+            'Get-PesterShardFailureSummary'
+        )) {
+            $definition = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $functionName
+            }, $true)
+            Assert-True ($null -ne $definition) "The shard executor is missing $functionName."
+            Invoke-Expression $definition.Extent.Text
+        }
+
+        $stderrPath = Join-Path $TestDrive 'progress-only-stderr.txt'
+        $stdoutPath = Join-Path $TestDrive 'terminal-stdout.txt'
+        Write-TestUtf8File -Path $stderrPath -Text @'
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.ProgressRecord</T></TN><Props><S N="Activity">Preparing modules for first use.</S><S N="StatusDescription">Preparing modules for first use.</S></Props></Obj></Objs>
+'@
+        Write-TestUtf8File -Path $stdoutPath -Text 'PowerShell 5.1 shard exited before writing its result file.'
+
+        $summary = Get-PesterShardFailureSummary -Paths @($stderrPath, $stdoutPath)
+        Assert-Match $summary 'PowerShell 5\.1 shard exited before writing its result file\.' 'A progress-only stderr stream must not mask useful stdout fallback context.'
+        Assert-False ($summary -match '(?i)#< CLIXML|Preparing modules for first use') 'Progress-only CLIXML must not become the first-failure summary.'
+
+        $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
+        Write-TestUtf8File -Path $mixedStderrPath -Text @'
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.ProgressRecord</T></TN><Props><S N="Activity">Preparing modules for first use.</S></Props></Obj><Obj S="information" RefId="1"><ToString> [-] Error occurred in test script 'tests\fixture.Tests.ps1'</ToString></Obj><Obj S="information" RefId="2"><ToString>   PSSecurityException: fixture execution policy failure</ToString></Obj></Objs>
+'@
+        $mixedSummary = Get-PesterShardFailureSummary -Paths @($mixedStderrPath, $stdoutPath)
+        Assert-Match $mixedSummary 'PSSecurityException: fixture execution policy failure' 'Mixed CLIXML must decode the useful non-progress record instead of returning raw XML.'
+        Assert-False ($mixedSummary -match '(?i)#< CLIXML|S="progress"') 'Decoded mixed CLIXML must omit serialization markup and progress records.'
+    }
+
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
     # or reaches the artifact root through a symlinked ancestor.
     # Purpose: Keep tool-role provenance and checkout-external artifact boundaries authoritative.
