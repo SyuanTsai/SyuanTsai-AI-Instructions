@@ -119,10 +119,22 @@ jobs:
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
-      - name: Checkout evidence workflow authority
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
+      - name: Materialize exact local artifact authority action
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+          workspace="$GITHUB_WORKSPACE"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ -d "$workspace" && ! -L "$workspace" ]]
+          [[ -z "$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+          git -C "$workspace" init
+          git -C "$workspace" remote add origin "$workflow_repository"
+          git -C "$workspace" fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          [[ "$(git -C "$workspace" rev-parse FETCH_HEAD)" == "$GITHUB_SHA" ]]
+          git -C "$workspace" checkout --detach FETCH_HEAD
+          [[ "$(git -C "$workspace" rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git -C "$workspace" status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Set up approved Go runtime
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -156,9 +168,13 @@ jobs:
           artifacts_root="$RUNNER_TEMP/syp154-pr33-artifacts"
           export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
           supervisor_root="/var/lib/syp154-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          upload_action_root="$(/usr/bin/dirname "$RUNNER_TEMP")/_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+          actions_root="$(/usr/bin/dirname "$RUNNER_TEMP")/_actions"
+          upload_action_root="$actions_root/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
           upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          [[ "$actions_root" == '/home/runner/work/_actions' ]]
+          [[ -d "$actions_root" && ! -L "$actions_root" ]]
+          [[ "$(/usr/bin/realpath -e "$actions_root")" == "$actions_root" ]]
           [[ "$upload_action_root" =~ ^/home/runner/work/_actions/actions/upload-artifact/[0-9a-f]{40}$ ]]
           [[ -d "$upload_action_parent" && ! -L "$upload_action_parent" ]]
           [[ "$(/usr/bin/realpath -e "$upload_action_parent")" == "$upload_action_parent" ]]
@@ -168,6 +184,9 @@ jobs:
           sudo -n cp -a -- "$upload_action_root" "$supervisor_root/upload-artifact"
           sudo -n chown -R root:root -- "$supervisor_root/upload-artifact"
           sudo -n chmod -R a-w -- "$supervisor_root/upload-artifact"
+          /usr/bin/sudo -n /usr/bin/chown -R root:root -- "$actions_root"
+          /usr/bin/sudo -n /usr/bin/chmod -R a-w -- "$actions_root"
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$actions_root")" == '0:0:555' ]]
           for root in "$candidate_root" "$launcher_root" "$artifacts_root"; do
             if [[ -e "$root" ]]; then
               echo "Evidence root already exists: $root" >&2

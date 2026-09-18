@@ -8,7 +8,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 3
-            '.github/workflows/standards-conformance.yml' = 2
+            '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
         }
@@ -830,6 +830,9 @@ jobs:
 
         Assert-Match $acquisition 'upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' 'Acquisition must locate the exact pinned upload action payload.'
         Assert-Match $acquisition '"\$supervisor_root/upload-artifact"' 'Acquisition must copy the uploader into the root-owned supervisor authority.'
+        Assert-Match $acquisition 'actions_root="\$\(/usr/bin/dirname "\$RUNNER_TEMP"\)/_actions"' 'Acquisition must identify the common action payload root before candidate execution.'
+        Assert-Match $acquisition '/usr/bin/chown -R root:root -- "\$actions_root"' 'Every registered external action payload must become root-owned before candidate execution.'
+        Assert-Match $acquisition '/usr/bin/chmod -R a-w -- "\$actions_root"' 'Candidate code must not be able to replace any registered action or post-action payload.'
         Assert-Match $finalizer '/bin/rm -rf -- "\$upload_action_root"' 'Finalization must remove any candidate-modified uploader payload.'
         Assert-Match $finalizer '/usr/bin/cp -a -- "\$supervisor_root/upload-artifact" "\$upload_action_root"' 'Finalization must restore the uploader from supervisor-owned bytes.'
         Assert-Match $finalizer '/usr/bin/chown -R root:root -- "\$upload_action_root"' 'The restored uploader must be owned by root.'
@@ -943,8 +946,8 @@ jobs:
     }
 
     # Scenario: The evidence job invokes a repository-local security action whose files can change independently.
-    # Purpose: Materialize the exact PR head before action resolution and run the authority workflow whenever that action changes.
-    It 'UnitT115_checks_out_and_watches_the_local_artifact_authority_action' {
+    # Purpose: Materialize the exact PR head without registering a candidate-writable post action, and watch every action change.
+    It 'UnitT115_materializes_and_watches_the_local_artifact_authority_action_without_a_post_hook' {
         $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
         $evidenceJob = [regex]::Match(
@@ -953,9 +956,11 @@ jobs:
         ).Value
 
         $evidenceJob | Should -Not -BeNullOrEmpty
-        Assert-Match $evidenceJob 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+# v7' 'The evidence job must materialize its exact workflow commit before resolving the local action.'
-        Assert-Match $evidenceJob '(?s)actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1.*?persist-credentials:\s*false' 'The evidence-job checkout must not persist ambient credentials.'
-        Assert-True ($evidenceJob.IndexOf('actions/checkout@') -lt $evidenceJob.IndexOf('uses: ./.github/actions/capture-artifact-service')) 'The repository checkout must precede local action resolution.'
+        Assert-NotMatch $evidenceJob 'actions/checkout@' 'The evidence job must not register a checkout post action that candidate code can replace.'
+        Assert-Match $evidenceJob 'git -C "\$workspace" fetch --no-tags --depth=1 origin "\$GITHUB_SHA"' 'The evidence job must fetch only the exact 40-hex workflow commit.'
+        Assert-Match $evidenceJob 'rev-parse FETCH_HEAD.*?== "\$GITHUB_SHA"' 'The evidence job must verify the fetched commit before materializing the local action.'
+        Assert-Match $evidenceJob 'git -C "\$workspace" checkout --detach FETCH_HEAD' 'The evidence job must materialize the verified commit without an action post hook.'
+        Assert-True ($evidenceJob.IndexOf('git -C "$workspace" checkout --detach FETCH_HEAD') -lt $evidenceJob.IndexOf('uses: ./.github/actions/capture-artifact-service')) 'Exact Git materialization must precede local action resolution.'
         Assert-Equal ([regex]::Matches($workflow, "'\.github/actions/capture-artifact-service/\*\*'").Count) 2 'Push and pull-request filters must both watch the security-critical local action.'
     }
 }
