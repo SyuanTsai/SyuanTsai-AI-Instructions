@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 SyuanTsai
+# SPDX-License-Identifier: Apache-2.0
+name: Capture trusted artifact service authority
+description: Preserve runner-injected artifact endpoints and token outside candidate-writable paths.
+runs:
+  using: node20
+  main: index.js

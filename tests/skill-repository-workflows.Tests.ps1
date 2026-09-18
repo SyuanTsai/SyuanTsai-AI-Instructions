@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '7519745266e0cd67b057e88c0ee63e702ccd1e10',
             '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            '9d480f8723f0fb26870e0fbeb7669fc536fd6757',
-            '0dab188dd2f82bba2cd9fd0186eb6595ab34724e',
+            '110b1737d7f2790cb85f37aaab94f802b6a81e69',
+            '8c2bfe321c2b625bc257be12510b09eac27f4bda',
             'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
             '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow 'f980040a5b146bbc9b2251af2d21a2383a8188a2' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow '820b3cffe7ced58f0c1b360ca182f22c7264f76c' 'The evidence job must pin the reviewed PR36 validator blob.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
@@ -869,5 +869,75 @@ jobs:
         $uploadEnvironment | Should -Not -BeNullOrEmpty
         $environmentNames = @([regex]::Matches($uploadEnvironment, '(?m)^\s+(?<name>[A-Za-z_][A-Za-z0-9_]*):') | ForEach-Object { $_.Groups['name'].Value.ToLowerInvariant() })
         @($environmentNames | Group-Object | Where-Object Count -GT 1).Count | Should -Be 0 -Because 'GitHub rejects case-insensitive duplicate env keys before dispatch.'
+    }
+
+    # Scenario: Candidate code shares the runner identity and can otherwise migrate through a runner-writable parent cgroup.
+    # Purpose: Keep every candidate descendant below a root-owned aggregate boundary, kill the whole subtree, and gate finalization on verified cleanup.
+    It 'UnitT105_contains_candidate_processes_below_a_root_owned_cgroup_boundary' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $delegation = [regex]::Match(
+            $workflow,
+            '(?s)- name: Delegate Linux cgroup v2 subtree.*?(?=\r?\n\s+- name: Prove unprivileged Linux namespace capability)'
+        ).Value
+        $cleanup = [regex]::Match(
+            $workflow,
+            '(?s)- name: Remove delegated Linux cgroup subtree.*?(?=\r?\n\s+- name: Finalize bounded evidence export)'
+        ).Value
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
+
+        foreach ($section in @($delegation, $cleanup, $finalizer)) {
+            $section | Should -Not -BeNullOrEmpty
+        }
+        Assert-Match $delegation 'cgroup_delegated="\$cgroup_parent/delegated"' 'Only a nested cgroup subtree may be delegated to the runner identity.'
+        Assert-Match $delegation 'cgroup_supervisor="\$cgroup_delegated/trusted-validator"' 'The trusted validator must remain inside the delegated subtree.'
+        Assert-Match $delegation '(?s)printf ''%s\\n'' ''2147483648''.*?"\$cgroup_parent/memory\.max"' 'The root-owned outer boundary must enforce the aggregate 2 GiB memory ceiling.'
+        Assert-Match $delegation '(?s)printf ''%s\\n'' ''256''.*?"\$cgroup_parent/pids\.max"' 'The root-owned outer boundary must enforce the aggregate PID ceiling when available.'
+        Assert-NotMatch $delegation 'chown[^\r\n]*"\$cgroup_parent(?:/cgroup\.(?:procs|threads))?"' 'The outer boundary and its migration controls must remain root-owned.'
+        Assert-Match $delegation 'CODEX_PESTER_CGROUP_ROOT=%s.*?\$cgroup_delegated' 'Protected tests must receive only the nested delegated root.'
+        Assert-Match $cleanup '(?m)^\s+id:\s*cleanup_cgroup\s*$' 'Cleanup must expose an outcome that can gate trusted finalization.'
+        Assert-Match $cleanup 'cgroup\.kill' 'Cleanup must terminate the complete outer cgroup subtree.'
+        Assert-Match $cleanup 'cgroup\.events' 'Cleanup must verify that the complete outer cgroup subtree is unpopulated.'
+        Assert-Match $cleanup '/usr/bin/find "\$cgroup_parent" -mindepth 1 -depth -type d' 'Cleanup must remove every descendant cgroup from deepest to shallowest.'
+        Assert-Match $finalizer "if:\s*\$\{\{ always\(\) && steps\.cleanup_cgroup\.outcome == 'success' \}\}" 'Trusted finalization must not start unless candidate subtree cleanup succeeds.'
+    }
+
+    # Scenario: Candidate code can append artifact-service endpoints and tokens to the runner environment command file.
+    # Purpose: Snapshot the runner-provided service authority before candidate execution and restore it only after verified cleanup.
+    It 'UnitT110_restores_trusted_artifact_service_authority_before_upload' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $snapshotStep = [regex]::Match(
+            $workflow,
+            '(?s)- name: Snapshot trusted artifact-service authority.*?(?=\r?\n\s+- name: Delegate Linux cgroup v2 subtree)'
+        ).Value
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
+        $actionDefinition = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+            Join-Path $script:RepositoryRoot '.github\actions\capture-artifact-service\action.yml'
+        )
+        $actionScript = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+            Join-Path $script:RepositoryRoot '.github\actions\capture-artifact-service\index.js'
+        )
+
+        $snapshotStep | Should -Not -BeNullOrEmpty
+        $finalizer | Should -Not -BeNullOrEmpty
+        Assert-Match $snapshotStep 'uses:\s*\./\.github/actions/capture-artifact-service' 'The workflow must capture runner-injected service values through a Node action before candidate execution.'
+        Assert-Match $actionDefinition 'using:\s*node20' 'The capture step must use the runner Node action handler that injects artifact-service authority.'
+        Assert-Match $actionScript 'artifact-service\.env' 'The capture action must snapshot artifact-service authority outside runner-owned paths.'
+        Assert-Match $actionScript "'/usr/bin/chmod', '0400'" 'The artifact-service snapshot must be readable only by root.'
+        Assert-Match $actionScript "'/usr/bin/tee'" 'The capture action must write through root authority without logging the token.'
+        Assert-Match $finalizer 'artifact-service\.env' 'Finalization must read the root-owned artifact-service authority snapshot.'
+        Assert-Match $finalizer "stat -c '%u:%g:%a'.*?0:0:400" 'Finalization must verify root-only snapshot ownership and mode.'
+        foreach ($name in @('ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_URL', 'ACTIONS_RUNTIME_TOKEN')) {
+            Assert-Match $actionScript ([regex]::Escape($name)) "The Node capture action must snapshot $name before candidate execution."
+            Assert-Match $finalizer ([regex]::Escape($name)) "Finalization must restore $name for the upload action."
+        }
+        Assert-Match $finalizer '>> "\$environment_file"' 'Trusted artifact-service values must be appended after candidate-controlled entries.'
     }
 }

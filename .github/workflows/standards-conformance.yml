@@ -112,8 +112,8 @@ jobs:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
       SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
       SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: 9d480f8723f0fb26870e0fbeb7669fc536fd6757
-      SYP154_LAUNCHER_TREE: 0dab188dd2f82bba2cd9fd0186eb6595ab34724e
+      SYP154_LAUNCHER_COMMIT: 110b1737d7f2790cb85f37aaab94f802b6a81e69
+      SYP154_LAUNCHER_TREE: 8c2bfe321c2b625bc257be12510b09eac27f4bda
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
@@ -192,7 +192,7 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:f980040a5b146bbc9b2251af2d21a2383a8188a2'
+            'scripts/Validate.ps1:820b3cffe7ced58f0c1b360ca182f22c7264f76c'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
@@ -245,6 +245,9 @@ jobs:
             printf 'SYP154_EXPORT_ROOT=%s\n' "$export_root"
           } >> "$GITHUB_ENV"
 
+      - name: Snapshot trusted artifact-service authority
+        uses: ./.github/actions/capture-artifact-service
+
       - name: Delegate Linux cgroup v2 subtree
         shell: bash
         run: |
@@ -260,21 +263,31 @@ jobs:
           fi
           printf '%s\n' "$controllers_to_enable" | sudo -n tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
           [[ ! -e "$cgroup_parent" ]]
-          cgroup_supervisor="$cgroup_parent/trusted-validator"
-          sudo -n mkdir -- "$cgroup_parent"
-          sudo -n chown "$(id -u):$(id -g)" -- "$cgroup_parent"
-          sudo -n chmod 0755 -- "$cgroup_parent"
+          cgroup_delegated="$cgroup_parent/delegated"
+          cgroup_supervisor="$cgroup_delegated/trusted-validator"
+          sudo -n install -d -m 0755 -o root -g root -- "$cgroup_parent"
+          [[ "$(sudo -n stat -c '%u:%g:%a' "$cgroup_parent")" == '0:0:755' ]]
+          printf '%s\n' '2147483648' | sudo -n tee "$cgroup_parent/memory.max" >/dev/null
+          [[ "$(< "$cgroup_parent/memory.max")" == '2147483648' ]]
+          if [[ -e "$cgroup_parent/pids.max" ]]; then
+            printf '%s\n' '256' | sudo -n tee "$cgroup_parent/pids.max" >/dev/null
+            [[ "$(< "$cgroup_parent/pids.max")" == '256' ]]
+          fi
           printf '%s\n' "$controllers_to_enable" | sudo -n tee "$cgroup_parent/cgroup.subtree_control" >/dev/null
+          sudo -n mkdir -- "$cgroup_delegated"
+          printf '%s\n' "$controllers_to_enable" | sudo -n tee "$cgroup_delegated/cgroup.subtree_control" >/dev/null
           for delegation_file in \
-            "$cgroup_parent/cgroup.procs" \
-            "$cgroup_parent/cgroup.threads" \
-            "$cgroup_parent/cgroup.subtree_control"; do
+            "$cgroup_delegated/cgroup.procs" \
+            "$cgroup_delegated/cgroup.threads" \
+            "$cgroup_delegated/cgroup.subtree_control"; do
             sudo -n chown "$(id -u):$(id -g)" -- "$delegation_file"
           done
+          sudo -n chown "$(id -u):$(id -g)" -- "$cgroup_delegated"
+          sudo -n chmod 0755 -- "$cgroup_delegated"
           mkdir -- "$cgroup_supervisor"
-          [[ -w "$cgroup_parent" && -w "$cgroup_supervisor" ]]
+          [[ ! -w "$cgroup_parent/cgroup.procs" && -w "$cgroup_delegated" && -w "$cgroup_supervisor" ]]
           {
-            printf 'CODEX_PESTER_CGROUP_ROOT=%s\n' "$cgroup_parent"
+            printf 'CODEX_PESTER_CGROUP_ROOT=%s\n' "$cgroup_delegated"
             printf 'CODEX_PESTER_VALIDATOR_CGROUP=%s\n' "$cgroup_supervisor"
           } >> "$GITHUB_ENV"
 
@@ -294,7 +307,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $validatorCgroup = [string]$env:CODEX_PESTER_VALIDATOR_CGROUP
-          if ($validatorCgroup -notmatch '^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/trusted-validator$') {
+          if ($validatorCgroup -notmatch '^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/delegated/trusted-validator$') {
             throw 'The trusted evidence validator cgroup path is missing or invalid.'
           }
           [string]$PID | & sudo -n tee -- (Join-Path $validatorCgroup 'cgroup.procs') | Out-Null
@@ -351,6 +364,7 @@ jobs:
           "pr33_evidence_sha256=$evidenceSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Remove delegated Linux cgroup subtree
+        id: cleanup_cgroup
         if: ${{ always() }}
         shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
@@ -358,17 +372,29 @@ jobs:
           cgroup_parent="/sys/fs/cgroup/codex-validation-${{ github.run_id }}-${{ github.run_attempt }}"
           [[ "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]
           if [[ -e "$cgroup_parent" ]]; then
-            cgroup_supervisor="$cgroup_parent/trusted-validator"
-            [[ "$cgroup_supervisor" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/trusted-validator$ ]]
-            if [[ -e "$cgroup_supervisor" ]]; then
-              /usr/bin/rmdir -- "$cgroup_supervisor"
-            fi
+            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$cgroup_parent")" == '0:0:755' ]]
+            [[ -f "$cgroup_parent/cgroup.kill" && -f "$cgroup_parent/cgroup.events" ]]
+            /usr/bin/printf '%s\n' '1' > "$cgroup_parent/cgroup.kill"
+            cgroup_unpopulated=0
+            for cleanup_attempt in {1..120}; do
+              if /usr/bin/grep -qx 'populated 0' "$cgroup_parent/cgroup.events"; then
+                cgroup_unpopulated=1
+                break
+              fi
+              /usr/bin/sleep 0.025
+            done
+            [[ "$cgroup_unpopulated" == '1' ]]
+            mapfile -t descendant_cgroups < <(/usr/bin/find "$cgroup_parent" -mindepth 1 -depth -type d -print)
+            for descendant_cgroup in "${descendant_cgroups[@]}"; do
+              /usr/bin/rmdir -- "$descendant_cgroup"
+            done
             /usr/bin/rmdir -- "$cgroup_parent"
+            [[ ! -e "$cgroup_parent" ]]
           fi
 
       - name: Finalize bounded evidence export
         id: finalize_evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.cleanup_cgroup.outcome == 'success' }}
         shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
@@ -377,14 +403,15 @@ jobs:
           repository='https://github.com/SyuanTsai/Skill-Darktide-Translate.git'
           candidate_commit='7519745266e0cd67b057e88c0ee63e702ccd1e10'
           candidate_tree='654934a3f1f412bc5ccda89bda0f9158cb4d328a'
-          launcher_commit='9d480f8723f0fb26870e0fbeb7669fc536fd6757'
-          launcher_tree='0dab188dd2f82bba2cd9fd0186eb6595ab34724e'
+          launcher_commit='110b1737d7f2790cb85f37aaab94f802b6a81e69'
+          launcher_tree='8c2bfe321c2b625bc257be12510b09eac27f4bda'
           oracle_commit='c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8'
           oracle_tree='4332d9a1a366d6ff238cde3fe33912cca7dd2050'
           candidate_root="$runner_temp/syp154-pr33-candidate"
           artifacts_root="$runner_temp/syp154-pr33-artifacts"
           export_root="$runner_temp/syp154-pr33-evidence-export"
           supervisor_root="/var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+          artifact_service_file="$supervisor_root/artifact-service.env"
           upload_action_root="$(/usr/bin/dirname "$runner_temp")/_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
           upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
@@ -400,6 +427,8 @@ jobs:
           witness="$supervisor_root/acquisition-witness.txt"
           [[ -d "$supervisor_root/upload-artifact" ]]
           [[ "$(/usr/bin/stat -c '%u:%g:%a' "$supervisor_root/upload-artifact")" == '0:0:555' ]]
+          [[ -f "$artifact_service_file" && ! -L "$artifact_service_file" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$artifact_service_file")" == '0:0:400' ]]
           if [[ -f "$witness" ]]; then
             [[ -d "$supervisor_root/candidate.git" && -d "$supervisor_root/launcher" ]]
             [[ "$(/usr/bin/stat -c '%u:%g:%a' "$witness")" == '0:0:444' ]]
@@ -421,7 +450,7 @@ jobs:
             "${git_command[@]}" diff --no-ext-diff --name-status "$oracle_commit...$candidate_commit" > "$export_root/candidate-diff.txt"
 
             launcher_inventory=(
-              'scripts/Validate.ps1:f980040a5b146bbc9b2251af2d21a2383a8188a2'
+              'scripts/Validate.ps1:820b3cffe7ced58f0c1b360ca182f22c7264f76c'
               'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
             )
             oracle_inventory=(
@@ -548,6 +577,18 @@ jobs:
             'NO_PROXY=' 'no_proxy=' \
             'NODE_TLS_REJECT_UNAUTHORIZED=' 'NODE_EXTRA_CA_CERTS=' \
             'SSL_CERT_FILE=' 'SSL_CERT_DIR=' >> "$environment_file"
+          mapfile -t artifact_service_lines < "$artifact_service_file"
+          artifact_service_names=(ACTIONS_RESULTS_URL ACTIONS_RUNTIME_URL ACTIONS_RUNTIME_TOKEN)
+          (( ${#artifact_service_lines[@]} == ${#artifact_service_names[@]} ))
+          for artifact_service_index in "${!artifact_service_names[@]}"; do
+            artifact_service_name="${artifact_service_names[$artifact_service_index]}"
+            artifact_service_line="${artifact_service_lines[$artifact_service_index]}"
+            [[ "$artifact_service_line" == "$artifact_service_name="* ]]
+            artifact_service_value="${artifact_service_line#*=}"
+            [[ -n "$artifact_service_value" ]]
+            [[ "$artifact_service_value" != *$'\r'* && "$artifact_service_value" != *$'\n'* ]]
+            /usr/bin/printf '%s=%s\n' "$artifact_service_name" "$artifact_service_value" >> "$environment_file"
+          done
 
       - name: Upload bounded PR33 adoption evidence
         if: ${{ always() && steps.finalize_evidence.outcome == 'success' }}
