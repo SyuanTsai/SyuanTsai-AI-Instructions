@@ -114,8 +114,8 @@ jobs:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
       SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
       SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: 4adc92ed1ae863fd79923f67a505ebf079b62e79
-      SYP154_LAUNCHER_TREE: 05550c4666252deef491a099f8a97b4b87ace9de
+      SYP154_LAUNCHER_COMMIT: 2d63f104ed7949a1d19e48e4120f05e1cbd84cee
+      SYP154_LAUNCHER_TREE: 388e47883ac57b243b9d96809b7c13935ac3ebd6
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
@@ -168,26 +168,15 @@ jobs:
           artifacts_root="$RUNNER_TEMP/syp154-pr33-artifacts"
           export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
           supervisor_root="/var/lib/syp154-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          actions_root="$(/usr/bin/dirname "$RUNNER_TEMP")/_actions"
-          upload_action_root="$actions_root/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-          upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
+          uploader_repository='https://github.com/actions/upload-artifact.git'
+          uploader_commit='043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+          uploader_action_blob='7cb4d1e81db55320b41217e1a78a1a46e3d2baef'
+          uploader_entry_blob='a36d775b02159bad1b24bf1ac3a314bc456a6fb5'
+          uploader_source="$RUNNER_TEMP/syp154-upload-artifact-source"
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
-          [[ "$actions_root" == '/home/runner/work/_actions' ]]
-          [[ -d "$actions_root" && ! -L "$actions_root" ]]
-          [[ "$(/usr/bin/realpath -e "$actions_root")" == "$actions_root" ]]
-          [[ "$upload_action_root" =~ ^/home/runner/work/_actions/actions/upload-artifact/[0-9a-f]{40}$ ]]
-          [[ -d "$upload_action_parent" && ! -L "$upload_action_parent" ]]
-          [[ "$(/usr/bin/realpath -e "$upload_action_parent")" == "$upload_action_parent" ]]
-          [[ -d "$upload_action_root" && ! -L "$upload_action_root" ]]
           [[ ! -e "$supervisor_root" ]]
           sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
-          sudo -n cp -a -- "$upload_action_root" "$supervisor_root/upload-artifact"
-          sudo -n chown -R root:root -- "$supervisor_root/upload-artifact"
-          sudo -n chmod -R a-w -- "$supervisor_root/upload-artifact"
-          /usr/bin/sudo -n /usr/bin/chown -R root:root -- "$actions_root"
-          /usr/bin/sudo -n /usr/bin/chmod -R a-w -- "$actions_root"
-          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$actions_root")" == '0:0:555' ]]
-          for root in "$candidate_root" "$launcher_root" "$artifacts_root"; do
+          for root in "$candidate_root" "$launcher_root" "$artifacts_root" "$uploader_source"; do
             if [[ -e "$root" ]]; then
               echo "Evidence root already exists: $root" >&2
               exit 1
@@ -197,7 +186,22 @@ jobs:
             echo "Evidence export root already exists before acquisition: $export_root" >&2
             exit 1
           fi
-          mkdir -- "$candidate_root" "$launcher_root" "$artifacts_root"
+          mkdir -- "$candidate_root" "$launcher_root" "$artifacts_root" "$uploader_source"
+          git -C "$uploader_source" init
+          git -C "$uploader_source" remote add origin "$uploader_repository"
+          git -C "$uploader_source" fetch --no-tags --depth=1 origin "$uploader_commit"
+          [[ "$(git -C "$uploader_source" rev-parse FETCH_HEAD)" == "$uploader_commit" ]]
+          [[ "$(git -C "$uploader_source" rev-parse "$uploader_commit:action.yml")" == "$uploader_action_blob" ]]
+          [[ "$(git -C "$uploader_source" rev-parse "$uploader_commit:dist/upload/index.js")" == "$uploader_entry_blob" ]]
+          sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root/upload-artifact"
+          git -C "$uploader_source" archive "$uploader_commit" |
+            sudo -n /usr/bin/tar -x -C "$supervisor_root/upload-artifact"
+          sudo -n chown -R root:root -- "$supervisor_root/upload-artifact"
+          sudo -n chmod -R a-w -- "$supervisor_root/upload-artifact"
+          [[ "$(sudo -n git -C "$supervisor_root/upload-artifact" hash-object action.yml)" == "$uploader_action_blob" ]]
+          [[ "$(sudo -n git -C "$supervisor_root/upload-artifact" hash-object dist/upload/index.js)" == "$uploader_entry_blob" ]]
+          /bin/rm -rf -- "$uploader_source"
+
           git -C "$candidate_root" init
           git -C "$candidate_root" remote add origin "$SYP154_DARKTIDE_REPOSITORY"
           git -C "$candidate_root" fetch --no-tags origin \
@@ -218,7 +222,7 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:a003f94b8054ccebec847e2e8e4d304aba69191c'
+            'scripts/Validate.ps1:9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
@@ -322,7 +326,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo -n sysctl -w kernel.unprivileged_userns_clone=1
-          if sudo -n sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+          apparmor_userns=''
+          if apparmor_userns="$(sudo -n sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)"; then
+            [[ "$apparmor_userns" =~ ^[0-9]+$ ]]
             sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- true
@@ -429,8 +435,8 @@ jobs:
           repository='https://github.com/SyuanTsai/Skill-Darktide-Translate.git'
           candidate_commit='7519745266e0cd67b057e88c0ee63e702ccd1e10'
           candidate_tree='654934a3f1f412bc5ccda89bda0f9158cb4d328a'
-          launcher_commit='4adc92ed1ae863fd79923f67a505ebf079b62e79'
-          launcher_tree='05550c4666252deef491a099f8a97b4b87ace9de'
+          launcher_commit='2d63f104ed7949a1d19e48e4120f05e1cbd84cee'
+          launcher_tree='388e47883ac57b243b9d96809b7c13935ac3ebd6'
           oracle_commit='c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8'
           oracle_tree='4332d9a1a366d6ff238cde3fe33912cca7dd2050'
           candidate_root="$runner_temp/syp154-pr33-candidate"
@@ -438,14 +444,14 @@ jobs:
           export_root="$runner_temp/syp154-pr33-evidence-export"
           supervisor_root="/var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
           artifact_service_file="$supervisor_root/artifact-service.env"
-          upload_action_root="$(/usr/bin/dirname "$runner_temp")/_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-          upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
-          [[ "$upload_action_root" =~ ^/home/runner/work/_actions/actions/upload-artifact/[0-9a-f]{40}$ ]]
-          [[ -d "$upload_action_parent" && ! -L "$upload_action_parent" ]]
-          [[ "$(/usr/bin/realpath -e "$upload_action_parent")" == "$upload_action_parent" ]]
-          cleanup_supervisor() { /bin/rm -rf -- "$supervisor_root"; }
-          trap cleanup_supervisor EXIT
+          finalizer_succeeded=0
+          cleanup_supervisor_on_failure() {
+            if [[ "$finalizer_succeeded" != '1' ]]; then
+              /bin/rm -rf -- "$supervisor_root"
+            fi
+          }
+          trap cleanup_supervisor_on_failure EXIT
           /bin/rm -rf -- "$export_root"
           /usr/bin/install -d -m 0755 -o root -g root -- "$export_root"
 
@@ -476,7 +482,7 @@ jobs:
             "${git_command[@]}" diff --no-ext-diff --name-status "$oracle_commit...$candidate_commit" > "$export_root/candidate-diff.txt"
 
             launcher_inventory=(
-              'scripts/Validate.ps1:a003f94b8054ccebec847e2e8e4d304aba69191c'
+              'scripts/Validate.ps1:9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c'
               'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
             )
             oracle_inventory=(
@@ -584,29 +590,47 @@ jobs:
           done < "$export_root/export-inventory.txt" > "$export_root/export-sha256.tsv"
           /usr/bin/find "$export_root" -maxdepth 1 -type f -exec /usr/bin/chmod 0444 -- '{}' +
           /usr/bin/chmod 0555 -- "$export_root"
-          /bin/rm -rf -- "$upload_action_root"
-          /usr/bin/cp -a -- "$supervisor_root/upload-artifact" "$upload_action_root"
-          /usr/bin/chown -R root:root -- "$upload_action_root"
-          /usr/bin/chmod -R a-w -- "$upload_action_root"
-          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_action_root")" == '0:0:555' ]]
+          finalizer_succeeded=1
 
-          environment_file='${{ github.env }}'
-          [[ "$environment_file" =~ ^/home/runner/work/_temp/_runner_file_commands/set_env_[0-9a-fA-F-]{36}$ ]]
-          [[ -f "$environment_file" && ! -L "$environment_file" ]]
-          [[ "$(/usr/bin/realpath -e "$environment_file")" == "$environment_file" ]]
-          [[ "$(/usr/bin/stat -c '%h' "$environment_file")" == '1' ]]
-          [[ "$(/usr/bin/stat -c '%u' "$environment_file")" == "$(/usr/bin/stat -c '%u' "$runner_temp")" ]]
-          /usr/bin/printf '%s\n' \
-            'HTTPS_PROXY=' 'https_proxy=' \
-            'HTTP_PROXY=' 'http_proxy=' \
-            'ALL_PROXY=' 'all_proxy=' \
-            'NO_PROXY=' 'no_proxy=' \
-            'NODE_TLS_REJECT_UNAUTHORIZED=' 'NODE_EXTRA_CA_CERTS=' \
-            'SSL_CERT_FILE=' 'SSL_CERT_DIR=' \
-            'OPENSSL_CONF=' 'OPENSSL_MODULES=' >> "$environment_file"
+      - name: Upload bounded PR33 adoption evidence
+        if: ${{ always() && steps.finalize_evidence.outcome == 'success' }}
+        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          runner_temp='${{ runner.temp }}'
+          workspace='${{ github.workspace }}'
+          supervisor_root="/var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+          export_root="$runner_temp/syp154-pr33-evidence-export"
+          artifact_service_file="$supervisor_root/artifact-service.env"
+          node_runtime="$supervisor_root/node24"
+          upload_root="$supervisor_root/upload-artifact"
+          upload_entry="$upload_root/dist/upload/index.js"
+          upload_home="$supervisor_root/upload-home"
+          upload_tmp="$supervisor_root/upload-tmp"
+          upload_output="$supervisor_root/upload-output"
+          [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          cleanup_supervisor() { /bin/rm -rf -- "$supervisor_root"; }
+          trap cleanup_supervisor EXIT
+
+          [[ -d "$export_root" && ! -L "$export_root" ]]
+          [[ "$(/usr/bin/realpath -e "$export_root")" == "$export_root" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$export_root")" == '0:0:555' ]]
+          [[ -f "$artifact_service_file" && ! -L "$artifact_service_file" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$artifact_service_file")" == '0:0:400' ]]
+          [[ -f "$node_runtime" && ! -L "$node_runtime" && -x "$node_runtime" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$node_runtime")" == '0:0:555' ]]
+          [[ -d "$upload_root" && ! -L "$upload_root" ]]
+          [[ "$(/usr/bin/realpath -e "$upload_root")" == "$upload_root" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_root")" == '0:0:555' ]]
+          [[ -f "$upload_entry" && ! -L "$upload_entry" ]]
+          [[ "$(/usr/bin/realpath -e "$upload_entry")" == "$upload_entry" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g' "$upload_entry")" == '0:0' ]]
+          [[ ! -w "$upload_entry" ]]
+
           mapfile -t artifact_service_lines < "$artifact_service_file"
           artifact_service_names=(ACTIONS_RESULTS_URL ACTIONS_RUNTIME_URL ACTIONS_RUNTIME_TOKEN)
           (( ${#artifact_service_lines[@]} == ${#artifact_service_names[@]} ))
+          artifact_service_values=()
           for artifact_service_index in "${!artifact_service_names[@]}"; do
             artifact_service_name="${artifact_service_names[$artifact_service_index]}"
             artifact_service_line="${artifact_service_lines[$artifact_service_index]}"
@@ -614,33 +638,36 @@ jobs:
             artifact_service_value="${artifact_service_line#*=}"
             [[ -n "$artifact_service_value" ]]
             [[ "$artifact_service_value" != *$'\r'* && "$artifact_service_value" != *$'\n'* ]]
-            /usr/bin/printf '%s=%s\n' "$artifact_service_name" "$artifact_service_value" >> "$environment_file"
+            artifact_service_values+=("$artifact_service_value")
           done
 
-      - name: Upload bounded PR33 adoption evidence
-        if: ${{ always() && steps.finalize_evidence.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        env:
-          PATH: /usr/sbin:/usr/bin:/sbin:/bin
-          LD_PRELOAD: ''
-          LD_AUDIT: ''
-          LD_LIBRARY_PATH: ''
-          NODE_OPTIONS: ''
-          NODE_PATH: ''
-          BASH_ENV: /dev/null
-          ENV: /dev/null
-          HTTPS_PROXY: ''
-          HTTP_PROXY: ''
-          ALL_PROXY: ''
-          NO_PROXY: ''
-          NODE_TLS_REJECT_UNAUTHORIZED: ''
-          NODE_EXTRA_CA_CERTS: ''
-          SSL_CERT_FILE: ''
-          SSL_CERT_DIR: ''
-          OPENSSL_CONF: ''
-          OPENSSL_MODULES: ''
-        with:
-          name: syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/syp154-pr33-evidence-export
-          if-no-files-found: error
-          retention-days: 14
+          /usr/bin/install -d -m 0700 -o root -g root -- "$upload_home" "$upload_tmp"
+          /usr/bin/install -m 0600 -o root -g root /dev/null "$upload_output"
+          /usr/bin/env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME="$upload_home" \
+            TMPDIR="$upload_tmp" \
+            CI=true \
+            GITHUB_ACTIONS=true \
+            GITHUB_REPOSITORY='${{ github.repository }}' \
+            GITHUB_RUN_ID='${{ github.run_id }}' \
+            GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \
+            GITHUB_SERVER_URL=https://github.com \
+            GITHUB_API_URL=https://api.github.com \
+            GITHUB_GRAPHQL_URL=https://api.github.com/graphql \
+            GITHUB_SHA='${{ github.sha }}' \
+            GITHUB_WORKSPACE="$workspace" \
+            RUNNER_TEMP="$upload_tmp" \
+            ACTIONS_RESULTS_URL="${artifact_service_values[0]}" \
+            ACTIONS_RUNTIME_URL="${artifact_service_values[1]}" \
+            ACTIONS_RUNTIME_TOKEN="${artifact_service_values[2]}" \
+            INPUT_NAME='syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}' \
+            INPUT_PATH="$export_root" \
+            'INPUT_IF-NO-FILES-FOUND=error' \
+            'INPUT_RETENTION-DAYS=14' \
+            'INPUT_COMPRESSION-LEVEL=6' \
+            INPUT_OVERWRITE=false \
+            'INPUT_INCLUDE-HIDDEN-FILES=false' \
+            INPUT_ARCHIVE=true \
+            GITHUB_OUTPUT="$upload_output" \
+            "$node_runtime" "$upload_entry"

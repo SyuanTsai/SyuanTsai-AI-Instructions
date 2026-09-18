@@ -12,6 +12,7 @@ if (!/^[0-9]+$/.test(runId) || !/^[0-9]+$/.test(runAttempt)) {
 
 const supervisorRoot = `/var/lib/syp154-evidence-${runId}-${runAttempt}`
 const authorityPath = `${supervisorRoot}/artifact-service.env`
+const nodeRuntimePath = `${supervisorRoot}/node24`
 const rootStat = execFileSync(
   '/usr/bin/sudo',
   ['-n', '/usr/bin/stat', '-c', '%u:%g:%a', '--', supervisorRoot],
@@ -19,6 +20,20 @@ const rootStat = execFileSync(
 ).trim()
 if (rootStat !== '0:0:755') {
   throw new Error('The artifact-service authority root is not root-owned and immutable.')
+}
+
+execFileSync('/usr/bin/sudo', ['-n', '/usr/bin/test', '!', '-e', nodeRuntimePath])
+execFileSync(
+  '/usr/bin/sudo',
+  ['-n', '/usr/bin/install', '-m', '0555', '-o', 'root', '-g', 'root', '--', process.execPath, nodeRuntimePath]
+)
+const nodeRuntimeStat = execFileSync(
+  '/usr/bin/sudo',
+  ['-n', '/usr/bin/stat', '-c', '%u:%g:%a', '--', nodeRuntimePath],
+  {encoding: 'utf8'}
+).trim()
+if (nodeRuntimeStat !== '0:0:555') {
+  throw new Error('The captured Node runtime is not root-owned and immutable.')
 }
 
 execFileSync('/usr/bin/sudo', ['-n', '/usr/bin/test', '!', '-e', authorityPath])

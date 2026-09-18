@@ -3,5 +3,5 @@
 name: Capture trusted artifact service authority
 description: Preserve runner-injected artifact endpoints and token outside candidate-writable paths.
 runs:
-  using: node20
+  using: node24
   main: index.js

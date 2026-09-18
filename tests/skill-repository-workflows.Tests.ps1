@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '7519745266e0cd67b057e88c0ee63e702ccd1e10',
             '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            '4adc92ed1ae863fd79923f67a505ebf079b62e79',
-            '05550c4666252deef491a099f8a97b4b87ace9de',
+            '2d63f104ed7949a1d19e48e4120f05e1cbd84cee',
+            '388e47883ac57b243b9d96809b7c13935ac3ebd6',
             'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
             '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow 'a003f94b8054ccebec847e2e8e4d304aba69191c' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow '9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c' 'The evidence job must pin the reviewed PR36 validator blob.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
@@ -732,8 +732,18 @@ jobs:
         Assert-Match $workflow 'releaseEligible.*false' 'The evidence manifest must remain non-release-eligible.'
         Assert-Match $workflow 'formalAdoption.*not-authorized' 'The evidence manifest must not claim formal adoption.'
         Assert-Match $workflow 'unshare --user --map-root-user --pid --fork --kill-child=SIGKILL' 'The native job must prove the required Linux namespace capability.'
+        Assert-Match $workflow 'sysctl -n kernel\.apparmor_restrict_unprivileged_userns' 'The namespace probe must query the exact AppArmor key without a pipefail-sensitive producer pipeline.'
+        Assert-NotMatch $workflow 'sysctl -a[^\r\n]*\|[^\r\n]*grep -q' 'The namespace probe must not combine sysctl -a with grep -q under pipefail.'
         Assert-Match $workflow 'cgroup\.subtree_control' 'The native job must establish the bounded cgroup v2 process boundary.'
-        Assert-Match $workflow 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' 'Evidence upload must use the reviewed immutable action.'
+        Assert-Match $workflow 'https://github\.com/actions/upload-artifact\.git' 'Evidence upload must acquire the official uploader without credentials.'
+        foreach ($uploaderIdentity in @(
+            '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+            '7cb4d1e81db55320b41217e1a78a1a46e3d2baef',
+            'a36d775b02159bad1b24bf1ac3a314bc456a6fb5'
+        )) {
+            Assert-Match $workflow ([regex]::Escape($uploaderIdentity)) "Evidence upload must bind immutable uploader identity '$uploaderIdentity'."
+        }
+        Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?uses:\s*actions/upload-artifact@' 'The uploader must not start through a runner-inherited action environment.'
         Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?checks:\s*write' 'The evidence-only job must not publish required checks.'
         Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?pull-requests:\s*write' 'The evidence-only job must not mutate pull requests.'
     }
@@ -751,7 +761,6 @@ jobs:
             $workflow,
             '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
         ).Value
-
         $acquisition | Should -Not -BeNullOrEmpty
         $finalizer | Should -Not -BeNullOrEmpty
         Assert-NotMatch $acquisition 'candidate-diff\.txt|launcher-inventory\.tsv|oracle-inventory\.tsv|identity-manifest\.json' 'Trusted export metadata must not exist while candidate code can run.'
@@ -804,10 +813,10 @@ jobs:
         }
         Assert-Match $finalizer '--git-dir="\$supervisor_root/candidate\.git" --work-tree="\$candidate_root"' 'Finalization must use supervisor-owned Git metadata.'
         Assert-NotMatch $finalizer '\$\{SYP154_[A-Z_]+' 'Finalization must not inherit candidate-poisonable SYP154 environment state.'
-        foreach ($name in @('LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH', 'NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV')) {
-            Assert-Match $upload ("(?m)^\s+" + [regex]::Escape($name) + ":") "The upload action must explicitly clear $name."
-        }
-        Assert-Match $upload '(?m)^\s+PATH:\s*/usr/sbin:/usr/bin:/sbin:/bin\s*$' 'The upload action must not inherit a candidate-appended command path.'
+        Assert-Match $upload 'shell:\s*/usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail \{0\}' 'Uploader shell startup must use sudo secure-exec and an empty environment.'
+        Assert-Match $upload '/usr/bin/env -i' 'The Node uploader must receive an explicit environment allowlist.'
+        Assert-Match $upload '"\$node_runtime" "\$upload_entry"' 'The strict uploader must execute the root-owned Node runtime and pinned entrypoint.'
+        Assert-NotMatch $upload '(?m)^\s+uses:' 'The strict uploader must not be dispatched by the runner with inherited job environment.'
     }
 
     # Scenario: Candidate code has the runner account's host filesystem permissions before the artifact action starts.
@@ -828,21 +837,19 @@ jobs:
             '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
         ).Value
 
-        Assert-Match $acquisition 'upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' 'Acquisition must locate the exact pinned upload action payload.'
-        Assert-Match $acquisition '"\$supervisor_root/upload-artifact"' 'Acquisition must copy the uploader into the root-owned supervisor authority.'
-        Assert-Match $acquisition 'actions_root="\$\(/usr/bin/dirname "\$RUNNER_TEMP"\)/_actions"' 'Acquisition must identify the common action payload root before candidate execution.'
-        Assert-Match $acquisition '/usr/bin/chown -R root:root -- "\$actions_root"' 'Every registered external action payload must become root-owned before candidate execution.'
-        Assert-Match $acquisition '/usr/bin/chmod -R a-w -- "\$actions_root"' 'Candidate code must not be able to replace any registered action or post-action payload.'
-        Assert-Match $finalizer '/bin/rm -rf -- "\$upload_action_root"' 'Finalization must remove any candidate-modified uploader payload.'
-        Assert-Match $finalizer '/usr/bin/cp -a -- "\$supervisor_root/upload-artifact" "\$upload_action_root"' 'Finalization must restore the uploader from supervisor-owned bytes.'
-        Assert-Match $finalizer '/usr/bin/chown -R root:root -- "\$upload_action_root"' 'The restored uploader must be owned by root.'
-        Assert-Match $finalizer '/usr/bin/chmod -R a-w -- "\$upload_action_root"' 'The restored uploader must be immutable to the runner account.'
+        Assert-Match $acquisition 'https://github\.com/actions/upload-artifact\.git' 'Acquisition must fetch the uploader from the official repository.'
+        Assert-Match $acquisition 'fetch --no-tags --depth=1 origin "\$uploader_commit"' 'Acquisition must fetch only the exact uploader commit without a token.'
+        Assert-Match $acquisition 'rev-parse "\$uploader_commit:action\.yml"' 'Acquisition must verify the pinned action definition blob.'
+        Assert-Match $acquisition 'rev-parse "\$uploader_commit:dist/upload/index\.js"' 'Acquisition must verify the pinned upload entrypoint blob.'
+        Assert-Match $acquisition 'git -C "\$uploader_source" archive "\$uploader_commit"' 'Acquisition must materialize only the verified uploader tree.'
+        Assert-Match $acquisition '"\$supervisor_root/upload-artifact"' 'Acquisition must store the uploader below the root-owned supervisor authority.'
+        Assert-NotMatch $finalizer 'upload_action_root' 'Finalization must not restore an uploader into the runner-managed action tree.'
         Assert-Match $upload "if:\s*\$\{\{ always\(\) && steps\.finalize_evidence\.outcome == 'success' \}\}" 'Upload must not execute if trusted restoration or finalization fails.'
     }
 
-    # Scenario: Candidate code can append proxy and TLS variables to the runner file-command environment.
-    # Purpose: Prevent the pinned uploader from inheriting candidate-selected transports or trust stores.
-    It 'UnitT100_clears_candidate_controlled_upload_transport_overrides' {
+    # Scenario: Candidate code can inject arbitrary Node/debug/output variables beyond any finite transport denylist.
+    # Purpose: Start the pinned uploader with an explicit allowlist instead of inheriting the job or runner command-file environment.
+    It 'UnitT100_runs_the_uploader_with_a_strict_environment_allowlist' {
         $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
         $finalizer = [regex]::Match(
@@ -856,23 +863,15 @@ jobs:
 
         $finalizer | Should -Not -BeNullOrEmpty
         $upload | Should -Not -BeNullOrEmpty
-        Assert-Match $finalizer "environment_file='\$\{\{ github\.env \}\}'" 'Trusted finalization must use the runner-provided environment command file for the current step.'
-        Assert-NotMatch $finalizer "-name 'set_env_\*'" 'Trusted finalization must not guess the current command file by scanning runner temp state.'
-        foreach ($name in @(
-            'HTTPS_PROXY', 'https_proxy',
-            'HTTP_PROXY', 'http_proxy',
-            'ALL_PROXY', 'all_proxy',
-            'NO_PROXY', 'no_proxy',
-            'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
-            'SSL_CERT_FILE', 'SSL_CERT_DIR',
-            'OPENSSL_CONF', 'OPENSSL_MODULES'
-        )) {
-            Assert-Match $finalizer ("'" + [regex]::Escape($name) + "='") "Trusted finalization must clear $name for the following upload step."
+        Assert-NotMatch $finalizer 'github\.env|environment_file|>>\s*"\$environment_file"' 'Finalization must not append to any runner environment command file.'
+        Assert-Match $upload '/usr/bin/env -i' 'Uploader process creation must begin from an empty environment.'
+        foreach ($name in @('ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_URL', 'ACTIONS_RUNTIME_TOKEN', 'INPUT_NAME', 'INPUT_PATH', 'RUNNER_TEMP', 'GITHUB_RUN_ID')) {
+            Assert-Match $upload ([regex]::Escape($name) + '=') "The strict uploader allowlist must supply $name explicitly."
         }
-        $uploadEnvironment = [regex]::Match($upload, '(?s)\r?\n\s+env:\s*\r?\n(?<body>.*?)(?=\r?\n\s+with:)').Groups['body'].Value
-        $uploadEnvironment | Should -Not -BeNullOrEmpty
-        $environmentNames = @([regex]::Matches($uploadEnvironment, '(?m)^\s+(?<name>[A-Za-z_][A-Za-z0-9_]*):') | ForEach-Object { $_.Groups['name'].Value.ToLowerInvariant() })
-        @($environmentNames | Group-Object | Where-Object Count -GT 1).Count | Should -Be 0 -Because 'GitHub rejects case-insensitive duplicate env keys before dispatch.'
+        Assert-Match $upload 'RUNNER_TEMP="\$upload_tmp"' 'The strict uploader must bind temporary files to its root-owned private directory.'
+        foreach ($name in @('NODE_DEBUG', 'NODE_REDIRECT_WARNINGS', 'NODE_OPTIONS', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH', 'BASH_ENV')) {
+            Assert-NotMatch $upload ([regex]::Escape($name) + '=') "The strict uploader environment must not carry $name."
+        }
     }
 
     # Scenario: Candidate code shares the runner identity and can otherwise migrate through a runner-writable parent cgroup.
@@ -922,6 +921,10 @@ jobs:
             $workflow,
             '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
         ).Value
+        $upload = [regex]::Match(
+            $workflow,
+            '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
+        ).Value
         $actionDefinition = Get-Content -Raw -Encoding UTF8 -LiteralPath (
             Join-Path $script:RepositoryRoot '.github\actions\capture-artifact-service\action.yml'
         )
@@ -931,18 +934,23 @@ jobs:
 
         $snapshotStep | Should -Not -BeNullOrEmpty
         $finalizer | Should -Not -BeNullOrEmpty
+        $upload | Should -Not -BeNullOrEmpty
         Assert-Match $snapshotStep 'uses:\s*\./\.github/actions/capture-artifact-service' 'The workflow must capture runner-injected service values through a Node action before candidate execution.'
-        Assert-Match $actionDefinition 'using:\s*node20' 'The capture step must use the runner Node action handler that injects artifact-service authority.'
+        Assert-Match $actionDefinition 'using:\s*node24' 'The capture step must use the same reviewed Node generation as the pinned uploader.'
         Assert-Match $actionScript 'artifact-service\.env' 'The capture action must snapshot artifact-service authority outside runner-owned paths.'
+        Assert-Match $actionScript 'process\.execPath' 'The capture action must identify the exact trusted Node runtime before candidate execution.'
+        Assert-Match $actionScript 'node24' 'The capture action must copy the trusted Node runtime below the supervisor root.'
+        Assert-Match $actionScript "'/usr/bin/install', '-m', '0555'" 'The captured Node runtime must be root-owned and immutable.'
         Assert-Match $actionScript "'/usr/bin/chmod', '0400'" 'The artifact-service snapshot must be readable only by root.'
         Assert-Match $actionScript "'/usr/bin/tee'" 'The capture action must write through root authority without logging the token.'
-        Assert-Match $finalizer 'artifact-service\.env' 'Finalization must read the root-owned artifact-service authority snapshot.'
-        Assert-Match $finalizer "stat -c '%u:%g:%a'.*?0:0:400" 'Finalization must verify root-only snapshot ownership and mode.'
+        Assert-Match $upload 'artifact-service\.env' 'The strict upload step must read the root-owned artifact-service authority snapshot.'
+        Assert-Match $upload "stat -c '%u:%g:%a'.*?0:0:400" 'The strict upload step must verify root-only snapshot ownership and mode.'
         foreach ($name in @('ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_URL', 'ACTIONS_RUNTIME_TOKEN')) {
             Assert-Match $actionScript ([regex]::Escape($name)) "The Node capture action must snapshot $name before candidate execution."
-            Assert-Match $finalizer ([regex]::Escape($name)) "Finalization must restore $name for the upload action."
+            Assert-Match $upload ([regex]::Escape($name)) "The strict upload step must restore $name from root-owned authority."
         }
-        Assert-Match $finalizer '>> "\$environment_file"' 'Trusted artifact-service values must be appended after candidate-controlled entries.'
+        Assert-NotMatch $finalizer 'environment_file|>> "\$environment_file"' 'Trusted service values must not be appended to candidate-influenced command-file bytes.'
+        Assert-Match $upload 'mapfile -t artifact_service_lines < "\$artifact_service_file"' 'The strict upload step must read the root-owned authority snapshot directly.'
     }
 
     # Scenario: The evidence job invokes a repository-local security action whose files can change independently.
