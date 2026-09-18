@@ -15,6 +15,7 @@ on:
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - 'tests/standard-validation-runner.Tests.ps1'
+      - '.github/actions/capture-artifact-service/**'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -33,6 +34,7 @@ on:
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - 'tests/standard-validation-runner.Tests.ps1'
+      - '.github/actions/capture-artifact-service/**'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -117,6 +119,11 @@ jobs:
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
+      - name: Checkout evidence workflow authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - name: Set up approved Go runtime
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -576,7 +583,8 @@ jobs:
             'ALL_PROXY=' 'all_proxy=' \
             'NO_PROXY=' 'no_proxy=' \
             'NODE_TLS_REJECT_UNAUTHORIZED=' 'NODE_EXTRA_CA_CERTS=' \
-            'SSL_CERT_FILE=' 'SSL_CERT_DIR=' >> "$environment_file"
+            'SSL_CERT_FILE=' 'SSL_CERT_DIR=' \
+            'OPENSSL_CONF=' 'OPENSSL_MODULES=' >> "$environment_file"
           mapfile -t artifact_service_lines < "$artifact_service_file"
           artifact_service_names=(ACTIONS_RESULTS_URL ACTIONS_RUNTIME_URL ACTIONS_RUNTIME_TOKEN)
           (( ${#artifact_service_lines[@]} == ${#artifact_service_names[@]} ))
@@ -610,6 +618,8 @@ jobs:
           NODE_EXTRA_CA_CERTS: ''
           SSL_CERT_FILE: ''
           SSL_CERT_DIR: ''
+          OPENSSL_CONF: ''
+          OPENSSL_MODULES: ''
         with:
           name: syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/syp154-pr33-evidence-export

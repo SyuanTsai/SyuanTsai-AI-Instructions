@@ -8,7 +8,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 3
-            '.github/workflows/standards-conformance.yml' = 1
+            '.github/workflows/standards-conformance.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
         }
@@ -861,7 +861,8 @@ jobs:
             'ALL_PROXY', 'all_proxy',
             'NO_PROXY', 'no_proxy',
             'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
-            'SSL_CERT_FILE', 'SSL_CERT_DIR'
+            'SSL_CERT_FILE', 'SSL_CERT_DIR',
+            'OPENSSL_CONF', 'OPENSSL_MODULES'
         )) {
             Assert-Match $finalizer ("'" + [regex]::Escape($name) + "='") "Trusted finalization must clear $name for the following upload step."
         }
@@ -939,5 +940,22 @@ jobs:
             Assert-Match $finalizer ([regex]::Escape($name)) "Finalization must restore $name for the upload action."
         }
         Assert-Match $finalizer '>> "\$environment_file"' 'Trusted artifact-service values must be appended after candidate-controlled entries.'
+    }
+
+    # Scenario: The evidence job invokes a repository-local security action whose files can change independently.
+    # Purpose: Materialize the exact PR head before action resolution and run the authority workflow whenever that action changes.
+    It 'UnitT115_checks_out_and_watches_the_local_artifact_authority_action' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $evidenceJob = [regex]::Match(
+            $workflow,
+            '(?s)pr33-adoption-evidence-development-only:.*\z'
+        ).Value
+
+        $evidenceJob | Should -Not -BeNullOrEmpty
+        Assert-Match $evidenceJob 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+# v7' 'The evidence job must materialize its exact workflow commit before resolving the local action.'
+        Assert-Match $evidenceJob '(?s)actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1.*?persist-credentials:\s*false' 'The evidence-job checkout must not persist ambient credentials.'
+        Assert-True ($evidenceJob.IndexOf('actions/checkout@') -lt $evidenceJob.IndexOf('uses: ./.github/actions/capture-artifact-service')) 'The repository checkout must precede local action resolution.'
+        Assert-Equal ([regex]::Matches($workflow, "'\.github/actions/capture-artifact-service/\*\*'").Count) 2 'Push and pull-request filters must both watch the security-critical local action.'
     }
 }
