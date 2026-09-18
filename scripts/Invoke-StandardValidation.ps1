@@ -270,6 +270,136 @@ public static class StandardValidationUnixProcessControlNative
     }
 }
 
+if ($null -eq ('StandardValidationNoFollowFileHashNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public static class StandardValidationNoFollowFileHashNative
+{
+    private const uint GenericRead = 0x80000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileAttributeDirectory = 0x00000010;
+    private const uint FileAttributeReparsePoint = 0x00000400;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const int FileBasicInfoClass = 0;
+    private const int UnixNoFollow = 0x20000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileBasicInformation
+    {
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long ChangeTime;
+        public uint FileAttributes;
+        public uint Reserved;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle file,
+        int fileInformationClass,
+        out FileBasicInformation fileInformation,
+        uint bufferSize);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "open")]
+    private static extern int OpenUnixFile(string path, int flags);
+
+    private static string ToSha256(byte[] bytes)
+    {
+        return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
+    }
+
+    private static string HashHandle(SafeFileHandle handle, string path)
+    {
+        try
+        {
+            using (FileStream stream = new FileStream(handle, FileAccess.Read, 65536, false))
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                return ToSha256(sha256.ComputeHash(stream));
+            }
+        }
+        finally
+        {
+            if (handle != null && !handle.IsClosed) handle.Dispose();
+        }
+    }
+
+    public static string HashWindows(string path)
+    {
+        SafeFileHandle handle = CreateFile(
+            path,
+            GenericRead,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (handle == null || handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (handle != null) handle.Dispose();
+            throw new Win32Exception(error, "CreateFileW no-follow open failed for '" + path + "'.");
+        }
+
+        FileBasicInformation information;
+        if (!GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfoClass,
+            out information,
+            (uint)Marshal.SizeOf(typeof(FileBasicInformation))) ||
+            (information.FileAttributes & FileAttributeDirectory) != 0 ||
+            (information.FileAttributes & FileAttributeReparsePoint) != 0)
+        {
+            handle.Dispose();
+            throw new IOException("The opened authority path is not a regular non-reparse file: " + path);
+        }
+        return HashHandle(handle, path);
+    }
+
+    public static string HashUnix(string path)
+    {
+        // The required hosted Unix target is native Linux. Do not guess an
+        // O_NOFOLLOW value on another Unix flavor; fail closed until that
+        // platform has its own verified primitive.
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            throw new PlatformNotSupportedException("O_NOFOLLOW hashing is only enabled for Linux.");
+        }
+        int fileDescriptor = OpenUnixFile(path, UnixNoFollow);
+        if (fileDescriptor < 0)
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, "open(O_NOFOLLOW) failed for '" + path + "'.");
+        }
+        SafeFileHandle handle = new SafeFileHandle((IntPtr)fileDescriptor, true);
+        return HashHandle(handle, path);
+    }
+}
+'@
+}
+
 if ($null -eq ('StandardValidationBoundedCapture' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -618,6 +748,25 @@ function Get-StandardValidationFileSha256 {
         throw "INVALID|$Context file is missing: $Path"
     }
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-StandardValidationNoFollowFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            return [StandardValidationNoFollowFileHashNative]::HashWindows($fullPath)
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            return [StandardValidationNoFollowFileHashNative]::HashUnix($fullPath)
+        }
+        throw "Unsupported platform '$([Environment]::OSVersion.Platform)' for no-follow file hashing."
+    }
+    catch {
+        if ($_.Exception.Message -like 'INVALID|*') { throw }
+        throw "INVALID|$Context could not be hashed through a no-follow regular-file handle: $($_.Exception.Message)"
+    }
 }
 
 function Get-StandardValidationTextSha256 {
@@ -1927,7 +2076,7 @@ function Get-StandardValidationInventory {
             -Context "$Context inventory path"
         $entries += [pscustomobject][ordered]@{
             path = $relative
-            sha256 = (Get-StandardValidationFileSha256 -Path $file.FullName -Context $Context)
+            sha256 = (Get-StandardValidationNoFollowFileSha256 -Path $file.FullName -Context $Context)
             length = [int64]$file.Length
         }
     }

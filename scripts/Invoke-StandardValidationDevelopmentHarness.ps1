@@ -275,6 +275,19 @@ function Assert-DevelopmentHarnessAuthorityPath {
     return [string]$fullPath
 }
 
+function Get-DevelopmentHarnessAuthorityFileSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = Assert-DevelopmentHarnessAuthorityPath -Path $Path -Context $Context
+    # The path check and this no-follow open are deliberately adjacent. The
+    # native helper hashes the regular-file handle it opened with reparse
+    # traversal disabled, rather than reopening the authority path by name.
+    return Get-StandardValidationNoFollowFileSha256 -Path $fullPath -Context $Context
+}
+
 function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
     param(
         [Parameter(Mandatory = $true)][string] $RunnerPath,
@@ -289,23 +302,20 @@ function Assert-DevelopmentHarnessAuthorityInputsUnchanged {
         [Parameter(Mandatory = $true)][string] $ExpectedTrustedToolInventorySha256
     )
 
-    $runnerFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $RunnerPath -Context 'central validation runner revalidation'
-    $launcherFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $LauncherPath -Context 'development harness launcher revalidation'
-    $powerShellFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
-    $adapterFullPath = Assert-DevelopmentHarnessAuthorityPath -Path $AdapterPath -Context 'authority adapter revalidation'
-    $currentRunnerSha256 = Get-StandardValidationFileSha256 -Path $runnerFullPath -Context 'central validation runner revalidation'
+    [void](Assert-StandardValidationCanonicalRootPath -Path $TrustedToolRoot -Context 'trusted tool root revalidation')
+    $currentRunnerSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $RunnerPath -Context 'central validation runner revalidation'
     if ($currentRunnerSha256 -cne $ExpectedRunnerSha256) {
         throw 'FAILED|Trusted authority runner changed during validation.'
     }
-    $currentLauncherSha256 = Get-StandardValidationFileSha256 -Path $launcherFullPath -Context 'development harness launcher revalidation'
+    $currentLauncherSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $LauncherPath -Context 'development harness launcher revalidation'
     if ($currentLauncherSha256 -cne $ExpectedLauncherSha256) {
         throw 'FAILED|Trusted development harness launcher changed during validation.'
     }
-    $currentPowerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellFullPath -Context 'development harness PowerShell host revalidation'
+    $currentPowerShellSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $PowerShellPath -Context 'development harness PowerShell host revalidation'
     if ($currentPowerShellSha256 -cne $ExpectedPowerShellSha256) {
         throw 'FAILED|Trusted authority PowerShell host changed during validation.'
     }
-    $currentAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFullPath -Context 'authority adapter revalidation'
+    $currentAdapterSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $AdapterPath -Context 'authority adapter revalidation'
     if ($currentAdapterSha256 -cne $ExpectedAdapterSha256) {
         throw 'FAILED|Trusted authority adapter changed during validation.'
     }
@@ -403,7 +413,7 @@ try {
     $candidateInventory = Get-StandardValidationInventory -Root $candidateFull -Context 'development harness candidate'
     $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
     $candidateValidatorSha256 = Get-StandardValidationFileSha256 -Path $validatorFull -Context 'CandidateValidatorPath'
-    $candidateAdapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'development harness adapter'
+    $candidateAdapterSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $adapterFull -Context 'development harness adapter'
     $candidateSnapshotRoot = Join-Path $runRoot 'candidate-snapshot'
     Copy-StandardValidationSnapshot -Source $candidateFull -Destination $candidateSnapshotRoot
     Assert-StandardValidationNoReparsePoints -Root $candidateSnapshotRoot -Context 'candidate snapshot'
@@ -437,14 +447,13 @@ try {
     Assert-StandardValidationNoReparsePoints -Root $candidateWorkingRoot -Context 'candidate working root'
 
     $powerShellPath = Get-DevelopmentHarnessPowerShellPath
-    $powerShellSha256 = Get-StandardValidationFileSha256 -Path $powerShellPath -Context 'development harness PowerShell host'
-    $runnerSha256 = Get-StandardValidationFileSha256 -Path $runnerPath -Context 'central validation runner'
+    $powerShellSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $powerShellPath -Context 'development harness PowerShell host'
+    $runnerSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $runnerPath -Context 'central validation runner'
     if ([string]::IsNullOrWhiteSpace([string]$PSCommandPath)) {
         throw 'INVALID|The development harness launcher path is unavailable from PSCommandPath.'
     }
-    $launcherPath = Get-StandardValidationFullPath -Path ([string]$PSCommandPath) -Context 'development harness launcher'
-    Assert-StandardValidationRegularFile -Path $launcherPath -Context 'development harness launcher'
-    $launcherSha256 = Get-StandardValidationFileSha256 -Path $launcherPath -Context 'development harness launcher'
+    $launcherPath = Assert-StandardValidationCanonicalRootPath -Path ([string]$PSCommandPath) -Context 'development harness launcher'
+    $launcherSha256 = Get-DevelopmentHarnessAuthorityFileSha256 -Path $launcherPath -Context 'development harness launcher'
     $trustedToolInventory = @(Get-StandardValidationInventory -Root $trustedToolRootFull -Context 'trusted tool root')
     $trustedToolInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $trustedToolInventory
     if ($CancellationStdin) {

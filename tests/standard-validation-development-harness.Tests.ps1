@@ -499,4 +499,65 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Ci1False ([bool]$result.Evidence.candidateExecutionAttempted) 'Unsafe arguments must be rejected before candidate start.'
         Assert-Ci1Match ([string]$result.Output) 'arguments|traversal|parent-directory' 'The invalid argument diagnosis must be retained.'
     }
+
+    It 'InterT05_binds_authority_hashes_to_no_follow_handles_and_rechecks_ancestors' {
+        $root = Join-Path $script:Ci1CaseRoot 'h'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        . $runnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -SourceRepository 'https://example.com/example/fixture.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+
+        $authorityPath = Join-Path $root 'authority.ps1'
+        $authorityBackupPath = Join-Path $root 'authority.original.ps1'
+        Write-Ci1Utf8File -Path $authorityPath -Text 'authority-A'
+        $authorityASha256 = Get-StandardValidationNoFollowFileSha256 -Path $authorityPath -Context 'authority handle snapshot A'
+        Move-Item -LiteralPath $authorityPath -Destination $authorityBackupPath -Force
+        Write-Ci1Utf8File -Path $authorityPath -Text 'authority-B'
+        $authorityBSha256 = Get-StandardValidationNoFollowFileSha256 -Path $authorityPath -Context 'authority handle snapshot B'
+        Assert-Ci1False ($authorityASha256 -ceq $authorityBSha256) 'The authority hash must bind the bytes of the file opened at the current path.'
+
+        $trustedFilePath = Join-Path $trustedRoot 'tool.ps1'
+        Write-Ci1Utf8File -Path $trustedFilePath -Text 'trusted-tool'
+        $trustedSha256 = Get-StandardValidationNoFollowFileSha256 -Path $trustedFilePath -Context 'trusted tool handle snapshot'
+        Assert-Ci1Match $trustedSha256 '^[0-9a-f]{64}$' 'A regular authority file must hash through the no-follow helper.'
+        $trustedMovedRoot = Join-Path $root 'trusted-original'
+        Move-Item -LiteralPath $trustedRoot -Destination $trustedMovedRoot -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            New-Item -ItemType SymbolicLink -Path $trustedRoot -Target $trustedMovedRoot -ErrorAction Stop | Out-Null
+        }
+        else {
+            New-Item -ItemType Junction -Path $trustedRoot -Target $trustedMovedRoot -ErrorAction Stop | Out-Null
+        }
+
+        $ancestorRejected = $false
+        try {
+            [void](Assert-StandardValidationCanonicalRootPath -Path (Join-Path $trustedRoot 'tool.ps1') -Context 'authority ancestor substitution')
+        }
+        catch {
+            $ancestorRejected = $true
+            Assert-Ci1Match ([string]$_.Exception.Message) 'reparse|symlink|ancestor' 'An authority ancestor substitution must be diagnosed as a reparse boundary.'
+        }
+        Assert-Ci1True $ancestorRejected 'A substituted trusted-tool ancestor must be rejected before authority hashing.'
+
+        $directoryRejected = $false
+        try {
+            Get-StandardValidationNoFollowFileSha256 -Path $trustedMovedRoot -Context 'authority directory rejection' | Out-Null
+        }
+        catch { $directoryRejected = $true }
+        Assert-Ci1True $directoryRejected 'The no-follow authority hash helper must reject a directory handle.'
+    }
 }
