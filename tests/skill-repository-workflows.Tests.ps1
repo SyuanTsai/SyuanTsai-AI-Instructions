@@ -824,9 +824,11 @@ jobs:
         Assert-Match $acquisition '/var/lib/syp154-evidence-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}' 'The immutable witness and Git authority must live below a root-owned parent.'
         Assert-Match $acquisition 'sudo -n install -d -m 0755 -o root -g root' 'Acquisition must create the supervisor authority as root.'
         Assert-Match $acquisition 'candidate\.git' 'Acquisition must preserve trusted Git metadata outside the candidate-writable checkout.'
-        foreach ($section in @($cleanup, $finalizer)) {
-            Assert-Match $section 'shell:\s*/usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail \{0\}' 'Post-candidate shell startup must use sudo secure-exec and an empty environment.'
-        }
+        Assert-Match $acquisition 'sudo -n /usr/bin/tee -- "\$cleanup_helper"' 'Acquisition must materialize cleanup before candidate execution.'
+        Assert-Match $acquisition "stat -c '%u:%g:%a'.*?cleanup_helper.*?0:0:555" 'The cleanup helper must be root-owned and immutable before candidate execution.'
+        Assert-Match $cleanup 'shell:.*?/var/lib/syp154-evidence-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/cleanup-cgroup.*?\{0\}' 'Cleanup must execute only the root-owned pre-candidate helper.'
+        Assert-NotMatch $cleanup '/bin/bash[^\r\n]*\{0\}' 'Cleanup must not pass the runner-writable step script to root Bash.'
+        Assert-Match $finalizer 'shell:\s*/usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail \{0\}' 'Post-cleanup finalization must use sudo secure-exec and an empty environment.'
         Assert-Match $finalizer '--git-dir="\$supervisor_root/candidate\.git" --work-tree="\$candidate_root"' 'Finalization must use supervisor-owned Git metadata.'
         Assert-NotMatch $finalizer '\$\{SYP154_[A-Z_]+' 'Finalization must not inherit candidate-poisonable SYP154 environment state.'
         Assert-Match $upload 'shell:\s*/usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail \{0\}' 'Uploader shell startup must use sudo secure-exec and an empty environment.'
@@ -897,6 +899,10 @@ jobs:
     It 'UnitT105_contains_candidate_processes_below_a_root_owned_cgroup_boundary' {
         $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $acquisition = [regex]::Match(
+            $workflow,
+            '(?s)- name: Acquire and bind immutable launcher oracle and PR33 candidate.*?(?=\r?\n\s+- name: Delegate Linux cgroup v2 subtree)'
+        ).Value
         $delegation = [regex]::Match(
             $workflow,
             '(?s)- name: Delegate Linux cgroup v2 subtree.*?(?=\r?\n\s+- name: Prove unprivileged Linux namespace capability)'
@@ -910,7 +916,7 @@ jobs:
             '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
         ).Value
 
-        foreach ($section in @($delegation, $cleanup, $finalizer)) {
+        foreach ($section in @($acquisition, $delegation, $cleanup, $finalizer)) {
             Assert-True (-not [string]::IsNullOrEmpty($section)) 'Every cgroup containment section must be present.'
         }
         Assert-Match $delegation 'cgroup_delegated="\$cgroup_parent/delegated"' 'Only a nested cgroup subtree may be delegated to the runner identity.'
@@ -920,12 +926,14 @@ jobs:
         Assert-NotMatch $delegation 'chown[^\r\n]*"\$cgroup_parent(?:/cgroup\.(?:procs|threads))?"' 'The outer boundary and its migration controls must remain root-owned.'
         Assert-Match $delegation 'CODEX_PESTER_CGROUP_ROOT=%s.*?\$cgroup_delegated' 'Protected tests must receive only the nested delegated root.'
         Assert-Match $cleanup '(?m)^\s+id:\s*cleanup_cgroup\s*$' 'Cleanup must expose an outcome that can gate trusted finalization.'
-        Assert-Match $cleanup 'cgroup\.kill' 'Cleanup must terminate the complete outer cgroup subtree.'
-        Assert-Match $cleanup 'cgroup\.events' 'Cleanup must verify that the complete outer cgroup subtree is unpopulated.'
-        Assert-Match $cleanup '/usr/bin/find "\$cgroup_parent" -mindepth 1 -depth -type d' 'Cleanup must remove every descendant cgroup from deepest to shallowest.'
-        Assert-Match $cleanup "mapfile -d '' -t descendant_cgroups" 'Cleanup must parse descendant cgroup paths with a NUL delimiter.'
-        Assert-Match $cleanup '-print0' 'Cleanup must serialize descendant cgroup paths with NUL delimiters.'
-        Assert-NotMatch $cleanup '-type d -print(?:\s|\))' 'Cleanup must not serialize hostile descendant cgroup paths with newline delimiters.'
+        Assert-Match $cleanup '/cleanup-cgroup.*?\{0\}' 'Cleanup must dispatch the root-owned helper while treating the generated step script as an ignored argument.'
+        Assert-NotMatch $cleanup 'cgroup\.kill|cgroup\.events|/usr/bin/find' 'The runner-writable cleanup step script must not contain privileged cleanup logic.'
+        Assert-Match $acquisition 'cgroup\.kill' 'The root-owned cleanup helper must terminate the complete outer cgroup subtree.'
+        Assert-Match $acquisition 'cgroup\.events' 'The root-owned cleanup helper must verify that the complete outer cgroup subtree is unpopulated.'
+        Assert-Match $acquisition '/usr/bin/find "\$cgroup_parent" -mindepth 1 -depth -type d' 'The root-owned cleanup helper must remove every descendant cgroup from deepest to shallowest.'
+        Assert-Match $acquisition "mapfile -d '' -t descendant_cgroups" 'The root-owned cleanup helper must parse descendant cgroup paths with a NUL delimiter.'
+        Assert-Match $acquisition '-print0' 'The root-owned cleanup helper must serialize descendant cgroup paths with NUL delimiters.'
+        Assert-NotMatch $acquisition '-type d -print(?:\s|\))' 'The root-owned cleanup helper must not serialize hostile descendant cgroup paths with newline delimiters.'
         Assert-Match $finalizer "if:\s*\$\{\{ always\(\) && steps\.cleanup_cgroup\.outcome == 'success' \}\}" 'Trusted finalization must not start unless candidate subtree cleanup succeeds.'
     }
 

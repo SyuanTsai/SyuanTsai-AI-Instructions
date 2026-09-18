@@ -176,6 +176,38 @@ jobs:
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
           [[ ! -e "$supervisor_root" ]]
           sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
+          cleanup_helper="$supervisor_root/cleanup-cgroup"
+          /usr/bin/cat <<'SYP154_CLEANUP' | sudo -n /usr/bin/tee -- "$cleanup_helper" >/dev/null
+          #!/bin/bash
+          set -euo pipefail
+          run_id="${1:-}"
+          run_attempt="${2:-}"
+          [[ "$run_id" =~ ^[0-9]+$ && "$run_attempt" =~ ^[0-9]+$ ]]
+          cgroup_parent="/sys/fs/cgroup/codex-validation-${run_id}-${run_attempt}"
+          if [[ -e "$cgroup_parent" ]]; then
+            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$cgroup_parent")" == '0:0:755' ]]
+            [[ -f "$cgroup_parent/cgroup.kill" && -f "$cgroup_parent/cgroup.events" ]]
+            /usr/bin/printf '%s\n' '1' > "$cgroup_parent/cgroup.kill"
+            cgroup_unpopulated=0
+            for cleanup_attempt in {1..120}; do
+              if /usr/bin/grep -qx 'populated 0' "$cgroup_parent/cgroup.events"; then
+                cgroup_unpopulated=1
+                break
+              fi
+              /usr/bin/sleep 0.025
+            done
+            [[ "$cgroup_unpopulated" == '1' ]]
+            mapfile -d '' -t descendant_cgroups < <(/usr/bin/find "$cgroup_parent" -mindepth 1 -depth -type d -print0)
+            for descendant_cgroup in "${descendant_cgroups[@]}"; do
+              /usr/bin/rmdir -- "$descendant_cgroup"
+            done
+            /usr/bin/rmdir -- "$cgroup_parent"
+            [[ ! -e "$cgroup_parent" ]]
+          fi
+          SYP154_CLEANUP
+          sudo -n /usr/bin/chown root:root -- "$cleanup_helper"
+          sudo -n /usr/bin/chmod 0555 -- "$cleanup_helper"
+          [[ "$(sudo -n /usr/bin/stat -c '%u:%g:%a' "$cleanup_helper")" == '0:0:555' ]]
           for root in "$candidate_root" "$launcher_root" "$artifacts_root" "$uploader_source"; do
             if [[ -e "$root" ]]; then
               echo "Evidence root already exists: $root" >&2
@@ -401,31 +433,9 @@ jobs:
       - name: Remove delegated Linux cgroup subtree
         id: cleanup_cgroup
         if: ${{ always() }}
-        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
+        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}/cleanup-cgroup ${{ github.run_id }} ${{ github.run_attempt }} {0}
         run: |
-          set -euo pipefail
-          cgroup_parent="/sys/fs/cgroup/codex-validation-${{ github.run_id }}-${{ github.run_attempt }}"
-          [[ "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]
-          if [[ -e "$cgroup_parent" ]]; then
-            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$cgroup_parent")" == '0:0:755' ]]
-            [[ -f "$cgroup_parent/cgroup.kill" && -f "$cgroup_parent/cgroup.events" ]]
-            /usr/bin/printf '%s\n' '1' > "$cgroup_parent/cgroup.kill"
-            cgroup_unpopulated=0
-            for cleanup_attempt in {1..120}; do
-              if /usr/bin/grep -qx 'populated 0' "$cgroup_parent/cgroup.events"; then
-                cgroup_unpopulated=1
-                break
-              fi
-              /usr/bin/sleep 0.025
-            done
-            [[ "$cgroup_unpopulated" == '1' ]]
-            mapfile -d '' -t descendant_cgroups < <(/usr/bin/find "$cgroup_parent" -mindepth 1 -depth -type d -print0)
-            for descendant_cgroup in "${descendant_cgroups[@]}"; do
-              /usr/bin/rmdir -- "$descendant_cgroup"
-            done
-            /usr/bin/rmdir -- "$cgroup_parent"
-            [[ ! -e "$cgroup_parent" ]]
-          fi
+          :
 
       - name: Finalize bounded evidence export
         id: finalize_evidence
