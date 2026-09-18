@@ -1616,7 +1616,8 @@ $childScript = @(
     '    Import-Module $env:SYP154_PESTER_MODULE_PATH -Force'
     ('    $invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object {{ $_.Module.Version -eq [version]''{0}'' }} | Select-Object -First 1' -f $PesterVersion)
     ('    if ($null -eq $invoke) {{ throw ''Pester shard could not resolve version {0}.'' }}' -f $PesterVersion)
-    '    $invokeParameters = @{ Script = $paths; PassThru = $true; Show = ''All'' }'
+    '    $invokeParameters = @{ Script = $paths; PassThru = $true }'
+    '    if ($invoke.Parameters.ContainsKey(''Show'')) { $invokeParameters.Show = ''All'' }'
     '    $childFailurePhase = ''invoke-pester'''
     '    $savedPesterErrorActionPreference = $ErrorActionPreference'
     '    try {'

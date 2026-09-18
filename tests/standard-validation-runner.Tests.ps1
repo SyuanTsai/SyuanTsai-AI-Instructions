@@ -802,6 +802,7 @@ catch {
         Assert-Match $shardExecutorSource 'FailedCount\s*=\s*1' 'Early child failure evidence must contain a nonzero failed count.'
         Assert-Match $shardExecutorSource 'childExitCode\s*-ne\s*0' 'An early child failure must retain a nonzero child exit code after writing evidence.'
         Assert-Match $shardExecutorSource 'ConvertTo-PesterShardEarlyFailureDiagnostic' 'Early child diagnostics must be bounded and sanitized before result/evidence emission.'
+        Assert-Match $shardExecutorSource "invoke\.Parameters\.ContainsKey\(''Show''\)" 'The shard executor must gate the optional Show parameter for Pester versions that do not expose it.'
         Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
     }
