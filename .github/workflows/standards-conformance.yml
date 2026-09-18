@@ -176,14 +176,13 @@ jobs:
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
           [[ ! -e "$supervisor_root" ]]
           sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
-          cleanup_helper="$supervisor_root/cleanup-cgroup"
-          /usr/bin/cat <<'SYP154_CLEANUP' | sudo -n /usr/bin/tee -- "$cleanup_helper" >/dev/null
-          #!/bin/bash
-          set -euo pipefail
-          run_id="${1:-}"
-          run_attempt="${2:-}"
-          [[ "$run_id" =~ ^[0-9]+$ && "$run_attempt" =~ ^[0-9]+$ ]]
-          cgroup_parent="/sys/fs/cgroup/codex-validation-${run_id}-${run_attempt}"
+          cleanup_helper='/usr/local/sbin/syp154-cleanup-cgroup'
+          [[ ! -e "$cleanup_helper" ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          {
+            /usr/bin/printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+            /usr/bin/printf 'cgroup_parent=%q\n' "/sys/fs/cgroup/codex-validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            /usr/bin/cat <<'SYP154_CLEANUP'
           if [[ -e "$cgroup_parent" ]]; then
             [[ "$(/usr/bin/stat -c '%u:%g:%a' "$cgroup_parent")" == '0:0:755' ]]
             [[ -f "$cgroup_parent/cgroup.kill" && -f "$cgroup_parent/cgroup.events" ]]
@@ -204,7 +203,10 @@ jobs:
             /usr/bin/rmdir -- "$cgroup_parent"
             [[ ! -e "$cgroup_parent" ]]
           fi
+          [[ "$0" == '/usr/local/sbin/syp154-cleanup-cgroup' ]]
+          /bin/rm -- "$0"
           SYP154_CLEANUP
+          } | sudo -n /usr/bin/tee -- "$cleanup_helper" >/dev/null
           sudo -n /usr/bin/chown root:root -- "$cleanup_helper"
           sudo -n /usr/bin/chmod 0555 -- "$cleanup_helper"
           [[ "$(sudo -n /usr/bin/stat -c '%u:%g:%a' "$cleanup_helper")" == '0:0:555' ]]
@@ -433,7 +435,7 @@ jobs:
       - name: Remove delegated Linux cgroup subtree
         id: cleanup_cgroup
         if: ${{ always() }}
-        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}/cleanup-cgroup ${{ github.run_id }} ${{ github.run_attempt }} {0}
+        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/local/sbin/syp154-cleanup-cgroup {0}
         run: |
           :
 
