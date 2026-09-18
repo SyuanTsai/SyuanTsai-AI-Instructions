@@ -114,8 +114,8 @@ jobs:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
       SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
       SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: 2d63f104ed7949a1d19e48e4120f05e1cbd84cee
-      SYP154_LAUNCHER_TREE: 388e47883ac57b243b9d96809b7c13935ac3ebd6
+      SYP154_LAUNCHER_COMMIT: efff60f7667d3e1fef159dfeec3565ad3087100e
+      SYP154_LAUNCHER_TREE: 0d89a00cb7786fba932332cd287aa7db88fc22af
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
@@ -222,7 +222,7 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c'
+            'scripts/Validate.ps1:522852401e85ed82bbeef69128f6825381f0cc99'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
@@ -435,8 +435,8 @@ jobs:
           repository='https://github.com/SyuanTsai/Skill-Darktide-Translate.git'
           candidate_commit='7519745266e0cd67b057e88c0ee63e702ccd1e10'
           candidate_tree='654934a3f1f412bc5ccda89bda0f9158cb4d328a'
-          launcher_commit='2d63f104ed7949a1d19e48e4120f05e1cbd84cee'
-          launcher_tree='388e47883ac57b243b9d96809b7c13935ac3ebd6'
+          launcher_commit='efff60f7667d3e1fef159dfeec3565ad3087100e'
+          launcher_tree='0d89a00cb7786fba932332cd287aa7db88fc22af'
           oracle_commit='c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8'
           oracle_tree='4332d9a1a366d6ff238cde3fe33912cca7dd2050'
           candidate_root="$runner_temp/syp154-pr33-candidate"
@@ -482,7 +482,7 @@ jobs:
             "${git_command[@]}" diff --no-ext-diff --name-status "$oracle_commit...$candidate_commit" > "$export_root/candidate-diff.txt"
 
             launcher_inventory=(
-              'scripts/Validate.ps1:9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c'
+              'scripts/Validate.ps1:522852401e85ed82bbeef69128f6825381f0cc99'
               'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
             )
             oracle_inventory=(

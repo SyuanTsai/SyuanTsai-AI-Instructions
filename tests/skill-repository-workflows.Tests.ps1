@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '7519745266e0cd67b057e88c0ee63e702ccd1e10',
             '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            '2d63f104ed7949a1d19e48e4120f05e1cbd84cee',
-            '388e47883ac57b243b9d96809b7c13935ac3ebd6',
+            'efff60f7667d3e1fef159dfeec3565ad3087100e',
+            '0d89a00cb7786fba932332cd287aa7db88fc22af',
             'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
             '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow '9e367a4bf5ee7ec7cf970bb9332e7158368e7c7c' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow '522852401e85ed82bbeef69128f6825381f0cc99' 'The evidence job must pin the reviewed PR36 validator blob.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
@@ -761,8 +761,8 @@ jobs:
             $workflow,
             '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
         ).Value
-        $acquisition | Should -Not -BeNullOrEmpty
-        $finalizer | Should -Not -BeNullOrEmpty
+        Assert-True (-not [string]::IsNullOrEmpty($acquisition)) 'The acquisition section must be present.'
+        Assert-True (-not [string]::IsNullOrEmpty($finalizer)) 'The finalizer section must be present.'
         Assert-NotMatch $acquisition 'candidate-diff\.txt|launcher-inventory\.tsv|oracle-inventory\.tsv|identity-manifest\.json' 'Trusted export metadata must not exist while candidate code can run.'
         Assert-Match $finalizer "runner_temp='\$\{\{ runner\.temp \}\}'" 'The finalizer must receive the runner temp path from a supervisor-owned workflow expression.'
         Assert-Match $finalizer 'export_root="\$runner_temp/syp154-pr33-evidence-export"' 'The finalizer must bind the exact run-owned export path.'
@@ -803,7 +803,7 @@ jobs:
         ).Value
 
         foreach ($section in @($acquisition, $cleanup, $finalizer, $upload)) {
-            $section | Should -Not -BeNullOrEmpty
+            Assert-True (-not [string]::IsNullOrEmpty($section)) 'Every post-candidate isolation section must be present.'
         }
         Assert-Match $acquisition '/var/lib/syp154-evidence-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}' 'The immutable witness and Git authority must live below a root-owned parent.'
         Assert-Match $acquisition 'sudo -n install -d -m 0755 -o root -g root' 'Acquisition must create the supervisor authority as root.'
@@ -863,8 +863,8 @@ jobs:
             '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
         ).Value
 
-        $finalizer | Should -Not -BeNullOrEmpty
-        $upload | Should -Not -BeNullOrEmpty
+        Assert-True (-not [string]::IsNullOrEmpty($finalizer)) 'The finalizer section must be present.'
+        Assert-True (-not [string]::IsNullOrEmpty($upload)) 'The upload section must be present.'
         Assert-NotMatch $finalizer 'github\.env|environment_file|>>\s*"\$environment_file"' 'Finalization must not append to any runner environment command file.'
         Assert-Match $upload '/usr/bin/env -i' 'Uploader process creation must begin from an empty environment.'
         foreach ($name in @('ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_URL', 'ACTIONS_RUNTIME_TOKEN', 'INPUT_NAME', 'INPUT_PATH', 'RUNNER_TEMP', 'GITHUB_RUN_ID')) {
@@ -895,7 +895,7 @@ jobs:
         ).Value
 
         foreach ($section in @($delegation, $cleanup, $finalizer)) {
-            $section | Should -Not -BeNullOrEmpty
+            Assert-True (-not [string]::IsNullOrEmpty($section)) 'Every cgroup containment section must be present.'
         }
         Assert-Match $delegation 'cgroup_delegated="\$cgroup_parent/delegated"' 'Only a nested cgroup subtree may be delegated to the runner identity.'
         Assert-Match $delegation 'cgroup_supervisor="\$cgroup_delegated/trusted-validator"' 'The trusted validator must remain inside the delegated subtree.'
@@ -934,9 +934,9 @@ jobs:
             Join-Path $script:RepositoryRoot '.github\actions\capture-artifact-service\index.js'
         )
 
-        $snapshotStep | Should -Not -BeNullOrEmpty
-        $finalizer | Should -Not -BeNullOrEmpty
-        $upload | Should -Not -BeNullOrEmpty
+        Assert-True (-not [string]::IsNullOrEmpty($snapshotStep)) 'The artifact-service snapshot step must be present.'
+        Assert-True (-not [string]::IsNullOrEmpty($finalizer)) 'The finalizer section must be present.'
+        Assert-True (-not [string]::IsNullOrEmpty($upload)) 'The upload section must be present.'
         Assert-Match $snapshotStep 'uses:\s*\./\.github/actions/capture-artifact-service' 'The workflow must capture runner-injected service values through a Node action before candidate execution.'
         Assert-Match $actionDefinition 'using:\s*node24' 'The capture step must use the same reviewed Node generation as the pinned uploader.'
         Assert-Match $actionScript 'artifact-service\.env' 'The capture action must snapshot artifact-service authority outside runner-owned paths.'
@@ -965,7 +965,7 @@ jobs:
             '(?s)pr33-adoption-evidence-development-only:.*\z'
         ).Value
 
-        $evidenceJob | Should -Not -BeNullOrEmpty
+        Assert-True (-not [string]::IsNullOrEmpty($evidenceJob)) 'The PR33 evidence job must be present.'
         Assert-NotMatch $evidenceJob 'actions/checkout@' 'The evidence job must not register a checkout post action that candidate code can replace.'
         Assert-Match $evidenceJob 'git -C "\$workspace" fetch --no-tags --depth=1 origin "\$GITHUB_SHA"' 'The evidence job must fetch only the exact 40-hex workflow commit.'
         Assert-Match $evidenceJob 'rev-parse FETCH_HEAD.*?== "\$GITHUB_SHA"' 'The evidence job must verify the fetched commit before materializing the local action.'

@@ -96,6 +96,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/actions/capture-artifact-service/action.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/actions/capture-artifact-service/index.js",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".github/copilot-instructions.en.md",
       "license": "Apache-2.0"
     },
