@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '7519745266e0cd67b057e88c0ee63e702ccd1e10',
             '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            '2987d624e2dfb92f440e7987e34a19c74255128b',
-            'd6b394cf54495df85987bb4e33f055367b005765',
+            '200c1c35634d949f2019dcb8575b8763fe5808da',
+            '07290f276a3aef631e6ba95b287630fab4286aa5',
             'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
             '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow '88fd2483923223c0e6a9d05d09dd299f434e82b8' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow '8ea69b0a6db9190eeed820e0a70b0ec9f3e17ad7' 'The evidence job must pin the reviewed PR36 validator blob.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
@@ -755,10 +755,11 @@ jobs:
         $acquisition | Should -Not -BeNullOrEmpty
         $finalizer | Should -Not -BeNullOrEmpty
         Assert-NotMatch $acquisition 'candidate-diff\.txt|launcher-inventory\.tsv|oracle-inventory\.tsv|identity-manifest\.json' 'Trusted export metadata must not exist while candidate code can run.'
-        Assert-Match $finalizer 'export_root.*RUNNER_TEMP/syp154-pr33-evidence-export' 'The finalizer must bind the exact run-owned export path.'
+        Assert-Match $finalizer "runner_temp='\$\{\{ runner\.temp \}\}'" 'The finalizer must receive the runner temp path from a supervisor-owned workflow expression.'
+        Assert-Match $finalizer 'export_root="\$runner_temp/syp154-pr33-evidence-export"' 'The finalizer must bind the exact run-owned export path.'
         Assert-Match $finalizer 'rm -rf -- "\$export_root"' 'The finalizer must replace any candidate-created export path after candidate shutdown.'
-        Assert-Match $acquisition 'SYP154_ACQUISITION_COMPLETE=1' 'The acquisition step must publish an explicit completion witness.'
-        Assert-Match $finalizer 'SYP154_ACQUISITION_COMPLETE.*==\s*''1''' 'The finalizer must fail closed over completed acquisition inputs.'
+        Assert-Match $acquisition 'acquisitionComplete=1' 'The acquisition step must publish an explicit completion witness.'
+        Assert-Match $finalizer 'acquisition_complete.*==\s*''1''' 'The finalizer must fail closed over completed acquisition inputs.'
         foreach ($trustedPayload in @(
             'candidate-diff\.txt',
             'launcher-inventory\.tsv',
@@ -768,5 +769,44 @@ jobs:
             Assert-Match $finalizer $trustedPayload "The finalizer must recreate $trustedPayload from immutable inputs."
         }
         Assert-Match $finalizer 'export-sha256\.tsv' 'The finalizer must hash every exported payload after rebuilding trusted metadata.'
+    }
+
+    # Scenario: Candidate code can append startup variables and paths to the runner file-command files before later steps start.
+    # Purpose: Start cleanup and finalization through sudo secure-exec with an empty environment, and keep their authority outside runner-owned paths.
+    It 'UnitT90_isolates_cleanup_and_finalization_from_candidate_poisoned_step_state' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $acquisition = [regex]::Match(
+            $workflow,
+            '(?s)- name: Acquire and bind immutable launcher oracle and PR33 candidate.*?(?=\r?\n\s+- name: Delegate Linux cgroup v2 subtree)'
+        ).Value
+        $cleanup = [regex]::Match(
+            $workflow,
+            '(?s)- name: Remove delegated Linux cgroup subtree.*?(?=\r?\n\s+- name: Finalize bounded evidence export)'
+        ).Value
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
+        $upload = [regex]::Match(
+            $workflow,
+            '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
+        ).Value
+
+        foreach ($section in @($acquisition, $cleanup, $finalizer, $upload)) {
+            $section | Should -Not -BeNullOrEmpty
+        }
+        Assert-Match $acquisition '/var/lib/syp154-evidence-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}' 'The immutable witness and Git authority must live below a root-owned parent.'
+        Assert-Match $acquisition 'sudo -n install -d -m 0755 -o root -g root' 'Acquisition must create the supervisor authority as root.'
+        Assert-Match $acquisition 'candidate\.git' 'Acquisition must preserve trusted Git metadata outside the candidate-writable checkout.'
+        foreach ($section in @($cleanup, $finalizer)) {
+            Assert-Match $section 'shell:\s*/usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail \{0\}' 'Post-candidate shell startup must use sudo secure-exec and an empty environment.'
+        }
+        Assert-Match $finalizer '--git-dir="\$supervisor_root/candidate\.git" --work-tree="\$candidate_root"' 'Finalization must use supervisor-owned Git metadata.'
+        Assert-NotMatch $finalizer '\$\{SYP154_[A-Z_]+' 'Finalization must not inherit candidate-poisonable SYP154 environment state.'
+        foreach ($name in @('LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH', 'NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV')) {
+            Assert-Match $upload ("(?m)^\s+" + [regex]::Escape($name) + ":") "The upload action must explicitly clear $name."
+        }
+        Assert-Match $upload '(?m)^\s+PATH:\s*/usr/sbin:/usr/bin:/sbin:/bin\s*$' 'The upload action must not inherit a candidate-appended command path.'
     }
 }

@@ -112,8 +112,8 @@ jobs:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
       SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
       SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: 2987d624e2dfb92f440e7987e34a19c74255128b
-      SYP154_LAUNCHER_TREE: d6b394cf54495df85987bb4e33f055367b005765
+      SYP154_LAUNCHER_COMMIT: 200c1c35634d949f2019dcb8575b8763fe5808da
+      SYP154_LAUNCHER_TREE: 07290f276a3aef631e6ba95b287630fab4286aa5
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
@@ -179,7 +179,7 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:88fd2483923223c0e6a9d05d09dd299f434e82b8'
+            'scripts/Validate.ps1:8ea69b0a6db9190eeed820e0a70b0ec9f3e17ad7'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
@@ -207,12 +207,33 @@ jobs:
             [[ "$actual_blob" == "$expected_blob" ]]
           done
           chmod -R a-w -- "$candidate_root" "$launcher_root"
+          supervisor_root="/var/lib/syp154-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          [[ ! -e "$supervisor_root" ]]
+          sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
+          sudo -n cp -a -- "$candidate_root/.git" "$supervisor_root/candidate.git"
+          sudo -n cp -a -- "$launcher_root" "$supervisor_root/launcher"
+          sudo -n chown -R root:root -- "$supervisor_root/candidate.git" "$supervisor_root/launcher"
+          sudo -n chmod -R a-w -- "$supervisor_root/candidate.git" "$supervisor_root/launcher"
+          {
+            printf 'acquisitionComplete=1\n'
+            printf 'runnerOs=%s\n' "$RUNNER_OS"
+            printf 'runnerArch=%s\n' "$RUNNER_ARCH"
+            printf 'imageOs=%s\n' "${ImageOS:-unknown}"
+            printf 'imageVersion=%s\n' "${ImageVersion:-unknown}"
+            /usr/bin/uname -a
+            /usr/bin/git --version
+            /usr/bin/pwsh --version
+            "$STANDARD_GO_COMMAND_PATH" version
+            /usr/bin/stat --version | /usr/bin/head -n 1
+            /usr/bin/unshare --version
+          } | sudo -n tee -- "$supervisor_root/acquisition-witness.txt" >/dev/null
+          sudo -n chmod 0444 -- "$supervisor_root/acquisition-witness.txt"
           {
             printf 'SYP154_CANDIDATE_ROOT=%s\n' "$candidate_root"
-            printf 'SYP154_LAUNCHER_ROOT=%s\n' "$launcher_root"
+            printf 'SYP154_LAUNCHER_ROOT=%s\n' "$supervisor_root/launcher"
             printf 'SYP154_ARTIFACTS_ROOT=%s\n' "$artifacts_root"
             printf 'SYP154_EXPORT_ROOT=%s\n' "$export_root"
-            printf 'SYP154_ACQUISITION_COMPLETE=1\n'
           } >> "$GITHUB_ENV"
 
       - name: Delegate Linux cgroup v2 subtree
@@ -280,6 +301,7 @@ jobs:
           $validatorPath = Join-Path $env:SYP154_LAUNCHER_ROOT 'scripts/Validate.ps1'
           $previousGithubSha = [Environment]::GetEnvironmentVariable('GITHUB_SHA', [EnvironmentVariableTarget]::Process)
           $previousSupervisorCommit = [Environment]::GetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', [EnvironmentVariableTarget]::Process)
+          $validationError = $null
           try {
             [Environment]::SetEnvironmentVariable('GITHUB_SHA', $env:SYP154_ORACLE_COMMIT, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', $env:SYP154_ORACLE_COMMIT, [EnvironmentVariableTarget]::Process)
@@ -290,67 +312,99 @@ jobs:
               -ExpectedGoRuntimeVersion $env:STANDARD_GO_RUNTIME_VERSION `
               -OutputPath $outputPath
           }
+          catch {
+            $validationError = $_
+          }
           finally {
             [Environment]::SetEnvironmentVariable('GITHUB_SHA', $previousGithubSha, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', $previousSupervisorCommit, [EnvironmentVariableTarget]::Process)
           }
+          $supervisorRoot = "/var/lib/syp154-evidence-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          if ($supervisorRoot -notmatch '^/var/lib/syp154-evidence-[0-9]+-[0-9]+$') {
+            throw 'The trusted evidence supervisor root is invalid.'
+          }
+          $summaryPaths = @(Get-ChildItem -LiteralPath $artifactsRoot -Filter 'security-preflight-summary.json' -File -Recurse -Force)
+          if ($summaryPaths.Count -gt 1) { throw 'Expected at most one bounded security preflight summary.' }
+          if ($summaryPaths.Count -eq 1) {
+            $summarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $summaryPaths[0].FullName).Hash.ToLowerInvariant()
+            $summarySha256 | & sudo -n tee -- (Join-Path $supervisorRoot 'security-summary.sha256') | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the trusted security summary digest.' }
+            & sudo -n chmod 0444 -- (Join-Path $supervisorRoot 'security-summary.sha256')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not protect the trusted security summary digest.' }
+          }
+          if ($null -ne $validationError) { throw $validationError }
           if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) { throw 'PR33 conformance evidence is missing.' }
           $evidenceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash.ToLowerInvariant()
+          $evidenceSha256 | & sudo -n tee -- (Join-Path $supervisorRoot 'report.sha256') | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the trusted conformance report digest.' }
+          & sudo -n chmod 0444 -- (Join-Path $supervisorRoot 'report.sha256')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not protect the trusted conformance report digest.' }
           "pr33_evidence_sha256=$evidenceSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Remove delegated Linux cgroup subtree
         if: ${{ always() }}
-        shell: bash
+        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
-          cgroup_parent="${CODEX_PESTER_CGROUP_ROOT:-}"
-          if [[ -z "$cgroup_parent" ]]; then
-            exit 0
-          fi
+          cgroup_parent="/sys/fs/cgroup/codex-validation-${{ github.run_id }}-${{ github.run_attempt }}"
           [[ "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]
           if [[ -e "$cgroup_parent" ]]; then
-            cgroup_supervisor="${CODEX_PESTER_VALIDATOR_CGROUP:-$cgroup_parent/trusted-validator}"
+            cgroup_supervisor="$cgroup_parent/trusted-validator"
             [[ "$cgroup_supervisor" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/trusted-validator$ ]]
             if [[ -e "$cgroup_supervisor" ]]; then
-              sudo -n rmdir -- "$cgroup_supervisor"
+              /usr/bin/rmdir -- "$cgroup_supervisor"
             fi
-            sudo -n rmdir -- "$cgroup_parent"
+            /usr/bin/rmdir -- "$cgroup_parent"
           fi
 
       - name: Finalize bounded evidence export
         if: ${{ always() }}
-        shell: bash
-        env:
-          EVIDENCE_JOB_STATUS: ${{ job.status }}
-          EXPECTED_REPORT_SHA256: ${{ steps.pr33-evidence.outputs.pr33_evidence_sha256 }}
+        shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
-          export_root="${SYP154_EXPORT_ROOT:-$RUNNER_TEMP/syp154-pr33-evidence-export}"
-          artifacts_root="${SYP154_ARTIFACTS_ROOT:-$RUNNER_TEMP/syp154-pr33-artifacts}"
-          candidate_root="${SYP154_CANDIDATE_ROOT:-$RUNNER_TEMP/syp154-pr33-candidate}"
-          launcher_root="${SYP154_LAUNCHER_ROOT:-$RUNNER_TEMP/syp154-pr33-launcher}"
-          expected_export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
-          if [[ "$export_root" != "$expected_export_root" ]]; then
-            echo "Refusing to finalize an unexpected evidence export path: $export_root" >&2
-            exit 1
-          fi
-          rm -rf -- "$export_root"
-          mkdir -- "$export_root"
+          runner_temp='${{ runner.temp }}'
+          evidence_job_status='${{ job.status }}'
+          repository='https://github.com/SyuanTsai/Skill-Darktide-Translate.git'
+          candidate_commit='7519745266e0cd67b057e88c0ee63e702ccd1e10'
+          candidate_tree='654934a3f1f412bc5ccda89bda0f9158cb4d328a'
+          launcher_commit='200c1c35634d949f2019dcb8575b8763fe5808da'
+          launcher_tree='07290f276a3aef631e6ba95b287630fab4286aa5'
+          oracle_commit='c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8'
+          oracle_tree='4332d9a1a366d6ff238cde3fe33912cca7dd2050'
+          candidate_root="$runner_temp/syp154-pr33-candidate"
+          artifacts_root="$runner_temp/syp154-pr33-artifacts"
+          export_root="$runner_temp/syp154-pr33-evidence-export"
+          supervisor_root="/var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+          [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          cleanup_supervisor() { /bin/rm -rf -- "$supervisor_root"; }
+          trap cleanup_supervisor EXIT
+          /bin/rm -rf -- "$export_root"
+          /usr/bin/install -d -m 0755 -o root -g root -- "$export_root"
 
-          if [[ "${SYP154_ACQUISITION_COMPLETE:-}" == '1' ]]; then
-            [[ -d "$candidate_root/.git" && -d "$launcher_root" ]]
-            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/candidate)" == "$SYP154_CANDIDATE_COMMIT" ]]
-            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/launcher)" == "$SYP154_LAUNCHER_COMMIT" ]]
-            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/oracle)" == "$SYP154_ORACLE_COMMIT" ]]
-            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_CANDIDATE_COMMIT^{tree}")" == "$SYP154_CANDIDATE_TREE" ]]
-            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT^{tree}")" == "$SYP154_LAUNCHER_TREE" ]]
-            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT^{tree}")" == "$SYP154_ORACLE_TREE" ]]
-            [[ -z "$(git -C "$candidate_root" status --porcelain=v1 --untracked-files=all)" ]]
-            git -C "$candidate_root" diff --check "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT"
-            git -C "$candidate_root" diff --name-status "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT" > "$export_root/candidate-diff.txt"
+          acquisition_complete=0
+          witness="$supervisor_root/acquisition-witness.txt"
+          if [[ -e "$supervisor_root" ]]; then
+            [[ -d "$supervisor_root/candidate.git" && -d "$supervisor_root/launcher" ]]
+            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$witness")" == '0:0:444' ]]
+            [[ "$(/usr/bin/head -n 1 "$witness")" == 'acquisitionComplete=1' ]]
+            acquisition_complete=1
+          fi
+
+          if [[ "$acquisition_complete" == '1' ]]; then
+            launcher_root="$supervisor_root/launcher"
+            git_command=(/usr/bin/git --git-dir="$supervisor_root/candidate.git" --work-tree="$candidate_root" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c credential.helper=)
+            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/candidate)" == "$candidate_commit" ]]
+            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/launcher)" == "$launcher_commit" ]]
+            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/oracle)" == "$oracle_commit" ]]
+            [[ "$("${git_command[@]}" rev-parse "$candidate_commit^{tree}")" == "$candidate_tree" ]]
+            [[ "$("${git_command[@]}" rev-parse "$launcher_commit^{tree}")" == "$launcher_tree" ]]
+            [[ "$("${git_command[@]}" rev-parse "$oracle_commit^{tree}")" == "$oracle_tree" ]]
+            [[ -z "$("${git_command[@]}" status --porcelain=v1 --untracked-files=all)" ]]
+            "${git_command[@]}" diff --no-ext-diff --check "$oracle_commit...$candidate_commit"
+            "${git_command[@]}" diff --no-ext-diff --name-status "$oracle_commit...$candidate_commit" > "$export_root/candidate-diff.txt"
 
             launcher_inventory=(
-              'scripts/Validate.ps1:88fd2483923223c0e6a9d05d09dd299f434e82b8'
+              'scripts/Validate.ps1:8ea69b0a6db9190eeed820e0a70b0ec9f3e17ad7'
               'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
             )
             oracle_inventory=(
@@ -368,16 +422,16 @@ jobs:
             for entry in "${launcher_inventory[@]}"; do
               path="${entry%%:*}"
               expected_blob="${entry##*:}"
-              actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT:$path")"
-              materialized_blob="$(git hash-object "$launcher_root/$path")"
+              actual_blob="$("${git_command[@]}" rev-parse "$launcher_commit:$path")"
+              materialized_blob="$("${git_command[@]}" hash-object "$launcher_root/$path")"
               [[ "$actual_blob" == "$expected_blob" && "$materialized_blob" == "$expected_blob" ]]
-              printf '%s\t%s\t%s\n' "$path" "$expected_blob" "$(sha256sum "$launcher_root/$path" | cut -d' ' -f1)" >> "$export_root/launcher-inventory.tsv"
+              printf '%s\t%s\t%s\n' "$path" "$expected_blob" "$(/usr/bin/sha256sum "$launcher_root/$path" | /usr/bin/cut -d' ' -f1)" >> "$export_root/launcher-inventory.tsv"
             done
             : > "$export_root/oracle-inventory.tsv"
             for entry in "${oracle_inventory[@]}"; do
               path="${entry%%:*}"
               expected_blob="${entry##*:}"
-              actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT:$path")"
+              actual_blob="$("${git_command[@]}" rev-parse "$oracle_commit:$path")"
               [[ "$actual_blob" == "$expected_blob" ]]
               printf '%s\t%s\n' "$path" "$expected_blob" >> "$export_root/oracle-inventory.tsv"
             done
@@ -387,48 +441,66 @@ jobs:
           {
             "schemaVersion": 1,
             "purpose": "syp154-pr33-adoption-evidence-development-only",
-            "repository": "$SYP154_DARKTIDE_REPOSITORY",
-            "candidate": { "commit": "$SYP154_CANDIDATE_COMMIT", "tree": "$SYP154_CANDIDATE_TREE" },
-            "launcher": { "commit": "$SYP154_LAUNCHER_COMMIT", "tree": "$SYP154_LAUNCHER_TREE" },
-            "oracle": { "commit": "$SYP154_ORACLE_COMMIT", "tree": "$SYP154_ORACLE_TREE" },
+            "repository": "$repository",
+            "candidate": { "commit": "$candidate_commit", "tree": "$candidate_tree" },
+            "launcher": { "commit": "$launcher_commit", "tree": "$launcher_tree" },
+            "oracle": { "commit": "$oracle_commit", "tree": "$oracle_tree" },
             "releaseEligible": false,
             "formalAdoption": "not-authorized"
           }
           JSON
           {
-            printf 'jobStatus=%s\n' "$EVIDENCE_JOB_STATUS"
-            printf 'runnerOs=%s\n' "${RUNNER_OS:-unknown}"
-            printf 'runnerArch=%s\n' "${RUNNER_ARCH:-unknown}"
-            printf 'imageOs=%s\n' "${ImageOS:-unknown}"
-            printf 'imageVersion=%s\n' "${ImageVersion:-unknown}"
-            uname -a
-            git --version
-            pwsh --version
-            go version
-            stat --version | head -n 1
-            unshare --version
+            printf 'jobStatus=%s\n' "$evidence_job_status"
+            if [[ "$acquisition_complete" == '1' ]]; then
+              /usr/bin/tail -n +2 "$witness"
+            else
+              printf 'runnerOs=Linux\nrunnerArch=X64\nimageOs=unknown\nimageVersion=unknown\n'
+              /usr/bin/uname -a
+              /usr/bin/git --version
+              /usr/bin/pwsh --version
+              /usr/bin/stat --version | /usr/bin/head -n 1
+              /usr/bin/unshare --version
+            fi
           } > "$export_root/runtime.txt"
           report="$artifacts_root/pr33-conformance-report.json"
+          expected_report_sha256=''
+          if [[ -f "$supervisor_root/report.sha256" ]]; then
+            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$supervisor_root/report.sha256")" == '0:0:444' ]]
+            IFS= read -r expected_report_sha256 < "$supervisor_root/report.sha256"
+            [[ "$expected_report_sha256" =~ ^[0-9a-f]{64}$ ]]
+          fi
           if [[ -f "$report" ]]; then
-            actual_sha256="$(sha256sum "$report" | cut -d' ' -f1)"
-            if [[ -n "$EXPECTED_REPORT_SHA256" && "$actual_sha256" != "$EXPECTED_REPORT_SHA256" ]]; then
+            [[ -n "$expected_report_sha256" ]]
+            actual_sha256="$(/usr/bin/sha256sum "$report" | /usr/bin/cut -d' ' -f1)"
+            if [[ "$actual_sha256" != "$expected_report_sha256" ]]; then
               echo 'Conformance report changed after the trusted validator returned.' >&2
               exit 1
             fi
-            cp -- "$report" "$export_root/pr33-conformance-report.json"
+            /usr/bin/cp -- "$report" "$export_root/pr33-conformance-report.json"
             printf '%s  %s\n' "$actual_sha256" 'pr33-conformance-report.json' > "$export_root/report.sha256"
+          elif [[ -n "$expected_report_sha256" ]]; then
+            echo 'The trusted conformance report disappeared before finalization.' >&2
+            exit 1
           fi
-          mapfile -t summaries < <(find "$artifacts_root" -type f -name security-preflight-summary.json -print)
+          mapfile -t summaries < <(/usr/bin/find "$artifacts_root" -type f -name security-preflight-summary.json -print)
           if (( ${#summaries[@]} > 1 )); then
             echo 'Expected at most one bounded security preflight summary.' >&2
             exit 1
           fi
           if (( ${#summaries[@]} == 1 )); then
-            cp -- "${summaries[0]}" "$export_root/security-preflight-summary.json"
-            sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"
+            [[ -f "$supervisor_root/security-summary.sha256" ]]
+            [[ "$(/usr/bin/stat -c '%u:%g:%a' "$supervisor_root/security-summary.sha256")" == '0:0:444' ]]
+            IFS= read -r expected_summary_sha256 < "$supervisor_root/security-summary.sha256"
+            [[ "$expected_summary_sha256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$(/usr/bin/sha256sum "${summaries[0]}" | /usr/bin/cut -d' ' -f1)" == "$expected_summary_sha256" ]]
+            /usr/bin/cp -- "${summaries[0]}" "$export_root/security-preflight-summary.json"
+            /usr/bin/sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"
+          elif [[ -f "$supervisor_root/security-summary.sha256" ]]; then
+            echo 'The trusted security preflight summary disappeared before finalization.' >&2
+            exit 1
           fi
           {
-            find "$export_root" -maxdepth 1 -type f \
+            /usr/bin/find "$export_root" -maxdepth 1 -type f \
               ! -name export-inventory.txt ! -name export-sha256.tsv -printf '%f\n'
             printf '%s\n' export-inventory.txt export-sha256.tsv
           } | LC_ALL=C sort > "$export_root/export-inventory.txt"
@@ -436,12 +508,23 @@ jobs:
             if [[ "$exported_file" == 'export-sha256.tsv' ]]; then
               continue
             fi
-            printf '%s\t%s\n' "$(sha256sum "$export_root/$exported_file" | cut -d' ' -f1)" "$exported_file"
+            printf '%s\t%s\n' "$(/usr/bin/sha256sum "$export_root/$exported_file" | /usr/bin/cut -d' ' -f1)" "$exported_file"
           done < "$export_root/export-inventory.txt" > "$export_root/export-sha256.tsv"
+          /usr/bin/find "$export_root" -maxdepth 1 -type f -exec /usr/bin/chmod 0444 -- '{}' +
+          /usr/bin/chmod 0555 -- "$export_root"
 
       - name: Upload bounded PR33 adoption evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        env:
+          PATH: /usr/sbin:/usr/bin:/sbin:/bin
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          BASH_ENV: /dev/null
+          ENV: /dev/null
         with:
           name: syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/syp154-pr33-evidence-export
