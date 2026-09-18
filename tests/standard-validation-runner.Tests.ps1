@@ -797,6 +797,11 @@ catch {
         Assert-Match $shardExecutorSource 'Cancellation marker observed before bootstrap release' 'Cancellation must be rechecked after ownership assignment and before bootstrap release.'
         Assert-Match $shardExecutorSource 'Pester shard process status is not completed or output quota was exceeded' 'The aggregate must fail closed on non-completed shard evidence or output-quota overflow.'
         Assert-Match $shardExecutorSource 'PesterShardBoundedCapture|outputQuotaCharacters' 'The shard executor must bound redirected child output.'
+        Assert-Match $shardExecutorSource 'failureKind[\s=]+.*early-child-failure' 'A child initialization or Invoke-Pester exception must be represented as an explicit failed result contract.'
+        Assert-Match $shardExecutorSource 'failurePhase\s*=\s*\$childFailurePhase' 'Early child evidence must identify the failing initialization or Invoke-Pester phase.'
+        Assert-Match $shardExecutorSource 'FailedCount\s*=\s*1' 'Early child failure evidence must contain a nonzero failed count.'
+        Assert-Match $shardExecutorSource 'childExitCode\s*-ne\s*0' 'An early child failure must retain a nonzero child exit code after writing evidence.'
+        Assert-Match $shardExecutorSource 'ConvertTo-PesterShardEarlyFailureDiagnostic' 'Early child diagnostics must be bounded and sanitized before result/evidence emission.'
         Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
     }
