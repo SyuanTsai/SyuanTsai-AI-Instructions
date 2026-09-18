@@ -809,4 +809,31 @@ jobs:
         }
         Assert-Match $upload '(?m)^\s+PATH:\s*/usr/sbin:/usr/bin:/sbin:/bin\s*$' 'The upload action must not inherit a candidate-appended command path.'
     }
+
+    # Scenario: Candidate code has the runner account's host filesystem permissions before the artifact action starts.
+    # Purpose: Restore the pinned uploader from a root-owned pre-candidate snapshot and skip upload if trusted finalization fails.
+    It 'UnitT95_restores_the_pinned_uploader_from_supervisor_owned_bytes' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $acquisition = [regex]::Match(
+            $workflow,
+            '(?s)- name: Acquire and bind immutable launcher oracle and PR33 candidate.*?(?=\r?\n\s+- name: Delegate Linux cgroup v2 subtree)'
+        ).Value
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
+        $upload = [regex]::Match(
+            $workflow,
+            '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
+        ).Value
+
+        Assert-Match $acquisition 'upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' 'Acquisition must locate the exact pinned upload action payload.'
+        Assert-Match $acquisition '"\$supervisor_root/upload-artifact"' 'Acquisition must copy the uploader into the root-owned supervisor authority.'
+        Assert-Match $finalizer '/bin/rm -rf -- "\$upload_action_root"' 'Finalization must remove any candidate-modified uploader payload.'
+        Assert-Match $finalizer '/usr/bin/cp -a -- "\$supervisor_root/upload-artifact" "\$upload_action_root"' 'Finalization must restore the uploader from supervisor-owned bytes.'
+        Assert-Match $finalizer '/usr/bin/chown -R root:root -- "\$upload_action_root"' 'The restored uploader must be owned by root.'
+        Assert-Match $finalizer '/usr/bin/chmod -R a-w -- "\$upload_action_root"' 'The restored uploader must be immutable to the runner account.'
+        Assert-Match $upload "if:\s*\$\{\{ always\(\) && steps\.finalize_evidence\.outcome == 'success' \}\}" 'Upload must not execute if trusted restoration or finalization fails.'
+    }
 }

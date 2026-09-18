@@ -148,6 +148,19 @@ jobs:
           launcher_root="$RUNNER_TEMP/syp154-pr33-launcher"
           artifacts_root="$RUNNER_TEMP/syp154-pr33-artifacts"
           export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
+          supervisor_root="/var/lib/syp154-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          upload_action_root="$(/usr/bin/dirname "$RUNNER_TEMP")/_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+          upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
+          [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          [[ "$upload_action_root" =~ ^/home/runner/work/_actions/actions/upload-artifact/[0-9a-f]{40}$ ]]
+          [[ -d "$upload_action_parent" && ! -L "$upload_action_parent" ]]
+          [[ "$(/usr/bin/realpath -e "$upload_action_parent")" == "$upload_action_parent" ]]
+          [[ -d "$upload_action_root" && ! -L "$upload_action_root" ]]
+          [[ ! -e "$supervisor_root" ]]
+          sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
+          sudo -n cp -a -- "$upload_action_root" "$supervisor_root/upload-artifact"
+          sudo -n chown -R root:root -- "$supervisor_root/upload-artifact"
+          sudo -n chmod -R a-w -- "$supervisor_root/upload-artifact"
           for root in "$candidate_root" "$launcher_root" "$artifacts_root"; do
             if [[ -e "$root" ]]; then
               echo "Evidence root already exists: $root" >&2
@@ -207,10 +220,6 @@ jobs:
             [[ "$actual_blob" == "$expected_blob" ]]
           done
           chmod -R a-w -- "$candidate_root" "$launcher_root"
-          supervisor_root="/var/lib/syp154-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
-          [[ ! -e "$supervisor_root" ]]
-          sudo -n install -d -m 0755 -o root -g root -- "$supervisor_root"
           sudo -n cp -a -- "$candidate_root/.git" "$supervisor_root/candidate.git"
           sudo -n cp -a -- "$launcher_root" "$supervisor_root/launcher"
           sudo -n chown -R root:root -- "$supervisor_root/candidate.git" "$supervisor_root/launcher"
@@ -358,6 +367,7 @@ jobs:
           fi
 
       - name: Finalize bounded evidence export
+        id: finalize_evidence
         if: ${{ always() }}
         shell: /usr/bin/sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
@@ -375,7 +385,12 @@ jobs:
           artifacts_root="$runner_temp/syp154-pr33-artifacts"
           export_root="$runner_temp/syp154-pr33-evidence-export"
           supervisor_root="/var/lib/syp154-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+          upload_action_root="$(/usr/bin/dirname "$runner_temp")/_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+          upload_action_parent="$(/usr/bin/dirname "$upload_action_root")"
           [[ "$supervisor_root" =~ ^/var/lib/syp154-evidence-[0-9]+-[0-9]+$ ]]
+          [[ "$upload_action_root" =~ ^/home/runner/work/_actions/actions/upload-artifact/[0-9a-f]{40}$ ]]
+          [[ -d "$upload_action_parent" && ! -L "$upload_action_parent" ]]
+          [[ "$(/usr/bin/realpath -e "$upload_action_parent")" == "$upload_action_parent" ]]
           cleanup_supervisor() { /bin/rm -rf -- "$supervisor_root"; }
           trap cleanup_supervisor EXIT
           /bin/rm -rf -- "$export_root"
@@ -383,7 +398,9 @@ jobs:
 
           acquisition_complete=0
           witness="$supervisor_root/acquisition-witness.txt"
-          if [[ -e "$supervisor_root" ]]; then
+          [[ -d "$supervisor_root/upload-artifact" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$supervisor_root/upload-artifact")" == '0:0:555' ]]
+          if [[ -f "$witness" ]]; then
             [[ -d "$supervisor_root/candidate.git" && -d "$supervisor_root/launcher" ]]
             [[ "$(/usr/bin/stat -c '%u:%g:%a' "$witness")" == '0:0:444' ]]
             [[ "$(/usr/bin/head -n 1 "$witness")" == 'acquisitionComplete=1' ]]
@@ -512,9 +529,14 @@ jobs:
           done < "$export_root/export-inventory.txt" > "$export_root/export-sha256.tsv"
           /usr/bin/find "$export_root" -maxdepth 1 -type f -exec /usr/bin/chmod 0444 -- '{}' +
           /usr/bin/chmod 0555 -- "$export_root"
+          /bin/rm -rf -- "$upload_action_root"
+          /usr/bin/cp -a -- "$supervisor_root/upload-artifact" "$upload_action_root"
+          /usr/bin/chown -R root:root -- "$upload_action_root"
+          /usr/bin/chmod -R a-w -- "$upload_action_root"
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_action_root")" == '0:0:555' ]]
 
       - name: Upload bounded PR33 adoption evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.finalize_evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         env:
           PATH: /usr/sbin:/usr/bin:/sbin:/bin
