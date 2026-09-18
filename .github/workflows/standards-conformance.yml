@@ -100,3 +100,286 @@ jobs:
           else
             git diff-tree --check --root -r HEAD
           fi
+
+  pr33-adoption-evidence-development-only:
+    name: SYP-154 PR33 adoption evidence (development only)
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - latest-stable-authority-regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
+      SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
+      SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
+      SYP154_LAUNCHER_COMMIT: d9134d17b7e898fc37752d7386cf858199dd08d9
+      SYP154_LAUNCHER_TREE: 0d64b1e2d5a44705e69cec506e763901271490a5
+      SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
+      SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
+    steps:
+      - name: Set up approved Go runtime
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 'stable'
+          check-latest: true
+          cache: false
+
+      - name: Capture resolved stable Go runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $goApplication = Get-Command -Name go -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1
+          $goCommandPath = if ($null -ne $goApplication.PSObject.Properties['Path']) { [string]$goApplication.Path } else { [string]$goApplication.Source }
+          if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) { throw "setup-go returned a non-absolute Go path: $goCommandPath" }
+          $versionOutput = @(& $goCommandPath version)
+          if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or
+              [string]$versionOutput[0] -notmatch '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$') {
+            throw "setup-go did not provide one stable Go runtime version. Evidence='$($versionOutput -join ' | ')'"
+          }
+          "STANDARD_GO_RUNTIME_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STANDARD_GO_COMMAND_PATH=$goCommandPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Acquire and bind immutable launcher oracle and PR33 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="$RUNNER_TEMP/syp154-pr33-candidate"
+          launcher_root="$RUNNER_TEMP/syp154-pr33-launcher"
+          artifacts_root="$RUNNER_TEMP/syp154-pr33-artifacts"
+          export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
+          for root in "$candidate_root" "$launcher_root" "$artifacts_root" "$export_root"; do
+            if [[ -e "$root" ]]; then
+              echo "Evidence root already exists: $root" >&2
+              exit 1
+            fi
+          done
+          mkdir -- "$candidate_root" "$launcher_root" "$artifacts_root" "$export_root"
+          git -C "$candidate_root" init
+          git -C "$candidate_root" remote add origin "$SYP154_DARKTIDE_REPOSITORY"
+          git -C "$candidate_root" fetch --no-tags origin \
+            '+refs/heads/codex/SYP-154-v3-p06-implementation:refs/remotes/evidence/candidate' \
+            '+refs/heads/codex/SYP-154-p06-base-compat:refs/remotes/evidence/launcher' \
+            '+refs/heads/main:refs/remotes/evidence/oracle'
+          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/candidate)" == "$SYP154_CANDIDATE_COMMIT" ]]
+          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/launcher)" == "$SYP154_LAUNCHER_COMMIT" ]]
+          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/oracle)" == "$SYP154_ORACLE_COMMIT" ]]
+          [[ "$(git -C "$candidate_root" rev-parse "$SYP154_CANDIDATE_COMMIT^{tree}")" == "$SYP154_CANDIDATE_TREE" ]]
+          [[ "$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT^{tree}")" == "$SYP154_LAUNCHER_TREE" ]]
+          [[ "$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT^{tree}")" == "$SYP154_ORACLE_TREE" ]]
+          git -C "$candidate_root" merge-base --is-ancestor "$SYP154_ORACLE_COMMIT" "$SYP154_CANDIDATE_COMMIT"
+          git -C "$candidate_root" checkout --detach "$SYP154_CANDIDATE_COMMIT"
+          [[ -z "$(git -C "$candidate_root" status --porcelain=v1 --untracked-files=all)" ]]
+          git -C "$candidate_root" diff --check "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT"
+          git -C "$candidate_root" diff --name-status "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT" > "$export_root/candidate-diff.txt"
+          git -C "$candidate_root" archive "$SYP154_LAUNCHER_COMMIT" \
+            scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
+
+          launcher_inventory=(
+            'scripts/Validate.ps1:c5f045671bf48320de2abe3a6244163632cc5576'
+            'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
+          )
+          oracle_inventory=(
+            'tests/BootstrapTransition.Tests.ps1:bb4dd7b3e5c3bd4085572c8400885e76f98031dd'
+            'tests/LocalizationWorkset.Tests.ps1:abbfc0ac6f7a8762a48b6b9c860ef1f48cddcb54'
+            'tests/ModUpdateAutomation.Tests.ps1:f67a6aa9050a5ab9718b7c5d450584fa402b28c2'
+            'tests/RepositoryContract.Tests.ps1:de5fa4f2efe3fa33d0dea23f1b616ec210cdc2bb'
+            'tests/RepositoryValidation.Tests.ps1:13e22b4522087b50b345736a4208dfd388ea148d'
+            'tests/Schema15Coordination.Tests.ps1:94c7990fff669164755a52e5937f34b677c8de53'
+            'tests/Schema15SourceAcquisition.Tests.ps1:84f141aca53aaeae7e93aefdbf4e30d5af1be6a7'
+            'tests/SkillContract.Tests.ps1:b87401c01a671b978529066d71f3f0a44bf17d2a'
+            'tests/SourcePin.Tests.ps1:6304768b79f063558f978e71cab59d9554c4e5ce'
+          )
+          : > "$export_root/launcher-inventory.tsv"
+          for entry in "${launcher_inventory[@]}"; do
+            path="${entry%%:*}"
+            expected_blob="${entry##*:}"
+            actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT:$path")"
+            materialized_blob="$(git hash-object "$launcher_root/$path")"
+            [[ "$actual_blob" == "$expected_blob" && "$materialized_blob" == "$expected_blob" ]]
+            printf '%s\t%s\t%s\n' "$path" "$expected_blob" "$(sha256sum "$launcher_root/$path" | cut -d' ' -f1)" >> "$export_root/launcher-inventory.tsv"
+          done
+          : > "$export_root/oracle-inventory.tsv"
+          for entry in "${oracle_inventory[@]}"; do
+            path="${entry%%:*}"
+            expected_blob="${entry##*:}"
+            actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT:$path")"
+            [[ "$actual_blob" == "$expected_blob" ]]
+            printf '%s\t%s\n' "$path" "$expected_blob" >> "$export_root/oracle-inventory.tsv"
+          done
+
+          cat > "$export_root/identity-manifest.json" <<JSON
+          {
+            "schemaVersion": 1,
+            "purpose": "syp154-pr33-adoption-evidence-development-only",
+            "repository": "$SYP154_DARKTIDE_REPOSITORY",
+            "candidate": { "commit": "$SYP154_CANDIDATE_COMMIT", "tree": "$SYP154_CANDIDATE_TREE" },
+            "launcher": { "commit": "$SYP154_LAUNCHER_COMMIT", "tree": "$SYP154_LAUNCHER_TREE" },
+            "oracle": { "commit": "$SYP154_ORACLE_COMMIT", "tree": "$SYP154_ORACLE_TREE" },
+            "releaseEligible": false,
+            "formalAdoption": "not-authorized"
+          }
+          JSON
+          chmod -R a-w -- "$candidate_root" "$launcher_root"
+          {
+            printf 'SYP154_CANDIDATE_ROOT=%s\n' "$candidate_root"
+            printf 'SYP154_LAUNCHER_ROOT=%s\n' "$launcher_root"
+            printf 'SYP154_ARTIFACTS_ROOT=%s\n' "$artifacts_root"
+            printf 'SYP154_EXPORT_ROOT=%s\n' "$export_root"
+          } >> "$GITHUB_ENV"
+
+      - name: Delegate Linux cgroup v2 subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cgroup_parent="/sys/fs/cgroup/codex-validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]
+          controllers="$(< /sys/fs/cgroup/cgroup.controllers)"
+          [[ " $controllers " =~ [[:space:]]memory[[:space:]] ]]
+          [[ " $controllers " =~ [[:space:]]cpu[[:space:]] ]]
+          controllers_to_enable='+cpu +memory'
+          if [[ " $controllers " =~ [[:space:]]pids[[:space:]] ]]; then
+            controllers_to_enable+=' +pids'
+          fi
+          printf '%s\n' "$controllers_to_enable" | sudo -n tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+          [[ ! -e "$cgroup_parent" ]]
+          cgroup_supervisor="$cgroup_parent/trusted-validator"
+          sudo -n mkdir -- "$cgroup_parent"
+          sudo -n chown "$(id -u):$(id -g)" -- "$cgroup_parent"
+          sudo -n chmod 0755 -- "$cgroup_parent"
+          printf '%s\n' "$controllers_to_enable" | sudo -n tee "$cgroup_parent/cgroup.subtree_control" >/dev/null
+          for delegation_file in \
+            "$cgroup_parent/cgroup.procs" \
+            "$cgroup_parent/cgroup.threads" \
+            "$cgroup_parent/cgroup.subtree_control"; do
+            sudo -n chown "$(id -u):$(id -g)" -- "$delegation_file"
+          done
+          mkdir -- "$cgroup_supervisor"
+          [[ -w "$cgroup_parent" && -w "$cgroup_supervisor" ]]
+          {
+            printf 'CODEX_PESTER_CGROUP_ROOT=%s\n' "$cgroup_parent"
+            printf 'CODEX_PESTER_VALIDATOR_CGROUP=%s\n' "$cgroup_supervisor"
+          } >> "$GITHUB_ENV"
+
+      - name: Prove unprivileged Linux namespace capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo -n sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- true
+
+      - name: Validate immutable PR33 candidate with independent oracle
+        id: pr33-evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $validatorCgroup = [string]$env:CODEX_PESTER_VALIDATOR_CGROUP
+          if ($validatorCgroup -notmatch '^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/trusted-validator$') {
+            throw 'The trusted evidence validator cgroup path is missing or invalid.'
+          }
+          [string]$PID | & sudo -n tee -- (Join-Path $validatorCgroup 'cgroup.procs') | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not place the trusted evidence validator inside its delegated cgroup.' }
+          $relativeValidatorCgroup = $validatorCgroup.Substring('/sys/fs/cgroup'.Length)
+          $currentCgroup = [IO.File]::ReadAllText("/proc/$PID/cgroup").Trim()
+          if ($currentCgroup -notmatch ("0::" + [regex]::Escape($relativeValidatorCgroup) + '$')) {
+            throw 'The trusted evidence validator did not enter its delegated cgroup.'
+          }
+          $candidateRoot = [IO.Path]::GetFullPath($env:SYP154_CANDIDATE_ROOT)
+          $artifactsRoot = [IO.Path]::GetFullPath($env:SYP154_ARTIFACTS_ROOT)
+          $outputPath = Join-Path $artifactsRoot 'pr33-conformance-report.json'
+          $validatorPath = Join-Path $env:SYP154_LAUNCHER_ROOT 'scripts/Validate.ps1'
+          $previousGithubSha = [Environment]::GetEnvironmentVariable('GITHUB_SHA', [EnvironmentVariableTarget]::Process)
+          $previousSupervisorCommit = [Environment]::GetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', [EnvironmentVariableTarget]::Process)
+          try {
+            [Environment]::SetEnvironmentVariable('GITHUB_SHA', $env:SYP154_ORACLE_COMMIT, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', $env:SYP154_ORACLE_COMMIT, [EnvironmentVariableTarget]::Process)
+            & $validatorPath `
+              -RepositoryRoot $candidateRoot `
+              -ArtifactsRoot $artifactsRoot `
+              -BaseCommit $env:SYP154_ORACLE_COMMIT `
+              -ExpectedGoRuntimeVersion $env:STANDARD_GO_RUNTIME_VERSION `
+              -OutputPath $outputPath
+          }
+          finally {
+            [Environment]::SetEnvironmentVariable('GITHUB_SHA', $previousGithubSha, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TRUSTED_SUPERVISOR_COMMIT', $previousSupervisorCommit, [EnvironmentVariableTarget]::Process)
+          }
+          if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) { throw 'PR33 conformance evidence is missing.' }
+          $evidenceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash.ToLowerInvariant()
+          "pr33_evidence_sha256=$evidenceSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Remove delegated Linux cgroup subtree
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cgroup_parent="${CODEX_PESTER_CGROUP_ROOT:-}"
+          if [[ -z "$cgroup_parent" ]]; then
+            exit 0
+          fi
+          [[ "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]
+          if [[ -e "$cgroup_parent" ]]; then
+            cgroup_supervisor="${CODEX_PESTER_VALIDATOR_CGROUP:-$cgroup_parent/trusted-validator}"
+            [[ "$cgroup_supervisor" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/trusted-validator$ ]]
+            if [[ -e "$cgroup_supervisor" ]]; then
+              sudo -n rmdir -- "$cgroup_supervisor"
+            fi
+            sudo -n rmdir -- "$cgroup_parent"
+          fi
+
+      - name: Finalize bounded evidence export
+        if: ${{ always() }}
+        shell: bash
+        env:
+          EVIDENCE_JOB_STATUS: ${{ job.status }}
+          EXPECTED_REPORT_SHA256: ${{ steps.pr33-evidence.outputs.pr33_evidence_sha256 }}
+        run: |
+          set -euo pipefail
+          export_root="${SYP154_EXPORT_ROOT:-$RUNNER_TEMP/syp154-pr33-evidence-export}"
+          artifacts_root="${SYP154_ARTIFACTS_ROOT:-$RUNNER_TEMP/syp154-pr33-artifacts}"
+          mkdir -p -- "$export_root"
+          {
+            printf 'jobStatus=%s\n' "$EVIDENCE_JOB_STATUS"
+            printf 'runnerOs=%s\n' "${RUNNER_OS:-unknown}"
+            printf 'runnerArch=%s\n' "${RUNNER_ARCH:-unknown}"
+            printf 'imageOs=%s\n' "${ImageOS:-unknown}"
+            printf 'imageVersion=%s\n' "${ImageVersion:-unknown}"
+            uname -a
+            git --version
+            pwsh --version
+            go version
+            stat --version | head -n 1
+            unshare --version
+          } > "$export_root/runtime.txt"
+          report="$artifacts_root/pr33-conformance-report.json"
+          if [[ -f "$report" ]]; then
+            actual_sha256="$(sha256sum "$report" | cut -d' ' -f1)"
+            if [[ -n "$EXPECTED_REPORT_SHA256" && "$actual_sha256" != "$EXPECTED_REPORT_SHA256" ]]; then
+              echo 'Conformance report changed after the trusted validator returned.' >&2
+              exit 1
+            fi
+            cp -- "$report" "$export_root/pr33-conformance-report.json"
+            printf '%s  %s\n' "$actual_sha256" 'pr33-conformance-report.json' > "$export_root/report.sha256"
+          fi
+          mapfile -t summaries < <(find "$artifacts_root" -type f -name security-preflight-summary.json -print)
+          if (( ${#summaries[@]} > 1 )); then
+            echo 'Expected at most one bounded security preflight summary.' >&2
+            exit 1
+          fi
+          if (( ${#summaries[@]} == 1 )); then
+            cp -- "${summaries[0]}" "$export_root/security-preflight-summary.json"
+            sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"
+          fi
+          find "$export_root" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$export_root/export-inventory.txt"
+
+      - name: Upload bounded PR33 adoption evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/syp154-pr33-evidence-export
+          if-no-files-found: error
+          retention-days: 14

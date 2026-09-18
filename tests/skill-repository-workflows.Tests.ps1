@@ -105,7 +105,8 @@ jobs:
 
         foreach ($workflow in @($standards, $required)) {
             $setupPattern = "actions/setup-go@$($script:SetupGoSha)\s+# v7\.0\.0"
-            Assert-Equal ([regex]::Matches($workflow, $setupPattern)).Count 1 'Each authority workflow must use the reviewed immutable setup-go v7.0.0 commit exactly once.'
+            $expectedSetupCount = if ($workflow -ceq $standards) { 2 } else { 1 }
+            Assert-Equal ([regex]::Matches($workflow, $setupPattern)).Count $expectedSetupCount 'Each authority workflow must use the reviewed immutable setup-go v7.0.0 commit for every native Go lane.'
             Assert-Match $workflow "go-version:\s*'stable'" 'Each authority workflow must provision the latest stable Go runtime.'
             Assert-Match $workflow 'check-latest:\s*true' 'Authority Go setup must check for the latest stable runtime.'
             Assert-NotMatch $workflow "go-version:\s*'[0-9]+\.[0-9]+\.[0-9]+'" 'Authority workflows must not pin a Go patch version.'
@@ -698,5 +699,40 @@ jobs:
             Assert-True (Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $role.path) -PathType Leaf) "Authority workflow role '$($role.path)' must remain present."
         }
         Assert-Match $authorityGate 'standards-conformance\.yml|pr8-powershell-validation\.yml|syp86-production-lock\.yml|syp101-production-smoke\.yml' 'The authority gate contract must retain the explicit four-workflow role surface.'
+    }
+
+    # Scenario: SYP-154 needs native Linux evidence for the immutable PR33 tree before any trusted-base promotion.
+    # Purpose: Keep the evidence-only job pinned, non-publishing, and separate from formal adoption authority.
+    It 'UnitT80_binds_the_PR33_adoption_evidence_job_to_exact_independent_inputs' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+
+        Assert-Match $workflow 'pr33-adoption-evidence-development-only:' 'The temporary PR33 adoption evidence job must remain explicit.'
+        Assert-Match $workflow "if: github\.event_name == 'workflow_dispatch'" 'The evidence job must run only from an explicit workflow dispatch.'
+        Assert-Match $workflow '(?s)pr33-adoption-evidence-development-only:.*?needs:\s*- latest-stable-authority-regression' 'The evidence job must wait for the exact central authority regression.'
+        Assert-Match $workflow 'runs-on: ubuntu-24\.04' 'The evidence job must bind the native Ubuntu 24.04 family.'
+        Assert-Match $workflow 'timeout-minutes: 45' 'The evidence job must retain one bounded outer deadline.'
+        Assert-Match $workflow 'https://github\.com/SyuanTsai/Skill-Darktide-Translate\.git' 'The evidence job must acquire the exact Darktide repository.'
+        foreach ($identity in @(
+            '7519745266e0cd67b057e88c0ee63e702ccd1e10',
+            '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
+            'd9134d17b7e898fc37752d7386cf858199dd08d9',
+            '0d64b1e2d5a44705e69cec506e763901271490a5',
+            'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
+            '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
+        )) {
+            Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
+        }
+        Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
+        Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
+        Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
+        Assert-Match $workflow 'scripts/Validate\.ps1' 'The evidence job must invoke the exact launcher validator.'
+        Assert-Match $workflow 'releaseEligible.*false' 'The evidence manifest must remain non-release-eligible.'
+        Assert-Match $workflow 'formalAdoption.*not-authorized' 'The evidence manifest must not claim formal adoption.'
+        Assert-Match $workflow 'unshare --user --map-root-user --pid --fork --kill-child=SIGKILL' 'The native job must prove the required Linux namespace capability.'
+        Assert-Match $workflow 'cgroup\.subtree_control' 'The native job must establish the bounded cgroup v2 process boundary.'
+        Assert-Match $workflow 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' 'Evidence upload must use the reviewed immutable action.'
+        Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?checks:\s*write' 'The evidence-only job must not publish required checks.'
+        Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?pull-requests:\s*write' 'The evidence-only job must not mutate pull requests.'
     }
 }
