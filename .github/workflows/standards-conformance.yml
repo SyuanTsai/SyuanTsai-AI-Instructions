@@ -535,14 +535,9 @@ jobs:
           /usr/bin/chmod -R a-w -- "$upload_action_root"
           [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_action_root")" == '0:0:555' ]]
 
-          file_command_root="$runner_temp/_runner_file_commands"
-          [[ -d "$file_command_root" && ! -L "$file_command_root" ]]
-          [[ "$(/usr/bin/realpath -e "$file_command_root")" == "$file_command_root" ]]
-          mapfile -t environment_files < <(/usr/bin/find "$file_command_root" -maxdepth 1 -type f -name 'set_env_*' -print)
-          (( ${#environment_files[@]} == 1 ))
-          environment_file="${environment_files[0]}"
+          environment_file='${{ github.env }}'
           [[ "$environment_file" =~ ^/home/runner/work/_temp/_runner_file_commands/set_env_[0-9a-fA-F-]{36}$ ]]
-          [[ ! -L "$environment_file" ]]
+          [[ -f "$environment_file" && ! -L "$environment_file" ]]
           [[ "$(/usr/bin/realpath -e "$environment_file")" == "$environment_file" ]]
           [[ "$(/usr/bin/stat -c '%h' "$environment_file")" == '1' ]]
           [[ "$(/usr/bin/stat -c '%u' "$environment_file")" == "$(/usr/bin/stat -c '%u' "$runner_temp")" ]]

@@ -853,8 +853,8 @@ jobs:
 
         $finalizer | Should -Not -BeNullOrEmpty
         $upload | Should -Not -BeNullOrEmpty
-        Assert-Match $finalizer '_runner_file_commands' 'Trusted finalization must locate the runner-created file-command directory.'
-        Assert-Match $finalizer "-name 'set_env_\*'" 'Trusted finalization must locate the current step environment command file.'
+        Assert-Match $finalizer "environment_file='\$\{\{ github\.env \}\}'" 'Trusted finalization must use the runner-provided environment command file for the current step.'
+        Assert-NotMatch $finalizer "-name 'set_env_\*'" 'Trusted finalization must not guess the current command file by scanning runner temp state.'
         foreach ($name in @(
             'HTTPS_PROXY', 'https_proxy',
             'HTTP_PROXY', 'http_proxy',
