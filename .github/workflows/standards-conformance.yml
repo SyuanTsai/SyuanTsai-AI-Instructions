@@ -575,7 +575,7 @@ jobs:
             echo 'The trusted conformance report disappeared before finalization.' >&2
             exit 1
           fi
-          mapfile -t summaries < <(/usr/bin/find "$artifacts_root" -type f -name security-preflight-summary.json -print)
+          mapfile -d '' -t summaries < <(/usr/bin/find "$artifacts_root" -type f -name security-preflight-summary.json -print0)
           if (( ${#summaries[@]} > 1 )); then
             echo 'Expected at most one bounded security preflight summary.' >&2
             exit 1

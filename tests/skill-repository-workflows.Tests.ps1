@@ -794,6 +794,9 @@ jobs:
         $absoluteSummaryChecksum = '/usr/bin/sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"'
         Assert-Match $finalizer ([regex]::Escape($portableSummaryChecksum)) 'The exported security-summary checksum must name only its adjacent artifact basename.'
         Assert-NotMatch $finalizer ([regex]::Escape($absoluteSummaryChecksum)) 'The exported security-summary checksum must not capture an ephemeral runner-absolute path.'
+        Assert-Match $finalizer "mapfile -d '' -t summaries" 'The finalizer must parse candidate-controlled security-summary paths with a NUL delimiter.'
+        Assert-Match $finalizer '-name security-preflight-summary\.json -print0' 'The finalizer must serialize candidate-controlled security-summary paths with NUL delimiters.'
+        Assert-NotMatch $finalizer '-name security-preflight-summary\.json -print(?:\s|\))' 'The finalizer must not split candidate-controlled security-summary paths on newlines.'
     }
 
     # Scenario: Candidate code can append startup variables and paths to the runner file-command files before later steps start.
