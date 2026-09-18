@@ -745,12 +745,18 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
         $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $rejectionProbe = @"
-& '$($shardPath.Replace("'", "''"))' ``
-    -PesterModulePath '$((Join-Path $TestDrive 'missing-pester.psd1').Replace("'", "''"))' ``
-    -PesterVersion '4.10.1' ``
-    -ExpectedTotalCount 1 ``
-    -ExpectedSkippedCount 0 ``
-    -CancellationPath '$((Join-Path $TestDrive 'caller-visible.cancel').Replace("'", "''"))'
+try {
+    & '$($shardPath.Replace("'", "''"))' ``
+        -PesterModulePath '$((Join-Path $TestDrive 'missing-pester.psd1').Replace("'", "''"))' ``
+        -PesterVersion '4.10.1' ``
+        -ExpectedTotalCount 1 ``
+        -ExpectedSkippedCount 0 ``
+        -CancellationPath '$((Join-Path $TestDrive 'caller-visible.cancel').Replace("'", "''"))'
+}
+catch {
+    [Console]::Error.WriteLine([string]`$_.Exception.Message)
+    exit 1
+}
 "@
         $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rejectionProbe))
         $startInfo = New-Object Diagnostics.ProcessStartInfo
