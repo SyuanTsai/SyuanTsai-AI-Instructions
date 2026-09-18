@@ -744,12 +744,34 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
         Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
         $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
-        $rejectedOutput = & $script:PowerShellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $shardPath `
-            -PesterModulePath (Join-Path $TestDrive 'missing-pester.psd1') `
-            -PesterVersion '4.10.1' `
-            -ExpectedTotalCount 1 `
-            -ExpectedSkippedCount 0 `
-            -CancellationPath (Join-Path $TestDrive 'caller-visible.cancel') 2>&1 | Out-String
+        $rejectionProbe = @"
+& '$($shardPath.Replace("'", "''"))' ``
+    -PesterModulePath '$((Join-Path $TestDrive 'missing-pester.psd1').Replace("'", "''"))' ``
+    -PesterVersion '4.10.1' ``
+    -ExpectedTotalCount 1 ``
+    -ExpectedSkippedCount 0 ``
+    -CancellationPath '$((Join-Path $TestDrive 'caller-visible.cancel').Replace("'", "''"))'
+"@
+        $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rejectionProbe))
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $script:PowerShellPath
+        $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedProbe"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $probeProcess = New-Object Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        try {
+            Assert-True $probeProcess.Start() 'The caller-visible cancellation rejection probe must start.'
+            $probeStdout = $probeProcess.StandardOutput.ReadToEnd()
+            $probeStderr = $probeProcess.StandardError.ReadToEnd()
+            $probeProcess.WaitForExit()
+            $probeExitCode = $probeProcess.ExitCode
+        }
+        finally { $probeProcess.Dispose() }
+        $rejectedOutput = "$probeStdout`n$probeStderr"
+        Assert-True ($probeExitCode -ne 0) 'A caller-visible cancellation path must cause a nonzero child exit.'
         Assert-Match $rejectedOutput 'does not accept a caller-visible CancellationPath' 'A caller-visible shard cancellation path must be rejected before any child process or shard artifact is created.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
