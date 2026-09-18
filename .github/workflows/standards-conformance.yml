@@ -624,8 +624,7 @@ jobs:
           [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_root")" == '0:0:555' ]]
           [[ -f "$upload_entry" && ! -L "$upload_entry" ]]
           [[ "$(/usr/bin/realpath -e "$upload_entry")" == "$upload_entry" ]]
-          [[ "$(/usr/bin/stat -c '%u:%g' "$upload_entry")" == '0:0' ]]
-          [[ ! -w "$upload_entry" ]]
+          [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_entry")" == '0:0:444' ]]
 
           mapfile -t artifact_service_lines < "$artifact_service_file"
           artifact_service_names=(ACTIONS_RESULTS_URL ACTIONS_RUNTIME_URL ACTIONS_RUNTIME_TOKEN)

@@ -845,6 +845,8 @@ jobs:
         Assert-Match $acquisition '"\$supervisor_root/upload-artifact"' 'Acquisition must store the uploader below the root-owned supervisor authority.'
         Assert-NotMatch $finalizer 'upload_action_root' 'Finalization must not restore an uploader into the runner-managed action tree.'
         Assert-Match $upload "if:\s*\$\{\{ always\(\) && steps\.finalize_evidence\.outcome == 'success' \}\}" 'Upload must not execute if trusted restoration or finalization fails.'
+        Assert-Match $upload "stat -c '%u:%g:%a'.*?upload_entry.*?0:0:444" 'The root uploader must validate immutable mode bits directly.'
+        Assert-NotMatch $upload '\[\[\s*!\s+-w\s+"\$upload_entry"\s*\]\]' 'Root must not use access(2)-style writability as a mode-bit check.'
     }
 
     # Scenario: Candidate code can inject arbitrary Node/debug/output variables beyond any finite transport denylist.
