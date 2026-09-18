@@ -572,7 +572,7 @@ jobs:
             [[ "$expected_summary_sha256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$(/usr/bin/sha256sum "${summaries[0]}" | /usr/bin/cut -d' ' -f1)" == "$expected_summary_sha256" ]]
             /usr/bin/cp -- "${summaries[0]}" "$export_root/security-preflight-summary.json"
-            /usr/bin/sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"
+            printf '%s  %s\n' "$expected_summary_sha256" 'security-preflight-summary.json' > "$export_root/security-preflight-summary.sha256"
           elif [[ -f "$supervisor_root/security-summary.sha256" ]]; then
             echo 'The trusted security preflight summary disappeared before finalization.' >&2
             exit 1

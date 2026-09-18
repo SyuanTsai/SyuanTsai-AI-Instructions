@@ -778,6 +778,10 @@ jobs:
             Assert-Match $finalizer $trustedPayload "The finalizer must recreate $trustedPayload from immutable inputs."
         }
         Assert-Match $finalizer 'export-sha256\.tsv' 'The finalizer must hash every exported payload after rebuilding trusted metadata.'
+        $portableSummaryChecksum = 'printf ''%s  %s\n'' "$expected_summary_sha256" ''security-preflight-summary.json'' > "$export_root/security-preflight-summary.sha256"'
+        $absoluteSummaryChecksum = '/usr/bin/sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"'
+        Assert-Match $finalizer ([regex]::Escape($portableSummaryChecksum)) 'The exported security-summary checksum must name only its adjacent artifact basename.'
+        Assert-NotMatch $finalizer ([regex]::Escape($absoluteSummaryChecksum)) 'The exported security-summary checksum must not capture an ephemeral runner-absolute path.'
     }
 
     # Scenario: Candidate code can append startup variables and paths to the runner file-command files before later steps start.
