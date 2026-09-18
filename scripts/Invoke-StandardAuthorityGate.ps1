@@ -2855,6 +2855,7 @@ $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-validation-development-harness.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-inventory-probe.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-preflight.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-raw-graph.Tests.ps1')

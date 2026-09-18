@@ -1,0 +1,563 @@
+Describe 'Standard validation development harness contract' {
+    BeforeAll {
+        $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:HarnessPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1'
+        $script:PowerShellPath = $null
+        foreach ($pwshCommand in @(Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue)) {
+            if ($null -eq $pwshCommand -or [string]::IsNullOrWhiteSpace([string]$pwshCommand.Source)) { continue }
+            $pwshItem = Get-Item -Force -LiteralPath ([string]$pwshCommand.Source) -ErrorAction SilentlyContinue
+            if ($null -ne $pwshItem -and $pwshItem.PSIsContainer -eq $false -and
+                ($pwshItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                $script:PowerShellPath = [string]$pwshItem.FullName
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($script:PowerShellPath)) {
+            $script:PowerShellPath = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                Join-Path $PSHOME 'powershell.exe'
+            }
+            else {
+                Join-Path $PSHOME 'pwsh'
+            }
+        }
+
+        function Assert-Ci1True {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+
+        function Assert-Ci1False {
+            param([bool] $Condition, [string] $Message)
+            if ($Condition) { throw $Message }
+        }
+
+        function Assert-Ci1Equal {
+            param($Actual, $Expected, [string] $Message)
+            if ($Actual -ne $Expected) {
+                throw "$Message Expected='$Expected' Actual='$Actual'."
+            }
+        }
+
+        function Assert-Ci1Match {
+            param([string] $Actual, [string] $Pattern, [string] $Message)
+            if ($Actual -notmatch $Pattern) {
+                throw "$Message Pattern='$Pattern'."
+            }
+        }
+
+        function Write-Ci1Utf8File {
+            param(
+                [Parameter(Mandatory = $true)][string] $Path,
+                [Parameter(Mandatory = $true)][string] $Text
+            )
+
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $parent = [IO.Path]::GetDirectoryName($fullPath)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and
+                -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                [void](New-Item -ItemType Directory -Path $parent -Force)
+            }
+            [IO.File]::WriteAllText($fullPath, $Text, (New-Object Text.UTF8Encoding($false)))
+        }
+
+        function Convert-Ci1ProcessArguments {
+            param([Parameter(Mandatory = $true)][string[]] $Arguments)
+
+            $quoted = @()
+            foreach ($argument in $Arguments) {
+                if ($argument -notmatch '[\s"]' -and $argument.Length -gt 0) {
+                    $quoted += $argument
+                    continue
+                }
+                $escaped = $argument -replace '(\\*)"', '$1$1\"'
+                $escaped = $escaped -replace '(\\+)$', '$1$1'
+                $quoted += ('"' + $escaped + '"')
+            }
+            return ($quoted -join ' ')
+        }
+
+        function New-Ci1HarnessFixture {
+            param(
+                [Parameter(Mandatory = $true)][string] $Root,
+                [ValidateSet('pass', 'static-fail', 'mutate', 'timeout', 'exit-fail', 'barrier-tamper', 'cancel-after-start')]
+                [string] $Behavior = 'pass'
+            )
+
+            $candidate = Join-Path $Root 'candidate'
+            $tools = Join-Path $Root 'trusted-tools'
+            $artifacts = Join-Path $Root 'artifacts'
+            $adapterPath = Join-Path $Root 'adapter.json'
+            $outputPath = Join-Path $artifacts 'ci1-evidence.json'
+            $logPath = Join-Path $Root 'trusted-tool-events.log'
+            [void](New-Item -ItemType Directory -Path (Join-Path $candidate 'skills/fixture') -Force)
+            [void](New-Item -ItemType Directory -Path (Join-Path $candidate 'scripts') -Force)
+            [void](New-Item -ItemType Directory -Path $tools -Force)
+            [void](New-Item -ItemType Directory -Path $artifacts -Force)
+
+            Write-Ci1Utf8File -Path (Join-Path $candidate 'skills/fixture/SKILL.md') -Text @'
+---
+name: fixture
+description: A harmless CI1 candidate fixture.
+---
+
+# Fixture
+'@
+
+            $candidateValidator = @'
+param([string] $RepositoryRoot)
+
+$fixtureBehavior = '__CI1_BEHAVIOR__'
+$root = if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    [string]$env:STANDARD_VALIDATION_CANDIDATE_ROOT
+}
+else {
+    $RepositoryRoot
+}
+if (-not (Test-Path -LiteralPath $root -PathType Container)) { exit 11 }
+if ([string]$env:STANDARD_VALIDATION_DEVELOPMENT_ONLY -cne 'true') { exit 12 }
+if ([string]$env:STANDARD_VALIDATION_RELEASE_ELIGIBLE -cne 'false') { exit 13 }
+if (-not [string]::IsNullOrWhiteSpace([string]$env:SYP154_INHERITED_SECRET) -or
+    -not [string]::IsNullOrWhiteSpace([string]$env:STANDARD_VALIDATION_INHERITED_SECRET)) {
+    exit 14
+}
+Write-Output ("candidate-validator-executed|candidateId={0}" -f $env:STANDARD_VALIDATION_CANDIDATE_ID)
+if ($fixtureBehavior -eq 'mutate') {
+    Add-Content -LiteralPath (Join-Path $root 'skills/fixture/SKILL.md') -Value 'mutated-by-candidate' -Encoding UTF8
+}
+if ($fixtureBehavior -eq 'barrier-tamper') {
+    $runRoot = Split-Path -Parent $root
+    $nestedBarrierArtifact = Get-ChildItem -LiteralPath (Join-Path $runRoot 'std') -Recurse -File -Force |
+        Where-Object { $_.FullName -ne (Join-Path $runRoot 'std/evidence.json') } |
+        Select-Object -First 1
+    if ($null -eq $nestedBarrierArtifact) { exit 15 }
+    Add-Content -LiteralPath $nestedBarrierArtifact.FullName -Value 'tampered-by-candidate' -Encoding UTF8
+}
+if ($fixtureBehavior -eq 'cancel-after-start') {
+    # This is a harmless candidate-owned start signal. The trusted test driver
+    # watches it and relays one byte through the supervisor's private stdin
+    # after process start; candidate code never receives that channel. It is
+    # written in the owned working directory rather than the immutable
+    # candidate snapshot so the signal cannot itself create snapshot drift.
+    [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'candidate-started.signal'), 'started')
+    Start-Sleep -Seconds 10
+}
+if ($fixtureBehavior -eq 'timeout') {
+    Start-Sleep -Seconds 10
+}
+if ($fixtureBehavior -eq 'exit-fail') {
+    Write-Error 'candidate fixture requested a nonzero result'
+    exit 17
+}
+exit 0
+'@
+            $candidateValidator = $candidateValidator.Replace('__CI1_BEHAVIOR__', $Behavior)
+            Write-Ci1Utf8File -Path (Join-Path $candidate 'scripts/Validate.ps1') -Text $candidateValidator
+
+            $toolScript = @'
+$fixtureBehavior = '__CI1_BEHAVIOR__'
+$logPath = '__CI1_LOG_PATH__'
+if (-not [string]::IsNullOrWhiteSpace($logPath)) {
+    Add-Content -LiteralPath $logPath -Value (
+        "{0}|{1}|{2}" -f
+        $env:STANDARD_VALIDATION_STAGE_ID,
+        $env:STANDARD_VALIDATION_TOOL_ID,
+        $env:STANDARD_VALIDATION_SKILL_ID
+    ) -Encoding UTF8
+}
+$skills = @()
+if (-not [string]::IsNullOrWhiteSpace($env:STANDARD_VALIDATION_ACTIVE_SKILLS)) {
+    $skills = @($env:STANDARD_VALIDATION_ACTIVE_SKILLS -split ';' | Where-Object { $_ })
+}
+$result = [ordered]@{
+    schemaVersion = 1
+    status = 'passed'
+    decision = 'PASS'
+    candidateIdentity = $env:STANDARD_VALIDATION_CANDIDATE_ID
+    skillId = $env:STANDARD_VALIDATION_SKILL_ID
+    activeSkills = $skills
+    skillInventorySha256 = $env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256
+    output = "ci1-fixture-$($env:STANDARD_VALIDATION_TOOL_ID)"
+}
+if ($fixtureBehavior -eq 'static-fail' -and
+    $env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
+    $result.status = 'failed'
+    $result.decision = 'BLOCK'
+}
+if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
+    $result.scannerIdentity = 'ci1-fixture-static-analyzer'
+    $result.analyzerCompleteness = 'complete'
+}
+if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
+    $result.testInventory = @('ci1-fixture-repository-test')
+    $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+    $result.domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+}
+$result | ConvertTo-Json -Depth 10 -Compress
+'@
+            $toolScript = $toolScript.Replace('__CI1_BEHAVIOR__', $Behavior)
+            $toolScript = $toolScript.Replace('__CI1_LOG_PATH__', $logPath.Replace("'", "''"))
+            $toolScriptPath = Join-Path $tools 'ci1-fixture-tool.ps1'
+            Write-Ci1Utf8File -Path $toolScriptPath -Text $toolScript
+
+            $toolSpec = [ordered]@{
+                command = $script:PowerShellPath
+                arguments = @('-NoProfile', '-File', $toolScriptPath)
+            }
+            $adapter = [ordered]@{
+                schemaVersion = 1
+                adapter = 'standard-validation-adapter-v1'
+                mode = 'development-harness'
+                skillsRoot = 'skills'
+                activeSkills = @('fixture')
+                canonicalValidatorPath = 'scripts/Validate.ps1'
+                packageAdapter = $toolSpec
+                skillValidator = $toolSpec
+                skillTools = $toolSpec
+                staticAnalyzer = $toolSpec
+                repositoryTests = @(
+                    [ordered]@{
+                        id = 'ci1-fixture-repository-test'
+                        command = $script:PowerShellPath
+                        arguments = @('-NoProfile', '-File', $toolScriptPath)
+                    }
+                )
+            }
+            Write-Ci1Utf8File -Path $adapterPath -Text ($adapter | ConvertTo-Json -Depth 20)
+
+            return [pscustomobject][ordered]@{
+                Root = $Root
+                Candidate = $candidate
+                Adapter = $adapterPath
+                TrustedTools = $tools
+                Artifacts = $artifacts
+                Output = $outputPath
+                Log = $logPath
+                Behavior = $Behavior
+            }
+        }
+
+        function Invoke-Ci1HarnessFixture {
+            param(
+                [Parameter(Mandatory = $true)] $Fixture,
+                [int] $TimeoutSeconds = 300,
+                [int] $CandidateTimeoutSeconds = 0,
+                [string] $CancellationPath,
+                [AllowEmptyCollection()][string[]] $ValidatorArguments = @()
+            )
+
+            $arguments = @(
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', $script:HarnessPath,
+                '-CandidateRoot', $Fixture.Candidate,
+                '-AdapterPath', $Fixture.Adapter,
+                '-TrustedToolRoot', $Fixture.TrustedTools,
+                '-CandidateValidatorPath', 'scripts/Validate.ps1',
+                '-ArtifactsRoot', $Fixture.Artifacts,
+                '-OutputPath', $Fixture.Output,
+                '-SourceRepository', 'https://example.com/ci1/fixture.git',
+                '-SourceRevision', ('a' * 40),
+                '-BaseRevision', ('b' * 40),
+                '-EventName', 'local',
+                '-TimeoutSeconds', [string]$TimeoutSeconds
+            )
+            if ($CandidateTimeoutSeconds -gt 0) {
+                $arguments += @('-CandidateTimeoutSeconds', [string]$CandidateTimeoutSeconds)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
+                $arguments += '-CancellationStdin'
+            }
+            if (@($ValidatorArguments).Count -gt 0) {
+                $arguments += '-ValidatorArguments'
+                $arguments += @($ValidatorArguments)
+            }
+
+            $environmentNames = @('SYP154_INHERITED_SECRET', 'STANDARD_VALIDATION_INHERITED_SECRET')
+            $previousEnvironment = @{}
+            foreach ($name in $environmentNames) {
+                $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+                [Environment]::SetEnvironmentVariable($name, "ci1-test-secret-$name", 'Process')
+            }
+            # Pester 6 runs this helper under StrictMode on Linux as well as
+            # Windows. Initialize the optional async-process handle so every
+            # early-return path can execute the finally cleanup safely.
+            $process = $null
+            $stdoutTask = $null
+            $stderrTask = $null
+            $stdinClosed = $false
+            $captured = ''
+            $exitCode = -1
+            try {
+                if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
+                    $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
+                    $exitCode = $LASTEXITCODE
+                }
+                else {
+                    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                    $startInfo.FileName = $script:PowerShellPath
+                    if ($startInfo.PSObject.Properties.Name -contains 'ArgumentList') {
+                        foreach ($argument in @($arguments)) {
+                            [void]$startInfo.ArgumentList.Add([string]$argument)
+                        }
+                    }
+                    else {
+                        $startInfo.Arguments = Convert-Ci1ProcessArguments -Arguments $arguments
+                    }
+                    $startInfo.WorkingDirectory = $script:RepositoryRoot
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.CreateNoWindow = $true
+                    $startInfo.RedirectStandardInput = $true
+                    $startInfo.RedirectStandardOutput = $true
+                    $startInfo.RedirectStandardError = $true
+                    $process = New-Object System.Diagnostics.Process
+                    $process.StartInfo = $startInfo
+                    if (-not $process.Start()) { throw 'CI1 test driver could not start the harness process.' }
+                    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                    $stderrTask = $process.StandardError.ReadToEndAsync()
+                    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+                    while (-not $process.HasExited) {
+                        $startSignal = Get-ChildItem -LiteralPath $Fixture.Artifacts -Filter 'candidate-started.signal' -File -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($null -ne $startSignal -and -not $stdinClosed) {
+                            $process.StandardInput.WriteLine('cancel')
+                            $process.StandardInput.Flush()
+                            $process.StandardInput.Close()
+                            $stdinClosed = $true
+                        }
+                        if ([DateTime]::UtcNow -ge $deadline) {
+                            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+                            throw 'CI1 test driver timed out while waiting for the harness process.'
+                        }
+                        [void]$process.WaitForExit(100)
+                    }
+                    [void]$process.WaitForExit()
+                    $stdout = $stdoutTask.GetAwaiter().GetResult()
+                    $stderr = $stderrTask.GetAwaiter().GetResult()
+                    $captured = "$stdout`n$stderr"
+                    $exitCode = $process.ExitCode
+                    $process.Dispose()
+                    $process = $null
+                }
+            }
+            finally {
+                if ($null -ne $process) {
+                    if (-not $stdinClosed) {
+                        try { $process.StandardInput.Close() } catch { }
+                    }
+                    try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+                    try { [void]$process.WaitForExit(1000) } catch { }
+                    if ($null -ne $stdoutTask) { try { [void]$stdoutTask.GetAwaiter().GetResult() } catch { } }
+                    if ($null -ne $stderrTask) { try { [void]$stderrTask.GetAwaiter().GetResult() } catch { } }
+                    try { $process.Dispose() } catch { }
+                }
+                foreach ($name in $environmentNames) {
+                    [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+                }
+            }
+            $evidence = $null
+            if (Test-Path -LiteralPath $Fixture.Output -PathType Leaf) {
+                try {
+                    $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $Fixture.Output | ConvertFrom-Json
+                }
+                catch { }
+            }
+            return [pscustomobject][ordered]@{
+                Output = [string]$captured
+                ExitCode = [int]$exitCode
+                Evidence = $evidence
+            }
+        }
+
+        function New-Ci1CaseRoot {
+            param([Parameter(Mandatory = $true)][string] $Name)
+            # Keep the fixture root short enough for the central runner's
+            # per-event child working directory on Windows.
+            $root = Join-Path ([IO.Path]::GetTempPath()) ("c1-{0}-{1}" -f ([guid]::NewGuid().ToString('N').Substring(0, 12)), $Name)
+            [void](New-Item -ItemType Directory -Path $root -Force)
+            return $root
+        }
+    }
+
+    BeforeEach {
+        $script:Ci1CaseRoot = New-Ci1CaseRoot -Name 'c'
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:Ci1CaseRoot -PathType Container) {
+            Remove-Item -LiteralPath $script:Ci1CaseRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'InterT01_executes_candidate_only_after_the_central_development_barrier' {
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'p')
+        $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('__CANDIDATE_ROOT__')
+
+        Assert-Ci1Equal $result.ExitCode 0 'A passing CI1 development fixture must return zero.'
+        Assert-Ci1Equal $result.Evidence.state 'PASS' 'The harness evidence must report PASS.'
+        Assert-Ci1False ([bool]$result.Evidence.releaseEligible) 'Development evidence must never be release-eligible.'
+        Assert-Ci1True ([bool]$result.Evidence.candidateExecutionAttempted) 'The candidate execution attempt must be recorded.'
+        Assert-Ci1True ([bool]$result.Evidence.candidateCodeExecuted) 'The candidate validator must execute after the barrier.'
+        Assert-Ci1Equal $result.Evidence.preCandidateBarrier.status 'passed' 'The independent barrier must pass before candidate execution.'
+        $stageIds = @($result.Evidence.preCandidateBarrier.firstFiveStages | ForEach-Object { [string]$_.id })
+        Assert-Ci1Equal ($stageIds -join ',') 'controlled-acquisition,integrity-verification,package-validation,skillspector-static,repository-tests' 'The first five barrier stages must remain canonical.'
+        $stageOrders = @($result.Evidence.preCandidateBarrier.firstFiveStages | ForEach-Object { [int]$_.order })
+        Assert-Ci1Equal ($stageOrders -join ',') '1,2,3,4,5' 'The barrier stage order must be canonical.'
+        Assert-Ci1Match ([string]$result.Evidence.process.candidate.stdout) 'candidate-validator-executed' 'Candidate execution must leave bounded evidence.'
+        Assert-Ci1False ([string]$result.Output -match 'ci1-test-secret|SYP154_INHERITED_SECRET|STANDARD_VALIDATION_INHERITED_SECRET') 'Inherited secrets must not cross either owned child boundary.'
+        Assert-Ci1False ([bool]$result.Evidence.authority.candidateIsTrustRoot) 'The candidate must not be treated as the authority trust root.'
+        Assert-Ci1Match ([string]$result.Evidence.authority.launcherSha256) '^[0-9a-f]{64}$' 'The development launcher bytes must be bound in authority evidence.'
+        Assert-Ci1Match ([string]$result.Evidence.launcher.sha256) '^[0-9a-f]{64}$' 'The launcher evidence must retain its exact file identity.'
+        Assert-Ci1Match ([string]$result.Evidence.authority.trustedToolInventorySha256) '^[0-9a-f]{64}$' 'The trusted tool root inventory must be bound in authority evidence.'
+        Assert-Ci1True ([bool]$result.Evidence.authority.inputsRevalidatedAfterCandidate) 'Recorded authority inputs must be revalidated after candidate execution.'
+        Assert-Ci1True ([string]::IsNullOrWhiteSpace([string]$result.Evidence.authority.inputRevalidationError)) 'A passing harness must not retain an authority revalidation error.'
+        $shardExecutorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardExecutorPath
+        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-Ci1True ($shardExecutorSource -match '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject') 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
+        Assert-Ci1True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
+        Assert-Ci1False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
+        Assert-Ci1True ($shardExecutorSource -match 'System\.Diagnostics\.Process\.Kill|Stop-Process') 'The shard executor must use a direct process termination API.'
+        Assert-Ci1True ($shardExecutorSource -match 'Get-PesterShardFailureSummary|failureSummary') 'A failed shard must retain a sanitized first-failure summary.'
+        Assert-Ci1True ($shardExecutorSource -match 'CreateKillOnCloseJob|AssignProcessToJobObject') 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
+        Assert-Ci1True ($shardExecutorSource -match 'does not accept a caller-visible CancellationPath') 'Caller-visible shard cancellation paths must be rejected before child execution.'
+        Assert-Ci1True ($shardExecutorSource -match 'PesterShardBoundedCapture|outputQuotaCharacters') 'The shard executor must bound redirected child output.'
+        Assert-Ci1True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
+        $harnessSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidationDevelopmentHarness.ps1')
+        Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-StandardValidationCandidateUnchanged')).Count -ge 2) 'The development harness must revalidate the source checkout before and after candidate execution.'
+        Assert-Ci1True (([regex]::Matches($harnessSource, 'Assert-DevelopmentHarnessAuthorityInputsUnchanged')).Count -ge 2) 'The development harness must revalidate recorded authority inputs before and after candidate execution.'
+        Assert-Ci1True ($harnessSource -match 'Assert-DevelopmentHarnessAuthorityPath') 'Authority inputs must be checked as direct non-reparse paths before hashing.'
+        Assert-Ci1True ($harnessSource -match 'Assert-StandardValidationCanonicalRootPath') 'Authority path checks must cover existing ancestors, not only the leaf file.'
+        Assert-Ci1True ($harnessSource -match '\$PSCommandPath') 'The development harness must bind its invoked launcher path rather than only recording a constant label.'
+        Assert-Ci1False ($harnessSource -match 'CancellationPath') 'The development launcher must not expose a cancellation path in its command line contract.'
+        Assert-Ci1True ($harnessSource -match 'CancellationStdin|CancellationProbe') 'Cancellation must use a supervisor-only private control channel.'
+        Assert-Ci1Match ([string]$result.Evidence.identity.validatorArgumentsSha256) '^[0-9a-f]{64}$' 'Candidate identity must bind the canonical validator arguments.'
+        $logicalArgumentsCanonical = ConvertTo-Json -InputObject ([string[]]@('__CANDIDATE_ROOT__')) -Compress
+        $logicalArgumentsSha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $logicalArgumentBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($logicalArgumentsCanonical)
+            $expectedLogicalArgumentsSha = ([BitConverter]::ToString($logicalArgumentsSha.ComputeHash($logicalArgumentBytes)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $logicalArgumentsSha.Dispose()
+        }
+        Assert-Ci1Equal $result.Evidence.identity.validatorArgumentsSha256 $expectedLogicalArgumentsSha 'Candidate identity must hash logical validator arguments before snapshot path substitution.'
+        Assert-Ci1True (-not [string]::IsNullOrWhiteSpace([string]$result.Evidence.preCandidateBarrier.artifactInventorySha256)) 'The barrier must retain a complete artifact inventory hash.'
+        Assert-Ci1Equal $result.Evidence.preCandidateBarrier.artifactInventorySha256 $result.Evidence.preCandidateBarrier.artifactInventoryPostExecutionSha256 'The barrier artifact inventory must remain unchanged after candidate execution.'
+        Assert-Ci1Equal $result.Evidence.recovery.status 'fail-closed' 'Recovery must remain fail-closed.'
+    }
+
+    It 'InterT02_stops_before_candidate_execution_when_the_central_barrier_fails' {
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 's') -Behavior 'static-fail'
+        $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('__CANDIDATE_ROOT__')
+
+        Assert-Ci1True ($result.ExitCode -ne 0) 'A failed static barrier must be nonzero.'
+        Assert-Ci1Equal $result.Evidence.state 'FAILED' 'A failed static barrier must fail closed.'
+        Assert-Ci1False ([bool]$result.Evidence.candidateCodeExecuted) 'Candidate code must not execute after a failed barrier.'
+        Assert-Ci1False ([bool]$result.Evidence.candidateExecutionAttempted) 'Candidate execution must not be attempted after a failed barrier.'
+        Assert-Ci1Equal $result.Evidence.preCandidateBarrier.status 'failed' 'An attempted failed barrier must retain its process status.'
+        Assert-Ci1Match ([string]$result.Output) 'barrier|skillspector-static|failed' 'The failure must retain the barrier diagnosis.'
+    }
+
+    It 'InterT03_fails_closed_on_candidate_mutation_and_timeout' {
+        $mutationFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'm') -Behavior 'mutate'
+        $mutationResult = Invoke-Ci1HarnessFixture -Fixture $mutationFixture -ValidatorArguments @('__CANDIDATE_ROOT__')
+        Assert-Ci1True ($mutationResult.ExitCode -ne 0) 'A mutated candidate snapshot must be nonzero.'
+        Assert-Ci1Equal $mutationResult.Evidence.state 'FAILED' 'Candidate snapshot mutation must fail closed.'
+        Assert-Ci1True ([bool]$mutationResult.Evidence.candidateCodeExecuted) 'Mutation must prove the candidate was actually attempted.'
+        Assert-Ci1Match ([string]$mutationResult.Output) 'snapshot.*changed|snapshot.*drift' 'The mutation failure must identify snapshot drift.'
+
+        $timeoutFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 't') -Behavior 'timeout'
+        $timeoutResult = Invoke-Ci1HarnessFixture -Fixture $timeoutFixture -TimeoutSeconds 300 -CandidateTimeoutSeconds 1 -ValidatorArguments @('__CANDIDATE_ROOT__')
+        Assert-Ci1True ($timeoutResult.ExitCode -ne 0) 'A timed-out candidate validator must be nonzero.'
+        Assert-Ci1Equal $timeoutResult.Evidence.state 'FAILED' 'A timed-out candidate validator must fail closed.'
+        Assert-Ci1True ([bool]$timeoutResult.Evidence.candidateCodeExecuted) 'Timeout must prove the candidate process was started.'
+        Assert-Ci1Equal $timeoutResult.Evidence.recovery.status 'fail-closed' 'Timeout recovery must remain fail-closed.'
+        Assert-Ci1Match ([string]$timeoutResult.Output) 'timed out|timeout' 'The timeout diagnosis must be retained.'
+
+        $tamperFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'b') -Behavior 'barrier-tamper'
+        $tamperResult = Invoke-Ci1HarnessFixture -Fixture $tamperFixture -ValidatorArguments @('__CANDIDATE_ROOT__')
+        Assert-Ci1True ($tamperResult.ExitCode -ne 0) 'A candidate that tampers with barrier artifacts must be nonzero.'
+        Assert-Ci1Equal $tamperResult.Evidence.state 'FAILED' 'Barrier artifact tampering must fail closed.'
+        Assert-Ci1True ([bool]$tamperResult.Evidence.candidateCodeExecuted) 'Barrier artifact tampering must prove candidate execution was attempted.'
+        Assert-Ci1Equal $tamperResult.Evidence.candidateOutcome.status 'passed' 'Barrier tampering must preserve the candidate process outcome.'
+        Assert-Ci1True ([bool]$tamperResult.Evidence.candidateOutcome.processStarted) 'Barrier tampering must preserve the candidate process-started indicator.'
+        Assert-Ci1False ([bool]$tamperResult.Evidence.preCandidateBarrier.evidenceUnchangedAfterCandidate) 'Tampered barrier evidence must not be reported unchanged.'
+        Assert-Ci1Match ([string]$tamperResult.Output) 'barrier artifacts changed|barrier evidence changed' 'The barrier artifact diagnosis must be retained.'
+
+        $cancellationPath = Join-Path $script:Ci1CaseRoot 'x.signal'
+        $cancelFixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'x') -Behavior 'cancel-after-start'
+        $cancelResult = Invoke-Ci1HarnessFixture -Fixture $cancelFixture -CancellationPath $cancellationPath -ValidatorArguments @('__CANDIDATE_ROOT__')
+        Assert-Ci1Equal $cancelResult.Evidence.state 'CANCELLED' 'Cancellation after process start must remain a cancelled result.'
+        Assert-Ci1True ([bool]$cancelResult.Evidence.candidateCodeExecuted) 'Cancellation after process start must conservatively report candidate execution.'
+        Assert-Ci1True ([bool]$cancelResult.Evidence.process.candidate.processStarted) 'Cancellation after process start must expose the process-started indicator.'
+    }
+
+    It 'InterT04_rejects_unsafe_candidate_arguments_before_execution' {
+        $fixture = New-Ci1HarnessFixture -Root (Join-Path $script:Ci1CaseRoot 'u')
+        $result = Invoke-Ci1HarnessFixture -Fixture $fixture -ValidatorArguments @('..\outside')
+        Assert-Ci1True ($result.ExitCode -ne 0) 'Unsafe candidate arguments must be nonzero.'
+        Assert-Ci1Equal $result.Evidence.state 'INVALID' 'Unsafe candidate arguments must be invalid.'
+        Assert-Ci1False ([bool]$result.Evidence.candidateCodeExecuted) 'Unsafe arguments must not execute candidate code.'
+        Assert-Ci1False ([bool]$result.Evidence.candidateExecutionAttempted) 'Unsafe arguments must be rejected before candidate start.'
+        Assert-Ci1Match ([string]$result.Output) 'arguments|traversal|parent-directory' 'The invalid argument diagnosis must be retained.'
+    }
+
+    It 'InterT05_binds_authority_hashes_to_no_follow_handles_and_rechecks_ancestors' {
+        $root = Join-Path $script:Ci1CaseRoot 'h'
+        $candidateRoot = Join-Path $root 'candidate'
+        $artifactsRoot = Join-Path $root 'artifacts'
+        $trustedRoot = Join-Path $root 'trusted'
+        foreach ($path in @($candidateRoot, $artifactsRoot, $trustedRoot)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapterPath = Join-Path $root 'adapter.json'
+        $runnerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        . $runnerPath `
+            -CandidateRoot $candidateRoot `
+            -AdapterPath $adapterPath `
+            -ArtifactsRoot $artifactsRoot `
+            -SourceRepository 'https://example.com/example/fixture.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $trustedRoot `
+            -DefineFunctionsOnly
+
+        $authorityPath = Join-Path $root 'authority.ps1'
+        $authorityBackupPath = Join-Path $root 'authority.original.ps1'
+        Write-Ci1Utf8File -Path $authorityPath -Text 'authority-A'
+        $authorityASha256 = Get-StandardValidationNoFollowFileSha256 -Path $authorityPath -Context 'authority handle snapshot A'
+        Move-Item -LiteralPath $authorityPath -Destination $authorityBackupPath -Force
+        Write-Ci1Utf8File -Path $authorityPath -Text 'authority-B'
+        $authorityBSha256 = Get-StandardValidationNoFollowFileSha256 -Path $authorityPath -Context 'authority handle snapshot B'
+        Assert-Ci1False ($authorityASha256 -ceq $authorityBSha256) 'The authority hash must bind the bytes of the file opened at the current path.'
+
+        $trustedFilePath = Join-Path $trustedRoot 'tool.ps1'
+        Write-Ci1Utf8File -Path $trustedFilePath -Text 'trusted-tool'
+        $trustedSha256 = Get-StandardValidationNoFollowFileSha256 -Path $trustedFilePath -Context 'trusted tool handle snapshot'
+        Assert-Ci1Match $trustedSha256 '^[0-9a-f]{64}$' 'A regular authority file must hash through the no-follow helper.'
+        $trustedMovedRoot = Join-Path $root 'trusted-original'
+        Move-Item -LiteralPath $trustedRoot -Destination $trustedMovedRoot -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            New-Item -ItemType SymbolicLink -Path $trustedRoot -Target $trustedMovedRoot -ErrorAction Stop | Out-Null
+        }
+        else {
+            New-Item -ItemType Junction -Path $trustedRoot -Target $trustedMovedRoot -ErrorAction Stop | Out-Null
+        }
+
+        $ancestorRejected = $false
+        try {
+            [void](Assert-StandardValidationCanonicalRootPath -Path (Join-Path $trustedRoot 'tool.ps1') -Context 'authority ancestor substitution')
+        }
+        catch {
+            $ancestorRejected = $true
+            Assert-Ci1Match ([string]$_.Exception.Message) 'reparse|symlink|ancestor' 'An authority ancestor substitution must be diagnosed as a reparse boundary.'
+        }
+        Assert-Ci1True $ancestorRejected 'A substituted trusted-tool ancestor must be rejected before authority hashing.'
+
+        $directoryRejected = $false
+        try {
+            Get-StandardValidationNoFollowFileSha256 -Path $trustedMovedRoot -Context 'authority directory rejection' | Out-Null
+        }
+        catch { $directoryRejected = $true }
+        Assert-Ci1True $directoryRejected 'The no-follow authority hash helper must reject a directory handle.'
+    }
+}

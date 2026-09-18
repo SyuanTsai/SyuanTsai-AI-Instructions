@@ -344,6 +344,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/standard-validation-development-harness-v1.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/trust-anchors/human-approval-public-key.xml",
       "license": "Apache-2.0"
     },
@@ -397,6 +401,14 @@
     },
     {
       "path": "scripts/Invoke-StandardValidation.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardValidationDevelopmentHarness.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-PesterShardProcess.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -677,6 +689,10 @@
     },
     {
       "path": "tests/standard-validation-resolver-hardening.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-validation-development-harness.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

@@ -3,8 +3,16 @@ $script:SmokeContractModule = Join-Path $script:RepositoryRoot 'scripts\syp101-p
 
 function Invoke-SmokeContractTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
-    $output = & git -C $Repository @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)" }
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & git -C $Repository @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($exitCode -ne 0) { throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)" }
     return $output
 }
 

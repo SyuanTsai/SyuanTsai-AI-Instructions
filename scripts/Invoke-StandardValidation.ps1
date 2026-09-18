@@ -270,6 +270,136 @@ public static class StandardValidationUnixProcessControlNative
     }
 }
 
+if ($null -eq ('StandardValidationNoFollowFileHashNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public static class StandardValidationNoFollowFileHashNative
+{
+    private const uint GenericRead = 0x80000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileAttributeDirectory = 0x00000010;
+    private const uint FileAttributeReparsePoint = 0x00000400;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const int FileBasicInfoClass = 0;
+    private const int UnixNoFollow = 0x20000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileBasicInformation
+    {
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long ChangeTime;
+        public uint FileAttributes;
+        public uint Reserved;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle file,
+        int fileInformationClass,
+        out FileBasicInformation fileInformation,
+        uint bufferSize);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "open")]
+    private static extern int OpenUnixFile(string path, int flags);
+
+    private static string ToSha256(byte[] bytes)
+    {
+        return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
+    }
+
+    private static string HashHandle(SafeFileHandle handle, string path)
+    {
+        try
+        {
+            using (FileStream stream = new FileStream(handle, FileAccess.Read, 65536, false))
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                return ToSha256(sha256.ComputeHash(stream));
+            }
+        }
+        finally
+        {
+            if (handle != null && !handle.IsClosed) handle.Dispose();
+        }
+    }
+
+    public static string HashWindows(string path)
+    {
+        SafeFileHandle handle = CreateFile(
+            path,
+            GenericRead,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal | FileFlagOpenReparsePoint,
+            IntPtr.Zero);
+        if (handle == null || handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (handle != null) handle.Dispose();
+            throw new Win32Exception(error, "CreateFileW no-follow open failed for '" + path + "'.");
+        }
+
+        FileBasicInformation information;
+        if (!GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfoClass,
+            out information,
+            (uint)Marshal.SizeOf(typeof(FileBasicInformation))) ||
+            (information.FileAttributes & FileAttributeDirectory) != 0 ||
+            (information.FileAttributes & FileAttributeReparsePoint) != 0)
+        {
+            handle.Dispose();
+            throw new IOException("The opened authority path is not a regular non-reparse file: " + path);
+        }
+        return HashHandle(handle, path);
+    }
+
+    public static string HashUnix(string path)
+    {
+        // The required hosted Unix target is native Linux. Do not guess an
+        // O_NOFOLLOW value on another Unix flavor; fail closed until that
+        // platform has its own verified primitive.
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            throw new PlatformNotSupportedException("O_NOFOLLOW hashing is only enabled for Linux.");
+        }
+        int fileDescriptor = OpenUnixFile(path, UnixNoFollow);
+        if (fileDescriptor < 0)
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, "open(O_NOFOLLOW) failed for '" + path + "'.");
+        }
+        SafeFileHandle handle = new SafeFileHandle((IntPtr)fileDescriptor, true);
+        return HashHandle(handle, path);
+    }
+}
+'@
+}
+
 if ($null -eq ('StandardValidationBoundedCapture' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -618,6 +748,25 @@ function Get-StandardValidationFileSha256 {
         throw "INVALID|$Context file is missing: $Path"
     }
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-StandardValidationNoFollowFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            return [StandardValidationNoFollowFileHashNative]::HashWindows($fullPath)
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            return [StandardValidationNoFollowFileHashNative]::HashUnix($fullPath)
+        }
+        throw "Unsupported platform '$([Environment]::OSVersion.Platform)' for no-follow file hashing."
+    }
+    catch {
+        if ($_.Exception.Message -like 'INVALID|*') { throw }
+        throw "INVALID|$Context could not be hashed through a no-follow regular-file handle: $($_.Exception.Message)"
+    }
 }
 
 function Get-StandardValidationTextSha256 {
@@ -1927,7 +2076,7 @@ function Get-StandardValidationInventory {
             -Context "$Context inventory path"
         $entries += [pscustomobject][ordered]@{
             path = $relative
-            sha256 = (Get-StandardValidationFileSha256 -Path $file.FullName -Context $Context)
+            sha256 = (Get-StandardValidationNoFollowFileSha256 -Path $file.FullName -Context $Context)
             length = [int64]$file.Length
         }
     }
@@ -2960,6 +3109,27 @@ function Get-StandardValidationChildEnvironment {
     return $childEnvironment
 }
 
+function Get-StandardValidationCancellationState {
+    param(
+        [string] $CancellationPath,
+        [scriptblock] $CancellationProbe
+    )
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and
+            (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            return [pscustomobject]@{ requested = $true; error = $null }
+        }
+        if ($null -ne $CancellationProbe -and [bool](& $CancellationProbe)) {
+            return [pscustomobject]@{ requested = $true; error = $null }
+        }
+        return [pscustomobject]@{ requested = $false; error = $null }
+    }
+    catch {
+        return [pscustomobject]@{ requested = $false; error = [string]$_.Exception.Message }
+    }
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -2967,7 +3137,8 @@ function Invoke-StandardValidationProcess {
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [Parameter(Mandatory = $true)][hashtable] $Environment,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
-        [string] $CancellationPath
+        [string] $CancellationPath,
+        [scriptblock] $CancellationProbe
     )
 
     $startedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -2978,6 +3149,7 @@ function Invoke-StandardValidationProcess {
     $outputQuotaExceeded = $false
     $outputQuotaDiagnostic = $null
     $cleanedUp = $true
+    $processStarted = $false
     $process = $null
     $rootProcessId = $null
     $jobHandle = [IntPtr]::Zero
@@ -2994,10 +3166,19 @@ function Invoke-StandardValidationProcess {
     $unixBootstrapReleasePath = $null
     $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
     try {
-        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+        $cancellationBeforeStart = Get-StandardValidationCancellationState `
+            -CancellationPath $CancellationPath `
+            -CancellationProbe $CancellationProbe
+        if (-not [string]::IsNullOrWhiteSpace([string]$cancellationBeforeStart.error)) {
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true
+                status = 'startup-failed'; stdout = ''; stderr = "Cancellation probe failed before process start: $($cancellationBeforeStart.error)"; cleanedUp = $true; processStarted = $false
+            }
+        }
+        if ([bool]$cancellationBeforeStart.requested) {
+            return [pscustomobject][ordered]@{
+                startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
+                status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true; processStarted = $false
             }
         }
         $launchCommand = $Command
@@ -3025,7 +3206,7 @@ function Invoke-StandardValidationProcess {
             catch {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true; processStarted = $false
                 }
             }
         }
@@ -3091,7 +3272,7 @@ function Invoke-StandardValidationProcess {
             catch {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true; processStarted = $false
                 }
             }
         }
@@ -3101,6 +3282,7 @@ function Invoke-StandardValidationProcess {
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.EnvironmentVariables.Clear()
@@ -3113,20 +3295,32 @@ function Invoke-StandardValidationProcess {
             if (-not $process.Start()) {
                 return [pscustomobject][ordered]@{
                     startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = 'Process.Start returned false.'; cleanedUp = $true
+                    status = 'startup-failed'; stdout = ''; stderr = 'Process.Start returned false.'; cleanedUp = $true; processStarted = $false
                 }
             }
         }
         catch {
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); exitCode = -1
-                status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true
+                status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true; processStarted = $false
             }
         }
+        $processStarted = $true
         $rootProcessId = [int]$process.Id
         $protectionSetupFailed = $false
         $terminationStatus = $null
-        if ($pidNamespaceLaunch) {
+        # Never let a candidate inherit the supervisor's private cancellation
+        # channel. The bootstrap process is held until the trusted boundary is
+        # installed, so closing stdin here is before the real child is released.
+        try {
+            $process.StandardInput.Close()
+        }
+        catch {
+            $protectionSetupFailed = $true
+            $terminationStatus = 'startup-failed'
+            $stderr = "Could not close the owned child standard input: $($_.Exception.Message)"
+        }
+        if (-not $protectionSetupFailed -and $pidNamespaceLaunch) {
             try {
                 $supervisorNamespaceId = Get-StandardValidationUnixPidNamespaceIdentity `
                     -ProcessId $PID
@@ -3315,7 +3509,16 @@ function Invoke-StandardValidationProcess {
                 [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break
             }
-            if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            $cancellationState = Get-StandardValidationCancellationState `
+                -CancellationPath $CancellationPath `
+                -CancellationProbe $CancellationProbe
+            if (-not [string]::IsNullOrWhiteSpace([string]$cancellationState.error)) {
+                $terminationStatus = 'failed'
+                $stderr = "Cancellation probe failed while the owned process was running: $($cancellationState.error)"
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
+                break
+            }
+            if ([bool]$cancellationState.requested) {
                 $terminationStatus = 'cancelled'
                 [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
                 break
@@ -3421,6 +3624,7 @@ function Invoke-StandardValidationProcess {
         outputQuotaExceeded = [bool]$outputQuotaExceeded
         outputQuotaDiagnostic = if ($null -eq $outputQuotaDiagnostic) { $null } else { [string]$outputQuotaDiagnostic }
         cleanedUp = [bool]$cleanedUp
+        processStarted = [bool]$processStarted
     }
 }
 
@@ -4050,6 +4254,9 @@ function Invoke-StandardValidationCommandAndRecord {
     }
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaDiagnostic') {
         $boundedProcessResult.outputQuotaDiagnostic = if ($null -eq $processResult.outputQuotaDiagnostic) { $null } else { [string]$processResult.outputQuotaDiagnostic }
+    }
+    if ($processResult.PSObject.Properties.Name -contains 'processStarted') {
+        $boundedProcessResult.processStarted = [bool]$processResult.processStarted
     }
     $processResult = [pscustomobject]$boundedProcessResult
     if ($null -ne $OutputReservationStream) {
@@ -5215,7 +5422,13 @@ function Invoke-StandardValidationRun {
         catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
-        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey
+        # Keep the process-boundary path compact for Windows PowerShell 5.1.
+        # The full execution key remains the canonical lock/run identity; the
+        # child directory is ephemeral and uses a fresh supervisor-generated
+        # N-format GUID so it cannot inherit caller-controlled identity or
+        # collide with a stale execution root.
+        $childWorkingKey = [guid]::NewGuid().ToString('N')
+        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $childWorkingKey
         $childWorkingRoot = Assert-StandardValidationCanonicalRootPath -Path $childWorkingRoot -Context 'child working root'
         [void](New-Item -ItemType Directory -Path $childWorkingRoot -Force)
         Assert-StandardValidationNoReparsePoints -Root $childWorkingRoot -Context 'child working root'

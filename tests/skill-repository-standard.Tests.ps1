@@ -1175,6 +1175,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
         Assert-Match $gate 'tests/standard-validation-resolver-hardening\.Tests\.ps1' 'Shared gate must run the resolver-hardening authority regression.'
+        Assert-Match $gate 'tests/standard-validation-development-harness\.Tests\.ps1' 'Shared gate must run the development-harness authority regression.'
 
         $expectedGateSources = [ordered]@{
             'skillspector' = 'NVIDIA/SkillSpector'

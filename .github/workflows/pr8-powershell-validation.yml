@@ -62,25 +62,33 @@ jobs:
         shell: powershell
         run: |
           # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Continue'
+          $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          $pester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'3.4.0' } |
+            Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
           Import-Module $pester.Path -Force
-          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'3.4.0' } | Select-Object -First 1
+          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop |
+            Where-Object { $_.Module.Version -eq [version]'3.4.0' } |
+            Select-Object -First 1
           if ($null -eq $invokePester) { throw 'Invoke-Pester 3.4.0 could not be resolved.' }
-          Write-Host "Executing Pester $($invokePester.Module.Version)"
-          $result = & $invokePester -Script ./tests -PassThru
-          if ($null -eq $result) { throw 'Pester did not return a result object.' }
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 525) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 525." }
-          if ($result.FailedCount -gt 0) { exit 1 }
-          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
-          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 7) { throw "Windows PowerShell 5.1 expected exactly 7 platform/version skips; got $($result.SkippedCount)." }
-          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
-            throw 'Pester result counts are incomplete.'
+          Write-Host "Executing Pester $($invokePester.Module.Version) through the bounded shard executor."
+          $executorArguments = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '3.4.0'
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 7
+            IsolatedTestFileNames = @(
+              'standard-validation-runner.Tests.ps1'
+              'standard-validation-development-harness.Tests.ps1'
+              'syp101-production-smoke-contract.Tests.ps1'
+            )
+            OuterTimeoutSeconds = 1800
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
           }
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
           exit 0
 
   powershell-7:
@@ -126,25 +134,33 @@ jobs:
         shell: pwsh
         run: |
           # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Continue'
+          $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          $pester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'4.10.1' } |
+            Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
           Import-Module $pester.Path -Force
-          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object { $_.Module.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          $invokePester = Get-Command Invoke-Pester -ErrorAction Stop |
+            Where-Object { $_.Module.Version -eq [version]'4.10.1' } |
+            Select-Object -First 1
           if ($null -eq $invokePester) { throw 'Invoke-Pester 4.10.1 could not be resolved.' }
-          Write-Host "Executing Pester $($invokePester.Module.Version)"
-          $result = & $invokePester -Script ./tests -PassThru
-          if ($null -eq $result) { throw 'Pester did not return a result object.' }
-          Write-Host "Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 525) { throw "Pester discovered $($result.TotalCount) tests; expected exactly 525." }
-          if ($result.FailedCount -gt 0) { exit 1 }
-          if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests." }
-          if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests." }
-          if ([int]$result.SkippedCount -ne 6) { throw "PowerShell 7 on Windows expected exactly 6 platform skips; got $($result.SkippedCount)." }
-          if (([int]$result.PassedCount + [int]$result.SkippedCount) -ne [int]$result.TotalCount) {
-            throw 'Pester result counts are incomplete.'
+          Write-Host "Executing Pester $($invokePester.Module.Version) through the bounded shard executor."
+          $executorArguments = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '4.10.1'
+            ExpectedTotalCount = 530
+            ExpectedSkippedCount = 6
+            IsolatedTestFileNames = @(
+              'standard-validation-runner.Tests.ps1'
+              'standard-validation-development-harness.Tests.ps1'
+              'syp101-production-smoke-contract.Tests.ps1'
+            )
+            OuterTimeoutSeconds = 1800
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
           }
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
           exit 0
 
   powershell-7-unix-composition:
