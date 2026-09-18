@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '7519745266e0cd67b057e88c0ee63e702ccd1e10',
             '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            '1789b5e709080f90d9ea107e2a22345a24ede1ac',
-            'dc0f1c4c5a5206182ba5e986c42ddbf84ed905c7',
+            '340c45441cc357e91a2e968ef0e9497ce279acc6',
+            '7c24409b7eda18f701e6c1d52440f4566d0816f7',
             'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
             '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow '9f40628ec4966a63d72ccb5d1f60dbf497c0540f' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow 'd2663c76b5fa119eb2e60ecbdbc961f07a319bee' 'The evidence job must pin the reviewed PR36 validator blob.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
