@@ -725,6 +725,10 @@ jobs:
         }
         Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
         Assert-Match $workflow '522852401e85ed82bbeef69128f6825381f0cc99' 'The evidence job must pin the reviewed PR36 validator blob.'
+        foreach ($pinnedCommitVariable in @('SYP154_CANDIDATE_COMMIT', 'SYP154_LAUNCHER_COMMIT', 'SYP154_ORACLE_COMMIT')) {
+            Assert-Match $workflow ('cat-file -e "\$' + $pinnedCommitVariable + '\^\{commit\}"') "The evidence job must prove that $pinnedCommitVariable exists as an exact commit object."
+        }
+        Assert-NotMatch $workflow 'rev-parse refs/remotes/evidence/(?:candidate|launcher|oracle).*?== "\$SYP154_' 'Moving branch heads must not be required to remain equal to immutable evidence pins.'
         Assert-Match $workflow 'git .*merge-base --is-ancestor.*SYP154_ORACLE_COMMIT.*SYP154_CANDIDATE_COMMIT' 'The evidence job must prove the oracle/base is an ancestor of the candidate.'
         Assert-Match $workflow 'GITHUB_SHA.*SYP154_ORACLE_COMMIT' 'The protected validator must receive the independent oracle commit as its event authority.'
         Assert-Match $workflow 'TRUSTED_SUPERVISOR_COMMIT.*SYP154_ORACLE_COMMIT' 'The validator must bind its declared test authority to the independent oracle commit.'
@@ -761,7 +765,12 @@ jobs:
             $workflow,
             '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
         ).Value
+        $validation = [regex]::Match(
+            $workflow,
+            '(?s)- name: Validate immutable PR33 candidate with independent oracle.*?(?=\r?\n\s+- name: Remove delegated Linux cgroup subtree)'
+        ).Value
         Assert-True (-not [string]::IsNullOrEmpty($acquisition)) 'The acquisition section must be present.'
+        Assert-True (-not [string]::IsNullOrEmpty($validation)) 'The validation section must be present.'
         Assert-True (-not [string]::IsNullOrEmpty($finalizer)) 'The finalizer section must be present.'
         Assert-NotMatch $acquisition 'candidate-diff\.txt|launcher-inventory\.tsv|oracle-inventory\.tsv|identity-manifest\.json' 'Trusted export metadata must not exist while candidate code can run.'
         Assert-Match $finalizer "runner_temp='\$\{\{ runner\.temp \}\}'" 'The finalizer must receive the runner temp path from a supervisor-owned workflow expression.'
@@ -778,6 +787,9 @@ jobs:
             Assert-Match $finalizer $trustedPayload "The finalizer must recreate $trustedPayload from immutable inputs."
         }
         Assert-Match $finalizer 'export-sha256\.tsv' 'The finalizer must hash every exported payload after rebuilding trusted metadata.'
+        $reportDigestIndex = $validation.IndexOf('$evidenceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash.ToLowerInvariant()')
+        $validationRethrowIndex = $validation.IndexOf('if ($null -ne $validationError) { throw $validationError }')
+        Assert-True ($reportDigestIndex -ge 0 -and $validationRethrowIndex -ge 0 -and $reportDigestIndex -lt $validationRethrowIndex) 'Any produced conformance report digest must be protected before a validation error is rethrown.'
         $portableSummaryChecksum = 'printf ''%s  %s\n'' "$expected_summary_sha256" ''security-preflight-summary.json'' > "$export_root/security-preflight-summary.sha256"'
         $absoluteSummaryChecksum = '/usr/bin/sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"'
         Assert-Match $finalizer ([regex]::Escape($portableSummaryChecksum)) 'The exported security-summary checksum must name only its adjacent artifact basename.'

@@ -208,9 +208,9 @@ jobs:
             '+refs/heads/codex/SYP-154-v3-p06-implementation:refs/remotes/evidence/candidate' \
             '+refs/heads/codex/SYP-158-trusted-file-contract:refs/remotes/evidence/launcher' \
             '+refs/heads/main:refs/remotes/evidence/oracle'
-          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/candidate)" == "$SYP154_CANDIDATE_COMMIT" ]]
-          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/launcher)" == "$SYP154_LAUNCHER_COMMIT" ]]
-          [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/oracle)" == "$SYP154_ORACLE_COMMIT" ]]
+          git -C "$candidate_root" cat-file -e "$SYP154_CANDIDATE_COMMIT^{commit}"
+          git -C "$candidate_root" cat-file -e "$SYP154_LAUNCHER_COMMIT^{commit}"
+          git -C "$candidate_root" cat-file -e "$SYP154_ORACLE_COMMIT^{commit}"
           [[ "$(git -C "$candidate_root" rev-parse "$SYP154_CANDIDATE_COMMIT^{tree}")" == "$SYP154_CANDIDATE_TREE" ]]
           [[ "$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT^{tree}")" == "$SYP154_LAUNCHER_TREE" ]]
           [[ "$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT^{tree}")" == "$SYP154_ORACLE_TREE" ]]
@@ -386,13 +386,16 @@ jobs:
             & sudo -n chmod 0444 -- (Join-Path $supervisorRoot 'security-summary.sha256')
             if ($LASTEXITCODE -ne 0) { throw 'Could not protect the trusted security summary digest.' }
           }
+          $reportExists = Test-Path -LiteralPath $outputPath -PathType Leaf
+          if ($reportExists) {
+            $evidenceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash.ToLowerInvariant()
+            $evidenceSha256 | & sudo -n tee -- (Join-Path $supervisorRoot 'report.sha256') | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the trusted conformance report digest.' }
+            & sudo -n chmod 0444 -- (Join-Path $supervisorRoot 'report.sha256')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not protect the trusted conformance report digest.' }
+          }
           if ($null -ne $validationError) { throw $validationError }
-          if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) { throw 'PR33 conformance evidence is missing.' }
-          $evidenceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $outputPath).Hash.ToLowerInvariant()
-          $evidenceSha256 | & sudo -n tee -- (Join-Path $supervisorRoot 'report.sha256') | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the trusted conformance report digest.' }
-          & sudo -n chmod 0444 -- (Join-Path $supervisorRoot 'report.sha256')
-          if ($LASTEXITCODE -ne 0) { throw 'Could not protect the trusted conformance report digest.' }
+          if (-not $reportExists) { throw 'PR33 conformance evidence is missing.' }
           "pr33_evidence_sha256=$evidenceSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Remove delegated Linux cgroup subtree
@@ -471,9 +474,9 @@ jobs:
           if [[ "$acquisition_complete" == '1' ]]; then
             launcher_root="$supervisor_root/launcher"
             git_command=(/usr/bin/git --git-dir="$supervisor_root/candidate.git" --work-tree="$candidate_root" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c credential.helper=)
-            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/candidate)" == "$candidate_commit" ]]
-            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/launcher)" == "$launcher_commit" ]]
-            [[ "$("${git_command[@]}" rev-parse refs/remotes/evidence/oracle)" == "$oracle_commit" ]]
+            "${git_command[@]}" cat-file -e "$candidate_commit^{commit}"
+            "${git_command[@]}" cat-file -e "$launcher_commit^{commit}"
+            "${git_command[@]}" cat-file -e "$oracle_commit^{commit}"
             [[ "$("${git_command[@]}" rev-parse "$candidate_commit^{tree}")" == "$candidate_tree" ]]
             [[ "$("${git_command[@]}" rev-parse "$launcher_commit^{tree}")" == "$launcher_tree" ]]
             [[ "$("${git_command[@]}" rev-parse "$oracle_commit^{tree}")" == "$oracle_tree" ]]
