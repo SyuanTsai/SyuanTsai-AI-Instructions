@@ -535,6 +535,25 @@ jobs:
           /usr/bin/chmod -R a-w -- "$upload_action_root"
           [[ "$(/usr/bin/stat -c '%u:%g:%a' "$upload_action_root")" == '0:0:555' ]]
 
+          file_command_root="$runner_temp/_runner_file_commands"
+          [[ -d "$file_command_root" && ! -L "$file_command_root" ]]
+          [[ "$(/usr/bin/realpath -e "$file_command_root")" == "$file_command_root" ]]
+          mapfile -t environment_files < <(/usr/bin/find "$file_command_root" -maxdepth 1 -type f -name 'set_env_*' -print)
+          (( ${#environment_files[@]} == 1 ))
+          environment_file="${environment_files[0]}"
+          [[ "$environment_file" =~ ^/home/runner/work/_temp/_runner_file_commands/set_env_[0-9a-fA-F-]{36}$ ]]
+          [[ ! -L "$environment_file" ]]
+          [[ "$(/usr/bin/realpath -e "$environment_file")" == "$environment_file" ]]
+          [[ "$(/usr/bin/stat -c '%h' "$environment_file")" == '1' ]]
+          [[ "$(/usr/bin/stat -c '%u' "$environment_file")" == "$(/usr/bin/stat -c '%u' "$runner_temp")" ]]
+          /usr/bin/printf '%s\n' \
+            'HTTPS_PROXY=' 'https_proxy=' \
+            'HTTP_PROXY=' 'http_proxy=' \
+            'ALL_PROXY=' 'all_proxy=' \
+            'NO_PROXY=' 'no_proxy=' \
+            'NODE_TLS_REJECT_UNAUTHORIZED=' 'NODE_EXTRA_CA_CERTS=' \
+            'SSL_CERT_FILE=' 'SSL_CERT_DIR=' >> "$environment_file"
+
       - name: Upload bounded PR33 adoption evidence
         if: ${{ always() && steps.finalize_evidence.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -548,13 +567,9 @@ jobs:
           BASH_ENV: /dev/null
           ENV: /dev/null
           HTTPS_PROXY: ''
-          https_proxy: ''
           HTTP_PROXY: ''
-          http_proxy: ''
           ALL_PROXY: ''
-          all_proxy: ''
           NO_PROXY: ''
-          no_proxy: ''
           NODE_TLS_REJECT_UNAUTHORIZED: ''
           NODE_EXTRA_CA_CERTS: ''
           SSL_CERT_FILE: ''

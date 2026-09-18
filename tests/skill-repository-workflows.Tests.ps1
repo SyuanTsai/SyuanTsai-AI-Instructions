@@ -842,12 +842,19 @@ jobs:
     It 'UnitT100_clears_candidate_controlled_upload_transport_overrides' {
         $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
         $upload = [regex]::Match(
             $workflow,
             '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
         ).Value
 
+        $finalizer | Should -Not -BeNullOrEmpty
         $upload | Should -Not -BeNullOrEmpty
+        Assert-Match $finalizer '_runner_file_commands' 'Trusted finalization must locate the runner-created file-command directory.'
+        Assert-Match $finalizer "-name 'set_env_\*'" 'Trusted finalization must locate the current step environment command file.'
         foreach ($name in @(
             'HTTPS_PROXY', 'https_proxy',
             'HTTP_PROXY', 'http_proxy',
@@ -856,7 +863,11 @@ jobs:
             'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
             'SSL_CERT_FILE', 'SSL_CERT_DIR'
         )) {
-            Assert-Match $upload ("(?m)^\s+" + [regex]::Escape($name) + ":\s*''\s*$") "The upload action must explicitly clear $name."
+            Assert-Match $finalizer ("'" + [regex]::Escape($name) + "='") "Trusted finalization must clear $name for the following upload step."
         }
+        $uploadEnvironment = [regex]::Match($upload, '(?s)\r?\n\s+env:\s*\r?\n(?<body>.*?)(?=\r?\n\s+with:)').Groups['body'].Value
+        $uploadEnvironment | Should -Not -BeNullOrEmpty
+        $environmentNames = @([regex]::Matches($uploadEnvironment, '(?m)^\s+(?<name>[A-Za-z_][A-Za-z0-9_]*):') | ForEach-Object { $_.Groups['name'].Value.ToLowerInvariant() })
+        @($environmentNames | Group-Object | Where-Object Count -GT 1).Count | Should -Be 0 -Because 'GitHub rejects case-insensitive duplicate env keys before dispatch.'
     }
 }
