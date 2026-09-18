@@ -148,13 +148,17 @@ jobs:
           launcher_root="$RUNNER_TEMP/syp154-pr33-launcher"
           artifacts_root="$RUNNER_TEMP/syp154-pr33-artifacts"
           export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
-          for root in "$candidate_root" "$launcher_root" "$artifacts_root" "$export_root"; do
+          for root in "$candidate_root" "$launcher_root" "$artifacts_root"; do
             if [[ -e "$root" ]]; then
               echo "Evidence root already exists: $root" >&2
               exit 1
             fi
           done
-          mkdir -- "$candidate_root" "$launcher_root" "$artifacts_root" "$export_root"
+          if [[ -e "$export_root" ]]; then
+            echo "Evidence export root already exists before acquisition: $export_root" >&2
+            exit 1
+          fi
+          mkdir -- "$candidate_root" "$launcher_root" "$artifacts_root"
           git -C "$candidate_root" init
           git -C "$candidate_root" remote add origin "$SYP154_DARKTIDE_REPOSITORY"
           git -C "$candidate_root" fetch --no-tags origin \
@@ -171,7 +175,6 @@ jobs:
           git -C "$candidate_root" checkout --detach "$SYP154_CANDIDATE_COMMIT"
           [[ -z "$(git -C "$candidate_root" status --porcelain=v1 --untracked-files=all)" ]]
           git -C "$candidate_root" diff --check "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT"
-          git -C "$candidate_root" diff --name-status "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT" > "$export_root/candidate-diff.txt"
           git -C "$candidate_root" archive "$SYP154_LAUNCHER_COMMIT" \
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
@@ -190,42 +193,26 @@ jobs:
             'tests/SkillContract.Tests.ps1:b87401c01a671b978529066d71f3f0a44bf17d2a'
             'tests/SourcePin.Tests.ps1:6304768b79f063558f978e71cab59d9554c4e5ce'
           )
-          : > "$export_root/launcher-inventory.tsv"
           for entry in "${launcher_inventory[@]}"; do
             path="${entry%%:*}"
             expected_blob="${entry##*:}"
             actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT:$path")"
             materialized_blob="$(git hash-object "$launcher_root/$path")"
             [[ "$actual_blob" == "$expected_blob" && "$materialized_blob" == "$expected_blob" ]]
-            printf '%s\t%s\t%s\n' "$path" "$expected_blob" "$(sha256sum "$launcher_root/$path" | cut -d' ' -f1)" >> "$export_root/launcher-inventory.tsv"
           done
-          : > "$export_root/oracle-inventory.tsv"
           for entry in "${oracle_inventory[@]}"; do
             path="${entry%%:*}"
             expected_blob="${entry##*:}"
             actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT:$path")"
             [[ "$actual_blob" == "$expected_blob" ]]
-            printf '%s\t%s\n' "$path" "$expected_blob" >> "$export_root/oracle-inventory.tsv"
           done
-
-          cat > "$export_root/identity-manifest.json" <<JSON
-          {
-            "schemaVersion": 1,
-            "purpose": "syp154-pr33-adoption-evidence-development-only",
-            "repository": "$SYP154_DARKTIDE_REPOSITORY",
-            "candidate": { "commit": "$SYP154_CANDIDATE_COMMIT", "tree": "$SYP154_CANDIDATE_TREE" },
-            "launcher": { "commit": "$SYP154_LAUNCHER_COMMIT", "tree": "$SYP154_LAUNCHER_TREE" },
-            "oracle": { "commit": "$SYP154_ORACLE_COMMIT", "tree": "$SYP154_ORACLE_TREE" },
-            "releaseEligible": false,
-            "formalAdoption": "not-authorized"
-          }
-          JSON
           chmod -R a-w -- "$candidate_root" "$launcher_root"
           {
             printf 'SYP154_CANDIDATE_ROOT=%s\n' "$candidate_root"
             printf 'SYP154_LAUNCHER_ROOT=%s\n' "$launcher_root"
             printf 'SYP154_ARTIFACTS_ROOT=%s\n' "$artifacts_root"
             printf 'SYP154_EXPORT_ROOT=%s\n' "$export_root"
+            printf 'SYP154_ACQUISITION_COMPLETE=1\n'
           } >> "$GITHUB_ENV"
 
       - name: Delegate Linux cgroup v2 subtree
@@ -340,7 +327,74 @@ jobs:
           set -euo pipefail
           export_root="${SYP154_EXPORT_ROOT:-$RUNNER_TEMP/syp154-pr33-evidence-export}"
           artifacts_root="${SYP154_ARTIFACTS_ROOT:-$RUNNER_TEMP/syp154-pr33-artifacts}"
-          mkdir -p -- "$export_root"
+          candidate_root="${SYP154_CANDIDATE_ROOT:-$RUNNER_TEMP/syp154-pr33-candidate}"
+          launcher_root="${SYP154_LAUNCHER_ROOT:-$RUNNER_TEMP/syp154-pr33-launcher}"
+          expected_export_root="$RUNNER_TEMP/syp154-pr33-evidence-export"
+          if [[ "$export_root" != "$expected_export_root" ]]; then
+            echo "Refusing to finalize an unexpected evidence export path: $export_root" >&2
+            exit 1
+          fi
+          rm -rf -- "$export_root"
+          mkdir -- "$export_root"
+
+          if [[ "${SYP154_ACQUISITION_COMPLETE:-}" == '1' ]]; then
+            [[ -d "$candidate_root/.git" && -d "$launcher_root" ]]
+            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/candidate)" == "$SYP154_CANDIDATE_COMMIT" ]]
+            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/launcher)" == "$SYP154_LAUNCHER_COMMIT" ]]
+            [[ "$(git -C "$candidate_root" rev-parse refs/remotes/evidence/oracle)" == "$SYP154_ORACLE_COMMIT" ]]
+            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_CANDIDATE_COMMIT^{tree}")" == "$SYP154_CANDIDATE_TREE" ]]
+            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT^{tree}")" == "$SYP154_LAUNCHER_TREE" ]]
+            [[ "$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT^{tree}")" == "$SYP154_ORACLE_TREE" ]]
+            [[ -z "$(git -C "$candidate_root" status --porcelain=v1 --untracked-files=all)" ]]
+            git -C "$candidate_root" diff --check "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT"
+            git -C "$candidate_root" diff --name-status "$SYP154_ORACLE_COMMIT...$SYP154_CANDIDATE_COMMIT" > "$export_root/candidate-diff.txt"
+
+            launcher_inventory=(
+              'scripts/Validate.ps1:e428c9ebf21a0e45da6adcaa4f2815d6c02a31bd'
+              'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
+            )
+            oracle_inventory=(
+              'tests/BootstrapTransition.Tests.ps1:bb4dd7b3e5c3bd4085572c8400885e76f98031dd'
+              'tests/LocalizationWorkset.Tests.ps1:abbfc0ac6f7a8762a48b6b9c860ef1f48cddcb54'
+              'tests/ModUpdateAutomation.Tests.ps1:f67a6aa9050a5ab9718b7c5d450584fa402b28c2'
+              'tests/RepositoryContract.Tests.ps1:de5fa4f2efe3fa33d0dea23f1b616ec210cdc2bb'
+              'tests/RepositoryValidation.Tests.ps1:13e22b4522087b50b345736a4208dfd388ea148d'
+              'tests/Schema15Coordination.Tests.ps1:94c7990fff669164755a52e5937f34b677c8de53'
+              'tests/Schema15SourceAcquisition.Tests.ps1:84f141aca53aaeae7e93aefdbf4e30d5af1be6a7'
+              'tests/SkillContract.Tests.ps1:b87401c01a671b978529066d71f3f0a44bf17d2a'
+              'tests/SourcePin.Tests.ps1:6304768b79f063558f978e71cab59d9554c4e5ce'
+            )
+            : > "$export_root/launcher-inventory.tsv"
+            for entry in "${launcher_inventory[@]}"; do
+              path="${entry%%:*}"
+              expected_blob="${entry##*:}"
+              actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_LAUNCHER_COMMIT:$path")"
+              materialized_blob="$(git hash-object "$launcher_root/$path")"
+              [[ "$actual_blob" == "$expected_blob" && "$materialized_blob" == "$expected_blob" ]]
+              printf '%s\t%s\t%s\n' "$path" "$expected_blob" "$(sha256sum "$launcher_root/$path" | cut -d' ' -f1)" >> "$export_root/launcher-inventory.tsv"
+            done
+            : > "$export_root/oracle-inventory.tsv"
+            for entry in "${oracle_inventory[@]}"; do
+              path="${entry%%:*}"
+              expected_blob="${entry##*:}"
+              actual_blob="$(git -C "$candidate_root" rev-parse "$SYP154_ORACLE_COMMIT:$path")"
+              [[ "$actual_blob" == "$expected_blob" ]]
+              printf '%s\t%s\n' "$path" "$expected_blob" >> "$export_root/oracle-inventory.tsv"
+            done
+          fi
+
+          cat > "$export_root/identity-manifest.json" <<JSON
+          {
+            "schemaVersion": 1,
+            "purpose": "syp154-pr33-adoption-evidence-development-only",
+            "repository": "$SYP154_DARKTIDE_REPOSITORY",
+            "candidate": { "commit": "$SYP154_CANDIDATE_COMMIT", "tree": "$SYP154_CANDIDATE_TREE" },
+            "launcher": { "commit": "$SYP154_LAUNCHER_COMMIT", "tree": "$SYP154_LAUNCHER_TREE" },
+            "oracle": { "commit": "$SYP154_ORACLE_COMMIT", "tree": "$SYP154_ORACLE_TREE" },
+            "releaseEligible": false,
+            "formalAdoption": "not-authorized"
+          }
+          JSON
           {
             printf 'jobStatus=%s\n' "$EVIDENCE_JOB_STATUS"
             printf 'runnerOs=%s\n' "${RUNNER_OS:-unknown}"
@@ -373,7 +427,17 @@ jobs:
             cp -- "${summaries[0]}" "$export_root/security-preflight-summary.json"
             sha256sum "$export_root/security-preflight-summary.json" > "$export_root/security-preflight-summary.sha256"
           fi
-          find "$export_root" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$export_root/export-inventory.txt"
+          {
+            find "$export_root" -maxdepth 1 -type f \
+              ! -name export-inventory.txt ! -name export-sha256.tsv -printf '%f\n'
+            printf '%s\n' export-inventory.txt export-sha256.tsv
+          } | LC_ALL=C sort > "$export_root/export-inventory.txt"
+          while IFS= read -r exported_file; do
+            if [[ "$exported_file" == 'export-sha256.tsv' ]]; then
+              continue
+            fi
+            printf '%s\t%s\n' "$(sha256sum "$export_root/$exported_file" | cut -d' ' -f1)" "$exported_file"
+          done < "$export_root/export-inventory.txt" > "$export_root/export-sha256.tsv"
 
       - name: Upload bounded PR33 adoption evidence
         if: ${{ always() }}

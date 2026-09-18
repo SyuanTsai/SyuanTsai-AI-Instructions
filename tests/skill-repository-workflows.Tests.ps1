@@ -737,4 +737,36 @@ jobs:
         Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?checks:\s*write' 'The evidence-only job must not publish required checks.'
         Assert-NotMatch $workflow '(?s)pr33-adoption-evidence-development-only:.*?pull-requests:\s*write' 'The evidence-only job must not mutate pull requests.'
     }
+
+    # Scenario: Candidate code runs under the runner identity and must not be able to forge the uploaded identity metadata.
+    # Purpose: Build every trusted metadata payload only after candidate descendants stop, replacing any candidate-created export path first.
+    It 'UnitT85_finalizes_trusted_evidence_metadata_after_candidate_execution' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $acquisition = [regex]::Match(
+            $workflow,
+            '(?s)- name: Acquire and bind immutable launcher oracle and PR33 candidate.*?(?=\r?\n\s+- name: Delegate Linux cgroup v2 subtree)'
+        ).Value
+        $finalizer = [regex]::Match(
+            $workflow,
+            '(?s)- name: Finalize bounded evidence export.*?(?=\r?\n\s+- name: Upload bounded PR33 adoption evidence)'
+        ).Value
+
+        $acquisition | Should -Not -BeNullOrEmpty
+        $finalizer | Should -Not -BeNullOrEmpty
+        Assert-NotMatch $acquisition 'candidate-diff\.txt|launcher-inventory\.tsv|oracle-inventory\.tsv|identity-manifest\.json' 'Trusted export metadata must not exist while candidate code can run.'
+        Assert-Match $finalizer 'export_root.*RUNNER_TEMP/syp154-pr33-evidence-export' 'The finalizer must bind the exact run-owned export path.'
+        Assert-Match $finalizer 'rm -rf -- "\$export_root"' 'The finalizer must replace any candidate-created export path after candidate shutdown.'
+        Assert-Match $acquisition 'SYP154_ACQUISITION_COMPLETE=1' 'The acquisition step must publish an explicit completion witness.'
+        Assert-Match $finalizer 'SYP154_ACQUISITION_COMPLETE.*==\s*''1''' 'The finalizer must fail closed over completed acquisition inputs.'
+        foreach ($trustedPayload in @(
+            'candidate-diff\.txt',
+            'launcher-inventory\.tsv',
+            'oracle-inventory\.tsv',
+            'identity-manifest\.json'
+        )) {
+            Assert-Match $finalizer $trustedPayload "The finalizer must recreate $trustedPayload from immutable inputs."
+        }
+        Assert-Match $finalizer 'export-sha256\.tsv' 'The finalizer must hash every exported payload after rebuilding trusted metadata.'
+    }
 }
