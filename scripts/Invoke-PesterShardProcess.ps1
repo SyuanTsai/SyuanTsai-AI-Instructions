@@ -562,6 +562,44 @@ function Read-PesterShardOutputPrefix {
     }
 }
 
+function Read-PesterShardOutputTail {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [int] $MaxBytes = 65536,
+        [int] $MaxChars = 65536
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    if ($MaxBytes -lt 1 -or $MaxChars -lt 1) { return '' }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $start = [Math]::Max([int64]0, $stream.Length - [int64]$MaxBytes)
+        [void]$stream.Seek($start, [IO.SeekOrigin]::Begin)
+        $requested = [int]($stream.Length - $start)
+        $buffer = New-Object byte[] $requested
+        $total = 0
+        while ($total -lt $requested) {
+            $read = $stream.Read($buffer, $total, $requested - $total)
+            if ($read -le 0) { break }
+            $total += $read
+        }
+        $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $total)
+        if ($start -gt 0) {
+            $firstNewline = $text.IndexOf("`n", [StringComparison]::Ordinal)
+            if ($firstNewline -ge 0) { $text = $text.Substring($firstNewline + 1) }
+        }
+        if ($text.Length -gt $MaxChars) { $text = $text.Substring($text.Length - $MaxChars) }
+        return $text
+    }
+    catch {
+        return "<output-tail-read-error: $($_.Exception.Message)>"
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Get-PesterShardFailureSummary {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -572,28 +610,54 @@ function Get-PesterShardFailureSummary {
 
     $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
     foreach ($path in $Paths) {
-        $text = Read-PesterShardOutputPrefix -Path $path
+        foreach ($text in @(
+            (Read-PesterShardOutputTail -Path $path),
+            (Read-PesterShardOutputPrefix -Path $path -MaxChars 32768)
+        )) {
+            if ([string]::IsNullOrWhiteSpace($text)) { continue }
+            $lines = @($text -split "`r?`n")
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+                $candidate = [regex]::Replace([string]$lines[$index], $ansiPattern, '')
+                if ($candidate -notmatch '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+') { continue }
+                $selected = New-Object 'System.Collections.Generic.List[string]'
+                $start = [Math]::Max(0, $index - 1)
+                $end = [Math]::Min($lines.Count - 1, $index + $MaxLines - 2)
+                for ($lineIndex = $start; $lineIndex -le $end -and $selected.Count -lt $MaxLines; $lineIndex++) {
+                    $line = [regex]::Replace([string]$lines[$lineIndex], $ansiPattern, '').Trim()
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                        $line = '[redacted sensitive diagnostic line]'
+                    }
+                    if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
+                    if (-not $selected.Contains($line)) { $selected.Add($line) }
+                }
+                $summary = ($selected.ToArray() -join ' | ')
+                if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
+                return $summary
+            }
+        }
+    }
+
+    $sanitizedFallback = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($path in $Paths) {
+        $text = Read-PesterShardOutputTail -Path $path
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
         $lines = @($text -split "`r?`n")
-        for ($index = 0; $index -lt $lines.Count; $index++) {
-            $candidate = [regex]::Replace([string]$lines[$index], $ansiPattern, '')
-            if ($candidate -notmatch '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+') { continue }
-            $selected = New-Object 'System.Collections.Generic.List[string]'
-            $start = [Math]::Max(0, $index - 1)
-            $end = [Math]::Min($lines.Count - 1, $index + $MaxLines - 2)
-            for ($lineIndex = $start; $lineIndex -le $end -and $selected.Count -lt $MaxLines; $lineIndex++) {
-                $line = [regex]::Replace([string]$lines[$lineIndex], $ansiPattern, '').Trim()
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                    $line = '[redacted sensitive diagnostic line]'
-                }
-                if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
-                if (-not $selected.Contains($line)) { $selected.Add($line) }
+        for ($index = $lines.Count - 1; $index -ge 0 -and $sanitizedFallback.Count -lt $MaxLines; $index--) {
+            $line = [regex]::Replace([string]$lines[$index], $ansiPattern, '').Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                $line = '[redacted sensitive diagnostic line]'
             }
-            $summary = ($selected.ToArray() -join ' | ')
-            if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
-            return $summary
+            if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
+            $sanitizedFallback.Insert(0, $line)
         }
+        if ($sanitizedFallback.Count -gt 0) { break }
+    }
+    if ($sanitizedFallback.Count -gt 0) {
+        $summary = ($sanitizedFallback.ToArray() -join ' | ')
+        if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
+        return $summary
     }
     return ''
 }
@@ -1304,9 +1368,11 @@ function Invoke-PesterShardProcess {
             exception = $exceptionText
             outputWriteError = $outputWriteError
             observedProcessIdentities = @($observedProcessIdentities.Values | Sort-Object processId)
-            failureSummary = Get-PesterShardFailureSummary -Paths @($StdoutPath, $StderrPath)
+            failureSummary = Get-PesterShardFailureSummary -Paths @($StderrPath, $StdoutPath)
             stdoutPrefix = Read-PesterShardOutputPrefix -Path $StdoutPath
             stderrPrefix = Read-PesterShardOutputPrefix -Path $StderrPath
+            stdoutTail = Read-PesterShardOutputTail -Path $StdoutPath
+            stderrTail = Read-PesterShardOutputTail -Path $StderrPath
         }
         try {
             [IO.File]::WriteAllText(
@@ -1415,7 +1481,7 @@ $childScript = @(
     'Import-Module $env:SYP154_PESTER_MODULE_PATH -Force'
     ('$invoke = Get-Command Invoke-Pester -ErrorAction Stop | Where-Object {{ $_.Module.Version -eq [version]''{0}'' }} | Select-Object -First 1' -f $PesterVersion)
     ('if ($null -eq $invoke) {{ throw ''Pester shard could not resolve version {0}.'' }}' -f $PesterVersion)
-    '$invokeParameters = @{ Script = $paths; PassThru = $true }'
+    '$invokeParameters = @{ Script = $paths; PassThru = $true; Show = ''All'' }'
     '$savedPesterErrorActionPreference = $ErrorActionPreference'
     'try {'
     '    # Preserve the original workflow contract: Pester and its fixtures may emit non-terminating native stderr warnings.'
