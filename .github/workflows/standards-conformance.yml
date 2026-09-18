@@ -112,8 +112,8 @@ jobs:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
       SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
       SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: bac572de9ca30738c1a8e73927a767882a153bdd
-      SYP154_LAUNCHER_TREE: 10a2b60b7156edf0970816af887776d41aa7ee76
+      SYP154_LAUNCHER_COMMIT: 807813ed49e284c96e5f9cf103787df0f0760485
+      SYP154_LAUNCHER_TREE: 72a8e98ac1d70f5fb130ec476d3cd4df385c2568
       SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
       SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
     steps:
@@ -176,7 +176,7 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:ef0dfe4507cfdebc0d9c893910a9dbc1a25edb48'
+            'scripts/Validate.ps1:213b5f0d2965529e4a6c939256f2545a086defa2'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
