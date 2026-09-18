@@ -836,4 +836,27 @@ jobs:
         Assert-Match $finalizer '/usr/bin/chmod -R a-w -- "\$upload_action_root"' 'The restored uploader must be immutable to the runner account.'
         Assert-Match $upload "if:\s*\$\{\{ always\(\) && steps\.finalize_evidence\.outcome == 'success' \}\}" 'Upload must not execute if trusted restoration or finalization fails.'
     }
+
+    # Scenario: Candidate code can append proxy and TLS variables to the runner file-command environment.
+    # Purpose: Prevent the pinned uploader from inheriting candidate-selected transports or trust stores.
+    It 'UnitT100_clears_candidate_controlled_upload_transport_overrides' {
+        $workflowPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
+        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
+        $upload = [regex]::Match(
+            $workflow,
+            '(?s)- name: Upload bounded PR33 adoption evidence.*?(?=\r?\n\s{2}\S|\z)'
+        ).Value
+
+        $upload | Should -Not -BeNullOrEmpty
+        foreach ($name in @(
+            'HTTPS_PROXY', 'https_proxy',
+            'HTTP_PROXY', 'http_proxy',
+            'ALL_PROXY', 'all_proxy',
+            'NO_PROXY', 'no_proxy',
+            'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS',
+            'SSL_CERT_FILE', 'SSL_CERT_DIR'
+        )) {
+            Assert-Match $upload ("(?m)^\s+" + [regex]::Escape($name) + ":\s*''\s*$") "The upload action must explicitly clear $name."
+        }
+    }
 }

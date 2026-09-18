@@ -547,6 +547,18 @@ jobs:
           NODE_PATH: ''
           BASH_ENV: /dev/null
           ENV: /dev/null
+          HTTPS_PROXY: ''
+          https_proxy: ''
+          HTTP_PROXY: ''
+          http_proxy: ''
+          ALL_PROXY: ''
+          all_proxy: ''
+          NO_PROXY: ''
+          no_proxy: ''
+          NODE_TLS_REJECT_UNAUTHORIZED: ''
+          NODE_EXTRA_CA_CERTS: ''
+          SSL_CERT_FILE: ''
+          SSL_CERT_DIR: ''
         with:
           name: syp154-pr33-adoption-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/syp154-pr33-evidence-export
