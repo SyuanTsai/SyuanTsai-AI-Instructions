@@ -687,12 +687,20 @@ function Get-PesterShardFailureSummary {
     )
 
     $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
+    $deferredCliXml = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
         foreach ($text in @(
             (Read-PesterShardOutputTail -Path $path),
             (Read-PesterShardOutputPrefix -Path $path -MaxChars 32768)
         )) {
+            $rawText = $text
             $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $text
+            if (-not [string]::IsNullOrWhiteSpace($rawText) -and
+                $text -ceq $rawText -and
+                $rawText.TrimStart().StartsWith('#< CLIXML', [StringComparison]::Ordinal)) {
+                if (-not $deferredCliXml.Contains($rawText)) { [void]$deferredCliXml.Add($rawText) }
+                continue
+            }
             if ([string]::IsNullOrWhiteSpace($text)) { continue }
             $lines = @($text -split "`r?`n")
             for ($index = 0; $index -lt $lines.Count; $index++) {
@@ -719,8 +727,15 @@ function Get-PesterShardFailureSummary {
 
     $sanitizedFallback = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
-        $text = Read-PesterShardOutputTail -Path $path
+        $rawText = Read-PesterShardOutputTail -Path $path
+        $text = $rawText
         $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $text
+        if (-not [string]::IsNullOrWhiteSpace($rawText) -and
+            $text -ceq $rawText -and
+            $rawText.TrimStart().StartsWith('#< CLIXML', [StringComparison]::Ordinal)) {
+            if (-not $deferredCliXml.Contains($rawText)) { [void]$deferredCliXml.Add($rawText) }
+            continue
+        }
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
         $lines = @($text -split "`r?`n")
         for ($index = $lines.Count - 1; $index -ge 0 -and $sanitizedFallback.Count -lt $MaxLines; $index--) {
@@ -736,6 +751,24 @@ function Get-PesterShardFailureSummary {
     }
     if ($sanitizedFallback.Count -gt 0) {
         $summary = ($sanitizedFallback.ToArray() -join ' | ')
+        if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
+        return $summary
+    }
+    if ($deferredCliXml.Count -gt 0) {
+        $rawFallback = [string]$deferredCliXml[0]
+        $rawLines = @($rawFallback -split "`r?`n")
+        $boundedRaw = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($rawLine in $rawLines) {
+            if ($boundedRaw.Count -ge $MaxLines) { break }
+            $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                $line = '[redacted sensitive diagnostic line]'
+            }
+            if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
+            [void]$boundedRaw.Add($line)
+        }
+        $summary = ($boundedRaw.ToArray() -join ' | ')
         if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
         return $summary
     }

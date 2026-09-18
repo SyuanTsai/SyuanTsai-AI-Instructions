@@ -843,6 +843,24 @@ catch {
         $mixedSummary = Get-PesterShardFailureSummary -Paths @($mixedStderrPath, $stdoutPath)
         Assert-Match $mixedSummary 'PSSecurityException: fixture execution policy failure' 'Mixed CLIXML must decode the useful non-progress record instead of returning raw XML.'
         Assert-False ($mixedSummary -match '(?i)#< CLIXML|S="progress"') 'Decoded mixed CLIXML must omit serialization markup and progress records.'
+
+        $truncatedStderrPath = Join-Path $TestDrive 'truncated-progress-clixml-stderr.txt'
+        Write-TestUtf8File -Path $truncatedStderrPath -Text @'
+#< CLIXML
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><MS><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0<
+'@
+        $actionableStdoutPath = Join-Path $TestDrive 'actionable-stdout.txt'
+        Write-TestUtf8File -Path $actionableStdoutPath -Text @'
+[-] Error occurred in test script 'tests\fixture.Tests.ps1'
+PSSecurityException: fixture execution policy failure
+'@
+        $truncatedSummary = Get-PesterShardFailureSummary -Paths @($truncatedStderrPath, $actionableStdoutPath)
+        Assert-Match $truncatedSummary 'PSSecurityException: fixture execution policy failure' 'Truncated progress CLIXML must be deferred behind actionable stdout.'
+        Assert-False ($truncatedSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Deferred truncated progress CLIXML must not mask actionable stdout.'
+
+        $preservedRawSummary = Get-PesterShardFailureSummary -Paths @($truncatedStderrPath)
+        Assert-Match $preservedRawSummary '#< CLIXML' 'Unparseable CLIXML must remain available when no better diagnostic stream exists.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
