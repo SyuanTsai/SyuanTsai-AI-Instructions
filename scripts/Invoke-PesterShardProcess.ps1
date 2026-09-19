@@ -703,6 +703,17 @@ function Remove-PesterShardTerminalControlSequences {
         $a = $p.Split(';')
         for ($i = 0; $i -lt $a.Count; $i++) {
             $n = 0
+            if ($a[$i].Contains(':')) {
+                $b = $a[$i].Split(':')
+                if (-not [int]::TryParse($b[0], [ref]$n) -or $n -notin 38, 48, 58 -or
+                    (($b.Count -ne 3 -or $b[1] -cne '5') -and ($b.Count -notin 5, 6 -or $b[1] -cne '2'))) { return $false }
+                for ($j = 2; $j -lt $b.Count; $j++) {
+                    if ($j -eq 2 -and $b.Count -eq 6 -and -not $b[$j]) { continue }
+                    $v = 0
+                    if (-not [int]::TryParse($b[$j], [ref]$v) -or $v -gt 255) { return $false }
+                }
+                continue
+            }
             if ($a[$i] -and -not [int]::TryParse($a[$i], [ref]$n)) { return $false }
             if ($n -eq 8) { return $false }
             if ($n -in 38, 48, 58) {
@@ -717,127 +728,127 @@ function Remove-PesterShardTerminalControlSequences {
         }
         $true
     }
-    $index = 0
-    while ($index -lt $Text.Length) {
-        $code = [int][char]$Text[$index]
+    $k = 0
+    while ($k -lt $Text.Length) {
+        $c = [int][char]$Text[$k]
 
-        if ($code -eq 0x08 -or $code -eq 0x0B -or $code -eq 0x0C -or $code -eq 0x0E -or $code -eq 0x0F -or
-            ($code -eq 0x0D -and (($index + 1) -ge $Text.Length -or [int][char]$Text[$index + 1] -ne 0x0A))) {
+        if ($c -eq 0x08 -or $c -eq 0x0B -or $c -eq 0x0C -or $c -eq 0x0E -or $c -eq 0x0F -or
+            ($c -eq 0x0D -and (($k + 1) -ge $Text.Length -or [int][char]$Text[$k + 1] -ne 0x0A))) {
             [void]$out.Append($taint)
-            $index++
+            $k++
             continue
         }
 
-        if ($code -eq 0x1B) {
-            $index++
-            if ($index -ge $Text.Length) { continue }
-            $next = [int][char]$Text[$index]
+        if ($c -eq 0x1B) {
+            $k++
+            if ($k -ge $Text.Length) { continue }
+            $n = [int][char]$Text[$k]
 
-            if ($next -eq 0x5D -or $next -eq 0x50 -or $next -eq 0x58 -or $next -eq 0x5E -or $next -eq 0x5F) {
-                $index++
-                while ($index -lt $Text.Length) {
-                    $stringCode = [int][char]$Text[$index]
-                    if ($stringCode -eq 0x07 -or $stringCode -eq 0x9C) {
-                        $index++
+            if ($n -eq 0x5D -or $n -eq 0x50 -or $n -eq 0x58 -or $n -eq 0x5E -or $n -eq 0x5F) {
+                $k++
+                while ($k -lt $Text.Length) {
+                    $s = [int][char]$Text[$k]
+                    if ($s -eq 0x07 -or $s -eq 0x9C) {
+                        $k++
                         break
                     }
-                    if ($stringCode -eq 0x1B -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x5C) {
-                        $index += 2
+                    if ($s -eq 0x1B -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x5C) {
+                        $k += 2
                         break
                     }
-                    $index++
+                    $k++
                 }
                 continue
             }
 
-            if ($next -eq 0x5B) {
-                $index++
-                $p = $index
-                while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
-                $sgr = $Text.Substring($p, $index - $p)
-                $intermediate = $index
-                while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
-                if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
-                    $finalCode = [int][char]$Text[$index]
-                    $index++
-                    $safeSgr = ($finalCode -eq 0x6D -and $index - 1 -eq $intermediate -and (& $sgrSafe $sgr))
-                    if (-not $safeSgr) { [void]$out.Append($taint) }
+            if ($n -eq 0x5B) {
+                $k++
+                $p = $k
+                while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x3F) { $k++ }
+                $sgr = $Text.Substring($p, $k - $p)
+                $m = $k
+                while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
+                if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x40 -and [int][char]$Text[$k] -le 0x7E) {
+                    $f = [int][char]$Text[$k]
+                    $k++
+                    $safe = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $sgrSafe $sgr))
+                    if (-not $safe) { [void]$out.Append($taint) }
                     continue
                 }
                 [void]$out.Append($taint)
-                if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
-                    if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
-                    $index++
+                if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
+                    if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
+                    $k++
                 }
                 continue
             }
 
-            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
-            if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x7E) {
-                $index++
+            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
+            if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x7E) {
+                $k++
                 [void]$out.Append($taint)
                 continue
             }
             [void]$out.Append($taint)
-            if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
-                if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
-                $index++
+            if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
+                if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
+                $k++
             }
             continue
         }
 
-        if ($code -eq 0x90 -or $code -eq 0x98 -or $code -eq 0x9D -or $code -eq 0x9E -or $code -eq 0x9F) {
-            $index++
-            while ($index -lt $Text.Length) {
-                $stringCode = [int][char]$Text[$index]
-                if ($stringCode -eq 0x07 -or $stringCode -eq 0x9C) {
-                    $index++
+        if ($c -eq 0x90 -or $c -eq 0x98 -or $c -eq 0x9D -or $c -eq 0x9E -or $c -eq 0x9F) {
+            $k++
+            while ($k -lt $Text.Length) {
+                $s = [int][char]$Text[$k]
+                if ($s -eq 0x07 -or $s -eq 0x9C) {
+                    $k++
                     break
                 }
-                if ($stringCode -eq 0x1B -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x5C) {
-                    $index += 2
+                if ($s -eq 0x1B -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x5C) {
+                    $k += 2
                     break
                 }
-                $index++
+                $k++
             }
             continue
         }
 
-        if ($code -eq 0x9B) {
-            $index++
-            $p = $index
-            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
-            $sgr = $Text.Substring($p, $index - $p)
-            $intermediate = $index
-            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
-            if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
-                $finalCode = [int][char]$Text[$index]
-                $index++
-                $safeSgr = ($finalCode -eq 0x6D -and $index - 1 -eq $intermediate -and (& $sgrSafe $sgr))
-                if (-not $safeSgr) { [void]$out.Append($taint) }
+        if ($c -eq 0x9B) {
+            $k++
+            $p = $k
+            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x3F) { $k++ }
+            $sgr = $Text.Substring($p, $k - $p)
+            $m = $k
+            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
+            if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x40 -and [int][char]$Text[$k] -le 0x7E) {
+                $f = [int][char]$Text[$k]
+                $k++
+                $safe = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $sgrSafe $sgr))
+                if (-not $safe) { [void]$out.Append($taint) }
                 continue
             }
             [void]$out.Append($taint)
-            if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
-                if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
-                $index++
+            if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
+                if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
+                $k++
             }
             continue
         }
 
-        if ($code -ge 0x80 -and $code -le 0x9F) {
+        if ($c -ge 0x80 -and $c -le 0x9F) {
             [void]$out.Append($taint)
-            $index++
+            $k++
             continue
         }
 
-        if (($code -ge 0x00 -and $code -le 0x08) -or $code -eq 0x0B -or $code -eq 0x0C -or ($code -ge 0x0E -and $code -le 0x1F) -or $code -eq 0x7F) {
-            $index++
+        if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) {
+            $k++
             continue
         }
 
-        [void]$out.Append($Text[$index])
-        $index++
+        [void]$out.Append($Text[$k])
+        $k++
     }
     return $out.ToString()
 }

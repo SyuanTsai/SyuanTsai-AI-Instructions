@@ -1072,6 +1072,8 @@ PSSecurityException: fixture execution policy failure
         $escape = [string][char]27
         $indexedColor = $escape + '[38;5;8m'
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${indexedColor}context${ansiReset}") 'safe context' 'A color index numerically equal to the concealment opcode must remain ordinary readable SGR formatting.'
+        $colonColor = $escape + '[38:2::255:0:0m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'A valid colon-form RGB SGR sequence must remain ordinary readable formatting.'
         $bell = [string][char]7
         $backspace = [string][char]8
         $osc = $escape + ']0;fixture' + $bell
@@ -1122,6 +1124,7 @@ PSSecurityException: fixture execution policy failure
         }, $true)
         Assert-True ($null -ne $childTerminalControlFunction) 'The generated child must embed the same bounded terminal-control scanner.'
         Invoke-Expression $childTerminalControlFunction.Extent.Text
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'The generated child must preserve valid colon-form RGB SGR formatting.'
         $childDiagnosticFunction = $childAst.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
