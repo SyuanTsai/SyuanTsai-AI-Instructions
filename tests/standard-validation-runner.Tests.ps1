@@ -1050,6 +1050,9 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "[-] fixture failure`n`"token`":$dcs`nparent-dcs-credential`nExpected: parent-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "[-] fixture failure`n`"token`":$c1Csi`nparent-c1-credential`nExpected: parent-c1-context" },
+            [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "[-] fixture failure`nto${escape}[31`nken:`nparent-esc-csi-incomplete-credential`nExpected: parent-esc-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "[-] fixture failure`nto$([char]0x9B)31`nken:`nparent-c1-csi-incomplete-credential`nExpected: parent-c1-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "[-] fixture failure`nto${escape}(`nken:`nparent-esc-intermediate-incomplete-credential`nExpected: parent-esc-intermediate-incomplete-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1080,6 +1083,9 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'osc'; Text = "fixture failure`n`"token`":$osc`nearly-child-osc-credential`nExpected: early-child-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "fixture failure`n`"token`":$dcs`nearly-child-dcs-credential`nExpected: early-child-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "fixture failure`n`"token`":$c1Csi`nearly-child-c1-credential`nExpected: early-child-c1-context" },
+            [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "fixture failure`nto${escape}[31`nken:`nearly-child-esc-csi-incomplete-credential`nExpected: early-child-esc-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "fixture failure`nto$([char]0x9B)31`nken:`nearly-child-c1-csi-incomplete-credential`nExpected: early-child-c1-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "fixture failure`nto${escape}(`nken:`nearly-child-esc-intermediate-incomplete-credential`nExpected: early-child-esc-intermediate-incomplete-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'

@@ -702,7 +702,9 @@ function Remove-PesterShardTerminalControlSequences {
         ''
     )
     $normalized = [regex]::Replace($normalized, '(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]', '')
+    $normalized = [regex]::Replace($normalized, '(?:\x1B\[|\x9B)[0-?]*[ -/]*(?:\r\n|\r|\n|\z)', '')
     $normalized = [regex]::Replace($normalized, '\x1B[ -/]*[@-Z\\-_]', '')
+    $normalized = [regex]::Replace($normalized, '\x1B[ -/]*(?:\r\n|\r|\n|\z)', '')
     return [regex]::Replace($normalized, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '')
 }
 
@@ -1824,7 +1826,9 @@ $childScript = @(
     '    $normalizedText = [regex]::Replace($text, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*?(?:\x07|\x1B\\|\x9C)'', '''')'
     '    $normalizedText = [regex]::Replace($normalizedText, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*\z'', '''')'
     '    $normalizedText = [regex]::Replace($normalizedText, ''(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''(?:\x1B\[|\x9B)[0-?]*[ -/]*(?:\r\n|\r|\n|\z)'', '''')'
     '    $normalizedText = [regex]::Replace($normalizedText, ''\x1B[ -/]*[@-Z\\-_]'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''\x1B[ -/]*(?:\r\n|\r|\n|\z)'', '''')'
     '    $normalizedText = [regex]::Replace($normalizedText, ''[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]'', '''')'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
     '    $redactSensitiveContinuation = $false'
