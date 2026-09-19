@@ -1212,7 +1212,16 @@ try {
     exit 0
 }
 catch {
-    [Console]::Error.WriteLine($_.Exception.GetType().FullName + ': ' + $_.Exception.Message)
+    $writerException = $_.Exception
+    while ($null -ne $writerException.InnerException) {
+        $writerException = $writerException.InnerException
+    }
+    $win32Error = ([int]$writerException.HResult -band 0xffff)
+    if ($writerException -isnot [System.IO.IOException] -or $win32Error -ne 32) {
+        [Console]::Error.WriteLine(('writer-error-kind=unexpected;type={0};win32={1}' -f $writerException.GetType().FullName,$win32Error))
+        exit 24
+    }
+    [Console]::Error.WriteLine('writer-error-kind=sharing-violation')
     exit 23
 }
 '@
@@ -1277,7 +1286,7 @@ finally {
         }
         Test-Path -LiteralPath $writerResultPath -PathType Leaf | Should Be $true
         (Get-Content -Raw -LiteralPath $writerResultPath) |
-            Should Match '(?s)^23\r?\n.*process cannot access the file'
+            Should Match '(?s)^23\r?\n.*writer-error-kind=sharing-violation'
         Test-Path -LiteralPath $probePath | Should Be $false
     }
 
