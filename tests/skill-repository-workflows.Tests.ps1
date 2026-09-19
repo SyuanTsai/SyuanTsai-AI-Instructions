@@ -714,17 +714,17 @@ jobs:
         Assert-Match $workflow 'timeout-minutes: 45' 'The evidence job must retain one bounded outer deadline.'
         Assert-Match $workflow 'https://github\.com/SyuanTsai/Skill-Darktide-Translate\.git' 'The evidence job must acquire the exact Darktide repository.'
         foreach ($identity in @(
-            '7519745266e0cd67b057e88c0ee63e702ccd1e10',
-            '654934a3f1f412bc5ccda89bda0f9158cb4d328a',
-            'efff60f7667d3e1fef159dfeec3565ad3087100e',
-            '0d89a00cb7786fba932332cd287aa7db88fc22af',
-            'c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8',
-            '4332d9a1a366d6ff238cde3fe33912cca7dd2050'
+            '726e269b9090dd5079f1bfb48c327f23cae60270',
+            'e9cd0c8899355499a5113cfbbc4d55cd249ba60a',
+            'c3e3add98902b2a14a0c5ef2aff5393a3c974751',
+            '8992b6a870c8ff5e4865f62ea4bc8b50c687a2d3',
+            'e1c14aa50f6da6a840f83aee837cd7861abfe387',
+            '0d89a00cb7786fba932332cd287aa7db88fc22af'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
-        Assert-Match $workflow 'codex/SYP-158-trusted-file-contract' 'The evidence job must fetch the reviewed PR36 launcher branch before proving its pinned head.'
-        Assert-Match $workflow '522852401e85ed82bbeef69128f6825381f0cc99' 'The evidence job must pin the reviewed PR36 validator blob.'
+        Assert-Match $workflow 'codex/SYP-154-p06-oracle-fixture-compat' 'The evidence job must fetch the reviewed bootstrap launcher branch before proving its pinned head.'
+        Assert-Match $workflow '8137577fc9992a4419d98d0bd9d881b51707ac32' 'The evidence job must pin the reviewed bootstrap validator blob.'
         foreach ($pinnedCommitVariable in @('SYP154_CANDIDATE_COMMIT', 'SYP154_LAUNCHER_COMMIT', 'SYP154_ORACLE_COMMIT')) {
             Assert-Match $workflow ('cat-file -e "\$' + $pinnedCommitVariable + '\^\{commit\}"') "The evidence job must prove that $pinnedCommitVariable exists as an exact commit object."
         }

@@ -112,12 +112,12 @@ jobs:
     timeout-minutes: 45
     env:
       SYP154_DARKTIDE_REPOSITORY: https://github.com/SyuanTsai/Skill-Darktide-Translate.git
-      SYP154_CANDIDATE_COMMIT: 7519745266e0cd67b057e88c0ee63e702ccd1e10
-      SYP154_CANDIDATE_TREE: 654934a3f1f412bc5ccda89bda0f9158cb4d328a
-      SYP154_LAUNCHER_COMMIT: efff60f7667d3e1fef159dfeec3565ad3087100e
-      SYP154_LAUNCHER_TREE: 0d89a00cb7786fba932332cd287aa7db88fc22af
-      SYP154_ORACLE_COMMIT: c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8
-      SYP154_ORACLE_TREE: 4332d9a1a366d6ff238cde3fe33912cca7dd2050
+      SYP154_CANDIDATE_COMMIT: 726e269b9090dd5079f1bfb48c327f23cae60270
+      SYP154_CANDIDATE_TREE: e9cd0c8899355499a5113cfbbc4d55cd249ba60a
+      SYP154_LAUNCHER_COMMIT: c3e3add98902b2a14a0c5ef2aff5393a3c974751
+      SYP154_LAUNCHER_TREE: 8992b6a870c8ff5e4865f62ea4bc8b50c687a2d3
+      SYP154_ORACLE_COMMIT: e1c14aa50f6da6a840f83aee837cd7861abfe387
+      SYP154_ORACLE_TREE: 0d89a00cb7786fba932332cd287aa7db88fc22af
     steps:
       - name: Materialize exact local artifact authority action
         shell: bash
@@ -240,7 +240,7 @@ jobs:
           git -C "$candidate_root" remote add origin "$SYP154_DARKTIDE_REPOSITORY"
           git -C "$candidate_root" fetch --no-tags origin \
             '+refs/heads/codex/SYP-154-v3-p06-implementation:refs/remotes/evidence/candidate' \
-            '+refs/heads/codex/SYP-158-trusted-file-contract:refs/remotes/evidence/launcher' \
+            '+refs/heads/codex/SYP-154-p06-oracle-fixture-compat:refs/remotes/evidence/launcher' \
             '+refs/heads/main:refs/remotes/evidence/oracle'
           git -C "$candidate_root" cat-file -e "$SYP154_CANDIDATE_COMMIT^{commit}"
           git -C "$candidate_root" cat-file -e "$SYP154_LAUNCHER_COMMIT^{commit}"
@@ -256,14 +256,14 @@ jobs:
             scripts/Validate.ps1 scripts/Test-Repository.ps1 | tar -x -C "$launcher_root"
 
           launcher_inventory=(
-            'scripts/Validate.ps1:522852401e85ed82bbeef69128f6825381f0cc99'
+            'scripts/Validate.ps1:8137577fc9992a4419d98d0bd9d881b51707ac32'
             'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
           )
           oracle_inventory=(
-            'tests/BootstrapTransition.Tests.ps1:bb4dd7b3e5c3bd4085572c8400885e76f98031dd'
+            'tests/BootstrapTransition.Tests.ps1:ed4e831dadc32f15456f0897b6b158607b6153e0'
             'tests/LocalizationWorkset.Tests.ps1:abbfc0ac6f7a8762a48b6b9c860ef1f48cddcb54'
             'tests/ModUpdateAutomation.Tests.ps1:f67a6aa9050a5ab9718b7c5d450584fa402b28c2'
-            'tests/RepositoryContract.Tests.ps1:de5fa4f2efe3fa33d0dea23f1b616ec210cdc2bb'
+            'tests/RepositoryContract.Tests.ps1:271ed1a16a1e6b949710a0b2c78ea61751c43819'
             'tests/RepositoryValidation.Tests.ps1:13e22b4522087b50b345736a4208dfd388ea148d'
             'tests/Schema15Coordination.Tests.ps1:94c7990fff669164755a52e5937f34b677c8de53'
             'tests/Schema15SourceAcquisition.Tests.ps1:84f141aca53aaeae7e93aefdbf4e30d5af1be6a7'
@@ -448,12 +448,12 @@ jobs:
           runner_temp='${{ runner.temp }}'
           evidence_job_status='${{ job.status }}'
           repository='https://github.com/SyuanTsai/Skill-Darktide-Translate.git'
-          candidate_commit='7519745266e0cd67b057e88c0ee63e702ccd1e10'
-          candidate_tree='654934a3f1f412bc5ccda89bda0f9158cb4d328a'
-          launcher_commit='efff60f7667d3e1fef159dfeec3565ad3087100e'
-          launcher_tree='0d89a00cb7786fba932332cd287aa7db88fc22af'
-          oracle_commit='c3bb5e49ee34e37418703ca2bf9a89c8bc5abfe8'
-          oracle_tree='4332d9a1a366d6ff238cde3fe33912cca7dd2050'
+          candidate_commit='726e269b9090dd5079f1bfb48c327f23cae60270'
+          candidate_tree='e9cd0c8899355499a5113cfbbc4d55cd249ba60a'
+          launcher_commit='c3e3add98902b2a14a0c5ef2aff5393a3c974751'
+          launcher_tree='8992b6a870c8ff5e4865f62ea4bc8b50c687a2d3'
+          oracle_commit='e1c14aa50f6da6a840f83aee837cd7861abfe387'
+          oracle_tree='0d89a00cb7786fba932332cd287aa7db88fc22af'
           candidate_root="$runner_temp/syp154-pr33-candidate"
           artifacts_root="$runner_temp/syp154-pr33-artifacts"
           export_root="$runner_temp/syp154-pr33-evidence-export"
@@ -497,14 +497,14 @@ jobs:
             "${git_command[@]}" diff --no-ext-diff --name-status "$oracle_commit...$candidate_commit" > "$export_root/candidate-diff.txt"
 
             launcher_inventory=(
-              'scripts/Validate.ps1:522852401e85ed82bbeef69128f6825381f0cc99'
+              'scripts/Validate.ps1:8137577fc9992a4419d98d0bd9d881b51707ac32'
               'scripts/Test-Repository.ps1:5ae4b630f69893cb6cd5927ef9c513056e89e3f1'
             )
             oracle_inventory=(
-              'tests/BootstrapTransition.Tests.ps1:bb4dd7b3e5c3bd4085572c8400885e76f98031dd'
+              'tests/BootstrapTransition.Tests.ps1:ed4e831dadc32f15456f0897b6b158607b6153e0'
               'tests/LocalizationWorkset.Tests.ps1:abbfc0ac6f7a8762a48b6b9c860ef1f48cddcb54'
               'tests/ModUpdateAutomation.Tests.ps1:f67a6aa9050a5ab9718b7c5d450584fa402b28c2'
-              'tests/RepositoryContract.Tests.ps1:de5fa4f2efe3fa33d0dea23f1b616ec210cdc2bb'
+              'tests/RepositoryContract.Tests.ps1:271ed1a16a1e6b949710a0b2c78ea61751c43819'
               'tests/RepositoryValidation.Tests.ps1:13e22b4522087b50b345736a4208dfd388ea148d'
               'tests/Schema15Coordination.Tests.ps1:94c7990fff669164755a52e5937f34b677c8de53'
               'tests/Schema15SourceAcquisition.Tests.ps1:84f141aca53aaeae7e93aefdbf4e30d5af1be6a7'
