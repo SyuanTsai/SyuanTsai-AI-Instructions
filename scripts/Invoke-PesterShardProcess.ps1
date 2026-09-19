@@ -723,7 +723,7 @@ function Remove-PesterShardTerminalControlSequences {
           if ($j -eq 2 -and $b.Count -eq 6) { if ($v) { $q = "r@$v" }; continue }
           $q += ":$v"
         }
-        if ($b[1] -ceq '5') { $q = & $e $v }
+        if($b[1] -ceq '5'){$q=&$e $v}
         $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
       }
       else {
@@ -740,7 +740,7 @@ function Remove-PesterShardTerminalControlSequences {
             if ($i -ge $a.Count -or -not [int]::TryParse($a[$i], [ref]$v) -or $v -gt 255) { return $false }
             $q += ":$v"
           }
-          if ($c -eq 1) { $q = & $e $v }
+          if($c -eq 1){$q=&$e $v}
           $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
         }
         elseif ($n -eq 0) { $h[0] = $h[1] = ''; $h[2] = $false }
@@ -840,7 +840,7 @@ function Remove-PesterShardTerminalControlSequences {
     $w=1;$u=$c;$uc=[char]::GetUnicodeCategory($x[$k])
     if(($k+1) -lt $l -and [char]::IsSurrogatePair($x[$k],$x[$k+1])){$w=2;$u=[char]::ConvertToUtf32($x[$k],$x[$k+1]);$uc=[Globalization.CharUnicodeInfo]::GetUnicodeCategory($Text,$k)}
     if ($uc -eq 'Format' -or $u -in 0x034F,0x115F,0x1160,0x17B4,0x17B5,0x180B,0x180C,0x180D,0x180F,0x2065,0x3164,0xFFA0 -or
-      ($u -band 0xFFF0) -eq 0xFE00 -or ($u -band 0xFFF0) -eq 0xFFF0 -or ($u -shr 12) -eq 0xE0) {
+      ($u-band 0xFFF0)-eq 0xFE00 -or($u-0xFFF0)-in 0..8 -or($u-shr 12)-eq 0xE0) {
       [void]$o.Append($t); $k += $w; continue
     }
     [void]$o.Append($(if ($c -in 10, 13 -or (-not $h[2] -and (-not $h[0] -or $h[0] -cne $h[1]))) { $x[$k] } else { $t }))

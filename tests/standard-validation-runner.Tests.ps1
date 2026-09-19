@@ -1086,6 +1086,7 @@ PSSecurityException: fixture execution policy failure
         $zeroWidthSpace = [string][char]0x200B
         $bidiOverride = [string][char]0x202E
         $variationSelector = [string][char]0xFE0F
+        $visibleReplacementCharacters = "safe$([char]0xFFFC)$([char]0xFFFD)context"
         $parentCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
@@ -1121,6 +1122,7 @@ PSSecurityException: fixture execution policy failure
             $caseDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text $case.Text
             if ($caseDiagnostic -match "parent-$($case.Name)-(?:credential|context)") { [void]$parentLeaks.Add($case.Name) }
         }
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text $visibleReplacementCharacters) $visibleReplacementCharacters 'Visible object and replacement glyphs must remain actionable parent diagnostics.'
 
         $childScriptAssignment = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and
@@ -1144,6 +1146,7 @@ PSSecurityException: fixture execution policy failure
         Invoke-Expression $childTerminalControlFunction.Extent.Text
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'The generated child must preserve valid colon-form RGB SGR formatting.'
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${differentColors}context${ansiReset}") 'safe context' 'The generated child must preserve different foreground and background colors.'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text $visibleReplacementCharacters) $visibleReplacementCharacters 'Visible object and replacement glyphs must remain actionable generated-child diagnostics.'
         $childDiagnosticFunction = $childAst.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
