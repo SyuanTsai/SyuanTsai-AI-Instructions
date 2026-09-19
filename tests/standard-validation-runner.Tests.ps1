@@ -1093,6 +1093,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "[-] fixture failure`ntox`rken:`nparent-cursor-cr-credential`nExpected: parent-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "[-] fixture failure`ntox${c1Index}ken:`nparent-cursor-c1-credential`nExpected: parent-cursor-c1-context" },
             [pscustomobject]@{ Name = 'sgr-conceal'; Text = "[-] fixture failure`nto${escape}[8mx${ansiReset}ken:`nparent-sgr-conceal-credential`nExpected: parent-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1108,6 +1109,9 @@ PSSecurityException: fixture execution policy failure
         Assert-True ($null -ne $childScriptAssignment) 'The shard executor must define its generated child script.'
         $PesterVersion = '4.10.1'
         $childScriptText = Invoke-Expression $childScriptAssignment.Right.Extent.Text
+        $encodedChildScriptText = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScriptText))
+        $childCommandLineLength = ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedChildScriptText).Length
+        Assert-True ($childCommandLineLength -le 32000) "The generated child command line must retain safety headroom below the Windows 32,767-character limit. Actual=$childCommandLineLength."
         $childTokens = $null
         $childErrors = $null
         $childAst = [Management.Automation.Language.Parser]::ParseInput($childScriptText, [ref]$childTokens, [ref]$childErrors)
@@ -1138,6 +1142,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "fixture failure`ntox`rken:`nearly-child-cursor-cr-credential`nExpected: early-child-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "fixture failure`ntox${c1Index}ken:`nearly-child-cursor-c1-credential`nExpected: early-child-cursor-c1-context" },
             [pscustomobject]@{ Name = 'sgr-conceal'; Text = "fixture failure`nto${escape}[8mx${ansiReset}ken:`nearly-child-sgr-conceal-credential`nExpected: early-child-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'
