@@ -695,9 +695,19 @@ function Remove-PesterShardTerminalControlSequences {
     # backtracking. Unterminated strings consume the remainder fail closed.
     $normalized = New-Object Text.StringBuilder
     [void]$normalized.EnsureCapacity($Text.Length)
+    $cursorControlSentinel = [char]0xE000
     $index = 0
     while ($index -lt $Text.Length) {
         $code = [int][char]$Text[$index]
+
+        # Controls that can overwrite or reinterpret already-emitted text
+        # make the whole diagnostic line untrusted. CRLF remains structural.
+        if ($code -eq 0x08 -or $code -eq 0x0B -or $code -eq 0x0C -or $code -eq 0x0E -or $code -eq 0x0F -or
+            ($code -eq 0x0D -and (($index + 1) -ge $Text.Length -or [int][char]$Text[$index + 1] -ne 0x0A))) {
+            [void]$normalized.Append($cursorControlSentinel)
+            $index++
+            continue
+        }
 
         if ($code -eq 0x1B) {
             $index++
@@ -726,9 +736,12 @@ function Remove-PesterShardTerminalControlSequences {
                 while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
                 while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
                 if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
+                    $finalCode = [int][char]$Text[$index]
                     $index++
+                    if ($finalCode -ne 0x6D) { [void]$normalized.Append($cursorControlSentinel) }
                     continue
                 }
+                [void]$normalized.Append($cursorControlSentinel)
                 if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
                     if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
                     $index++
@@ -739,8 +752,10 @@ function Remove-PesterShardTerminalControlSequences {
             while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
             if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x7E) {
                 $index++
+                [void]$normalized.Append($cursorControlSentinel)
                 continue
             }
+            [void]$normalized.Append($cursorControlSentinel)
             if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
                 if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
                 $index++
@@ -770,9 +785,12 @@ function Remove-PesterShardTerminalControlSequences {
             while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
             while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
             if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
+                $finalCode = [int][char]$Text[$index]
                 $index++
+                if ($finalCode -ne 0x6D) { [void]$normalized.Append($cursorControlSentinel) }
                 continue
             }
+            [void]$normalized.Append($cursorControlSentinel)
             if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
                 if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
                 $index++
@@ -780,7 +798,13 @@ function Remove-PesterShardTerminalControlSequences {
             continue
         }
 
-        if (($code -ge 0x00 -and $code -le 0x08) -or $code -eq 0x0B -or $code -eq 0x0C -or ($code -ge 0x0E -and $code -le 0x1F) -or ($code -ge 0x7F -and $code -le 0x9F)) {
+        if ($code -ge 0x80 -and $code -le 0x9F) {
+            [void]$normalized.Append($cursorControlSentinel)
+            $index++
+            continue
+        }
+
+        if (($code -ge 0x00 -and $code -le 0x08) -or $code -eq 0x0B -or $code -eq 0x0C -or ($code -ge 0x0E -and $code -le 0x1F) -or $code -eq 0x7F) {
             $index++
             continue
         }
@@ -824,7 +848,7 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
             }
         }
         else {
-            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
                 $redactSensitiveContinuation = $true
                 $line = '[redacted sensitive diagnostic line]'
             }
@@ -903,7 +927,7 @@ function Get-PesterShardFailureSummary {
         for ($index = $lines.Count - 1; $index -ge 0 -and $allowlistedFallback.Count -lt $MaxLines; $index--) {
             $line = ([string]$lines[$index]).Trim()
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
                 continue
             }
             $safeLine = if ($line -match '^PowerShell (?:5\.1|7(?:\.\d+)*) shard exited before writing its result file\.$') {
@@ -1939,7 +1963,7 @@ $childScript = @(
     '            }'
     '        }'
     '        else {'
-    '            if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
+    '            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
     '                $redactSensitiveContinuation = $true'
     '                $line = ''[redacted sensitive diagnostic line]'''
     '            }'

@@ -1044,9 +1044,12 @@ PSSecurityException: fixture execution policy failure
 
         $escape = [string][char]27
         $bell = [string][char]7
+        $backspace = [string][char]8
         $osc = $escape + ']0;fixture' + $bell
         $dcs = $escape + 'P1;2|fixture' + $escape + '\'
         $c1Csi = ([string][char]0x9B) + '0m'
+        $c1Index = [string][char]0x84
+        $cursorLeft = $escape + '[1D'
         $parentCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
@@ -1056,6 +1059,10 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "[-] fixture failure`nto$([char]0x9B)31`nken:`nparent-c1-csi-incomplete-credential`nExpected: parent-c1-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "[-] fixture failure`nto${escape}(`nken:`nparent-esc-intermediate-incomplete-credential`nExpected: parent-esc-intermediate-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-low-final'; Text = "[-] fixture failure`nto${escape}#8ken:`nparent-esc-low-final-credential`nExpected: parent-esc-low-final-context" },
+            [pscustomobject]@{ Name = 'cursor-bs'; Text = "[-] fixture failure`ntox${backspace}ken:`nparent-cursor-bs-credential`nExpected: parent-cursor-bs-context" },
+            [pscustomobject]@{ Name = 'cursor-csi'; Text = "[-] fixture failure`ntox${cursorLeft}ken:`nparent-cursor-csi-credential`nExpected: parent-cursor-csi-context" },
+            [pscustomobject]@{ Name = 'cursor-cr'; Text = "[-] fixture failure`ntox`rken:`nparent-cursor-cr-credential`nExpected: parent-cursor-cr-context" },
+            [pscustomobject]@{ Name = 'cursor-c1'; Text = "[-] fixture failure`ntox${c1Index}ken:`nparent-cursor-c1-credential`nExpected: parent-cursor-c1-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1096,6 +1103,10 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "fixture failure`nto$([char]0x9B)31`nken:`nearly-child-c1-csi-incomplete-credential`nExpected: early-child-c1-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "fixture failure`nto${escape}(`nken:`nearly-child-esc-intermediate-incomplete-credential`nExpected: early-child-esc-intermediate-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-low-final'; Text = "fixture failure`nto${escape}#8ken:`nearly-child-esc-low-final-credential`nExpected: early-child-esc-low-final-context" },
+            [pscustomobject]@{ Name = 'cursor-bs'; Text = "fixture failure`ntox${backspace}ken:`nearly-child-cursor-bs-credential`nExpected: early-child-cursor-bs-context" },
+            [pscustomobject]@{ Name = 'cursor-csi'; Text = "fixture failure`ntox${cursorLeft}ken:`nearly-child-cursor-csi-credential`nExpected: early-child-cursor-csi-context" },
+            [pscustomobject]@{ Name = 'cursor-cr'; Text = "fixture failure`ntox`rken:`nearly-child-cursor-cr-credential`nExpected: early-child-cursor-cr-context" },
+            [pscustomobject]@{ Name = 'cursor-c1'; Text = "fixture failure`ntox${c1Index}ken:`nearly-child-cursor-c1-credential`nExpected: early-child-cursor-c1-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'
