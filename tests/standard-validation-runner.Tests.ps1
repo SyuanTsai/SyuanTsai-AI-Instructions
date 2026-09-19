@@ -905,6 +905,7 @@ PSSecurityException: fixture execution policy failure
                 $node.Left.Extent.Text -ceq '$childScript'
         }, $true)
         Assert-True ($null -ne $childScriptAssignment) 'The shard executor must define its generated child script.'
+        $PesterVersion = '4.10.1'
         $childScriptText = Invoke-Expression $childScriptAssignment.Right.Extent.Text
         $childTokens = $null
         $childErrors = $null
