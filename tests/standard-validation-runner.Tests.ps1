@@ -777,12 +777,14 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
         Assert-Equal @($errors).Count 0 'The shard executor must parse before process-start cleanup testing.'
-        $definition = $ast.Find({ param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -ceq 'Get-PesterShardCleanupTarget'
-        }, $true)
-        Assert-True ($null -ne $definition) 'The shard executor must define its process-start-aware cleanup target.'
-        Invoke-Expression $definition.Extent.Text
+        foreach ($functionName in @('Get-PesterShardCleanupTarget', 'Resolve-PesterShardOutputFailure')) {
+            $definition = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $functionName
+            }, $true)
+            Assert-True ($null -ne $definition) "The shard executor must define $functionName."
+            Invoke-Expression $definition.Extent.Text
+        }
 
         $unstartedProcess = New-Object Diagnostics.Process
         try {
@@ -810,6 +812,20 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $jobHandleCloseIndex = $shardExecutorSource.LastIndexOf('if ($jobHandle -ne [IntPtr]::Zero)', [StringComparison]::Ordinal)
         $processEvidenceIndex = $shardExecutorSource.IndexOf('$diagnostic = [ordered]@{', [StringComparison]::Ordinal)
         Assert-True ($cleanupTargetIndex -ge 0 -and $jobHandleCloseIndex -gt $cleanupTargetIndex -and $processEvidenceIndex -gt $jobHandleCloseIndex) 'Job Object closure must remain independent of process-tree cleanup and precede process evidence finalization.'
+
+        $preStartCleanup = [pscustomobject][ordered]@{ cleanedUp = $true; reason = 'process-not-started' }
+        $closeFailure = Resolve-PesterShardOutputFailure `
+            -Cleanup $preStartCleanup `
+            -Errors @('The owned Windows Job Object handle could not be closed safely.') `
+            -Status 'startup-failed' `
+            -ExceptionText 'Process.Start returned false.'
+        Assert-Equal $closeFailure.status 'cleanup-failed' 'A pre-start Job Object close failure must become a cleanup failure.'
+        Assert-Match ($closeFailure.cleanup.errors -join ' | ') 'Job Object handle could not be closed safely' 'A pre-start cleanup shape must gain close-failure evidence without throwing.'
+        Assert-Match $closeFailure.exceptionText 'Process\.Start returned false.*Job Object handle could not be closed safely' 'The original startup failure and the cleanup failure must both remain available.'
+
+        $postCaptureCleanup = $shardExecutorSource.Substring($shardExecutorSource.IndexOf('$outputWriteFailure = Resolve-PesterShardOutputFailure', [StringComparison]::Ordinal))
+        Assert-False ($postCaptureCleanup -match '\$cleanup\.errors\s*=') 'Post-capture Job Object and bootstrap cleanup failures must not assign a missing cleanup.errors property directly.'
+        Assert-True (([regex]::Matches($postCaptureCleanup, 'Resolve-PesterShardOutputFailure')).Count -ge 4) 'Output, Job Object, and bootstrap cleanup failures must share the property-safe fail-closed transition.'
     }
 
     # Scenario: A caller supplies a visible cancellation marker to the shard wrapper.

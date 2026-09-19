@@ -1595,16 +1595,26 @@ function Invoke-PesterShardProcess {
                 }
                 $jobClosed = [bool][PesterShardProcessControlNative]::TryCloseHandle($jobHandle)
                 if (-not $jobClosed) {
-                    $cleanup.cleanedUp = $false
-                    $status = 'cleanup-failed'
-                    $cleanup.errors = @($cleanup.errors) + @('The owned Windows Job Object handle could not be closed safely.')
+                    $jobCloseFailure = Resolve-PesterShardOutputFailure `
+                        -Cleanup $cleanup `
+                        -Errors @('The owned Windows Job Object handle could not be closed safely.') `
+                        -Status $status `
+                        -ExceptionText $exceptionText
+                    $cleanup = $jobCloseFailure.cleanup
+                    $status = [string]$jobCloseFailure.status
+                    $exceptionText = [string]$jobCloseFailure.exceptionText
                 }
             }
             catch {
                 $jobClosed = $false
-                $cleanup.cleanedUp = $false
-                $status = 'cleanup-failed'
-                $cleanup.errors = @($cleanup.errors) + @("The owned Windows Job Object handle could not be closed safely: $($_.Exception.Message)")
+                $jobCloseFailure = Resolve-PesterShardOutputFailure `
+                    -Cleanup $cleanup `
+                    -Errors @("The owned Windows Job Object handle could not be closed safely: $($_.Exception.Message)") `
+                    -Status $status `
+                    -ExceptionText $exceptionText
+                $cleanup = $jobCloseFailure.cleanup
+                $status = [string]$jobCloseFailure.status
+                $exceptionText = [string]$jobCloseFailure.exceptionText
             }
             $jobHandle = [IntPtr]::Zero
         }
@@ -1612,9 +1622,14 @@ function Invoke-PesterShardProcess {
             [IO.File]::Exists($windowsBootstrapReleasePath)) {
             try { [IO.File]::Delete($windowsBootstrapReleasePath) }
             catch {
-                $cleanup.cleanedUp = $false
-                $status = 'cleanup-failed'
-                $cleanup.errors = @($cleanup.errors) + @("The owned Pester shard bootstrap signal could not be removed: $($_.Exception.Message)")
+                $bootstrapCleanupFailure = Resolve-PesterShardOutputFailure `
+                    -Cleanup $cleanup `
+                    -Errors @("The owned Pester shard bootstrap signal could not be removed: $($_.Exception.Message)") `
+                    -Status $status `
+                    -ExceptionText $exceptionText
+                $cleanup = $bootstrapCleanupFailure.cleanup
+                $status = [string]$bootstrapCleanupFailure.status
+                $exceptionText = [string]$bootstrapCleanupFailure.exceptionText
             }
         }
         $finishedAt = [DateTime]::UtcNow.ToString('o')
