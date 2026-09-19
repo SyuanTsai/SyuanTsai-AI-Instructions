@@ -742,8 +742,43 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
-        Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
+        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
+        Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
+        Assert-False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
+        Assert-Match $shardExecutorSource 'System\.Diagnostics\.Process\.Kill|Stop-Process' 'The shard executor must use a direct process termination API.'
+        Assert-Match $shardExecutorSource 'Get-PesterShardFailureSummary|failureSummary' 'A failed shard must retain a sanitized first-failure summary.'
+        Assert-Match $shardExecutorSource 'Read-PesterShardOutputTail' 'A result-less shard must preserve bounded tail diagnostics instead of retaining only the beginning of each stream.'
+        Assert-Match $shardExecutorSource '(?s)Get-PesterShardFailureSummary.*?Read-PesterShardOutputTail' 'Failure summarization must inspect the bounded stream tail where terminal errors are written.'
+        Assert-Match $shardExecutorSource 'allowlistedFallback' 'A result-less shard without a recognized Pester failure marker may expose only allowlisted bounded terminal context.'
+        Assert-Match $shardExecutorSource "Show = ''All''" 'Pester shards must emit bounded per-test progress so an abrupt hosted exit identifies the last completed test.'
+        Assert-Match $shardExecutorSource 'CreateKillOnCloseJob|AssignProcessToJobObject' 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Assert-PesterShardPathAncestorsNoReparse' 'The shard preflight must reject reparse-point ancestors before creating shard artifacts.'
+        Assert-Match $shardExecutorSource 'symlinked or reparse-point ancestor' 'The shard preflight must preserve a precise ancestor trust diagnostic.'
+        Assert-Match $shardExecutorSource '\$isHardLink' 'The shard preflight must not mistake a legitimate hardlink executable for symlink traversal.'
+        Assert-Match $shardExecutorSource 'Terminate the Job Object before draining inherited output pipes' 'Owned Job Object termination must precede inherited pipe draining.'
+        Assert-Match $shardExecutorSource 'Cancellation marker observed before bootstrap release' 'Cancellation must be rechecked after ownership assignment and before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Pester shard process status is not completed or output quota was exceeded' 'The aggregate must fail closed on non-completed shard evidence or output-quota overflow.'
+        Assert-Match $shardExecutorSource 'PesterShardBoundedCapture|outputQuotaCharacters' 'The shard executor must bound redirected child output.'
+        Assert-Match $shardExecutorSource 'failureKind[\s=]+.*early-child-failure' 'A child initialization or Invoke-Pester exception must be represented as an explicit failed result contract.'
+        Assert-Match $shardExecutorSource 'failurePhase\s*=\s*\$childFailurePhase' 'Early child evidence must identify the failing initialization or Invoke-Pester phase.'
+        Assert-Match $shardExecutorSource 'FailedCount\s*=\s*1' 'Early child failure evidence must contain a nonzero failed count.'
+        Assert-Match $shardExecutorSource 'childExitCode\s*-ne\s*0' 'An early child failure must retain a nonzero child exit code after writing evidence.'
+        Assert-Match $shardExecutorSource 'ConvertTo-PesterShardEarlyFailureDiagnostic' 'Early child diagnostics must be bounded and sanitized before result/evidence emission.'
+        Assert-Match $shardExecutorSource "invoke\.Parameters\.ContainsKey\(''Show''\)" 'The shard executor must gate the optional Show parameter for Pester versions that do not expose it.'
+        Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
+        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
+        $moduleAncestorValidation = $shardExecutorSource.IndexOf('Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath', [StringComparison]::Ordinal)
+        $moduleImport = $shardExecutorSource.IndexOf('Import-Module $PesterModulePath', [StringComparison]::Ordinal)
+        Assert-True ($moduleAncestorValidation -ge 0 -and $moduleImport -ge 0 -and $moduleAncestorValidation -lt $moduleImport) 'The Pester module path and all existing ancestors must be validated before module initialization can execute.'
+    }
+
+    # Scenario: A caller supplies a visible cancellation marker to the shard wrapper.
+    # Purpose: Reject the unsupported channel in its own discoverable behavior test before any child or shard artifact can be created.
+    It 'UnitT05_rejects_a_caller_visible_cancellation_channel_before_child_execution' {
         $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
         $rejectionProbe = @"
 try {
     & '$($shardPath.Replace("'", "''"))' ``
@@ -779,32 +814,6 @@ catch {
         $rejectedOutput = "$probeStdout`n$probeStderr"
         Assert-True ($probeExitCode -ne 0) 'A caller-visible cancellation path must cause a nonzero child exit.'
         Assert-Match $rejectedOutput 'does not accept a caller-visible CancellationPath' 'A caller-visible shard cancellation path must be rejected before any child process or shard artifact is created.'
-        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
-        Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
-        Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
-        Assert-False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
-        Assert-Match $shardExecutorSource 'System\.Diagnostics\.Process\.Kill|Stop-Process' 'The shard executor must use a direct process termination API.'
-        Assert-Match $shardExecutorSource 'Get-PesterShardFailureSummary|failureSummary' 'A failed shard must retain a sanitized first-failure summary.'
-        Assert-Match $shardExecutorSource 'Read-PesterShardOutputTail' 'A result-less shard must preserve bounded tail diagnostics instead of retaining only the beginning of each stream.'
-        Assert-Match $shardExecutorSource '(?s)Get-PesterShardFailureSummary.*?Read-PesterShardOutputTail' 'Failure summarization must inspect the bounded stream tail where terminal errors are written.'
-        Assert-Match $shardExecutorSource 'sanitizedFallback' 'A result-less shard without a recognized Pester failure marker must still report a redacted bounded terminal context.'
-        Assert-Match $shardExecutorSource "Show = ''All''" 'Pester shards must emit bounded per-test progress so an abrupt hosted exit identifies the last completed test.'
-        Assert-Match $shardExecutorSource 'CreateKillOnCloseJob|AssignProcessToJobObject' 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
-        Assert-Match $shardExecutorSource 'Assert-PesterShardPathAncestorsNoReparse' 'The shard preflight must reject reparse-point ancestors before creating shard artifacts.'
-        Assert-Match $shardExecutorSource 'symlinked or reparse-point ancestor' 'The shard preflight must preserve a precise ancestor trust diagnostic.'
-        Assert-Match $shardExecutorSource '\$isHardLink' 'The shard preflight must not mistake a legitimate hardlink executable for symlink traversal.'
-        Assert-Match $shardExecutorSource 'Terminate the Job Object before draining inherited output pipes' 'Owned Job Object termination must precede inherited pipe draining.'
-        Assert-Match $shardExecutorSource 'Cancellation marker observed before bootstrap release' 'Cancellation must be rechecked after ownership assignment and before bootstrap release.'
-        Assert-Match $shardExecutorSource 'Pester shard process status is not completed or output quota was exceeded' 'The aggregate must fail closed on non-completed shard evidence or output-quota overflow.'
-        Assert-Match $shardExecutorSource 'PesterShardBoundedCapture|outputQuotaCharacters' 'The shard executor must bound redirected child output.'
-        Assert-Match $shardExecutorSource 'failureKind[\s=]+.*early-child-failure' 'A child initialization or Invoke-Pester exception must be represented as an explicit failed result contract.'
-        Assert-Match $shardExecutorSource 'failurePhase\s*=\s*\$childFailurePhase' 'Early child evidence must identify the failing initialization or Invoke-Pester phase.'
-        Assert-Match $shardExecutorSource 'FailedCount\s*=\s*1' 'Early child failure evidence must contain a nonzero failed count.'
-        Assert-Match $shardExecutorSource 'childExitCode\s*-ne\s*0' 'An early child failure must retain a nonzero child exit code after writing evidence.'
-        Assert-Match $shardExecutorSource 'ConvertTo-PesterShardEarlyFailureDiagnostic' 'Early child diagnostics must be bounded and sanitized before result/evidence emission.'
-        Assert-Match $shardExecutorSource "invoke\.Parameters\.ContainsKey\(''Show''\)" 'The shard executor must gate the optional Show parameter for Pester versions that do not expose it.'
-        Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
-        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
     }
 
     # Scenario: Windows PowerShell writes only module-initialization progress CLIXML to stderr while the useful terminal context is on stdout.
@@ -841,6 +850,19 @@ catch {
         Assert-Match $summary 'PowerShell 5\.1 shard exited before writing its result file\.' 'A progress-only stderr stream must not mask useful stdout fallback context.'
         Assert-False ($summary -match '(?i)#< CLIXML|Preparing modules for first use') 'Progress-only CLIXML must not become the first-failure summary.'
 
+        $credentialPath = Join-Path $TestDrive 'credential-continuation.txt'
+        Write-TestUtf8File -Path $credentialPath -Text "Authorization:`ncredential-value-that-must-not-be-logged"
+        $credentialSummary = Get-PesterShardFailureSummary -Paths @($credentialPath)
+        Assert-False ($credentialSummary -match 'credential-value-that-must-not-be-logged') 'An unlabeled value after a sensitive header must never enter the workflow-visible fallback diagnostic.'
+        Assert-Match $credentialSummary 'No allowlisted Pester diagnostic' 'Unrecognized arbitrary child output must be replaced by a fixed safe diagnostic.'
+
+        $recognizedCredentialPath = Join-Path $TestDrive 'recognized-credential-continuation.txt'
+        Write-TestUtf8File -Path $recognizedCredentialPath -Text "[-] fixture failure`nAuthorization:`nrecognized-credential-value-that-must-not-be-logged`nExpected: safe diagnostic context"
+        $recognizedCredentialSummary = Get-PesterShardFailureSummary -Paths @($recognizedCredentialPath)
+        Assert-False ($recognizedCredentialSummary -match 'recognized-credential-value-that-must-not-be-logged') 'A recognized failure block must not retain an unlabeled value after a sensitive header.'
+        Assert-Match $recognizedCredentialSummary '\[-\] fixture failure' 'Sanitizing a sensitive continuation must preserve the recognized failure marker.'
+        Assert-Match $recognizedCredentialSummary 'Expected: safe diagnostic context' 'Sanitizing a sensitive continuation must preserve adjacent allowlisted failure context.'
+
         $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
         Write-TestUtf8File -Path $mixedStderrPath -Text @'
 #< CLIXML
@@ -866,7 +888,43 @@ PSSecurityException: fixture execution policy failure
         Assert-False ($truncatedSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Deferred truncated progress CLIXML must not mask actionable stdout.'
 
         $preservedRawSummary = Get-PesterShardFailureSummary -Paths @($truncatedStderrPath)
-        Assert-Match $preservedRawSummary '#< CLIXML' 'Unparseable CLIXML must remain available when no better diagnostic stream exists.'
+        Assert-Equal $preservedRawSummary 'PowerShell CLIXML diagnostic could not be safely decoded.' 'Unparseable CLIXML must retain a fixed diagnostic without exposing raw serialized values.'
+        Assert-False ($preservedRawSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Unparseable CLIXML must never be copied into workflow-visible diagnostics.'
+    }
+
+    # Scenario: A generated shard child catches an exception whose diagnostic contains a sensitive header followed by an unlabeled value.
+    # Purpose: Keep continuation values out of both the child result contract and redirected stderr while preserving safe context.
+    It 'UnitT07_redacts_sensitive_continuations_from_early_child_diagnostics' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before generated child diagnostic testing.'
+        $childScriptAssignment = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$childScript'
+        }, $true)
+        Assert-True ($null -ne $childScriptAssignment) 'The shard executor must define its generated child script.'
+        $childScriptText = Invoke-Expression $childScriptAssignment.Right.Extent.Text
+        $childTokens = $null
+        $childErrors = $null
+        $childAst = [Management.Automation.Language.Parser]::ParseInput($childScriptText, [ref]$childTokens, [ref]$childErrors)
+        Assert-Equal @($childErrors).Count 0 'The generated child script must parse before early-failure diagnostic testing.'
+        $childDiagnosticFunction = $childAst.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
+        }, $true)
+        Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
+        Invoke-Expression $childDiagnosticFunction.Extent.Text
+        try {
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-value-that-must-not-be-logged`nExpected: safe child context")
+        }
+        catch {
+            $childFailureDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($childFailureDiagnostic -match 'early-child-credential-value-that-must-not-be-logged') 'Early child result and stderr diagnostics must not retain an unlabeled value after a sensitive header.'
+        Assert-Match $childFailureDiagnostic 'fixture failure' 'Early child sanitization must preserve the exception summary.'
+        Assert-Match $childFailureDiagnostic 'Expected: safe child context' 'Early child sanitization must preserve adjacent nonsensitive context.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,

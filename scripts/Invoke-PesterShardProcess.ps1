@@ -709,10 +709,16 @@ function Get-PesterShardFailureSummary {
                 $selected = New-Object 'System.Collections.Generic.List[string]'
                 $start = [Math]::Max(0, $index - 1)
                 $end = [Math]::Min($lines.Count - 1, $index + $MaxLines - 2)
+                $redactSensitiveContinuation = $false
                 for ($lineIndex = $start; $lineIndex -le $end -and $selected.Count -lt $MaxLines; $lineIndex++) {
                     $line = [regex]::Replace([string]$lines[$lineIndex], $ansiPattern, '').Trim()
                     if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                    if ($redactSensitiveContinuation) {
+                        $line = '[redacted sensitive diagnostic continuation]'
+                        $redactSensitiveContinuation = $false
+                    }
+                    elseif ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                        $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
                         $line = '[redacted sensitive diagnostic line]'
                     }
                     if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
@@ -725,7 +731,8 @@ function Get-PesterShardFailureSummary {
         }
     }
 
-    $sanitizedFallback = New-Object 'System.Collections.Generic.List[string]'
+    $allowlistedFallback = New-Object 'System.Collections.Generic.List[string]'
+    $sawUnrecognizedDiagnostic = $false
     foreach ($path in $Paths) {
         $rawText = Read-PesterShardOutputTail -Path $path
         $text = $rawText
@@ -737,40 +744,54 @@ function Get-PesterShardFailureSummary {
             continue
         }
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $sawUnrecognizedDiagnostic = $true
         $lines = @($text -split "`r?`n")
-        for ($index = $lines.Count - 1; $index -ge 0 -and $sanitizedFallback.Count -lt $MaxLines; $index--) {
+        for ($index = $lines.Count - 1; $index -ge 0 -and $allowlistedFallback.Count -lt $MaxLines; $index--) {
             $line = [regex]::Replace([string]$lines[$index], $ansiPattern, '').Trim()
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                $line = '[redacted sensitive diagnostic line]'
+                continue
             }
-            if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
-            $sanitizedFallback.Insert(0, $line)
+            $safeLine = if ($line -match '^PowerShell (?:5\.1|7(?:\.\d+)*) shard exited before writing its result file\.$') {
+                $line
+            }
+            elseif ($line -match '^Pester shard child early failure \((initialization|invoke-pester|summary)\):') {
+                "Pester shard child early failure ($($Matches[1]))."
+            }
+            elseif ($line -match '^Pester shard result evidence write failure:') {
+                'Pester shard result evidence write failed.'
+            }
+            elseif ($line -match '^Tests (Passed|Failed|Skipped|Pending|Inconclusive):\s*([0-9]+)\s*$') {
+                "Tests $($Matches[1]): $($Matches[2])"
+            }
+            elseif ($line -match '^Tests completed in\s+([0-9]+(?:\.[0-9]+)?)(ms|s)\s*$') {
+                "Tests completed in $($Matches[1])$($Matches[2])"
+            }
+            elseif ($line -match '^Executing script\b') {
+                'Pester progress: executing script.'
+            }
+            elseif ($line -match '^(Describing|Context)\b') {
+                "Pester progress: $($Matches[1].ToLowerInvariant())."
+            }
+            else {
+                $null
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$safeLine)) { continue }
+            if ($safeLine.Length -gt $MaxLineLength) { $safeLine = $safeLine.Substring(0, $MaxLineLength) }
+            $allowlistedFallback.Insert(0, $safeLine)
         }
-        if ($sanitizedFallback.Count -gt 0) { break }
+        if ($allowlistedFallback.Count -gt 0) { break }
     }
-    if ($sanitizedFallback.Count -gt 0) {
-        $summary = ($sanitizedFallback.ToArray() -join ' | ')
+    if ($allowlistedFallback.Count -gt 0) {
+        $summary = ($allowlistedFallback.ToArray() -join ' | ')
         if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
         return $summary
     }
     if ($deferredCliXml.Count -gt 0) {
-        $rawFallback = [string]$deferredCliXml[0]
-        $rawLines = @($rawFallback -split "`r?`n")
-        $boundedRaw = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($rawLine in $rawLines) {
-            if ($boundedRaw.Count -ge $MaxLines) { break }
-            $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                $line = '[redacted sensitive diagnostic line]'
-            }
-            if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
-            [void]$boundedRaw.Add($line)
-        }
-        $summary = ($boundedRaw.ToArray() -join ' | ')
-        if ($summary.Length -gt $MaxTotalLength) { $summary = $summary.Substring(0, $MaxTotalLength) }
-        return $summary
+        return 'PowerShell CLIXML diagnostic could not be safely decoded.'
+    }
+    if ($sawUnrecognizedDiagnostic) {
+        return 'No allowlisted Pester diagnostic was found in the bounded output tail.'
     }
     return ''
 }
@@ -1539,6 +1560,7 @@ function Invoke-PesterShardProcess {
     }
 }
 
+Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath -Context 'Pester module path'
 Import-Module $PesterModulePath -Force -ErrorAction Stop
 $loadedPester = Get-Module -Name Pester |
     Where-Object { $_.Version -eq [version]$PesterVersion } |
@@ -1594,11 +1616,19 @@ $childScript = @(
     '    $text = if ($null -eq $ErrorRecord) { ''Pester shard child failed before producing a result.'' } else { [string]$ErrorRecord.Exception.ToString() }'
     '    if ([string]::IsNullOrWhiteSpace($text)) { $text = ''Pester shard child failed before producing a result.'' }'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
+    '    $redactSensitiveContinuation = $false'
     '    foreach ($rawLine in @($text -split "`r?`n")) {'
     '        if ($lines.Count -ge 8) { break }'
     '        $line = ([string]$rawLine).Trim()'
     '        if ([string]::IsNullOrWhiteSpace($line)) { continue }'
-    '        if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') { $line = ''[redacted sensitive diagnostic line]'' }'
+    '        if ($redactSensitiveContinuation) {'
+    '            $line = ''[redacted sensitive diagnostic continuation]'''
+    '            $redactSensitiveContinuation = $false'
+    '        }'
+    '        elseif ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
+    '            $redactSensitiveContinuation = $line -match ''(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'''
+    '            $line = ''[redacted sensitive diagnostic line]'''
+    '        }'
     '        if ($line.Length -gt 512) { $line = $line.Substring(0, 512) }'
     '        if (-not $lines.Contains($line)) { [void]$lines.Add($line) }'
     '    }'
