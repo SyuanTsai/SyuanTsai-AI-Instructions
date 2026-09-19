@@ -777,7 +777,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
         Assert-Equal @($errors).Count 0 'The shard executor must parse before process-start cleanup testing.'
-        foreach ($functionName in @('Get-PesterShardCleanupTarget', 'Resolve-PesterShardOutputFailure')) {
+        foreach ($functionName in @('New-PesterShardNotStartedCleanup', 'Get-PesterShardCleanupTarget', 'Resolve-PesterShardOutputFailure')) {
             $definition = $ast.Find({ param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                     $node.Name -ceq $functionName
@@ -813,7 +813,23 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $processEvidenceIndex = $shardExecutorSource.IndexOf('$diagnostic = [ordered]@{', [StringComparison]::Ordinal)
         Assert-True ($cleanupTargetIndex -ge 0 -and $jobHandleCloseIndex -gt $cleanupTargetIndex -and $processEvidenceIndex -gt $jobHandleCloseIndex) 'Job Object closure must remain independent of process-tree cleanup and precede process evidence finalization.'
 
-        $preStartCleanup = [pscustomobject][ordered]@{ cleanedUp = $true; reason = 'process-not-started' }
+        $preStartCleanup = New-PesterShardNotStartedCleanup
+        $strictShape = & {
+            Set-StrictMode -Version Latest
+            $shape = New-PesterShardNotStartedCleanup
+            [pscustomobject][ordered]@{
+                cleanedUp = [bool]$shape.cleanedUp
+                remainingCount = @($shape.remainingProcessIds).Count
+                errorCount = @($shape.errors).Count
+                warningCount = @($shape.warnings).Count
+                authoritative = [bool]$shape.jobObject.authoritative
+            }
+        }
+        Assert-True $strictShape.cleanedUp 'A process-not-started cleanup contract must begin clean.'
+        Assert-Equal $strictShape.remainingCount 0 'A process-not-started cleanup contract must expose an empty remaining-process collection.'
+        Assert-Equal $strictShape.errorCount 0 'A process-not-started cleanup contract must expose an empty error collection.'
+        Assert-Equal $strictShape.warningCount 0 'A process-not-started cleanup contract must expose an empty warning collection.'
+        Assert-False $strictShape.authoritative 'A Job Object that contains no started process must not be reported as authoritative containment.'
         $closeFailure = Resolve-PesterShardOutputFailure `
             -Cleanup $preStartCleanup `
             -Errors @('The owned Windows Job Object handle could not be closed safely.') `

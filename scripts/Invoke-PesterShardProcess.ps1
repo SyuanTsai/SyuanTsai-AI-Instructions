@@ -1234,6 +1234,30 @@ function Resolve-PesterShardOutputFailure {
     }
 }
 
+function New-PesterShardNotStartedCleanup {
+    return [pscustomobject][ordered]@{
+        rootProcessId = $null
+        initialDescendantProcessIds = @()
+        observedProcessIds = @()
+        observedProcessIdentities = @()
+        remainingProcessIds = @()
+        finalDescendantProcessIds = @()
+        cleanupTimeoutSeconds = 15
+        cleanupTimedOut = $false
+        jobObject = [ordered]@{
+            available = $false
+            terminationAttempted = $false
+            terminationSucceeded = $false
+            authoritative = $false
+        }
+        processKillResults = @()
+        warnings = @()
+        errors = @()
+        cleanedUp = $true
+        reason = 'process-not-started'
+    }
+}
+
 function Get-PesterShardCleanupTarget {
     param(
         [Parameter()][AllowNull()] $Process,
@@ -1277,10 +1301,7 @@ function Invoke-PesterShardProcess {
     $observedProcessIdentities = @{}
     $observationErrors = New-Object 'System.Collections.Generic.List[string]'
     $captureErrors = New-Object 'System.Collections.Generic.List[string]'
-    $cleanup = [pscustomobject][ordered]@{
-        cleanedUp = $true
-        reason = 'process-not-started'
-    }
+    $cleanup = New-PesterShardNotStartedCleanup
     $evidenceWriteError = $null
     $outputWriteError = $null
     $outputCaptureTimedOut = $false
