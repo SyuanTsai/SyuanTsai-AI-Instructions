@@ -1083,6 +1083,9 @@ PSSecurityException: fixture execution policy failure
         $c1Csi = ([string][char]0x9B) + '0m'
         $c1Index = [string][char]0x84
         $cursorLeft = $escape + '[1D'
+        $zeroWidthSpace = [string][char]0x200B
+        $bidiOverride = [string][char]0x202E
+        $variationSelector = [string][char]0xFE0F
         $parentCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
@@ -1103,9 +1106,14 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "[-] fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-basic-indexed-credential`nExpected: parent-sgr-equal-basic-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "[-] fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-normalized-index-credential`nExpected: parent-sgr-equal-normalized-index-context" },
             [pscustomobject]@{ Name = 'sgr-equal-default-space'; Text = "[-] fixture failure`nto${escape}[38:2:0:255:0:0;48:2::255:0:0mx${ansiReset}ken:`nparent-sgr-equal-default-space-credential`nExpected: parent-sgr-equal-default-space-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-cube'; Text = "[-] fixture failure`nto${escape}[38:2::255:0:0;48;5;196mx${ansiReset}ken:`nparent-sgr-equal-fixed-cube-credential`nExpected: parent-sgr-equal-fixed-cube-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-gray'; Text = "[-] fixture failure`nto${escape}[38;5;244;48:2::128:128:128mx${ansiReset}ken:`nparent-sgr-equal-fixed-gray-credential`nExpected: parent-sgr-equal-fixed-gray-context" },
             [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "[-] fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nparent-sgr-equal-state-credential`nExpected: parent-sgr-equal-state-context" },
             [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "[-] fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nparent-sgr-conceal-state-credential`nExpected: parent-sgr-conceal-state-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
+            [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "[-] fixture failure`nto${zeroWidthSpace}ken:`nparent-unicode-zero-width-credential`nExpected: parent-unicode-zero-width-context" },
+            [pscustomobject]@{ Name = 'unicode-bidi'; Text = "[-] fixture failure`nto${bidiOverride}ken:`nparent-unicode-bidi-credential`nExpected: parent-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-variation'; Text = "[-] fixture failure`nto${variationSelector}ken:`nparent-unicode-variation-credential`nExpected: parent-unicode-variation-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1162,9 +1170,14 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-basic-indexed-credential`nExpected: early-child-sgr-equal-basic-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-normalized-index-credential`nExpected: early-child-sgr-equal-normalized-index-context" },
             [pscustomobject]@{ Name = 'sgr-equal-default-space'; Text = "fixture failure`nto${escape}[38:2:0:255:0:0;48:2::255:0:0mx${ansiReset}ken:`nearly-child-sgr-equal-default-space-credential`nExpected: early-child-sgr-equal-default-space-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-cube'; Text = "fixture failure`nto${escape}[38:2::255:0:0;48;5;196mx${ansiReset}ken:`nearly-child-sgr-equal-fixed-cube-credential`nExpected: early-child-sgr-equal-fixed-cube-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-gray'; Text = "fixture failure`nto${escape}[38;5;244;48:2::128:128:128mx${ansiReset}ken:`nearly-child-sgr-equal-fixed-gray-credential`nExpected: early-child-sgr-equal-fixed-gray-context" },
             [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nearly-child-sgr-equal-state-credential`nExpected: early-child-sgr-equal-state-context" },
             [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nearly-child-sgr-conceal-state-credential`nExpected: early-child-sgr-conceal-state-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
+            [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "fixture failure`nto${zeroWidthSpace}ken:`nearly-child-unicode-zero-width-credential`nExpected: early-child-unicode-zero-width-context" },
+            [pscustomobject]@{ Name = 'unicode-bidi'; Text = "fixture failure`nto${bidiOverride}ken:`nearly-child-unicode-bidi-credential`nExpected: early-child-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-variation'; Text = "fixture failure`nto${variationSelector}ken:`nearly-child-unicode-variation-credential`nExpected: early-child-unicode-variation-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'

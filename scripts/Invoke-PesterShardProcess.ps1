@@ -702,6 +702,10 @@ function Remove-PesterShardTerminalControlSequences {
   [void]$o.EnsureCapacity($l)
   $t = [char]0xE000
   $h = @('', '', $false)
+  $e = { param($v)
+    if($v -lt 16){return "i:$v"}
+    if($v -lt 232){$v-=16;$d=0,95,135,175,215,255;return 'r:{0}:{1}:{2}' -f $d[[math]::Floor($v/36)],$d[[math]::Floor(($v%36)/6)],$d[$v%6]}
+    $v=8+10*($v-232);'r:{0}:{0}:{0}' -f $v }
   $g = {
     param($p)
     $a = $p.Split(';')
@@ -719,6 +723,7 @@ function Remove-PesterShardTerminalControlSequences {
           if ($j -eq 2 -and $b.Count -eq 6) { if ($v) { $q = "r@$v" }; continue }
           $q += ":$v"
         }
+        if ($b[1] -ceq '5') { $q = & $e $v }
         $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
       }
       else {
@@ -735,6 +740,7 @@ function Remove-PesterShardTerminalControlSequences {
             if ($i -ge $a.Count -or -not [int]::TryParse($a[$i], [ref]$v) -or $v -gt 255) { return $false }
             $q += ":$v"
           }
+          if ($c -eq 1) { $q = & $e $v }
           $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
         }
         elseif ($n -eq 0) { $h[0] = $h[1] = ''; $h[2] = $false }
@@ -831,6 +837,12 @@ function Remove-PesterShardTerminalControlSequences {
     }
     if ($c -ge 0x80 -and $c -le 0x9F) { [void]$o.Append($t); $k++; continue }
     if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) { $k++; continue }
+    $w=1;$u=$c;$uc=[char]::GetUnicodeCategory($x[$k])
+    if(($k+1) -lt $l -and [char]::IsSurrogatePair($x[$k],$x[$k+1])){$w=2;$u=[char]::ConvertToUtf32($x[$k],$x[$k+1]);$uc=[Globalization.CharUnicodeInfo]::GetUnicodeCategory($Text,$k)}
+    if ($uc -eq 'Format' -or $u -in 0x034F,0x115F,0x1160,0x17B4,0x17B5,0x180B,0x180C,0x180D,0x180F,0x2065,0x3164,0xFFA0 -or
+      ($u -band 0xFFF0) -eq 0xFE00 -or ($u -band 0xFFF0) -eq 0xFFF0 -or ($u -shr 12) -eq 0xE0) {
+      [void]$o.Append($t); $k += $w; continue
+    }
     [void]$o.Append($(if ($c -in 10, 13 -or (-not $h[2] -and (-not $h[0] -or $h[0] -cne $h[1]))) { $x[$k] } else { $t }))
     $k++
   }
