@@ -619,7 +619,15 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
         $settings = New-Object System.Xml.XmlReaderSettings
         $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
         $settings.XmlResolver = $null
-        $settings.MaxCharactersInDocument = 131072
+        $maxCharactersInDocument = 1048577
+        $quotaVariable = Get-Variable -Name PesterShardChildOutputQuotaCharacters -Scope Script -ErrorAction SilentlyContinue
+        if ($null -ne $quotaVariable) {
+            $configuredQuota = [int64]$quotaVariable.Value
+            if ($configuredQuota -gt 0 -and $configuredQuota -lt [int64]::MaxValue) {
+                $maxCharactersInDocument = $configuredQuota + 1
+            }
+        }
+        $settings.MaxCharactersInDocument = $maxCharactersInDocument
         $stringReader = New-Object IO.StringReader($payload)
         $xmlReader = [System.Xml.XmlReader]::Create($stringReader, $settings)
         $document.Load($xmlReader)
@@ -686,16 +694,33 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
     $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
     $lines = New-Object 'System.Collections.Generic.List[string]'
     $redactSensitiveContinuation = $false
-    $diagnosticBoundaryPattern = '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'
     foreach ($rawLine in @($Text -split "`r?`n")) {
         $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern
-        if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {
-            $line = '[redacted sensitive diagnostic continuation]'
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
+            continue
+        }
+        if ($redactSensitiveContinuation) {
+            $line = if ($line -match '(?i)^\s*\[-\]') {
+                '[-] [redacted sensitive diagnostic continuation]'
+            }
+            elseif ($line -match '(?i)^\s*Expected') {
+                'Expected: [redacted sensitive diagnostic continuation]'
+            }
+            elseif ($line -match '(?i)^\s*But was') {
+                'But was: [redacted sensitive diagnostic continuation]'
+            }
+            elseif ($line -match '(?i)^\s*Exception:') {
+                'Exception: [redacted sensitive diagnostic continuation]'
+            }
+            elseif ($line -match '(?i)\bat\s+.+\.ps1:\d+') {
+                'at [redacted sensitive diagnostic continuation]'
+            }
+            else {
+                '[redacted sensitive diagnostic continuation]'
+            }
         }
         else {
-            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
             if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
                 $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
                 $line = '[redacted sensitive diagnostic line]'
@@ -1726,17 +1751,34 @@ $childScript = @(
     '    if ([string]::IsNullOrWhiteSpace($text)) { $text = ''Pester shard child failed before producing a result.'' }'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
     '    $redactSensitiveContinuation = $false'
-    '    $diagnosticBoundaryPattern = ''(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'''
     '    foreach ($rawLine in @($text -split "`r?`n")) {'
     '        if ($lines.Count -ge 8) { break }'
     '        $line = ([string]$rawLine).Trim()'
-    '        if ([string]::IsNullOrWhiteSpace($line)) { continue }'
-    '        $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern'
-    '        if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {'
-    '            $line = ''[redacted sensitive diagnostic continuation]'''
+    '        if ([string]::IsNullOrWhiteSpace($line)) {'
+    '            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }'
+    '            continue'
+    '        }'
+    '        if ($redactSensitiveContinuation) {'
+    '            $line = if ($line -match ''(?i)^\s*\[-\]'') {'
+    '                ''[-] [redacted sensitive diagnostic continuation]'''
+    '            }'
+    '            elseif ($line -match ''(?i)^\s*Expected'') {'
+    '                ''Expected: [redacted sensitive diagnostic continuation]'''
+    '            }'
+    '            elseif ($line -match ''(?i)^\s*But was'') {'
+    '                ''But was: [redacted sensitive diagnostic continuation]'''
+    '            }'
+    '            elseif ($line -match ''(?i)^\s*Exception:'') {'
+    '                ''Exception: [redacted sensitive diagnostic continuation]'''
+    '            }'
+    '            elseif ($line -match ''(?i)\bat\s+.+\.ps1:\d+'') {'
+    '                ''at [redacted sensitive diagnostic continuation]'''
+    '            }'
+    '            else {'
+    '                ''[redacted sensitive diagnostic continuation]'''
+    '            }'
     '        }'
     '        else {'
-    '            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }'
     '            if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
     '                $redactSensitiveContinuation = $line -match ''(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'''
     '                $line = ''[redacted sensitive diagnostic line]'''

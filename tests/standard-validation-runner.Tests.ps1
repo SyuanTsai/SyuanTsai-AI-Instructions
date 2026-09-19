@@ -859,21 +859,21 @@ catch {
         Assert-Match $credentialSummary 'No allowlisted Pester diagnostic' 'Unrecognized arbitrary child output must be replaced by a fixed safe diagnostic.'
 
         $recognizedCredentialPath = Join-Path $TestDrive 'recognized-credential-continuation.txt'
-        Write-TestUtf8File -Path $recognizedCredentialPath -Text "[-] fixture failure`nAuthorization:`nrecognized-credential-value-that-must-not-be-logged`nExpected: safe diagnostic context"
+        Write-TestUtf8File -Path $recognizedCredentialPath -Text "[-] fixture failure`nAuthorization:`nrecognized-credential-value-that-must-not-be-logged`n`nExpected: safe diagnostic context"
         $recognizedCredentialSummary = Get-PesterShardFailureSummary -Paths @($recognizedCredentialPath)
         Assert-False ($recognizedCredentialSummary -match 'recognized-credential-value-that-must-not-be-logged') 'A recognized failure block must not retain an unlabeled value after a sensitive header.'
         Assert-Match $recognizedCredentialSummary '\[-\] fixture failure' 'Sanitizing a sensitive continuation must preserve the recognized failure marker.'
         Assert-Match $recognizedCredentialSummary 'Expected: safe diagnostic context' 'Sanitizing a sensitive continuation must preserve adjacent allowlisted failure context.'
 
         $wrappedCredentialPath = Join-Path $TestDrive 'wrapped-credential-before-marker.txt'
-        Write-TestUtf8File -Path $wrappedCredentialPath -Text "Authorization:`nwrapped-credential-fragment-one`nwrapped-credential-fragment-two`n[-] fixture failure`nExpected: safe diagnostic context"
+        Write-TestUtf8File -Path $wrappedCredentialPath -Text "Authorization:`nwrapped-credential-fragment-one`nwrapped-credential-fragment-two`n`n[-] fixture failure`nExpected: safe diagnostic context"
         $wrappedCredentialSummary = Get-PesterShardFailureSummary -Paths @($wrappedCredentialPath)
         Assert-False ($wrappedCredentialSummary -match 'wrapped-credential-fragment-(?:one|two)') 'Every wrapped credential continuation before a recognized failure marker must be redacted.'
         Assert-Match $wrappedCredentialSummary '\[-\] fixture failure' 'Redacting a pre-marker continuation block must preserve the recognized failure marker.'
         Assert-Match $wrappedCredentialSummary 'Expected: safe diagnostic context' 'Redacting a pre-marker continuation block must preserve later safe context.'
 
         $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
-        $windowSuffix = "Authorization:`nwindow-boundary-credential`n[-] fixture failure`nExpected: safe diagnostic context`n"
+        $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
         $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
         Assert-True ($windowFillerLength -gt 0) 'The tail-window fixture must place the read offset inside the sensitive header.'
         Write-TestUtf8File -Path $windowBoundaryCredentialPath -Text ("safe prefix`n" + $windowSuffix + ('z' * $windowFillerLength))
@@ -881,6 +881,23 @@ catch {
         Assert-False ($windowBoundarySummary -match 'window-boundary-credential') 'Sanitization must retain sensitive continuation state across a tail-window read boundary.'
         Assert-Match $windowBoundarySummary '\[-\] fixture failure' 'Window-boundary sanitization must preserve the recognized failure marker.'
         Assert-Match $windowBoundarySummary 'Expected: safe diagnostic context' 'Window-boundary sanitization must preserve adjacent safe context.'
+
+        $boundaryLookingCredentialPath = Join-Path $TestDrive 'boundary-looking-credential.txt'
+        Write-TestUtf8File -Path $boundaryLookingCredentialPath -Text "[-] fixture failure`nAuthorization:`n[-]window-boundary-credential`nExpected: expected-boundary-credential"
+        $boundaryLookingCredentialSummary = Get-PesterShardFailureSummary -Paths @($boundaryLookingCredentialPath)
+        Assert-False ($boundaryLookingCredentialSummary -match '(?:window|expected)-boundary-credential') 'Boundary-looking credential continuations must never be trusted as raw diagnostic structure.'
+        Assert-Match $boundaryLookingCredentialSummary '\[-\] fixture failure' 'A failure marker before a sensitive continuation must remain available.'
+
+        $oversizedCliXmlPath = Join-Path $TestDrive 'oversized-valid-clixml-stderr.txt'
+        $oversizedCliXmlPadding = 'p' * 140000
+        Write-TestUtf8File -Path $oversizedCliXmlPath -Text @"
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><Props><S N="Activity">$oversizedCliXmlPadding</S></Props></Obj><Obj S="information" RefId="1"><ToString>[-] oversized CLIXML fixture failure</ToString></Obj><Obj S="information" RefId="2"><ToString>Expected: safe oversized diagnostic context</ToString></Obj></Objs>
+"@
+        $oversizedCliXmlSummary = Get-PesterShardFailureSummary -Paths @($oversizedCliXmlPath)
+        Assert-Match $oversizedCliXmlSummary '\[-\] oversized CLIXML fixture failure' 'Valid CLIXML within the child-output quota must decode even when it exceeds the former parser limit.'
+        Assert-Match $oversizedCliXmlSummary 'Expected: safe oversized diagnostic context' 'Oversized valid CLIXML must preserve adjacent safe diagnostic context.'
+        Assert-False ($oversizedCliXmlSummary -match '(?i)#< CLIXML|PowerShell CLIXML diagnostic could not be safely decoded') 'Valid quota-bounded CLIXML must not fall back to an undecodable-stream diagnostic.'
 
         $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
         Write-TestUtf8File -Path $mixedStderrPath -Text @'
@@ -937,7 +954,7 @@ PSSecurityException: fixture execution policy failure
         Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
         Invoke-Expression $childDiagnosticFunction.Extent.Text
         try {
-            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-fragment-one`nearly-child-credential-fragment-two`nExpected: safe child context")
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-fragment-one`nearly-child-credential-fragment-two`n`nExpected: safe child context")
         }
         catch {
             $childFailureDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
@@ -945,6 +962,15 @@ PSSecurityException: fixture execution policy failure
         Assert-False ($childFailureDiagnostic -match 'early-child-credential-fragment-(?:one|two)') 'Early child result and stderr diagnostics must not retain any wrapped value after a sensitive header.'
         Assert-Match $childFailureDiagnostic 'fixture failure' 'Early child sanitization must preserve the exception summary.'
         Assert-Match $childFailureDiagnostic 'Expected: safe child context' 'Early child sanitization must preserve adjacent nonsensitive context.'
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`n[-]early-child-boundary-credential`nExpected: early-child-expected-credential")
+        }
+        catch {
+            $boundaryLookingChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($boundaryLookingChildDiagnostic -match 'early-child-(?:boundary|expected)-credential') 'The generated child sanitizer must not trust boundary-looking text while a sensitive continuation is active.'
+        Assert-Match $boundaryLookingChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes the sensitive continuation.'
     }
 
     # Scenario: The configured evidence directory is missing beneath a junction or symbolic-link ancestor.
