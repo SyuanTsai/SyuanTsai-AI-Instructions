@@ -1085,6 +1085,8 @@ PSSecurityException: fixture execution policy failure
         $cursorLeft = $escape + '[1D'
         $zeroWidthSpace = [string][char]0x200B
         $bidiOverride = [string][char]0x202E
+        $lineSeparator = [string][char]0x2028
+        $paragraphSeparator = [string][char]0x2029
         $variationSelector = [string][char]0xFE0F
         $visibleReplacementCharacters = "safe$([char]0xFFFC)$([char]0xFFFD)context"
         $parentCases = @(
@@ -1114,6 +1116,8 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "[-] fixture failure`nto${zeroWidthSpace}ken:`nparent-unicode-zero-width-credential`nExpected: parent-unicode-zero-width-context" },
             [pscustomobject]@{ Name = 'unicode-bidi'; Text = "[-] fixture failure`nto${bidiOverride}ken:`nparent-unicode-bidi-credential`nExpected: parent-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-line-separator'; Text = "[-] fixture failure`nto${lineSeparator}ken:`nparent-unicode-line-separator-credential`nExpected: parent-unicode-line-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-paragraph-separator'; Text = "[-] fixture failure`nto${paragraphSeparator}ken:`nparent-unicode-paragraph-separator-credential`nExpected: parent-unicode-paragraph-separator-context" },
             [pscustomobject]@{ Name = 'unicode-variation'; Text = "[-] fixture failure`nto${variationSelector}ken:`nparent-unicode-variation-credential`nExpected: parent-unicode-variation-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
@@ -1180,6 +1184,8 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "fixture failure`nto${zeroWidthSpace}ken:`nearly-child-unicode-zero-width-credential`nExpected: early-child-unicode-zero-width-context" },
             [pscustomobject]@{ Name = 'unicode-bidi'; Text = "fixture failure`nto${bidiOverride}ken:`nearly-child-unicode-bidi-credential`nExpected: early-child-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-line-separator'; Text = "fixture failure`nto${lineSeparator}ken:`nearly-child-unicode-line-separator-credential`nExpected: early-child-unicode-line-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-paragraph-separator'; Text = "fixture failure`nto${paragraphSeparator}ken:`nearly-child-unicode-paragraph-separator-credential`nExpected: early-child-unicode-paragraph-separator-context" },
             [pscustomobject]@{ Name = 'unicode-variation'; Text = "fixture failure`nto${variationSelector}ken:`nearly-child-unicode-variation-credential`nExpected: early-child-unicode-variation-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
