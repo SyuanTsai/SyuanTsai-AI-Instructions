@@ -889,7 +889,8 @@ catch {
         Assert-Match $boundaryLookingCredentialSummary '\[-\] fixture failure' 'A failure marker before a sensitive continuation must remain available.'
 
         $quotedKeyCredentialPath = Join-Path $TestDrive 'quoted-key-credential.txt'
-        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
+        $ansiReset = ([string][char]27) + '[0m'
+        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":$ansiReset`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
         $quotedKeyCredentialSummary = Get-PesterShardFailureSummary -Paths @($quotedKeyCredentialPath)
         Assert-False ($quotedKeyCredentialSummary -match 'quoted-key-credential-(?:that-must-not-be-logged|context)') 'A quoted sensitive key ending in a separator must enable continuation redaction.'
         Assert-Match $quotedKeyCredentialSummary '\[-\] fixture failure' 'Quoted-key redaction must retain safe context that precedes the sensitive block.'
@@ -986,6 +987,16 @@ PSSecurityException: fixture execution policy failure
         }
         Assert-False ($quotedKeyChildDiagnostic -match 'early-child-quoted-key-(?:credential|context)') 'The generated child sanitizer must enable continuation redaction for quoted sensitive keys.'
         Assert-Match $quotedKeyChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes a quoted sensitive key.'
+
+        $ansiReset = ([string][char]27) + '[0m'
+        try {
+            throw [InvalidOperationException]::new("fixture failure`n`"token`":$ansiReset`nearly-child-ansi-key-credential`nExpected: early-child-ansi-key-context")
+        }
+        catch {
+            $ansiKeyChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($ansiKeyChildDiagnostic -match 'early-child-ansi-key-(?:credential|context)') 'The generated child sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
+        Assert-Match $ansiKeyChildDiagnostic 'fixture failure' 'ANSI normalization must retain safe context that precedes the sensitive block.'
     }
 
     # Scenario: The configured evidence directory is missing beneath a junction or symbolic-link ancestor.
