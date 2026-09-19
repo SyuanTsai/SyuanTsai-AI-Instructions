@@ -1015,9 +1015,9 @@ PSSecurityException: fixture execution policy failure
         Assert-False ($preservedRawSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Unparseable CLIXML must never be copied into workflow-visible diagnostics.'
     }
 
-    # Scenario: Parent and generated-child diagnostics contain sensitive continuations, including a delimiter followed by terminal formatting.
-    # Purpose: Normalize ANSI before classifying sensitive boundaries and keep continuation values out of every workflow-visible diagnostic.
-    It 'UnitT07_normalizes_ansi_before_redacting_parent_and_child_diagnostics' {
+    # Scenario: Parent and generated-child diagnostics contain sensitive continuations split by complete, unterminated, or adversarial terminal controls.
+    # Purpose: Normalize terminal controls in one bounded pass before classifying sensitive boundaries and keep continuation values out of every workflow-visible diagnostic.
+    It 'UnitT07_normalizes_terminal_controls_before_redacting_parent_and_child_diagnostics_in_bounded_time' {
         $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $tokens = $null
         $errors = $null
@@ -1028,6 +1028,8 @@ PSSecurityException: fixture execution policy failure
                 $node.Name -ceq 'Remove-PesterShardTerminalControlSequences'
         }, $true)
         Assert-True ($null -ne $terminalControlFunction) 'The shard executor must define its terminal-control normalizer.'
+        Assert-False ($terminalControlFunction.Extent.Text -match '\[regex\]::Replace') 'Terminal-control normalization must not use a backtracking regex over quota-sized child output.'
+        Assert-Match $terminalControlFunction.Extent.Text 'while\s*\(' 'Terminal-control normalization must scan its bounded input directly.'
         Invoke-Expression $terminalControlFunction.Extent.Text
         $parentDiagnosticFunction = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -1053,6 +1055,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "[-] fixture failure`nto${escape}[31`nken:`nparent-esc-csi-incomplete-credential`nExpected: parent-esc-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "[-] fixture failure`nto$([char]0x9B)31`nken:`nparent-c1-csi-incomplete-credential`nExpected: parent-c1-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "[-] fixture failure`nto${escape}(`nken:`nparent-esc-intermediate-incomplete-credential`nExpected: parent-esc-intermediate-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-low-final'; Text = "[-] fixture failure`nto${escape}#8ken:`nparent-esc-low-final-credential`nExpected: parent-esc-low-final-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1072,6 +1075,12 @@ PSSecurityException: fixture execution policy failure
         $childErrors = $null
         $childAst = [Management.Automation.Language.Parser]::ParseInput($childScriptText, [ref]$childTokens, [ref]$childErrors)
         Assert-Equal @($childErrors).Count 0 'The generated child script must parse before early-failure diagnostic testing.'
+        $childTerminalControlFunction = $childAst.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Remove-PesterShardTerminalControlSequences'
+        }, $true)
+        Assert-True ($null -ne $childTerminalControlFunction) 'The generated child must embed the same bounded terminal-control scanner.'
+        Invoke-Expression $childTerminalControlFunction.Extent.Text
         $childDiagnosticFunction = $childAst.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
@@ -1086,6 +1095,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "fixture failure`nto${escape}[31`nken:`nearly-child-esc-csi-incomplete-credential`nExpected: early-child-esc-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "fixture failure`nto$([char]0x9B)31`nken:`nearly-child-c1-csi-incomplete-credential`nExpected: early-child-c1-csi-incomplete-context" },
             [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "fixture failure`nto${escape}(`nken:`nearly-child-esc-intermediate-incomplete-credential`nExpected: early-child-esc-intermediate-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-low-final'; Text = "fixture failure`nto${escape}#8ken:`nearly-child-esc-low-final-credential`nExpected: early-child-esc-low-final-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'

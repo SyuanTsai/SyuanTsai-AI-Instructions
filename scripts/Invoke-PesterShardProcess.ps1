@@ -691,21 +691,104 @@ function Remove-PesterShardTerminalControlSequences {
     param([Parameter()][AllowEmptyString()][string] $Text)
 
     if ([string]::IsNullOrEmpty($Text)) { return '' }
-    $normalized = [regex]::Replace(
-        $Text,
-        '(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*?(?:\x07|\x1B\\|\x9C)',
-        ''
-    )
-    $normalized = [regex]::Replace(
-        $normalized,
-        '(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*\z',
-        ''
-    )
-    $normalized = [regex]::Replace($normalized, '(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]', '')
-    $normalized = [regex]::Replace($normalized, '(?:\x1B\[|\x9B)[0-?]*[ -/]*(?:\r\n|\r|\n|\z)', '')
-    $normalized = [regex]::Replace($normalized, '\x1B[ -/]*[@-Z\\-_]', '')
-    $normalized = [regex]::Replace($normalized, '\x1B[ -/]*(?:\r\n|\r|\n|\z)', '')
-    return [regex]::Replace($normalized, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '')
+    # Scan left-to-right so quota-sized control strings cannot trigger regex
+    # backtracking. Unterminated strings consume the remainder fail closed.
+    $normalized = New-Object Text.StringBuilder
+    [void]$normalized.EnsureCapacity($Text.Length)
+    $index = 0
+    while ($index -lt $Text.Length) {
+        $code = [int][char]$Text[$index]
+
+        if ($code -eq 0x1B) {
+            $index++
+            if ($index -ge $Text.Length) { continue }
+            $next = [int][char]$Text[$index]
+
+            if ($next -eq 0x5D -or $next -eq 0x50 -or $next -eq 0x58 -or $next -eq 0x5E -or $next -eq 0x5F) {
+                $index++
+                while ($index -lt $Text.Length) {
+                    $stringCode = [int][char]$Text[$index]
+                    if ($stringCode -eq 0x07 -or $stringCode -eq 0x9C) {
+                        $index++
+                        break
+                    }
+                    if ($stringCode -eq 0x1B -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x5C) {
+                        $index += 2
+                        break
+                    }
+                    $index++
+                }
+                continue
+            }
+
+            if ($next -eq 0x5B) {
+                $index++
+                while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
+                while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
+                if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
+                    $index++
+                    continue
+                }
+                if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
+                    if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
+                    $index++
+                }
+                continue
+            }
+
+            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
+            if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x7E) {
+                $index++
+                continue
+            }
+            if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
+                if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
+                $index++
+            }
+            continue
+        }
+
+        if ($code -eq 0x90 -or $code -eq 0x98 -or $code -eq 0x9D -or $code -eq 0x9E -or $code -eq 0x9F) {
+            $index++
+            while ($index -lt $Text.Length) {
+                $stringCode = [int][char]$Text[$index]
+                if ($stringCode -eq 0x07 -or $stringCode -eq 0x9C) {
+                    $index++
+                    break
+                }
+                if ($stringCode -eq 0x1B -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x5C) {
+                    $index += 2
+                    break
+                }
+                $index++
+            }
+            continue
+        }
+
+        if ($code -eq 0x9B) {
+            $index++
+            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
+            while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
+            if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
+                $index++
+                continue
+            }
+            if ($index -lt $Text.Length -and ([int][char]$Text[$index] -eq 0x0D -or [int][char]$Text[$index] -eq 0x0A)) {
+                if ([int][char]$Text[$index] -eq 0x0D -and ($index + 1) -lt $Text.Length -and [int][char]$Text[$index + 1] -eq 0x0A) { $index++ }
+                $index++
+            }
+            continue
+        }
+
+        if (($code -ge 0x00 -and $code -le 0x08) -or $code -eq 0x0B -or $code -eq 0x0C -or ($code -ge 0x0E -and $code -le 0x1F) -or ($code -ge 0x7F -and $code -le 0x9F)) {
+            $index++
+            continue
+        }
+
+        [void]$normalized.Append($Text[$index])
+        $index++
+    }
+    return $normalized.ToString()
 }
 
 function ConvertTo-PesterShardSanitizedDiagnosticText {
@@ -1819,17 +1902,14 @@ else {
 }
 $childScript = @(
     '$ErrorActionPreference = ''Stop'''
+    'function Remove-PesterShardTerminalControlSequences {'
+    (Get-Command Remove-PesterShardTerminalControlSequences -CommandType Function -ErrorAction Stop).Definition
+    '}'
     'function ConvertTo-PesterShardEarlyFailureDiagnostic {'
     '    param([Parameter()][AllowNull()][object] $ErrorRecord)'
     '    $text = if ($null -eq $ErrorRecord) { ''Pester shard child failed before producing a result.'' } else { [string]$ErrorRecord.Exception.ToString() }'
     '    if ([string]::IsNullOrWhiteSpace($text)) { $text = ''Pester shard child failed before producing a result.'' }'
-    '    $normalizedText = [regex]::Replace($text, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*?(?:\x07|\x1B\\|\x9C)'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*\z'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''(?:\x1B\[|\x9B)[0-?]*[ -/]*(?:\r\n|\r|\n|\z)'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''\x1B[ -/]*[@-Z\\-_]'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''\x1B[ -/]*(?:\r\n|\r|\n|\z)'', '''')'
-    '    $normalizedText = [regex]::Replace($normalizedText, ''[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]'', '''')'
+    '    $normalizedText = Remove-PesterShardTerminalControlSequences -Text $text'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
     '    $redactSensitiveContinuation = $false'
     '    foreach ($rawLine in @($normalizedText -split "`r?`n")) {'
