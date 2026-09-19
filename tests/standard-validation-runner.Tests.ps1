@@ -1074,6 +1074,8 @@ PSSecurityException: fixture execution policy failure
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${indexedColor}context${ansiReset}") 'safe context' 'A color index numerically equal to the concealment opcode must remain ordinary readable SGR formatting.'
         $colonColor = $escape + '[38:2::255:0:0m'
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'A valid colon-form RGB SGR sequence must remain ordinary readable formatting.'
+        $differentColors = $escape + '[38:2::255:0:0;48:2::0:0:255m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${differentColors}context${ansiReset}") 'safe context' 'Different valid foreground and background colors must remain readable formatting.'
         $bell = [string][char]7
         $backspace = [string][char]8
         $osc = $escape + ']0;fixture' + $bell
@@ -1095,6 +1097,10 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "[-] fixture failure`ntox`rken:`nparent-cursor-cr-credential`nExpected: parent-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "[-] fixture failure`ntox${c1Index}ken:`nparent-cursor-c1-credential`nExpected: parent-cursor-c1-context" },
             [pscustomobject]@{ Name = 'sgr-conceal'; Text = "[-] fixture failure`nto${escape}[8mx${ansiReset}ken:`nparent-sgr-conceal-credential`nExpected: parent-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-colon'; Text = "[-] fixture failure`nto${escape}[38:2::255:0:0;48:2::255:0:0mx${ansiReset}ken:`nparent-sgr-equal-colon-credential`nExpected: parent-sgr-equal-colon-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "[-] fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nparent-sgr-equal-indexed-credential`nExpected: parent-sgr-equal-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "[-] fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nparent-sgr-equal-basic-credential`nExpected: parent-sgr-equal-basic-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "[-] fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-basic-indexed-credential`nExpected: parent-sgr-equal-basic-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
@@ -1125,6 +1131,7 @@ PSSecurityException: fixture execution policy failure
         Assert-True ($null -ne $childTerminalControlFunction) 'The generated child must embed the same bounded terminal-control scanner.'
         Invoke-Expression $childTerminalControlFunction.Extent.Text
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'The generated child must preserve valid colon-form RGB SGR formatting.'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${differentColors}context${ansiReset}") 'safe context' 'The generated child must preserve different foreground and background colors.'
         $childDiagnosticFunction = $childAst.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
@@ -1145,6 +1152,10 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "fixture failure`ntox`rken:`nearly-child-cursor-cr-credential`nExpected: early-child-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "fixture failure`ntox${c1Index}ken:`nearly-child-cursor-c1-credential`nExpected: early-child-cursor-c1-context" },
             [pscustomobject]@{ Name = 'sgr-conceal'; Text = "fixture failure`nto${escape}[8mx${ansiReset}ken:`nearly-child-sgr-conceal-credential`nExpected: early-child-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-colon'; Text = "fixture failure`nto${escape}[38:2::255:0:0;48:2::255:0:0mx${ansiReset}ken:`nearly-child-sgr-equal-colon-credential`nExpected: early-child-sgr-equal-colon-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nearly-child-sgr-equal-indexed-credential`nExpected: early-child-sgr-equal-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nearly-child-sgr-equal-basic-credential`nExpected: early-child-sgr-equal-basic-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-basic-indexed-credential`nExpected: early-child-sgr-equal-basic-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )

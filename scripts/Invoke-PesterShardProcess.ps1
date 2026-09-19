@@ -691,166 +691,147 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
 # Scan left-to-right so quota-sized control strings cannot trigger regex
 # backtracking. Unterminated strings consume the remainder fail closed.
 # Cursor controls that can reinterpret emitted text taint the whole line.
+# Validated SGR color state is retained so equal foreground/background spans
+# also taint their hidden glyphs; structural newlines remain intact.
 function Remove-PesterShardTerminalControlSequences {
-    param([Parameter()][AllowEmptyString()][string] $Text)
-
-    if ([string]::IsNullOrEmpty($Text)) { return '' }
-    $out = New-Object Text.StringBuilder
-    [void]$out.EnsureCapacity($Text.Length)
-    $taint = [char]0xE000
-    $sgrSafe = {
-        param($p)
-        $a = $p.Split(';')
-        for ($i = 0; $i -lt $a.Count; $i++) {
-            $n = 0
-            if ($a[$i].Contains(':')) {
-                $b = $a[$i].Split(':')
-                if (-not [int]::TryParse($b[0], [ref]$n) -or $n -notin 38, 48, 58 -or
-                    (($b.Count -ne 3 -or $b[1] -cne '5') -and ($b.Count -notin 5, 6 -or $b[1] -cne '2'))) { return $false }
-                for ($j = 2; $j -lt $b.Count; $j++) {
-                    if ($j -eq 2 -and $b.Count -eq 6 -and -not $b[$j]) { continue }
-                    $v = 0
-                    if (-not [int]::TryParse($b[$j], [ref]$v) -or $v -gt 255) { return $false }
-                }
-                continue
-            }
-            if ($a[$i] -and -not [int]::TryParse($a[$i], [ref]$n)) { return $false }
-            if ($n -eq 8) { return $false }
-            if ($n -in 38, 48, 58) {
-                $i++
-                if ($i -ge $a.Count) { return $false }
-                $c = if ($a[$i] -ceq '5') { 1 } elseif ($a[$i] -ceq '2') { 3 } else { return $false }
-                for ($j = 0; $j -lt $c; $j++) {
-                    $i++; $v = 0
-                    if ($i -ge $a.Count -or -not [int]::TryParse($a[$i], [ref]$v) -or $v -gt 255) { return $false }
-                }
-            }
+  param([Parameter()][AllowEmptyString()][string] $Text)
+  if ([string]::IsNullOrEmpty($Text)) { return '' }
+  $x = $Text.ToCharArray()
+  $l = $x.Length
+  $o = New-Object Text.StringBuilder
+  [void]$o.EnsureCapacity($l)
+  $t = [char]0xE000
+  $h = @('', '')
+  $g = {
+    param($p)
+    $a = $p.Split(';')
+    for ($i = 0; $i -lt $a.Count; $i++) {
+      $n = 0; $q = $null; $z = 2
+      if ($a[$i].Contains(':')) {
+        $b = $a[$i].Split(':')
+        if (-not [int]::TryParse($b[0], [ref]$n) -or $n -notin 38, 48, 58 -or
+          (($b.Count -ne 3 -or $b[1] -cne '5') -and ($b.Count -notin 5, 6 -or $b[1] -cne '2'))) { return $false }
+        for ($j = 2; $j -lt $b.Count; $j++) {
+          if ($j -eq 2 -and $b.Count -eq 6 -and -not $b[$j]) { continue }
+          $v = 0
+          if (-not [int]::TryParse($b[$j], [ref]$v) -or $v -gt 255) { return $false }
         }
-        $true
+        $q = if ($b[1] -ceq '5') { "i:$($b[2])" } else { "r:$($b[$b.Count - 3]):$($b[$b.Count - 2]):$($b[$b.Count - 1])" }
+        $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
+      }
+      else {
+        if ($a[$i] -and -not [int]::TryParse($a[$i], [ref]$n)) { return $false }
+        if ($n -eq 8) { return $false }
+        if ($n -in 38, 48, 58) {
+          $i++
+          if ($i -ge $a.Count) { return $false }
+          $c = if ($a[$i] -ceq '5') { 1 } elseif ($a[$i] -ceq '2') { 3 } else { return $false }
+          $q = if ($c -eq 1) { 'i' } else { 'r' }
+          for ($j = 0; $j -lt $c; $j++) {
+            $i++; $v = 0
+            if ($i -ge $a.Count -or -not [int]::TryParse($a[$i], [ref]$v) -or $v -gt 255) { return $false }
+            $q += ":$v"
+          }
+          $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
+        }
+        elseif ($n -eq 0) { $h[0] = $h[1] = '' }
+        elseif ($n -eq 39 -or $n -eq 49) { $h[[int]($n -eq 49)] = '' }
+        else {
+          $d = $n % 10
+          if ($d -le 7 -and (($n -ge 30 -and $n -le 47) -or ($n -ge 90 -and $n -le 107))) {
+            $z = [int](($n -ge 40 -and $n -le 47) -or $n -ge 100)
+            $q = 'i:' + ($d + $(if ($n -ge 90) { 8 } else { 0 }))
+          }
+        }
+      }
+      if ($z -lt 2) { $h[$z] = $q }
     }
-    $k = 0
-    while ($k -lt $Text.Length) {
-        $c = [int][char]$Text[$k]
-
-        if ($c -eq 0x08 -or $c -eq 0x0B -or $c -eq 0x0C -or $c -eq 0x0E -or $c -eq 0x0F -or
-            ($c -eq 0x0D -and (($k + 1) -ge $Text.Length -or [int][char]$Text[$k + 1] -ne 0x0A))) {
-            [void]$out.Append($taint)
-            $k++
-            continue
-        }
-
-        if ($c -eq 0x1B) {
-            $k++
-            if ($k -ge $Text.Length) { continue }
-            $n = [int][char]$Text[$k]
-
-            if ($n -eq 0x5D -or $n -eq 0x50 -or $n -eq 0x58 -or $n -eq 0x5E -or $n -eq 0x5F) {
-                $k++
-                while ($k -lt $Text.Length) {
-                    $s = [int][char]$Text[$k]
-                    if ($s -eq 0x07 -or $s -eq 0x9C) {
-                        $k++
-                        break
-                    }
-                    if ($s -eq 0x1B -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x5C) {
-                        $k += 2
-                        break
-                    }
-                    $k++
-                }
-                continue
-            }
-
-            if ($n -eq 0x5B) {
-                $k++
-                $p = $k
-                while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x3F) { $k++ }
-                $sgr = $Text.Substring($p, $k - $p)
-                $m = $k
-                while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
-                if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x40 -and [int][char]$Text[$k] -le 0x7E) {
-                    $f = [int][char]$Text[$k]
-                    $k++
-                    $safe = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $sgrSafe $sgr))
-                    if (-not $safe) { [void]$out.Append($taint) }
-                    continue
-                }
-                [void]$out.Append($taint)
-                if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
-                    if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
-                    $k++
-                }
-                continue
-            }
-
-            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
-            if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x7E) {
-                $k++
-                [void]$out.Append($taint)
-                continue
-            }
-            [void]$out.Append($taint)
-            if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
-                if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
-                $k++
-            }
-            continue
-        }
-
-        if ($c -eq 0x90 -or $c -eq 0x98 -or $c -eq 0x9D -or $c -eq 0x9E -or $c -eq 0x9F) {
-            $k++
-            while ($k -lt $Text.Length) {
-                $s = [int][char]$Text[$k]
-                if ($s -eq 0x07 -or $s -eq 0x9C) {
-                    $k++
-                    break
-                }
-                if ($s -eq 0x1B -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x5C) {
-                    $k += 2
-                    break
-                }
-                $k++
-            }
-            continue
-        }
-
-        if ($c -eq 0x9B) {
-            $k++
-            $p = $k
-            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x30 -and [int][char]$Text[$k] -le 0x3F) { $k++ }
-            $sgr = $Text.Substring($p, $k - $p)
-            $m = $k
-            while ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x20 -and [int][char]$Text[$k] -le 0x2F) { $k++ }
-            if ($k -lt $Text.Length -and [int][char]$Text[$k] -ge 0x40 -and [int][char]$Text[$k] -le 0x7E) {
-                $f = [int][char]$Text[$k]
-                $k++
-                $safe = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $sgrSafe $sgr))
-                if (-not $safe) { [void]$out.Append($taint) }
-                continue
-            }
-            [void]$out.Append($taint)
-            if ($k -lt $Text.Length -and ([int][char]$Text[$k] -eq 0x0D -or [int][char]$Text[$k] -eq 0x0A)) {
-                if ([int][char]$Text[$k] -eq 0x0D -and ($k + 1) -lt $Text.Length -and [int][char]$Text[$k + 1] -eq 0x0A) { $k++ }
-                $k++
-            }
-            continue
-        }
-
-        if ($c -ge 0x80 -and $c -le 0x9F) {
-            [void]$out.Append($taint)
-            $k++
-            continue
-        }
-
-        if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) {
-            $k++
-            continue
-        }
-
-        [void]$out.Append($Text[$k])
+    $true
+  }
+  $k = 0
+  while ($k -lt $l) {
+    $c = [int]$x[$k]
+    if ($c -eq 0x08 -or $c -eq 0x0B -or $c -eq 0x0C -or $c -eq 0x0E -or $c -eq 0x0F -or
+      ($c -eq 0x0D -and (($k + 1) -ge $l -or [int]$x[$k + 1] -ne 0x0A))) {
+      [void]$o.Append($t); $k++; continue
+    }
+    if ($c -eq 0x1B) {
+      $k++
+      if ($k -ge $l) { continue }
+      $n = [int]$x[$k]
+      if ($n -eq 0x5D -or $n -eq 0x50 -or $n -eq 0x58 -or $n -eq 0x5E -or $n -eq 0x5F) {
         $k++
+        while ($k -lt $l) {
+          $s = [int]$x[$k]
+          if ($s -eq 0x07 -or $s -eq 0x9C) { $k++; break }
+          if ($s -eq 0x1B -and ($k + 1) -lt $l -and [int]$x[$k + 1] -eq 0x5C) { $k += 2; break }
+          $k++
+        }
+        continue
+      }
+      if ($n -eq 0x5B) {
+        $k++; $p = $k
+        while ($k -lt $l -and [int]$x[$k] -ge 0x30 -and [int]$x[$k] -le 0x3F) { $k++ }
+        $r = $Text.Substring($p, $k - $p); $m = $k
+        while ($k -lt $l -and [int]$x[$k] -ge 0x20 -and [int]$x[$k] -le 0x2F) { $k++ }
+        if ($k -lt $l -and [int]$x[$k] -ge 0x40 -and [int]$x[$k] -le 0x7E) {
+          $f = [int]$x[$k]; $k++
+          $y = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $g $r))
+          if (-not $y) { [void]$o.Append($t) }
+          continue
+        }
+        [void]$o.Append($t)
+        if ($k -lt $l -and ([int]$x[$k] -eq 0x0D -or [int]$x[$k] -eq 0x0A)) {
+          if ([int]$x[$k] -eq 0x0D -and ($k + 1) -lt $l -and [int]$x[$k + 1] -eq 0x0A) { $k++ }
+          $k++
+        }
+        continue
+      }
+      while ($k -lt $l -and [int]$x[$k] -ge 0x20 -and [int]$x[$k] -le 0x2F) { $k++ }
+      if ($k -lt $l -and [int]$x[$k] -ge 0x30 -and [int]$x[$k] -le 0x7E) {
+        $k++; [void]$o.Append($t); continue
+      }
+      [void]$o.Append($t)
+      if ($k -lt $l -and ([int]$x[$k] -eq 0x0D -or [int]$x[$k] -eq 0x0A)) {
+        if ([int]$x[$k] -eq 0x0D -and ($k + 1) -lt $l -and [int]$x[$k + 1] -eq 0x0A) { $k++ }
+        $k++
+      }
+      continue
     }
-    return $out.ToString()
+    if ($c -eq 0x90 -or $c -eq 0x98 -or $c -eq 0x9D -or $c -eq 0x9E -or $c -eq 0x9F) {
+      $k++
+      while ($k -lt $l) {
+        $s = [int]$x[$k]
+        if ($s -eq 0x07 -or $s -eq 0x9C) { $k++; break }
+        if ($s -eq 0x1B -and ($k + 1) -lt $l -and [int]$x[$k + 1] -eq 0x5C) { $k += 2; break }
+        $k++
+      }
+      continue
+    }
+    if ($c -eq 0x9B) {
+      $k++; $p = $k
+      while ($k -lt $l -and [int]$x[$k] -ge 0x30 -and [int]$x[$k] -le 0x3F) { $k++ }
+      $r = $Text.Substring($p, $k - $p); $m = $k
+      while ($k -lt $l -and [int]$x[$k] -ge 0x20 -and [int]$x[$k] -le 0x2F) { $k++ }
+      if ($k -lt $l -and [int]$x[$k] -ge 0x40 -and [int]$x[$k] -le 0x7E) {
+        $f = [int]$x[$k]; $k++
+        $y = ($f -eq 0x6D -and $k - 1 -eq $m -and (& $g $r))
+        if (-not $y) { [void]$o.Append($t) }
+        continue
+      }
+      [void]$o.Append($t)
+      if ($k -lt $l -and ([int]$x[$k] -eq 0x0D -or [int]$x[$k] -eq 0x0A)) {
+        if ([int]$x[$k] -eq 0x0D -and ($k + 1) -lt $l -and [int]$x[$k + 1] -eq 0x0A) { $k++ }
+        $k++
+      }
+      continue
+    }
+    if ($c -ge 0x80 -and $c -le 0x9F) { [void]$o.Append($t); $k++; continue }
+    if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) { $k++; continue }
+    [void]$o.Append($(if ($c -in 10, 13 -or -not $h[0] -or $h[0] -cne $h[1]) { $x[$k] } else { $t }))
+    $k++
+  }
+  $o.ToString()
 }
 
 function ConvertTo-PesterShardSanitizedDiagnosticText {
