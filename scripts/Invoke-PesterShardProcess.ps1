@@ -839,9 +839,9 @@ function Remove-PesterShardTerminalControlSequences {
     if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) { $k++; continue }
     $w=1;$u=$c;$uc=[char]::GetUnicodeCategory($x[$k])
     if(($k+1) -lt $l -and [char]::IsSurrogatePair($x[$k],$x[$k+1])){$w=2;$u=[char]::ConvertToUtf32($x[$k],$x[$k+1]);$uc=[Globalization.CharUnicodeInfo]::GetUnicodeCategory($Text,$k)}
-    if($uc -eq 'Format' -or $u -in 0x034F,0x115F,0x1160,0x17B4,0x17B5,0x180B,0x180C,0x180D,0x180F,0x2028,0x2029,0x2065,0x3164,0xFFA0 -or
+    if($uc-eq'Format'-or$u-in 0x034F,0x115F,0x1160,0x17B4,0x17B5,0x180B,0x180C,0x180D,0x180F,0x2028,0x2029,0x2065,0x3164,0xFFA0 -or
       ($u-band 0xFFF0)-eq 0xFE00 -or($u-0xFFF0)-in 0..8 -or($u-shr 12)-eq 0xE0) {
-      [void]$o.Append($t); $k += $w; continue
+      [void]$o.Append($t);$k+=$w;continue
     }
     [void]$o.Append($(if ($c -in 10, 13 -or (-not $h[2] -and (-not $h[0] -or $h[0] -cne $h[1]))) { $x[$k] } else { $t }))
     $k++
