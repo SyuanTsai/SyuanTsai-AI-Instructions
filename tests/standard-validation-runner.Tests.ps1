@@ -287,19 +287,80 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 STANDARD_VALIDATION_INHERITED_SECRET = 'fixture-reserved-prefix-secret-must-not-cross-the-child-boundary'
                 SYP154_INHERITED_SECRET = 'fixture-secret-must-not-cross-the-child-boundary'
             }
-            $previousEnvironment = @{}
+            $runnerBootstrap = @'
+$ErrorActionPreference = 'Stop'
+$runnerPath = [string]$env:SYP154_TEST_RUNNER_PATH
+$encodedArguments = [string]$env:SYP154_TEST_RUNNER_ARGUMENTS_B64
+if ([string]::IsNullOrWhiteSpace($runnerPath) -or [string]::IsNullOrWhiteSpace($encodedArguments)) {
+    throw 'Runner fixture bootstrap metadata is incomplete.'
+}
+$runnerArguments = @()
+foreach ($item in $encodedArguments.Split(';', [StringSplitOptions]::RemoveEmptyEntries)) {
+    $runnerArguments += [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($item))
+}
+$switchNames = @('DevelopmentHarness', 'SemanticTriggered', 'SemanticConsent', 'CompleteLifecycle')
+$valueNames = @(
+    'CandidateRoot', 'AdapterPath', 'ArtifactsRoot', 'OutputPath', 'SourceRepository',
+    'SourceRevision', 'BaseRevision', 'EventName', 'TimeoutSeconds', 'TrustedToolRoot',
+    'SemanticProvider', 'SemanticPurpose', 'SemanticScope', 'SemanticEvidencePath',
+    'AiReviewEvidencePath', 'HumanApprovalEvidencePath', 'PublishInstallEvidencePath',
+    'PostInstallEvidencePath', 'CancellationPath', 'RunId'
+)
+$runnerParameters = @{}
+for ($index = 0; $index -lt $runnerArguments.Count;) {
+    $token = [string]$runnerArguments[$index]
+    if (-not $token.StartsWith('-', [StringComparison]::Ordinal) -or $token.Length -lt 2) {
+        throw "Runner fixture argument name is invalid at index $index."
+    }
+    $name = $token.Substring(1)
+    if ($switchNames -contains $name) {
+        $runnerParameters[$name] = $true
+        $index++
+        continue
+    }
+    if ($valueNames -notcontains $name -or ($index + 1) -ge $runnerArguments.Count) {
+        throw "Runner fixture parameter '$name' is not allowed or has no value."
+    }
+    $runnerParameters[$name] = [string]$runnerArguments[$index + 1]
+    $index += 2
+}
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_PATH', $null, 'Process')
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_ARGUMENTS_B64', $null, 'Process')
+& $runnerPath @runnerParameters
+if ($null -eq $LASTEXITCODE) { exit 0 }
+exit ([int]$LASTEXITCODE)
+'@
+            $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($runnerBootstrap))
+            $startInfo = New-Object Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $script:PowerShellPath
+            $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedBootstrap"
+            $startInfo.WorkingDirectory = $script:RepositoryRoot
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
+            $runnerArguments = @($arguments | Select-Object -Skip 3)
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
+                $runnerArguments | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) }
+            ) -join ';'
             foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                $previousEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
-                [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+                $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
             }
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo = $startInfo
             try {
-                $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
-                $exitCode = $LASTEXITCODE
+                if (-not $process.Start()) { throw 'Runner fixture Process.Start returned false.' }
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                $process.WaitForExit()
+                $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+                $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+                $exitCode = [int]$process.ExitCode
+                $captured = $stdout + $stderr
             }
             finally {
-                foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                    [Environment]::SetEnvironmentVariable([string]$entry.Key, $previousEnvironment[$entry.Key], 'Process')
-                }
+                $process.Dispose()
             }
             $evidence = $null
             if (Test-Path -LiteralPath $Fixture.Output -PathType Leaf) {
