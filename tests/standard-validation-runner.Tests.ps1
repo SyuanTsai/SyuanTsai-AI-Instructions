@@ -714,9 +714,9 @@ $result | ConvertTo-Json -Depth 10 -Compress
         Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
     }
 
-    # Scenario: Supervisor setup or cleanup reports an error before or after the child output streams are drained.
-    # Purpose: Preserve the authoritative supervisor diagnostic in either direction while keeping the merged stream bounded.
-    It 'UnitT04_preserves_first_supervisor_diagnostic_during_child_capture' {
+    # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
+    # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
+    It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
         . $script:RunnerPath `
             -CandidateRoot (Join-Path $TestDrive 'stderr-preservation-candidate') `
             -AdapterPath (Join-Path $TestDrive 'stderr-preservation-adapter.json') `
@@ -771,6 +771,45 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $moduleAncestorValidation = $shardExecutorSource.IndexOf('Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath', [StringComparison]::Ordinal)
         $moduleImport = $shardExecutorSource.IndexOf('Import-Module $PesterModulePath', [StringComparison]::Ordinal)
         Assert-True ($moduleAncestorValidation -ge 0 -and $moduleImport -ge 0 -and $moduleAncestorValidation -lt $moduleImport) 'The Pester module path and all existing ancestors must be validated before module initialization can execute.'
+
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before process-start cleanup testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Get-PesterShardCleanupTarget'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must define its process-start-aware cleanup target.'
+        Invoke-Expression $definition.Extent.Text
+
+        $unstartedProcess = New-Object Diagnostics.Process
+        try {
+            $notStarted = Get-PesterShardCleanupTarget `
+                -Process $unstartedProcess `
+                -ProcessStarted $false `
+                -RootProcessId $null
+            Assert-True ($null -eq $notStarted) 'An unstarted process must not enter process-tree cleanup or require its Id.'
+
+            $throwingIdProcess = New-Object psobject
+            $throwingIdProcess | Add-Member -MemberType ScriptProperty -Name Id -Value { throw 'The process Id getter must not be used.' }
+            $started = Get-PesterShardCleanupTarget `
+                -Process $throwingIdProcess `
+                -ProcessStarted $true `
+                -RootProcessId 4242
+            Assert-Equal $started.rootProcessId 4242 'A started process cleanup target must use the stored authenticated root process ID.'
+            Assert-True ([object]::ReferenceEquals($started.process, $throwingIdProcess)) 'The cleanup target must retain the original process object without reading its Id.'
+        }
+        finally { $unstartedProcess.Dispose() }
+
+        Assert-Match $shardExecutorSource 'if \(-not \$processStarted\)[\s\S]{0,180}\$status = ''startup-failed''' 'A Process.Start failure must retain the explicit startup-failed status.'
+        Assert-Match $shardExecutorSource '\$cleanupTarget\s*=\s*Get-PesterShardCleanupTarget[\s\S]{0,220}if \(\$null -ne \$cleanupTarget\)' 'Process-tree cleanup must be gated by the start-aware target.'
+        Assert-False ($shardExecutorSource -match '-RootProcessId\s+\(\[int\]\$process\.Id\)') 'Cleanup must not reacquire the root ID from a process object.'
+        $cleanupTargetIndex = $shardExecutorSource.IndexOf('$cleanupTarget = Get-PesterShardCleanupTarget', [StringComparison]::Ordinal)
+        $jobHandleCloseIndex = $shardExecutorSource.LastIndexOf('if ($jobHandle -ne [IntPtr]::Zero)', [StringComparison]::Ordinal)
+        $processEvidenceIndex = $shardExecutorSource.IndexOf('$diagnostic = [ordered]@{', [StringComparison]::Ordinal)
+        Assert-True ($cleanupTargetIndex -ge 0 -and $jobHandleCloseIndex -gt $cleanupTargetIndex -and $processEvidenceIndex -gt $jobHandleCloseIndex) 'Job Object closure must remain independent of process-tree cleanup and precede process evidence finalization.'
     }
 
     # Scenario: A caller supplies a visible cancellation marker to the shard wrapper.

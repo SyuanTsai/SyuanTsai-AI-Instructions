@@ -1234,6 +1234,20 @@ function Resolve-PesterShardOutputFailure {
     }
 }
 
+function Get-PesterShardCleanupTarget {
+    param(
+        [Parameter()][AllowNull()] $Process,
+        [Parameter(Mandatory = $true)][bool] $ProcessStarted,
+        [Parameter()][AllowNull()] $RootProcessId
+    )
+
+    if (-not $ProcessStarted -or $null -eq $Process -or $null -eq $RootProcessId) { return $null }
+    return [pscustomobject][ordered]@{
+        rootProcessId = [int]$RootProcessId
+        process = $Process
+    }
+}
+
 function Invoke-PesterShardProcess {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -1454,17 +1468,21 @@ function Invoke-PesterShardProcess {
     }
     catch {
         if ([string]::IsNullOrWhiteSpace($exceptionText)) { $exceptionText = $_.Exception.ToString() }
-        if ($null -eq $process) {
+        if (-not $processStarted) {
             if ($status -notin @('cancelled', 'timeout')) { $status = 'startup-failed' }
         }
         elseif ($status -notin @('cancelled', 'timeout', 'failed')) { $status = 'failed' }
     }
     finally {
-        if ($null -ne $process) {
+        $cleanupTarget = Get-PesterShardCleanupTarget `
+            -Process $process `
+            -ProcessStarted $processStarted `
+            -RootProcessId $rootProcessId
+        if ($null -ne $cleanupTarget) {
             try {
                 $cleanup = Stop-PesterShardOwnedProcessTree `
-                    -RootProcessId ([int]$process.Id) `
-                    -RootProcess $process `
+                    -RootProcessId ([int]$cleanupTarget.rootProcessId) `
+                    -RootProcess $cleanupTarget.process `
                     -JobHandle $jobHandle `
                     -ObservedDescendantProcessIds @($observedDescendantProcessIds.ToArray()) `
                     -ObservedProcessIdentities $observedProcessIdentities
@@ -1475,9 +1493,9 @@ function Invoke-PesterShardProcess {
             }
             catch {
                 $cleanup = [pscustomobject][ordered]@{
-                    rootProcessId = [int]$process.Id
+                    rootProcessId = [int]$cleanupTarget.rootProcessId
                     initialDescendantProcessIds = @()
-                    observedProcessIds = @([int]$process.Id)
+                    observedProcessIds = @([int]$cleanupTarget.rootProcessId)
                     observedProcessIdentities = @($observedProcessIdentities.Values | Sort-Object processId)
                     remainingProcessIds = @()
                     finalDescendantProcessIds = @()
@@ -1500,9 +1518,9 @@ function Invoke-PesterShardProcess {
                 $cleanup.cleanedUp = $false
             }
             if (-not $cleanup.cleanedUp) { $status = 'cleanup-failed' }
-            if ($process.HasExited -and $null -eq $exitCode -and
+            if ($cleanupTarget.process.HasExited -and $null -eq $exitCode -and
                 $status -notin @('cancelled', 'timeout', 'cleanup-failed')) {
-                $exitCode = [int]$process.ExitCode
+                $exitCode = [int]$cleanupTarget.process.ExitCode
             }
         }
         $captureDeadline = [DateTime]::UtcNow.AddSeconds(5)
