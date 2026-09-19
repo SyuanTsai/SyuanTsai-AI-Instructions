@@ -716,15 +716,15 @@ jobs:
         foreach ($identity in @(
             '726e269b9090dd5079f1bfb48c327f23cae60270',
             'e9cd0c8899355499a5113cfbbc4d55cd249ba60a',
-            'f5021c2b7860b170697ef9e703e18f284c82e613',
-            '1ea5f22dd3d9a509a640e856298717ee7bc67ac3',
+            '515de6b2baa49e8c384c2cd73ffa5245d473ff22',
+            'c1772efe220f14e5d945d1d8db42f446d9e9a15c',
             'e1c14aa50f6da6a840f83aee837cd7861abfe387',
             '0d89a00cb7786fba932332cd287aa7db88fc22af'
         )) {
             Assert-Match $workflow ([regex]::Escape($identity)) "The evidence job must pin immutable identity '$identity'."
         }
         Assert-Match $workflow 'codex/SYP-154-p06-oracle-fixture-compat' 'The evidence job must fetch the reviewed bootstrap launcher branch before proving its pinned head.'
-        Assert-Match $workflow 'd42aaeaa7a1b694044c5fb461f2bde0f03de6bac' 'The evidence job must pin the reviewed bootstrap validator blob.'
+        Assert-Match $workflow '7f14bff878252d0efd048e68abd4c197c877aa6e' 'The evidence job must pin the reviewed bootstrap validator blob.'
         foreach ($pinnedCommitVariable in @('SYP154_CANDIDATE_COMMIT', 'SYP154_LAUNCHER_COMMIT', 'SYP154_ORACLE_COMMIT')) {
             Assert-Match $workflow ('cat-file -e "\$' + $pinnedCommitVariable + '\^\{commit\}"') "The evidence job must prove that $pinnedCommitVariable exists as an exact commit object."
         }
