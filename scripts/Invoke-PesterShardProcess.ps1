@@ -722,7 +722,7 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
         }
         else {
             if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
+                $redactSensitiveContinuation = $line -match '[:=]\s*$'
                 $line = '[redacted sensitive diagnostic line]'
             }
         }
@@ -1780,7 +1780,7 @@ $childScript = @(
     '        }'
     '        else {'
     '            if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
-    '                $redactSensitiveContinuation = $line -match ''(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'''
+    '                $redactSensitiveContinuation = $line -match ''[:=]\s*$'''
     '                $line = ''[redacted sensitive diagnostic line]'''
     '            }'
     '        }'

@@ -888,6 +888,12 @@ catch {
         Assert-False ($boundaryLookingCredentialSummary -match '(?:window|expected)-boundary-credential') 'Boundary-looking credential continuations must never be trusted as raw diagnostic structure.'
         Assert-Match $boundaryLookingCredentialSummary '\[-\] fixture failure' 'A failure marker before a sensitive continuation must remain available.'
 
+        $quotedKeyCredentialPath = Join-Path $TestDrive 'quoted-key-credential.txt'
+        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
+        $quotedKeyCredentialSummary = Get-PesterShardFailureSummary -Paths @($quotedKeyCredentialPath)
+        Assert-False ($quotedKeyCredentialSummary -match 'quoted-key-credential-(?:that-must-not-be-logged|context)') 'A quoted sensitive key ending in a separator must enable continuation redaction.'
+        Assert-Match $quotedKeyCredentialSummary '\[-\] fixture failure' 'Quoted-key redaction must retain safe context that precedes the sensitive block.'
+
         $oversizedCliXmlPath = Join-Path $TestDrive 'oversized-valid-clixml-stderr.txt'
         $oversizedCliXmlPadding = 'p' * 140000
         Write-TestUtf8File -Path $oversizedCliXmlPath -Text @"
@@ -971,6 +977,15 @@ PSSecurityException: fixture execution policy failure
         }
         Assert-False ($boundaryLookingChildDiagnostic -match 'early-child-(?:boundary|expected)-credential') 'The generated child sanitizer must not trust boundary-looking text while a sensitive continuation is active.'
         Assert-Match $boundaryLookingChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes the sensitive continuation.'
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`n`"token`":`nearly-child-quoted-key-credential`nExpected: early-child-quoted-key-context")
+        }
+        catch {
+            $quotedKeyChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($quotedKeyChildDiagnostic -match 'early-child-quoted-key-(?:credential|context)') 'The generated child sanitizer must enable continuation redaction for quoted sensitive keys.'
+        Assert-Match $quotedKeyChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes a quoted sensitive key.'
     }
 
     # Scenario: The configured evidence directory is missing beneath a junction or symbolic-link ancestor.
