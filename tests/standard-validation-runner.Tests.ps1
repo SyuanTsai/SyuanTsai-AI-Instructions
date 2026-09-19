@@ -1101,6 +1101,9 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "[-] fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nparent-sgr-equal-indexed-credential`nExpected: parent-sgr-equal-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "[-] fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nparent-sgr-equal-basic-credential`nExpected: parent-sgr-equal-basic-context" },
             [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "[-] fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-basic-indexed-credential`nExpected: parent-sgr-equal-basic-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "[-] fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-normalized-index-credential`nExpected: parent-sgr-equal-normalized-index-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "[-] fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nparent-sgr-equal-state-credential`nExpected: parent-sgr-equal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "[-] fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nparent-sgr-conceal-state-credential`nExpected: parent-sgr-conceal-state-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
@@ -1156,6 +1159,9 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nearly-child-sgr-equal-indexed-credential`nExpected: early-child-sgr-equal-indexed-context" },
             [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nearly-child-sgr-equal-basic-credential`nExpected: early-child-sgr-equal-basic-context" },
             [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-basic-indexed-credential`nExpected: early-child-sgr-equal-basic-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-normalized-index-credential`nExpected: early-child-sgr-equal-normalized-index-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nearly-child-sgr-equal-state-credential`nExpected: early-child-sgr-equal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nearly-child-sgr-conceal-state-credential`nExpected: early-child-sgr-conceal-state-context" },
             [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )

@@ -701,7 +701,7 @@ function Remove-PesterShardTerminalControlSequences {
   $o = New-Object Text.StringBuilder
   [void]$o.EnsureCapacity($l)
   $t = [char]0xE000
-  $h = @('', '')
+  $h = @('', '', $false)
   $g = {
     param($p)
     $a = $p.Split(';')
@@ -711,17 +711,20 @@ function Remove-PesterShardTerminalControlSequences {
         $b = $a[$i].Split(':')
         if (-not [int]::TryParse($b[0], [ref]$n) -or $n -notin 38, 48, 58 -or
           (($b.Count -ne 3 -or $b[1] -cne '5') -and ($b.Count -notin 5, 6 -or $b[1] -cne '2'))) { return $false }
+        $q = if ($b[1] -ceq '5') { 'i' } else { 'r' }
         for ($j = 2; $j -lt $b.Count; $j++) {
           if ($j -eq 2 -and $b.Count -eq 6 -and -not $b[$j]) { continue }
           $v = 0
           if (-not [int]::TryParse($b[$j], [ref]$v) -or $v -gt 255) { return $false }
+          if ($j -eq 2 -and $b.Count -eq 6) { $q = "r@$v"; continue }
+          $q += ":$v"
         }
-        $q = if ($b[1] -ceq '5') { "i:$($b[2])" } else { "r:$($b[$b.Count - 3]):$($b[$b.Count - 2]):$($b[$b.Count - 1])" }
         $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
       }
       else {
         if ($a[$i] -and -not [int]::TryParse($a[$i], [ref]$n)) { return $false }
-        if ($n -eq 8) { return $false }
+        if ($n -eq 8) { $h[2] = $true }
+        elseif ($n -eq 28) { $h[2] = $false }
         if ($n -in 38, 48, 58) {
           $i++
           if ($i -ge $a.Count) { return $false }
@@ -734,7 +737,7 @@ function Remove-PesterShardTerminalControlSequences {
           }
           $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
         }
-        elseif ($n -eq 0) { $h[0] = $h[1] = '' }
+        elseif ($n -eq 0) { $h[0] = $h[1] = ''; $h[2] = $false }
         elseif ($n -eq 39 -or $n -eq 49) { $h[[int]($n -eq 49)] = '' }
         else {
           $d = $n % 10
@@ -828,7 +831,7 @@ function Remove-PesterShardTerminalControlSequences {
     }
     if ($c -ge 0x80 -and $c -le 0x9F) { [void]$o.Append($t); $k++; continue }
     if (($c -ge 0x00 -and $c -le 0x08) -or $c -eq 0x0B -or $c -eq 0x0C -or ($c -ge 0x0E -and $c -le 0x1F) -or $c -eq 0x7F) { $k++; continue }
-    [void]$o.Append($(if ($c -in 10, 13 -or -not $h[0] -or $h[0] -cne $h[1]) { $x[$k] } else { $t }))
+    [void]$o.Append($(if ($c -in 10, 13 -or (-not $h[2] -and (-not $h[0] -or $h[0] -cne $h[1]))) { $x[$k] } else { $t }))
     $k++
   }
   $o.ToString()
