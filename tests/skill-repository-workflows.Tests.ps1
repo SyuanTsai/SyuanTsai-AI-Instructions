@@ -245,6 +245,8 @@ jobs:
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
 
         Assert-Match $standards 'docs/standards/\*\*' 'Dedicated authority workflow must watch the central validation/security policy.'
+        Assert-Match $standards 'scripts/StandardSemanticBridge\.psm1' 'Dedicated authority workflow must watch the semantic bridge implementation.'
+        Assert-Match $standards 'tests/standard-semantic-bridge\.Tests\.ps1' 'Dedicated authority workflow must watch the semantic bridge behavior suite.'
         foreach ($workflow in @($standards, $required)) {
             Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Authority workflows must execute the shared gate for validation/security changes.'
         }
@@ -256,6 +258,7 @@ jobs:
         Assert-Match $gate 'standard-semantic-inventory-probe\.Tests\.ps1' 'Shared authority gate must execute semantic inventory behavior regressions.'
         Assert-Match $gate 'standard-semantic-preflight\.Tests\.ps1' 'Shared authority gate must execute semantic preflight behavior regressions.'
         Assert-Match $gate 'standard-semantic-raw-graph\.Tests\.ps1' 'Shared authority gate must execute raw-graph behavior regressions.'
+        Assert-Match $gate 'standard-semantic-bridge\.Tests\.ps1' 'Shared authority gate must execute semantic bridge behavior regressions.'
         Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared authority gate must supply the frozen SkillSpector Python to semantic behavior suites.'
         foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)

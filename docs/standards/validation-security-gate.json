@@ -143,6 +143,31 @@
       "fixedState": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"],
       "nonAuthority": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"]
     },
+    "semanticBridgeV2": {
+      "schemaVersion": 2,
+      "schemaPath": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json",
+      "artifactClassification": "local-semantic-bridge-v2",
+      "artifactTypes": ["semantic-consent-request-v2", "semantic-consent-decision-v2", "semantic-evidence-v2"],
+      "mode": "development-harness-local-simulation-only",
+      "callerSupplied": {
+        "providerRoute": true,
+        "verificationKey": true,
+        "providerCallback": true,
+        "signerCallback": true
+      },
+      "nonSelected": ["provider", "accountOrTenant", "model", "endpoint", "signer"],
+      "production": {
+        "active": false,
+        "releaseEligible": false,
+        "failureAction": "BLOCK",
+        "pending": ["protected-trust-anchor", "trusted-supervisor-authorization"]
+      },
+      "v1Compatibility": {
+        "canonicalAuthentication": "trusted-supervisor-signed-semantic-v1",
+        "preserved": true,
+        "v2SatisfiesV1": false
+      }
+    },
     "aiReview": {
       "status": "passed",
       "decision": "PASS",
