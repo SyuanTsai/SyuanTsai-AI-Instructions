@@ -828,6 +828,7 @@ catch {
             'Read-PesterShardOutputPrefix',
             'Read-PesterShardOutputTail',
             'ConvertFrom-PesterShardCliXmlDiagnostic',
+            'Remove-PesterShardTerminalControlSequences',
             'ConvertTo-PesterShardSanitizedDiagnosticText',
             'Get-PesterShardFailureSummary'
         )) {
@@ -852,6 +853,14 @@ catch {
         Assert-Match $summary 'PowerShell 5\.1 shard exited before writing its result file\.' 'A progress-only stderr stream must not mask useful stdout fallback context.'
         Assert-False ($summary -match '(?i)#< CLIXML|Preparing modules for first use') 'Progress-only CLIXML must not become the first-failure summary.'
 
+        $fallbackTerminalPath = Join-Path $TestDrive 'terminal-control-fallback.txt'
+        $escape = [string][char]27
+        $bell = [string][char]7
+        Write-TestUtf8File -Path $fallbackTerminalPath -Text ($escape + ']0;untrusted terminal title' + $bell + 'PowerShell 5.1 shard exited before writing its result file.')
+        $fallbackTerminalSummary = Get-PesterShardFailureSummary -Paths @($fallbackTerminalPath)
+        Assert-Equal $fallbackTerminalSummary 'PowerShell 5.1 shard exited before writing its result file.' 'Fallback diagnostics must normalize terminal-control strings before applying the fixed allowlist.'
+        Assert-False ($fallbackTerminalSummary -match '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]|untrusted terminal title') 'Fallback diagnostics must not retain terminal controls or their payload.'
+
         $credentialPath = Join-Path $TestDrive 'credential-continuation.txt'
         Write-TestUtf8File -Path $credentialPath -Text "Authorization:`ncredential-value-that-must-not-be-logged"
         $credentialSummary = Get-PesterShardFailureSummary -Paths @($credentialPath)
@@ -863,14 +872,15 @@ catch {
         $recognizedCredentialSummary = Get-PesterShardFailureSummary -Paths @($recognizedCredentialPath)
         Assert-False ($recognizedCredentialSummary -match 'recognized-credential-value-that-must-not-be-logged') 'A recognized failure block must not retain an unlabeled value after a sensitive header.'
         Assert-Match $recognizedCredentialSummary '\[-\] fixture failure' 'Sanitizing a sensitive continuation must preserve the recognized failure marker.'
-        Assert-Match $recognizedCredentialSummary 'Expected: safe diagnostic context' 'Sanitizing a sensitive continuation must preserve adjacent allowlisted failure context.'
+        Assert-False ($recognizedCredentialSummary -match 'Expected: safe diagnostic context') 'A blank line must not restore raw output after a sensitive header.'
+        Assert-Match $recognizedCredentialSummary 'redacted sensitive diagnostic continuation' 'The sensitive block must be represented only by a fixed safe continuation marker.'
 
         $wrappedCredentialPath = Join-Path $TestDrive 'wrapped-credential-before-marker.txt'
         Write-TestUtf8File -Path $wrappedCredentialPath -Text "Authorization:`nwrapped-credential-fragment-one`nwrapped-credential-fragment-two`n`n[-] fixture failure`nExpected: safe diagnostic context"
         $wrappedCredentialSummary = Get-PesterShardFailureSummary -Paths @($wrappedCredentialPath)
         Assert-False ($wrappedCredentialSummary -match 'wrapped-credential-fragment-(?:one|two)') 'Every wrapped credential continuation before a recognized failure marker must be redacted.'
-        Assert-Match $wrappedCredentialSummary '\[-\] fixture failure' 'Redacting a pre-marker continuation block must preserve the recognized failure marker.'
-        Assert-Match $wrappedCredentialSummary 'Expected: safe diagnostic context' 'Redacting a pre-marker continuation block must preserve later safe context.'
+        Assert-False ($wrappedCredentialSummary -match '\[-\] fixture failure|Expected: safe diagnostic context') 'No raw line after a sensitive header may be trusted as a boundary.'
+        Assert-Match $wrappedCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A boundary-looking continuation must be represented by a fixed safe marker.'
 
         $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
         $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
@@ -879,8 +889,8 @@ catch {
         Write-TestUtf8File -Path $windowBoundaryCredentialPath -Text ("safe prefix`n" + $windowSuffix + ('z' * $windowFillerLength))
         $windowBoundarySummary = Get-PesterShardFailureSummary -Paths @($windowBoundaryCredentialPath)
         Assert-False ($windowBoundarySummary -match 'window-boundary-credential') 'Sanitization must retain sensitive continuation state across a tail-window read boundary.'
-        Assert-Match $windowBoundarySummary '\[-\] fixture failure' 'Window-boundary sanitization must preserve the recognized failure marker.'
-        Assert-Match $windowBoundarySummary 'Expected: safe diagnostic context' 'Window-boundary sanitization must preserve adjacent safe context.'
+        Assert-False ($windowBoundarySummary -match '\[-\] fixture failure|Expected: safe diagnostic context') 'Window-boundary sanitization must not restore raw output after a blank line.'
+        Assert-Match $windowBoundarySummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'Window-boundary sanitization must retain only a fixed safe boundary marker.'
 
         $boundaryLookingCredentialPath = Join-Path $TestDrive 'boundary-looking-credential.txt'
         Write-TestUtf8File -Path $boundaryLookingCredentialPath -Text "[-] fixture failure`nAuthorization:`n[-]window-boundary-credential`nExpected: expected-boundary-credential"
@@ -942,6 +952,12 @@ PSSecurityException: fixture execution policy failure
         $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
         Assert-Equal @($errors).Count 0 'The shard executor must parse before generated child diagnostic testing.'
+        $terminalControlFunction = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Remove-PesterShardTerminalControlSequences'
+        }, $true)
+        Assert-True ($null -ne $terminalControlFunction) 'The shard executor must define its terminal-control normalizer.'
+        Invoke-Expression $terminalControlFunction.Extent.Text
         $parentDiagnosticFunction = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -ceq 'ConvertTo-PesterShardSanitizedDiagnosticText'
@@ -952,6 +968,24 @@ PSSecurityException: fixture execution policy failure
         $parentDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[-] fixture failure`n`"token`":$ansiReset`nparent-ansi-key-credential`nExpected: parent-ansi-key-context"
         Assert-False ($parentDiagnostic -match 'parent-ansi-key-(?:credential|context)') 'The parent sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
         Assert-Match $parentDiagnostic '\[-\] fixture failure' 'Parent ANSI normalization must retain safe context that precedes the sensitive block.'
+
+        $escape = [string][char]27
+        $bell = [string][char]7
+        $osc = $escape + ']0;fixture' + $bell
+        $dcs = $escape + 'P1;2|fixture' + $escape + '\'
+        $c1Csi = ([string][char]0x9B) + '0m'
+        $parentCases = @(
+            [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
+            [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
+            [pscustomobject]@{ Name = 'dcs'; Text = "[-] fixture failure`n`"token`":$dcs`nparent-dcs-credential`nExpected: parent-dcs-context" },
+            [pscustomobject]@{ Name = 'c1'; Text = "[-] fixture failure`n`"token`":$c1Csi`nparent-c1-credential`nExpected: parent-c1-context" },
+            [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
+        )
+        $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($case in $parentCases) {
+            $caseDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text $case.Text
+            if ($caseDiagnostic -match "parent-$($case.Name)-(?:credential|context)") { [void]$parentLeaks.Add($case.Name) }
+        }
 
         $childScriptAssignment = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and
@@ -970,6 +1004,21 @@ PSSecurityException: fixture execution policy failure
         }, $true)
         Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
         Invoke-Expression $childDiagnosticFunction.Extent.Text
+        $childCases = @(
+            [pscustomobject]@{ Name = 'blank'; Text = "fixture failure`nAuthorization:`n`nearly-child-blank-credential`nExpected: early-child-blank-context" },
+            [pscustomobject]@{ Name = 'osc'; Text = "fixture failure`n`"token`":$osc`nearly-child-osc-credential`nExpected: early-child-osc-context" },
+            [pscustomobject]@{ Name = 'dcs'; Text = "fixture failure`n`"token`":$dcs`nearly-child-dcs-credential`nExpected: early-child-dcs-context" },
+            [pscustomobject]@{ Name = 'c1'; Text = "fixture failure`n`"token`":$c1Csi`nearly-child-c1-credential`nExpected: early-child-c1-context" },
+            [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
+        )
+        $childLeaks = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($case in $childCases) {
+            try { throw [InvalidOperationException]::new($case.Text) }
+            catch { $caseDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+            if ($caseDiagnostic -match "early-child-$($case.Name)-(?:credential|context)") { [void]$childLeaks.Add($case.Name) }
+        }
+        Assert-Equal ($parentLeaks.Count + $childLeaks.Count) 0 "Fail-closed continuation leaks: parent=[$($parentLeaks -join ', ')]; child=[$($childLeaks -join ', ')]."
+
         try {
             throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-fragment-one`nearly-child-credential-fragment-two`n`nExpected: safe child context")
         }
@@ -978,7 +1027,8 @@ PSSecurityException: fixture execution policy failure
         }
         Assert-False ($childFailureDiagnostic -match 'early-child-credential-fragment-(?:one|two)') 'Early child result and stderr diagnostics must not retain any wrapped value after a sensitive header.'
         Assert-Match $childFailureDiagnostic 'fixture failure' 'Early child sanitization must preserve the exception summary.'
-        Assert-Match $childFailureDiagnostic 'Expected: safe child context' 'Early child sanitization must preserve adjacent nonsensitive context.'
+        Assert-False ($childFailureDiagnostic -match 'Expected: safe child context') 'Early child sanitization must remain fail closed across blank lines.'
+        Assert-Match $childFailureDiagnostic 'redacted sensitive diagnostic continuation' 'Early child sanitization must emit only fixed markers after a sensitive header.'
 
         try {
             throw [InvalidOperationException]::new("fixture failure`nAuthorization:`n[-]early-child-boundary-credential`nExpected: early-child-expected-credential")

@@ -687,17 +687,35 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
     }
 }
 
+function Remove-PesterShardTerminalControlSequences {
+    param([Parameter()][AllowEmptyString()][string] $Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $normalized = [regex]::Replace(
+        $Text,
+        '(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*?(?:\x07|\x1B\\|\x9C)',
+        ''
+    )
+    $normalized = [regex]::Replace(
+        $normalized,
+        '(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*\z',
+        ''
+    )
+    $normalized = [regex]::Replace($normalized, '(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]', '')
+    $normalized = [regex]::Replace($normalized, '\x1B[ -/]*[@-Z\\-_]', '')
+    return [regex]::Replace($normalized, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '')
+}
+
 function ConvertTo-PesterShardSanitizedDiagnosticText {
     param([Parameter()][AllowEmptyString()][string] $Text)
 
     if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
+    $normalizedText = Remove-PesterShardTerminalControlSequences -Text $Text
     $lines = New-Object 'System.Collections.Generic.List[string]'
     $redactSensitiveContinuation = $false
-    foreach ($rawLine in @($Text -split "`r?`n")) {
-        $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
+    foreach ($rawLine in @($normalizedText -split "`r?`n")) {
+        $line = ([string]$rawLine).Trim()
         if ([string]::IsNullOrWhiteSpace($line)) {
-            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
             continue
         }
         if ($redactSensitiveContinuation) {
@@ -722,7 +740,7 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
         }
         else {
             if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                $redactSensitiveContinuation = $line -match '[:=]\s*$'
+                $redactSensitiveContinuation = $true
                 $line = '[redacted sensitive diagnostic line]'
             }
         }
@@ -739,7 +757,6 @@ function Get-PesterShardFailureSummary {
         [int] $MaxTotalLength = 4096
     )
 
-    $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
     $deferredCliXml = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
         $rawText = Read-PesterShardOutputPrefix `
@@ -796,9 +813,10 @@ function Get-PesterShardFailureSummary {
         }
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
         $sawUnrecognizedDiagnostic = $true
+        $text = Remove-PesterShardTerminalControlSequences -Text $text
         $lines = @($text -split "`r?`n")
         for ($index = $lines.Count - 1; $index -ge 0 -and $allowlistedFallback.Count -lt $MaxLines; $index--) {
-            $line = [regex]::Replace([string]$lines[$index], $ansiPattern, '').Trim()
+            $line = ([string]$lines[$index]).Trim()
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
                 continue
@@ -1749,14 +1767,17 @@ $childScript = @(
     '    param([Parameter()][AllowNull()][object] $ErrorRecord)'
     '    $text = if ($null -eq $ErrorRecord) { ''Pester shard child failed before producing a result.'' } else { [string]$ErrorRecord.Exception.ToString() }'
     '    if ([string]::IsNullOrWhiteSpace($text)) { $text = ''Pester shard child failed before producing a result.'' }'
+    '    $normalizedText = [regex]::Replace($text, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*?(?:\x07|\x1B\\|\x9C)'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''(?s)(?:\x1B(?:\]|\x50|\x58|\x5E|\x5F)|[\x90\x98\x9D\x9E\x9F]).*\z'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''\x1B[ -/]*[@-Z\\-_]'', '''')'
+    '    $normalizedText = [regex]::Replace($normalizedText, ''[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]'', '''')'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
-    '    $ansiPattern = ([string][char]27) + ''\[[0-9;?]*[ -/]*[@-~]'''
     '    $redactSensitiveContinuation = $false'
-    '    foreach ($rawLine in @($text -split "`r?`n")) {'
+    '    foreach ($rawLine in @($normalizedText -split "`r?`n")) {'
     '        if ($lines.Count -ge 8) { break }'
-    '        $line = [regex]::Replace([string]$rawLine, $ansiPattern, '''').Trim()'
+    '        $line = ([string]$rawLine).Trim()'
     '        if ([string]::IsNullOrWhiteSpace($line)) {'
-    '            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }'
     '            continue'
     '        }'
     '        if ($redactSensitiveContinuation) {'
@@ -1781,7 +1802,7 @@ $childScript = @(
     '        }'
     '        else {'
     '            if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
-    '                $redactSensitiveContinuation = $line -match ''[:=]\s*$'''
+    '                $redactSensitiveContinuation = $true'
     '                $line = ''[redacted sensitive diagnostic line]'''
     '            }'
     '        }'
