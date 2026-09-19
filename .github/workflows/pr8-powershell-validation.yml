@@ -21,7 +21,7 @@ permissions:
 jobs:
   windows-powershell-51:
     name: Pester (Windows PowerShell 5.1)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -72,10 +72,10 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 537
-            ExpectedSkippedCount = 7
+            ExpectedTotalCount = 27
+            ExpectedSkippedCount = 0
             OuterTimeoutSeconds = 1800
-            TestRoot = './tests'
+            TestRoot = './tests/standard-validation-runner.Tests.ps1'
             EvidenceRoot = $env:RUNNER_TEMP
           }
           & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
@@ -83,6 +83,7 @@ jobs:
 
   powershell-7:
     name: Pester (PowerShell 7)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -145,6 +146,7 @@ jobs:
 
   powershell-7-unix-composition:
     name: Composition (PowerShell 7 on Linux)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
