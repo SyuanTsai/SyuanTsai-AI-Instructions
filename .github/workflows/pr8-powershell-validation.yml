@@ -74,6 +74,7 @@ jobs:
             PesterVersion = '3.4.0'
             ExpectedTotalCount = 27
             ExpectedSkippedCount = 0
+            IsolatedTestFileNames = @()
             OuterTimeoutSeconds = 1800
             TestRoot = './tests/standard-validation-runner.Tests.ps1'
             EvidenceRoot = $env:RUNNER_TEMP
