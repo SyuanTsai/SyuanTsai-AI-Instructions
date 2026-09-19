@@ -863,6 +863,13 @@ catch {
         Assert-Match $recognizedCredentialSummary '\[-\] fixture failure' 'Sanitizing a sensitive continuation must preserve the recognized failure marker.'
         Assert-Match $recognizedCredentialSummary 'Expected: safe diagnostic context' 'Sanitizing a sensitive continuation must preserve adjacent allowlisted failure context.'
 
+        $wrappedCredentialPath = Join-Path $TestDrive 'wrapped-credential-before-marker.txt'
+        Write-TestUtf8File -Path $wrappedCredentialPath -Text "Authorization:`nwrapped-credential-fragment-one`nwrapped-credential-fragment-two`n[-] fixture failure`nExpected: safe diagnostic context"
+        $wrappedCredentialSummary = Get-PesterShardFailureSummary -Paths @($wrappedCredentialPath)
+        Assert-False ($wrappedCredentialSummary -match 'wrapped-credential-fragment-(?:one|two)') 'Every wrapped credential continuation before a recognized failure marker must be redacted.'
+        Assert-Match $wrappedCredentialSummary '\[-\] fixture failure' 'Redacting a pre-marker continuation block must preserve the recognized failure marker.'
+        Assert-Match $wrappedCredentialSummary 'Expected: safe diagnostic context' 'Redacting a pre-marker continuation block must preserve later safe context.'
+
         $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
         Write-TestUtf8File -Path $mixedStderrPath -Text @'
 #< CLIXML
@@ -918,12 +925,12 @@ PSSecurityException: fixture execution policy failure
         Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
         Invoke-Expression $childDiagnosticFunction.Extent.Text
         try {
-            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-value-that-must-not-be-logged`nExpected: safe child context")
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-fragment-one`nearly-child-credential-fragment-two`nExpected: safe child context")
         }
         catch {
             $childFailureDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
         }
-        Assert-False ($childFailureDiagnostic -match 'early-child-credential-value-that-must-not-be-logged') 'Early child result and stderr diagnostics must not retain an unlabeled value after a sensitive header.'
+        Assert-False ($childFailureDiagnostic -match 'early-child-credential-fragment-(?:one|two)') 'Early child result and stderr diagnostics must not retain any wrapped value after a sensitive header.'
         Assert-Match $childFailureDiagnostic 'fixture failure' 'Early child sanitization must preserve the exception summary.'
         Assert-Match $childFailureDiagnostic 'Expected: safe child context' 'Early child sanitization must preserve adjacent nonsensitive context.'
     }
@@ -1003,15 +1010,15 @@ catch {
         Assert-Equal @($errors).Count 0 'The shard executor must parse before capture-failure state testing.'
         $definition = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -ceq 'Resolve-PesterShardCaptureFailure'
+                $node.Name -ceq 'Resolve-PesterShardOutputFailure'
         }, $true)
         Assert-True ($null -ne $definition) 'The shard executor must define its bounded-capture failure transition.'
         Invoke-Expression $definition.Extent.Text
 
         $cleanup = [pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }
-        $faulted = Resolve-PesterShardCaptureFailure `
+        $faulted = Resolve-PesterShardOutputFailure `
             -Cleanup $cleanup `
-            -CaptureErrors @('stderr bounded output capture failed: injected I/O fault') `
+            -Errors @('stderr bounded output capture failed: injected I/O fault') `
             -Status 'completed' `
             -ExceptionText $null
         Assert-Equal $faulted.status 'cleanup-failed' 'A capture task fault must override an otherwise completed shard.'
@@ -1019,13 +1026,78 @@ catch {
         Assert-Match ($faulted.cleanup.errors -join ' | ') 'injected I/O fault' 'The capture fault must remain available in process evidence.'
         Assert-Match $faulted.exceptionText 'injected I/O fault' 'The capture fault must remain available to the caller.'
 
-        $clean = Resolve-PesterShardCaptureFailure `
+        $clean = Resolve-PesterShardOutputFailure `
             -Cleanup ([pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }) `
-            -CaptureErrors @() `
+            -Errors @() `
             -Status 'completed' `
             -ExceptionText $null
         Assert-Equal $clean.status 'completed' 'The normal completed path must remain unchanged when capture has no errors.'
         Assert-True ([bool]$clean.cleanup.cleanedUp) 'The normal completed path must preserve cleanup success.'
+    }
+
+    # Scenario: A bounded capture task faults while its child process is still running.
+    # Purpose: Surface the fault immediately so the supervisor can break the live wait and start Job Object cleanup.
+    It 'UnitT10_terminates_the_live_wait_when_bounded_capture_faults' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before live capture-fault testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Get-PesterShardLiveCaptureState'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must expose a testable live capture-state transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $faultSource = New-Object 'System.Threading.Tasks.TaskCompletionSource[object]'
+        $faultSource.SetException((New-Object IO.IOException('injected live pipe fault')))
+        $faulted = Get-PesterShardLiveCaptureState -Name 'stderr' -Task $faultSource.Task
+        Assert-True ([bool]$faulted.isCompleted) 'A faulted live capture task must be recognized as completed.'
+        Assert-True ([bool]$faulted.faulted) 'A faulted live capture task must be classified as a fault.'
+        Assert-Match $faulted.error 'stderr bounded output capture failed:.*injected live pipe fault' 'The live fault must retain its stream and cause.'
+
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        Assert-Match $source '\$captureFaultDetected\s*=\s*\$true' 'The live loop must record a detected capture fault.'
+        Assert-Match $source 'if \(\$captureFaultDetected\) \{ break \}' 'The live loop must break immediately after a capture fault.'
+    }
+
+    # Scenario: Persisting bounded stdout or stderr evidence fails after capture and child completion.
+    # Purpose: Prevent a successful shard result from being accepted without its bounded stream evidence.
+    It 'UnitT11_fails_closed_when_bounded_output_evidence_cannot_be_persisted' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before output-persistence failure testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Resolve-PesterShardOutputFailure'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must define its output-failure transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $faulted = Resolve-PesterShardOutputFailure `
+            -Cleanup ([pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }) `
+            -Errors @('stdout evidence write failed: injected disk fault') `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $faulted.status 'cleanup-failed' 'An output evidence write fault must override an otherwise completed shard.'
+        Assert-False ([bool]$faulted.cleanup.cleanedUp) 'An output evidence write fault must invalidate cleanup evidence.'
+        Assert-Match ($faulted.cleanup.errors -join ' | ') 'injected disk fault' 'The output evidence write fault must remain in process evidence.'
+
+        $startupFault = Resolve-PesterShardOutputFailure `
+            -Cleanup ([pscustomobject][ordered]@{ cleanedUp = $true; reason = 'process-not-started' }) `
+            -Errors @('stderr evidence write failed: injected startup disk fault') `
+            -Status 'startup-failed' `
+            -ExceptionText $null
+        Assert-Equal $startupFault.status 'cleanup-failed' 'An output write fault before process start must still fail closed.'
+        Assert-Match ($startupFault.cleanup.errors -join ' | ') 'injected startup disk fault' 'A pre-start cleanup shape must gain output-write error evidence safely.'
+
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        $writeFailureIndex = $source.IndexOf('$outputWriteError = "stdout evidence write failed:', [StringComparison]::Ordinal)
+        $failClosedIndex = $source.IndexOf('-Errors @($outputWriteError)', [StringComparison]::Ordinal)
+        Assert-True ($writeFailureIndex -ge 0 -and $failClosedIndex -gt $writeFailureIndex) 'Output write failures must enter the fail-closed transition before process evidence is finalized.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,

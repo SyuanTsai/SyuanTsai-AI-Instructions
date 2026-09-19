@@ -703,25 +703,34 @@ function Get-PesterShardFailureSummary {
                 continue
             }
             if ([string]::IsNullOrWhiteSpace($text)) { continue }
-            $lines = @($text -split "`r?`n")
+            $lines = New-Object 'System.Collections.Generic.List[string]'
+            $redactSensitiveContinuation = $false
+            $diagnosticBoundaryPattern = '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'
+            foreach ($rawLine in @($text -split "`r?`n")) {
+                $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern
+                if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {
+                    $line = '[redacted sensitive diagnostic continuation]'
+                }
+                else {
+                    if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
+                    if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                        $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
+                        $line = '[redacted sensitive diagnostic line]'
+                    }
+                }
+                [void]$lines.Add($line)
+            }
             for ($index = 0; $index -lt $lines.Count; $index++) {
-                $candidate = [regex]::Replace([string]$lines[$index], $ansiPattern, '')
+                $candidate = [string]$lines[$index]
                 if ($candidate -notmatch '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+') { continue }
                 $selected = New-Object 'System.Collections.Generic.List[string]'
                 $start = [Math]::Max(0, $index - 1)
                 $end = [Math]::Min($lines.Count - 1, $index + $MaxLines - 2)
-                $redactSensitiveContinuation = $false
                 for ($lineIndex = $start; $lineIndex -le $end -and $selected.Count -lt $MaxLines; $lineIndex++) {
-                    $line = [regex]::Replace([string]$lines[$lineIndex], $ansiPattern, '').Trim()
+                    $line = [string]$lines[$lineIndex]
                     if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    if ($redactSensitiveContinuation) {
-                        $line = '[redacted sensitive diagnostic continuation]'
-                        $redactSensitiveContinuation = $false
-                    }
-                    elseif ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                        $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
-                        $line = '[redacted sensitive diagnostic line]'
-                    }
                     if ($line.Length -gt $MaxLineLength) { $line = $line.Substring(0, $MaxLineLength) }
                     if (-not $selected.Contains($line)) { $selected.Add($line) }
                 }
@@ -1093,16 +1102,49 @@ function Stop-PesterShardOwnedProcessTree {
     }
 }
 
-function Resolve-PesterShardCaptureFailure {
+function Get-PesterShardLiveCaptureState {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter()] $Task
+    )
+
+    if ($null -eq $Task -or -not [bool]$Task.IsCompleted) {
+        return [pscustomobject][ordered]@{
+            isCompleted = $false
+            faulted = $false
+            exceeded = $false
+            error = $null
+        }
+    }
+    try {
+        $captureResult = $Task.GetAwaiter().GetResult()
+        return [pscustomobject][ordered]@{
+            isCompleted = $true
+            faulted = $false
+            exceeded = [bool]$captureResult.Exceeded
+            error = $null
+        }
+    }
+    catch {
+        return [pscustomobject][ordered]@{
+            isCompleted = $true
+            faulted = $true
+            exceeded = $false
+            error = "$Name bounded output capture failed: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Resolve-PesterShardOutputFailure {
     param(
         [Parameter(Mandatory = $true)] $Cleanup,
-        [string[]] $CaptureErrors,
+        [string[]] $Errors,
         [Parameter(Mandatory = $true)][string] $Status,
         [AllowNull()][string] $ExceptionText
     )
 
-    $errors = @($CaptureErrors | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    if ($errors.Count -eq 0) {
+    $outputErrors = @($Errors | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($outputErrors.Count -eq 0) {
         return [pscustomobject][ordered]@{
             cleanup = $Cleanup
             status = $Status
@@ -1110,9 +1152,16 @@ function Resolve-PesterShardCaptureFailure {
         }
     }
 
-    $Cleanup.errors = @($Cleanup.errors) + $errors
+    $existingCleanupErrors = if ($Cleanup.PSObject.Properties.Name -contains 'errors') { @($Cleanup.errors) } else { @() }
+    $resolvedCleanupErrors = $existingCleanupErrors + $outputErrors
+    if ($Cleanup.PSObject.Properties.Name -contains 'errors') {
+        $Cleanup.errors = $resolvedCleanupErrors
+    }
+    else {
+        $Cleanup | Add-Member -MemberType NoteProperty -Name errors -Value $resolvedCleanupErrors
+    }
     $Cleanup.cleanedUp = $false
-    $captureMessage = $errors -join ' | '
+    $captureMessage = $outputErrors -join ' | '
     $resolvedException = if ([string]::IsNullOrWhiteSpace($ExceptionText)) {
         $captureMessage
     }
@@ -1287,6 +1336,7 @@ function Invoke-PesterShardProcess {
             catch {
                 if ($observationErrors.Count -lt 32) { $observationErrors.Add("initial live descendant observation failed: $($_.Exception.Message)") }
             }
+            $captureFaultDetected = $false
             while (-not $process.HasExited) {
                 try {
                     foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId)) {
@@ -1304,14 +1354,19 @@ function Invoke-PesterShardProcess {
                     [pscustomobject]@{ Name = 'stdout'; Task = $stdoutTask },
                     [pscustomobject]@{ Name = 'stderr'; Task = $stderrTask }
                 )) {
-                    if ($null -ne $captureSpec.Task -and $captureSpec.Task.IsCompleted) {
-                        try {
-                            if ([bool]$captureSpec.Task.GetAwaiter().GetResult().Exceeded) { $quotaStream = [string]$captureSpec.Name }
-                        }
-                        catch { }
+                    $captureState = Get-PesterShardLiveCaptureState -Name ([string]$captureSpec.Name) -Task $captureSpec.Task
+                    if ([bool]$captureState.faulted) {
+                        $captureError = [string]$captureState.error
+                        if (-not $captureErrors.Contains($captureError)) { $captureErrors.Add($captureError) }
+                        $status = 'failed'
+                        $exceptionText = $captureError
+                        $captureFaultDetected = $true
+                        break
                     }
+                    if ([bool]$captureState.exceeded) { $quotaStream = [string]$captureSpec.Name }
                     if ($null -ne $quotaStream) { break }
                 }
+                if ($captureFaultDetected) { break }
                 if ($null -ne $quotaStream) {
                     $status = 'failed'
                     $outputQuotaExceeded = $true
@@ -1413,12 +1468,13 @@ function Invoke-PesterShardProcess {
                 }
             }
             catch {
-                $captureErrors.Add("$($captureSpec.Name) bounded output capture failed: $($_.Exception.Message)")
+                $captureError = "$($captureSpec.Name) bounded output capture failed: $($_.Exception.Message)"
+                if (-not $captureErrors.Contains($captureError)) { $captureErrors.Add($captureError) }
             }
         }
-        $captureFailure = Resolve-PesterShardCaptureFailure `
+        $captureFailure = Resolve-PesterShardOutputFailure `
             -Cleanup $cleanup `
-            -CaptureErrors @($captureErrors.ToArray()) `
+            -Errors @($captureErrors.ToArray()) `
             -Status $status `
             -ExceptionText $exceptionText
         $cleanup = $captureFailure.cleanup
@@ -1436,6 +1492,14 @@ function Invoke-PesterShardProcess {
         catch {
             $outputWriteError = if ($null -eq $outputWriteError) { "stderr evidence write failed: $($_.Exception.ToString())" } else { "$outputWriteError | stderr evidence write failed: $($_.Exception.ToString())" }
         }
+        $outputWriteFailure = Resolve-PesterShardOutputFailure `
+            -Cleanup $cleanup `
+            -Errors @($outputWriteError) `
+            -Status $status `
+            -ExceptionText $exceptionText
+        $cleanup = $outputWriteFailure.cleanup
+        $status = [string]$outputWriteFailure.status
+        $exceptionText = [string]$outputWriteFailure.exceptionText
         if ($null -ne $process -and -not $processDisposed) {
             try {
                 if ($process.HasExited -and $null -eq $exitCode -and
@@ -1646,17 +1710,21 @@ $childScript = @(
     '    if ([string]::IsNullOrWhiteSpace($text)) { $text = ''Pester shard child failed before producing a result.'' }'
     '    $lines = New-Object ''System.Collections.Generic.List[string]'''
     '    $redactSensitiveContinuation = $false'
+    '    $diagnosticBoundaryPattern = ''(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'''
     '    foreach ($rawLine in @($text -split "`r?`n")) {'
     '        if ($lines.Count -ge 8) { break }'
     '        $line = ([string]$rawLine).Trim()'
     '        if ([string]::IsNullOrWhiteSpace($line)) { continue }'
-    '        if ($redactSensitiveContinuation) {'
+    '        $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern'
+    '        if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {'
     '            $line = ''[redacted sensitive diagnostic continuation]'''
-    '            $redactSensitiveContinuation = $false'
     '        }'
-    '        elseif ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
-    '            $redactSensitiveContinuation = $line -match ''(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'''
-    '            $line = ''[redacted sensitive diagnostic line]'''
+    '        else {'
+    '            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }'
+    '            if ($line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
+    '                $redactSensitiveContinuation = $line -match ''(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'''
+    '                $line = ''[redacted sensitive diagnostic line]'''
+    '            }'
     '        }'
     '        if ($line.Length -gt 512) { $line = $line.Substring(0, 512) }'
     '        if (-not $lines.Contains($line)) { [void]$lines.Add($line) }'
