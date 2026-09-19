@@ -928,6 +928,106 @@ PSSecurityException: fixture execution policy failure
         Assert-Match $childFailureDiagnostic 'Expected: safe child context' 'Early child sanitization must preserve adjacent nonsensitive context.'
     }
 
+    # Scenario: The configured evidence directory is missing beneath a junction or symbolic-link ancestor.
+    # Purpose: Reject the ancestor before New-Item can create any directory in the external target.
+    It 'UnitT08_rejects_a_reparse_ancestor_before_creating_the_evidence_root' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $fixtureRoot = Join-Path $TestDrive 'precreate-evidence-root'
+        $targetRoot = Join-Path $fixtureRoot 'target'
+        $aliasRoot = Join-Path $fixtureRoot 'alias'
+        $testRoot = Join-Path $fixtureRoot 'tests'
+        $moduleRoot = Join-Path $fixtureRoot 'module'
+        [void](New-Item -ItemType Directory -Path $targetRoot -Force)
+        [void](New-Item -ItemType Directory -Path $testRoot -Force)
+        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
+        $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+        [void](New-Item -ItemType $linkType -Path $aliasRoot -Target $targetRoot)
+        Write-TestUtf8File -Path (Join-Path $testRoot 'fixture.Tests.ps1') -Text "Describe 'fixture' { It 'passes' { } }"
+        Write-TestUtf8File -Path (Join-Path $moduleRoot 'Pester.psm1') -Text "function Invoke-Pester { }`nExport-ModuleMember -Function Invoke-Pester"
+        Write-TestUtf8File -Path (Join-Path $moduleRoot 'Pester.psd1') -Text @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '4.10.1'
+    GUID = 'a5e46c75-f24e-4c3f-baa2-57e93b50e620'
+    FunctionsToExport = @('Invoke-Pester')
+}
+'@
+        $evidenceRoot = Join-Path $aliasRoot 'must-not-be-created'
+        $probeScript = @"
+try {
+    & '$($shardPath.Replace("'", "''"))' ``
+        -PesterModulePath '$((Join-Path $moduleRoot 'Pester.psd1').Replace("'", "''"))' ``
+        -PesterVersion '4.10.1' ``
+        -ExpectedTotalCount 1 ``
+        -ExpectedSkippedCount 0 ``
+        -TestRoot '$($testRoot.Replace("'", "''"))' ``
+        -EvidenceRoot '$($evidenceRoot.Replace("'", "''"))' ``
+        -OuterTimeoutSeconds 5
+}
+catch {
+    [Console]::Error.WriteLine([string]`$_.Exception.Message)
+    exit 1
+}
+"@
+        $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $script:PowerShellPath
+        $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedProbe"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $probeProcess = New-Object Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        try {
+            Assert-True $probeProcess.Start() 'The evidence-root pre-creation probe must start.'
+            $probeStdout = $probeProcess.StandardOutput.ReadToEnd()
+            $probeStderr = $probeProcess.StandardError.ReadToEnd()
+            $probeProcess.WaitForExit()
+            $probeExitCode = $probeProcess.ExitCode
+        }
+        finally { $probeProcess.Dispose() }
+        $probeOutput = "$probeStdout`n$probeStderr"
+        Assert-True ($probeExitCode -ne 0) 'A reparse-point evidence ancestor must be rejected.'
+        Assert-Match $probeOutput 'Preflight evidence root contains a symlinked or reparse-point ancestor' 'The rejection must identify the evidence-root trust boundary.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $targetRoot 'must-not-be-created')) 'Evidence-root rejection must happen before the external target is mutated.'
+    }
+
+    # Scenario: A bounded stdout or stderr capture task faults after the child wrote otherwise successful result evidence.
+    # Purpose: Make missing stream evidence a cleanup failure instead of accepting a completed shard.
+    It 'UnitT09_fails_closed_when_bounded_output_capture_faults' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before capture-failure state testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Resolve-PesterShardCaptureFailure'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must define its bounded-capture failure transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $cleanup = [pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }
+        $faulted = Resolve-PesterShardCaptureFailure `
+            -Cleanup $cleanup `
+            -CaptureErrors @('stderr bounded output capture failed: injected I/O fault') `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $faulted.status 'cleanup-failed' 'A capture task fault must override an otherwise completed shard.'
+        Assert-False ([bool]$faulted.cleanup.cleanedUp) 'A capture task fault must invalidate cleanup evidence.'
+        Assert-Match ($faulted.cleanup.errors -join ' | ') 'injected I/O fault' 'The capture fault must remain available in process evidence.'
+        Assert-Match $faulted.exceptionText 'injected I/O fault' 'The capture fault must remain available to the caller.'
+
+        $clean = Resolve-PesterShardCaptureFailure `
+            -Cleanup ([pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }) `
+            -CaptureErrors @() `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $clean.status 'completed' 'The normal completed path must remain unchanged when capture has no errors.'
+        Assert-True ([bool]$clean.cleanup.cleanedUp) 'The normal completed path must preserve cleanup success.'
+    }
+
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
     # or reaches the artifact root through a symlinked ancestor.
     # Purpose: Keep tool-role provenance and checkout-external artifact boundaries authoritative.

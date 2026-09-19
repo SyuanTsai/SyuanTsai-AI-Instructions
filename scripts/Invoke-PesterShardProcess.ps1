@@ -196,10 +196,60 @@ if (-not (Test-Path -LiteralPath $PesterModulePath -PathType Leaf)) {
     throw "Pester module path does not identify a file: $PesterModulePath"
 }
 
+function Test-PesterShardReparseItem {
+    param([Parameter(Mandatory = $true)] $Item)
+
+    $isReparse = (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+    $isHardLink = ($Item.PSObject.Properties.Name -contains 'LinkType' -and
+        [string]$Item.LinkType -match '(?i)^HardLink$')
+    # A regular executable can be a hardlink on Windows. Hardlink identity is
+    # not a symlink/reparse traversal and must not invalidate the controlled
+    # child-host path; symbolic links and junctions remain fail-closed.
+    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'LinkType' -and
+        -not [string]::IsNullOrWhiteSpace([string]$Item.LinkType) -and
+        [string]$Item.LinkType -notmatch '(?i)^HardLink$') {
+        $isReparse = $true
+    }
+    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'Target' -and
+        $null -ne $Item.Target -and -not [string]::IsNullOrWhiteSpace(([string](@($Item.Target) -join '|')))) {
+        $isReparse = $true
+    }
+    return [bool]$isReparse
+}
+
+function Assert-PesterShardPathAncestorsNoReparse {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $existingPath = $fullPath
+    while (-not (Test-Path -LiteralPath $existingPath)) {
+        $parent = [IO.Path]::GetDirectoryName($existingPath)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $existingPath) { break }
+        $existingPath = $parent
+    }
+    if (-not (Test-Path -LiteralPath $existingPath)) {
+        throw "Preflight $Context has no existing ancestor: $fullPath"
+    }
+
+    $item = Get-Item -Force -LiteralPath $existingPath -ErrorAction Stop
+    while ($null -ne $item) {
+        if (Test-PesterShardReparseItem -Item $item) {
+            throw "Preflight $Context contains a symlinked or reparse-point ancestor: $($item.FullName)"
+        }
+        $parent = $item.Parent
+        if ($null -eq $parent -or $parent.FullName -ceq $item.FullName) { break }
+        $item = $parent
+    }
+}
+
 $repositoryRoot = (Get-Location).Path
 $resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
+Assert-PesterShardPathAncestorsNoReparse -Path $EvidenceRoot -Context 'evidence root'
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 function Test-PesterShardProcessAlive {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
@@ -325,55 +375,6 @@ function Write-PesterShardBoundedOutput {
         [void](New-Item -ItemType Directory -Path $parent -Force)
     }
     [IO.File]::WriteAllText($Path, [string]$Text, (New-Object Text.UTF8Encoding($false)))
-}
-
-function Test-PesterShardReparseItem {
-    param([Parameter(Mandatory = $true)] $Item)
-
-    $isReparse = (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-    $isHardLink = ($Item.PSObject.Properties.Name -contains 'LinkType' -and
-        [string]$Item.LinkType -match '(?i)^HardLink$')
-    # A regular executable can be a hardlink on Windows. Hardlink identity is
-    # not a symlink/reparse traversal and must not invalidate the controlled
-    # child-host path; symbolic links and junctions remain fail-closed.
-    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'LinkType' -and
-        -not [string]::IsNullOrWhiteSpace([string]$Item.LinkType) -and
-        [string]$Item.LinkType -notmatch '(?i)^HardLink$') {
-        $isReparse = $true
-    }
-    if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'Target' -and
-        $null -ne $Item.Target -and -not [string]::IsNullOrWhiteSpace(([string](@($Item.Target) -join '|')))) {
-        $isReparse = $true
-    }
-    return [bool]$isReparse
-}
-
-function Assert-PesterShardPathAncestorsNoReparse {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string] $Context
-    )
-
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    $existingPath = $fullPath
-    while (-not (Test-Path -LiteralPath $existingPath)) {
-        $parent = [IO.Path]::GetDirectoryName($existingPath)
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $existingPath) { break }
-        $existingPath = $parent
-    }
-    if (-not (Test-Path -LiteralPath $existingPath)) {
-        throw "Preflight $Context has no existing ancestor: $fullPath"
-    }
-
-    $item = Get-Item -Force -LiteralPath $existingPath -ErrorAction Stop
-    while ($null -ne $item) {
-        if (Test-PesterShardReparseItem -Item $item) {
-            throw "Preflight $Context contains a symlinked or reparse-point ancestor: $($item.FullName)"
-        }
-        $parent = $item.Parent
-        if ($null -eq $parent -or $parent.FullName -ceq $item.FullName) { break }
-        $item = $parent
-    }
 }
 
 function Get-PesterShardPreflight {
@@ -1092,6 +1093,39 @@ function Stop-PesterShardOwnedProcessTree {
     }
 }
 
+function Resolve-PesterShardCaptureFailure {
+    param(
+        [Parameter(Mandatory = $true)] $Cleanup,
+        [string[]] $CaptureErrors,
+        [Parameter(Mandatory = $true)][string] $Status,
+        [AllowNull()][string] $ExceptionText
+    )
+
+    $errors = @($CaptureErrors | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($errors.Count -eq 0) {
+        return [pscustomobject][ordered]@{
+            cleanup = $Cleanup
+            status = $Status
+            exceptionText = $ExceptionText
+        }
+    }
+
+    $Cleanup.errors = @($Cleanup.errors) + $errors
+    $Cleanup.cleanedUp = $false
+    $captureMessage = $errors -join ' | '
+    $resolvedException = if ([string]::IsNullOrWhiteSpace($ExceptionText)) {
+        $captureMessage
+    }
+    else {
+        "$ExceptionText | $captureMessage"
+    }
+    return [pscustomobject][ordered]@{
+        cleanup = $Cleanup
+        status = 'cleanup-failed'
+        exceptionText = $resolvedException
+    }
+}
+
 function Invoke-PesterShardProcess {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -1382,23 +1416,18 @@ function Invoke-PesterShardProcess {
                 $captureErrors.Add("$($captureSpec.Name) bounded output capture failed: $($_.Exception.Message)")
             }
         }
-        if ($outputCaptureTimedOut) {
-            $cleanup.errors = @($cleanup.errors) + @($captureErrors.ToArray())
-            $cleanup.cleanedUp = $false
-            $status = 'cleanup-failed'
-        }
+        $captureFailure = Resolve-PesterShardCaptureFailure `
+            -Cleanup $cleanup `
+            -CaptureErrors @($captureErrors.ToArray()) `
+            -Status $status `
+            -ExceptionText $exceptionText
+        $cleanup = $captureFailure.cleanup
+        $status = [string]$captureFailure.status
+        $exceptionText = [string]$captureFailure.exceptionText
         if ($outputQuotaExceeded -and $status -notin @('cancelled', 'timeout', 'cleanup-failed')) {
             $status = 'failed'
             if ([string]::IsNullOrWhiteSpace($exceptionText)) {
                 $exceptionText = "Owned Pester shard output capture quota exceeded for $($outputQuotaStreams -join ' and ') (limit=$($script:PesterShardChildOutputQuotaCharacters) characters per stream)."
-            }
-        }
-        if ($captureErrors.Count -gt 0 -and -not $outputCaptureTimedOut) {
-            $exceptionText = if ([string]::IsNullOrWhiteSpace($exceptionText)) {
-                ($captureErrors -join ' | ')
-            }
-            else {
-                "$exceptionText | $($captureErrors -join ' | ')"
             }
         }
         try { Write-PesterShardBoundedOutput -Path $StdoutPath -Text $stdout }
