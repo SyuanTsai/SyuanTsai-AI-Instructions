@@ -828,6 +828,7 @@ catch {
             'Read-PesterShardOutputPrefix',
             'Read-PesterShardOutputTail',
             'ConvertFrom-PesterShardCliXmlDiagnostic',
+            'ConvertTo-PesterShardSanitizedDiagnosticText',
             'Get-PesterShardFailureSummary'
         )) {
             $definition = $ast.Find({ param($node)
@@ -837,6 +838,7 @@ catch {
             Assert-True ($null -ne $definition) "The shard executor is missing $functionName."
             Invoke-Expression $definition.Extent.Text
         }
+        $script:PesterShardChildOutputQuotaCharacters = 1048576
 
         $stderrPath = Join-Path $TestDrive 'progress-only-stderr.txt'
         $stdoutPath = Join-Path $TestDrive 'terminal-stdout.txt'
@@ -869,6 +871,16 @@ catch {
         Assert-False ($wrappedCredentialSummary -match 'wrapped-credential-fragment-(?:one|two)') 'Every wrapped credential continuation before a recognized failure marker must be redacted.'
         Assert-Match $wrappedCredentialSummary '\[-\] fixture failure' 'Redacting a pre-marker continuation block must preserve the recognized failure marker.'
         Assert-Match $wrappedCredentialSummary 'Expected: safe diagnostic context' 'Redacting a pre-marker continuation block must preserve later safe context.'
+
+        $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
+        $windowSuffix = "Authorization:`nwindow-boundary-credential`n[-] fixture failure`nExpected: safe diagnostic context`n"
+        $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
+        Assert-True ($windowFillerLength -gt 0) 'The tail-window fixture must place the read offset inside the sensitive header.'
+        Write-TestUtf8File -Path $windowBoundaryCredentialPath -Text ("safe prefix`n" + $windowSuffix + ('z' * $windowFillerLength))
+        $windowBoundarySummary = Get-PesterShardFailureSummary -Paths @($windowBoundaryCredentialPath)
+        Assert-False ($windowBoundarySummary -match 'window-boundary-credential') 'Sanitization must retain sensitive continuation state across a tail-window read boundary.'
+        Assert-Match $windowBoundarySummary '\[-\] fixture failure' 'Window-boundary sanitization must preserve the recognized failure marker.'
+        Assert-Match $windowBoundarySummary 'Expected: safe diagnostic context' 'Window-boundary sanitization must preserve adjacent safe context.'
 
         $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
         Write-TestUtf8File -Path $mixedStderrPath -Text @'

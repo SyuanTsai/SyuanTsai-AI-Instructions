@@ -679,6 +679,33 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
     }
 }
 
+function ConvertTo-PesterShardSanitizedDiagnosticText {
+    param([Parameter()][AllowEmptyString()][string] $Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $redactSensitiveContinuation = $false
+    $diagnosticBoundaryPattern = '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'
+    foreach ($rawLine in @($Text -split "`r?`n")) {
+        $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern
+        if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {
+            $line = '[redacted sensitive diagnostic continuation]'
+        }
+        else {
+            if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
+            if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+                $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
+                $line = '[redacted sensitive diagnostic line]'
+            }
+        }
+        [void]$lines.Add($line)
+    }
+    return ($lines.ToArray() -join [Environment]::NewLine)
+}
+
 function Get-PesterShardFailureSummary {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -690,38 +717,27 @@ function Get-PesterShardFailureSummary {
     $ansiPattern = ([string][char]27) + '\[[0-9;?]*[ -/]*[@-~]'
     $deferredCliXml = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
-        foreach ($text in @(
-            (Read-PesterShardOutputTail -Path $path),
-            (Read-PesterShardOutputPrefix -Path $path -MaxChars 32768)
-        )) {
-            $rawText = $text
-            $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $text
-            if (-not [string]::IsNullOrWhiteSpace($rawText) -and
-                $text -ceq $rawText -and
-                $rawText.TrimStart().StartsWith('#< CLIXML', [StringComparison]::Ordinal)) {
-                if (-not $deferredCliXml.Contains($rawText)) { [void]$deferredCliXml.Add($rawText) }
-                continue
-            }
-            if ([string]::IsNullOrWhiteSpace($text)) { continue }
-            $lines = New-Object 'System.Collections.Generic.List[string]'
-            $redactSensitiveContinuation = $false
-            $diagnosticBoundaryPattern = '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+'
-            foreach ($rawLine in @($text -split "`r?`n")) {
-                $line = [regex]::Replace([string]$rawLine, $ansiPattern, '').Trim()
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                $isDiagnosticBoundary = $line -match $diagnosticBoundaryPattern
-                if ($redactSensitiveContinuation -and -not $isDiagnosticBoundary) {
-                    $line = '[redacted sensitive diagnostic continuation]'
-                }
-                else {
-                    if ($redactSensitiveContinuation) { $redactSensitiveContinuation = $false }
-                    if ($line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
-                        $redactSensitiveContinuation = $line -match '(?i)(?:secret|password|token|authorization|api[-_]?key|bearer)\s*[:=]\s*$'
-                        $line = '[redacted sensitive diagnostic line]'
-                    }
-                }
-                [void]$lines.Add($line)
-            }
+        $rawText = Read-PesterShardOutputPrefix `
+            -Path $path `
+            -MaxChars ($script:PesterShardChildOutputQuotaCharacters + 1)
+        $text = ConvertFrom-PesterShardCliXmlDiagnostic -Text $rawText
+        if (-not [string]::IsNullOrWhiteSpace($rawText) -and
+            $text -ceq $rawText -and
+            $rawText.TrimStart().StartsWith('#< CLIXML', [StringComparison]::Ordinal)) {
+            if (-not $deferredCliXml.Contains($rawText)) { [void]$deferredCliXml.Add($rawText) }
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $sanitizedText = ConvertTo-PesterShardSanitizedDiagnosticText -Text $text
+        if ([string]::IsNullOrWhiteSpace($sanitizedText)) { continue }
+        $tailStart = [Math]::Max(0, $sanitizedText.Length - 65536)
+        $tailWindow = $sanitizedText.Substring($tailStart)
+        $prefixWindow = $sanitizedText.Substring(0, [Math]::Min(32768, $sanitizedText.Length))
+        $diagnosticWindows = New-Object 'System.Collections.Generic.List[string]'
+        [void]$diagnosticWindows.Add($tailWindow)
+        if ($prefixWindow -cne $tailWindow) { [void]$diagnosticWindows.Add($prefixWindow) }
+        foreach ($window in $diagnosticWindows) {
+            $lines = @($window -split "`r?`n")
             for ($index = 0; $index -lt $lines.Count; $index++) {
                 $candidate = [string]$lines[$index]
                 if ($candidate -notmatch '(?i)\[-\]|^\s*(Expected|But was|Exception:)|\bat\s+.+\.ps1:\d+') { continue }
