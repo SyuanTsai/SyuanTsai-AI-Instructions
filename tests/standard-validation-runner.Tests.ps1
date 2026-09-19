@@ -889,8 +889,7 @@ catch {
         Assert-Match $boundaryLookingCredentialSummary '\[-\] fixture failure' 'A failure marker before a sensitive continuation must remain available.'
 
         $quotedKeyCredentialPath = Join-Path $TestDrive 'quoted-key-credential.txt'
-        $ansiReset = ([string][char]27) + '[0m'
-        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":$ansiReset`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
+        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
         $quotedKeyCredentialSummary = Get-PesterShardFailureSummary -Paths @($quotedKeyCredentialPath)
         Assert-False ($quotedKeyCredentialSummary -match 'quoted-key-credential-(?:that-must-not-be-logged|context)') 'A quoted sensitive key ending in a separator must enable continuation redaction.'
         Assert-Match $quotedKeyCredentialSummary '\[-\] fixture failure' 'Quoted-key redaction must retain safe context that precedes the sensitive block.'
@@ -935,14 +934,25 @@ PSSecurityException: fixture execution policy failure
         Assert-False ($preservedRawSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Unparseable CLIXML must never be copied into workflow-visible diagnostics.'
     }
 
-    # Scenario: A generated shard child catches an exception whose diagnostic contains a sensitive header followed by an unlabeled value.
-    # Purpose: Keep continuation values out of both the child result contract and redirected stderr while preserving safe context.
-    It 'UnitT07_redacts_sensitive_continuations_from_early_child_diagnostics' {
+    # Scenario: Parent and generated-child diagnostics contain sensitive continuations, including a delimiter followed by terminal formatting.
+    # Purpose: Normalize ANSI before classifying sensitive boundaries and keep continuation values out of every workflow-visible diagnostic.
+    It 'UnitT07_normalizes_ansi_before_redacting_parent_and_child_diagnostics' {
         $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $tokens = $null
         $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
         Assert-Equal @($errors).Count 0 'The shard executor must parse before generated child diagnostic testing.'
+        $parentDiagnosticFunction = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertTo-PesterShardSanitizedDiagnosticText'
+        }, $true)
+        Assert-True ($null -ne $parentDiagnosticFunction) 'The shard executor must define its parent diagnostic sanitizer.'
+        Invoke-Expression $parentDiagnosticFunction.Extent.Text
+        $ansiReset = ([string][char]27) + '[0m'
+        $parentDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[-] fixture failure`n`"token`":$ansiReset`nparent-ansi-key-credential`nExpected: parent-ansi-key-context"
+        Assert-False ($parentDiagnostic -match 'parent-ansi-key-(?:credential|context)') 'The parent sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
+        Assert-Match $parentDiagnostic '\[-\] fixture failure' 'Parent ANSI normalization must retain safe context that precedes the sensitive block.'
+
         $childScriptAssignment = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.AssignmentStatementAst] -and
                 $node.Left.Extent.Text -ceq '$childScript'
@@ -988,7 +998,6 @@ PSSecurityException: fixture execution policy failure
         Assert-False ($quotedKeyChildDiagnostic -match 'early-child-quoted-key-(?:credential|context)') 'The generated child sanitizer must enable continuation redaction for quoted sensitive keys.'
         Assert-Match $quotedKeyChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes a quoted sensitive key.'
 
-        $ansiReset = ([string][char]27) + '[0m'
         try {
             throw [InvalidOperationException]::new("fixture failure`n`"token`":$ansiReset`nearly-child-ansi-key-credential`nExpected: early-child-ansi-key-context")
         }
