@@ -633,6 +633,7 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
         $document.Load($xmlReader)
 
         $diagnosticLines = New-Object 'System.Collections.Generic.List[string]'
+        $diagnosticLineSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         $sawStreamNode = $false
         $sawNonProgressStream = $false
         foreach ($streamNode in @($document.DocumentElement.ChildNodes)) {
@@ -669,7 +670,7 @@ function ConvertFrom-PesterShardCliXmlDiagnostic {
             foreach ($line in @($value -split "`r?`n")) {
                 $line = ([string]$line).TrimEnd()
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                if (-not $diagnosticLines.Contains($line)) { [void]$diagnosticLines.Add($line) }
+                if ($diagnosticLineSet.Add($line)) { [void]$diagnosticLines.Add($line) }
             }
         }
         if ($diagnosticLines.Count -gt 0) { return ($diagnosticLines.ToArray() -join [Environment]::NewLine) }
@@ -696,6 +697,46 @@ function Remove-PesterShardTerminalControlSequences {
     $normalized = New-Object Text.StringBuilder
     [void]$normalized.EnsureCapacity($Text.Length)
     $cursorControlSentinel = [char]0xE000
+    $sgrParametersAreSafe = {
+        param([Parameter()][AllowEmptyString()][string] $Parameters)
+
+        if ([string]::IsNullOrEmpty($Parameters)) { return $true }
+        $parts = $Parameters.Split(';')
+        for ($partIndex = 0; $partIndex -lt $parts.Length; $partIndex++) {
+            $part = [string]$parts[$partIndex]
+            $code = 0
+            if (-not [string]::IsNullOrEmpty($part)) {
+                for ($digitIndex = 0; $digitIndex -lt $part.Length; $digitIndex++) {
+                    $digitCode = [int][char]$part[$digitIndex]
+                    if ($digitCode -lt 0x30 -or $digitCode -gt 0x39) { return $false }
+                }
+                if (-not [int]::TryParse($part, [ref]$code)) { return $false }
+            }
+
+            # SGR 8 conceals subsequent glyphs. It can therefore change the
+            # visible identity of a sensitive key and must taint the line.
+            if ($code -eq 8) { return $false }
+
+            # Do not mistake an extended-color argument equal to 8 for the
+            # concealment opcode. Accept only the bounded semicolon forms.
+            if ($code -eq 38 -or $code -eq 48 -or $code -eq 58) {
+                if (($partIndex + 1) -ge $parts.Length) { return $false }
+                $mode = 0
+                if (-not [int]::TryParse([string]$parts[$partIndex + 1], [ref]$mode)) { return $false }
+                $componentCount = if ($mode -eq 5) { 1 } elseif ($mode -eq 2) { 3 } else { return $false }
+                if (($partIndex + 1 + $componentCount) -ge $parts.Length) { return $false }
+                for ($componentIndex = 1; $componentIndex -le $componentCount; $componentIndex++) {
+                    $component = 0
+                    if (-not [int]::TryParse([string]$parts[$partIndex + 1 + $componentIndex], [ref]$component) -or
+                        $component -lt 0 -or $component -gt 255) {
+                        return $false
+                    }
+                }
+                $partIndex += 1 + $componentCount
+            }
+        }
+        return $true
+    }
     $index = 0
     while ($index -lt $Text.Length) {
         $code = [int][char]$Text[$index]
@@ -733,12 +774,17 @@ function Remove-PesterShardTerminalControlSequences {
 
             if ($next -eq 0x5B) {
                 $index++
+                $parameterStart = $index
                 while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
+                $parameterLength = $index - $parameterStart
+                $intermediateStart = $index
                 while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
                 if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
                     $finalCode = [int][char]$Text[$index]
                     $index++
-                    if ($finalCode -ne 0x6D) { [void]$normalized.Append($cursorControlSentinel) }
+                    $safeSgr = ($finalCode -eq 0x6D -and $index - 1 -eq $intermediateStart -and
+                        (& $sgrParametersAreSafe $Text.Substring($parameterStart, $parameterLength)))
+                    if (-not $safeSgr) { [void]$normalized.Append($cursorControlSentinel) }
                     continue
                 }
                 [void]$normalized.Append($cursorControlSentinel)
@@ -782,12 +828,17 @@ function Remove-PesterShardTerminalControlSequences {
 
         if ($code -eq 0x9B) {
             $index++
+            $parameterStart = $index
             while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x30 -and [int][char]$Text[$index] -le 0x3F) { $index++ }
+            $parameterLength = $index - $parameterStart
+            $intermediateStart = $index
             while ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x20 -and [int][char]$Text[$index] -le 0x2F) { $index++ }
             if ($index -lt $Text.Length -and [int][char]$Text[$index] -ge 0x40 -and [int][char]$Text[$index] -le 0x7E) {
                 $finalCode = [int][char]$Text[$index]
                 $index++
-                if ($finalCode -ne 0x6D) { [void]$normalized.Append($cursorControlSentinel) }
+                $safeSgr = ($finalCode -eq 0x6D -and $index - 1 -eq $intermediateStart -and
+                    (& $sgrParametersAreSafe $Text.Substring($parameterStart, $parameterLength)))
+                if (-not $safeSgr) { [void]$normalized.Append($cursorControlSentinel) }
                 continue
             }
             [void]$normalized.Append($cursorControlSentinel)

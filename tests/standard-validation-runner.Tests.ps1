@@ -911,6 +911,33 @@ catch {
             Invoke-Expression $definition.Extent.Text
         }
         $script:PesterShardChildOutputQuotaCharacters = 1048576
+        $cliXmlDecoderSource = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertFrom-PesterShardCliXmlDiagnostic'
+        }, $true).Extent.Text
+        Assert-Match $cliXmlDecoderSource 'HashSet\[string\]' 'CLIXML diagnostic deduplication must use a set instead of repeatedly scanning the ordered list.'
+        Assert-Match $cliXmlDecoderSource 'StringComparer\]::Ordinal' 'CLIXML diagnostic deduplication must preserve exact ordinal identity.'
+        Assert-False ($cliXmlDecoderSource -match '\$diagnosticLines\.Contains\(') 'CLIXML diagnostic deduplication must not perform a linear list scan for every decoded line.'
+
+        $manyRecordBuilder = New-Object Text.StringBuilder
+        [void]$manyRecordBuilder.Append('#< CLIXML')
+        [void]$manyRecordBuilder.Append([Environment]::NewLine)
+        [void]$manyRecordBuilder.Append('<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">')
+        for ($recordIndex = 0; $recordIndex -lt 12000; $recordIndex++) {
+            [void]$manyRecordBuilder.Append(('<S S="information">unique-diagnostic-{0:D5}</S>' -f $recordIndex))
+        }
+        [void]$manyRecordBuilder.Append('<S S="information">unique-diagnostic-00000</S>')
+        [void]$manyRecordBuilder.Append('</Objs>')
+        $manyRecordCliXml = $manyRecordBuilder.ToString()
+        Assert-True ($manyRecordCliXml.Length -lt $script:PesterShardChildOutputQuotaCharacters) 'The adversarial CLIXML fixture must remain inside the accepted child-output quota.'
+        $manyRecordStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $manyRecordDiagnostic = ConvertFrom-PesterShardCliXmlDiagnostic -Text $manyRecordCliXml
+        $manyRecordStopwatch.Stop()
+        $manyRecordLines = @($manyRecordDiagnostic -split "`r?`n")
+        Assert-Equal $manyRecordLines.Count 12000 'Quota-bounded CLIXML must preserve ordered unique diagnostics while removing duplicates.'
+        Assert-Equal $manyRecordLines[0] 'unique-diagnostic-00000' 'CLIXML deduplication must preserve first-seen ordering.'
+        Assert-Equal $manyRecordLines[-1] 'unique-diagnostic-11999' 'CLIXML deduplication must retain the final unique record.'
+        Assert-True ($manyRecordStopwatch.Elapsed.TotalSeconds -lt 10) 'Quota-bounded CLIXML diagnostic decoding must finish within the absolute safety bound.'
 
         $stderrPath = Join-Path $TestDrive 'progress-only-stderr.txt'
         $stdoutPath = Join-Path $TestDrive 'terminal-stdout.txt'
@@ -1043,6 +1070,8 @@ PSSecurityException: fixture execution policy failure
         Assert-Match $parentDiagnostic '\[-\] fixture failure' 'Parent ANSI normalization must retain safe context that precedes the sensitive block.'
 
         $escape = [string][char]27
+        $indexedColor = $escape + '[38;5;8m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${indexedColor}context${ansiReset}") 'safe context' 'A color index numerically equal to the concealment opcode must remain ordinary readable SGR formatting.'
         $bell = [string][char]7
         $backspace = [string][char]8
         $osc = $escape + ']0;fixture' + $bell
@@ -1063,6 +1092,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-csi'; Text = "[-] fixture failure`ntox${cursorLeft}ken:`nparent-cursor-csi-credential`nExpected: parent-cursor-csi-context" },
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "[-] fixture failure`ntox`rken:`nparent-cursor-cr-credential`nExpected: parent-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "[-] fixture failure`ntox${c1Index}ken:`nparent-cursor-c1-credential`nExpected: parent-cursor-c1-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal'; Text = "[-] fixture failure`nto${escape}[8mx${ansiReset}ken:`nparent-sgr-conceal-credential`nExpected: parent-sgr-conceal-context" },
             [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
         )
         $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
@@ -1107,6 +1137,7 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'cursor-csi'; Text = "fixture failure`ntox${cursorLeft}ken:`nearly-child-cursor-csi-credential`nExpected: early-child-cursor-csi-context" },
             [pscustomobject]@{ Name = 'cursor-cr'; Text = "fixture failure`ntox`rken:`nearly-child-cursor-cr-credential`nExpected: early-child-cursor-cr-context" },
             [pscustomobject]@{ Name = 'cursor-c1'; Text = "fixture failure`ntox${c1Index}ken:`nearly-child-cursor-c1-credential`nExpected: early-child-cursor-c1-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal'; Text = "fixture failure`nto${escape}[8mx${ansiReset}ken:`nearly-child-sgr-conceal-credential`nExpected: early-child-sgr-conceal-context" },
             [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
         )
         $childLeaks = New-Object 'System.Collections.Generic.List[string]'
