@@ -320,8 +320,8 @@ function Update-TestConsentDigests {
                 $expectedRoute = $route
             }
             $run = Invoke-TestSemanticBridge -Fixture $fixture -Bindings $bindings -ProviderRoute $route -Items $items
-            Assert-TestCondition ([string]$run.status -ceq 'BLOCKED') "$($case.Name) drift did not block the bridge."
-            Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) "$($case.Name) drift reached the provider."
+            Assert-TestCondition ([string]$run.status -ceq 'BLOCKED') "$case drift did not block the bridge."
+            Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) "$case drift reached the provider."
             $evidenceCheck = Test-StandardSemanticBridgeEvidence `
                 -EvidenceBytes $goodEvidence.evidenceBytes `
                 -ConsentRequest $evidenceFixture.Request `
@@ -334,7 +334,7 @@ function Update-TestConsentDigests {
                 -ExpectedScope $evidenceFixture.Scope `
                 -ExpectedProviderTextInventory $expectedInventory `
                 -Now $evidenceFixture.Now.AddMinutes(2)
-            Assert-TestCondition (-not [bool]$evidenceCheck.valid) "$($case.Name) drift did not invalidate old evidence."
+            Assert-TestCondition (-not [bool]$evidenceCheck.valid) "$case drift did not invalidate old evidence."
         }
     }
 
