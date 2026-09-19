@@ -716,7 +716,7 @@ function Remove-PesterShardTerminalControlSequences {
           if ($j -eq 2 -and $b.Count -eq 6 -and -not $b[$j]) { continue }
           $v = 0
           if (-not [int]::TryParse($b[$j], [ref]$v) -or $v -gt 255) { return $false }
-          if ($j -eq 2 -and $b.Count -eq 6) { $q = "r@$v"; continue }
+          if ($j -eq 2 -and $b.Count -eq 6) { if ($v) { $q = "r@$v" }; continue }
           $q += ":$v"
         }
         $z = if ($n -eq 38) { 0 } elseif ($n -eq 48) { 1 } else { 2 }
