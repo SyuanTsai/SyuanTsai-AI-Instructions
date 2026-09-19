@@ -17,6 +17,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:ValidationSecurityGateSchemaPath = Join-Path $script:StandardsRoot 'schemas\validation-security-gate-v1.schema.json'
         $script:StandardValidationAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-adapter-v1.schema.json'
         $script:StandardValidationEvidenceSchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-validation-evidence-v1.schema.json'
+        $script:StandardSemanticConsentEvidenceV2SchemaPath = Join-Path $script:StandardsRoot 'schemas\standard-semantic-consent-evidence-v2.schema.json'
         $script:StandardValidationContractPath = Join-Path $script:StandardsRoot 'standard-validation-contract-v1.json'
         $script:ResolverPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-StandardValidationTool.ps1'
         $script:PythonClosureHelperPath = Join-Path $script:RepositoryRoot 'scripts\Resolve-PythonWheelClosure.py'
@@ -1208,7 +1209,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $gate 'resolutionRounds=\$\(\$skillSpectorReceipt\.resolutionRounds\)' 'Shared gate must bind resolution rounds into the resolver identity.'
         Assert-Match $gate 'consoleEntryPoint=\$\(\$skillSpectorReceipt\.consoleEntryPoint\)' 'Shared gate must bind the static console entry point into the resolver identity.'
         Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute the complete authority regression inventory through frozen Pester.'
-        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+        foreach ($semanticSuite in @('standard-semantic-bridge.Tests.ps1','standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
         }
         Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared gate must bind semantic Python tests to the frozen SkillSpector environment.'
@@ -2931,6 +2932,26 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-ExactStringSequence $policy.security.semanticPreflight.nonAuthority @('cannot-satisfy-semantic-evidence', 'cannot-authorize-release') 'Semantic preflight must not become release authority.'
         Assert-ExactStringSequence $policy.security.samePassBlockSemantics @('local', 'pre-push', 'ci') 'Local, pre-push and CI must share pass/block semantics.'
 
+        $semanticBridge = $policy.security.semanticBridgeV2
+        Assert-ExactPropertySet $semanticBridge @('schemaVersion', 'schemaPath', 'artifactClassification', 'artifactTypes', 'mode', 'callerSupplied', 'nonSelected', 'production', 'v1Compatibility') 'The v2 local semantic bridge policy property set changed.'
+        Assert-Equal $semanticBridge.schemaVersion 2 'The local semantic bridge must remain schema version 2.'
+        Assert-Equal $semanticBridge.schemaPath 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json' 'The v2 local semantic bridge must reference the versioned schema.'
+        Assert-Equal $semanticBridge.artifactClassification 'local-semantic-bridge-v2' 'The v2 local semantic bridge classification changed.'
+        Assert-ExactStringSequence $semanticBridge.artifactTypes @('semantic-consent-request-v2', 'semantic-consent-decision-v2', 'semantic-evidence-v2') 'The v2 local semantic bridge artifact types must remain versioned.'
+        Assert-Equal $semanticBridge.mode 'development-harness-local-simulation-only' 'The v2 local semantic bridge must remain development/local-only.'
+        Assert-True ([bool]$semanticBridge.callerSupplied.providerRoute) 'Provider route selection must remain caller-supplied.'
+        Assert-True ([bool]$semanticBridge.callerSupplied.verificationKey) 'The v2 verification key must remain caller-supplied.'
+        Assert-True ([bool]$semanticBridge.callerSupplied.providerCallback) 'Provider callback selection must remain caller-supplied.'
+        Assert-True ([bool]$semanticBridge.callerSupplied.signerCallback) 'Signer callback selection must remain caller-supplied.'
+        Assert-ExactStringSequence $semanticBridge.nonSelected @('provider', 'accountOrTenant', 'model', 'endpoint', 'signer') 'The v2 bridge must not select provider, account, model, endpoint, or signer.'
+        Assert-False ([bool]$semanticBridge.production.active) 'The v2 local semantic bridge must not be production-active.'
+        Assert-False ([bool]$semanticBridge.production.releaseEligible) 'The v2 local semantic bridge must never make a release eligible result.'
+        Assert-Equal $semanticBridge.production.failureAction 'BLOCK' 'The v2 production boundary must fail closed.'
+        Assert-ExactStringSequence $semanticBridge.production.pending @('protected-trust-anchor', 'trusted-supervisor-authorization') 'The v2 production boundary must remain pending protected trust and supervisor authorization.'
+        Assert-Equal $semanticBridge.v1Compatibility.canonicalAuthentication 'trusted-supervisor-signed-semantic-v1' 'The existing semantic v1 authentication contract must remain canonical.'
+        Assert-True ([bool]$semanticBridge.v1Compatibility.preserved) 'Semantic v1 compatibility must remain preserved.'
+        Assert-False ([bool]$semanticBridge.v1Compatibility.v2SatisfiesV1) 'A local v2 bridge result must not satisfy the semantic v1 contract.'
+
         Assert-Match $index 'validation-security-gate\.json' 'Standards index must expose the canonical validation/security gate policy.'
         Assert-Match $standard 'validation-security-gate\.json' 'Normative Standard must bind the canonical validation/security gate policy.'
         Assert-Match $standard 'strict-utf8-v1' 'Normative Standard must bind provider text to the versioned deterministic decoding of verified source bytes.'
@@ -2938,6 +2959,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $standard 'planned work item.*provider call' 'Normative Standard must bind provider telemetry to every planned work item.'
         Assert-Match $standard 'OrdinalIgnoreCase' 'Normative Standard must define supported PowerShell JSON property-collision semantics.'
         Assert-Match $standard 'semantic-scan-preflight-v1' 'Normative Standard must define the unsigned semantic preflight boundary.'
+        Assert-Match $standard 'standard-semantic-consent-evidence-v2\.schema\.json' 'Normative Standard must reference the versioned v2 local semantic bridge schema.'
+        Assert-Match $standard 'caller.*provider.*account/tenant.*model.*endpoint.*signer' 'Normative Standard must prohibit central selection of v2 provider route and signer values.'
+        Assert-Match $standard 'releaseEligible=false' 'Normative Standard must keep the local v2 bridge ineligible for release.'
+        Assert-Match $standard 'protected trust anchor.*trusted-supervisor authorization' 'Normative Standard must keep production v2 fail-closed pending protected authority.'
         Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
         Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
@@ -2953,9 +2978,57 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
     }
 
+    # Scenario: The central policy, v1 runner contract, v1 evidence schema, and new v2 schema expose the same local-only bridge boundary.
+    # Purpose: Keep v2 caller-supplied verification explicitly non-authoritative while preserving the production semantic v1 contract.
+    It 'UnitT93_binds_the_v2_local_bridge_reference_without_promoting_it_to_production' {
+        Assert-True (Test-Path -LiteralPath $script:StandardSemanticConsentEvidenceV2SchemaPath -PathType Leaf) 'The versioned v2 local semantic bridge schema is missing.'
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $policySchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
+        $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationEvidenceSchemaPath | ConvertFrom-Json
+        $v2Schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardSemanticConsentEvidenceV2SchemaPath | ConvertFrom-Json
+
+        Assert-Equal $v2Schema.'$id' 'urn:syuan-tsai-ai-instructions:standard-semantic-consent-evidence:v2' 'The v2 schema identity must remain explicit and versioned.'
+        Assert-Equal @($v2Schema.oneOf).Count 3 'The v2 schema must distinguish request, decision, and evidence artifacts.'
+        Assert-True ([string]$v2Schema.description -match 'does not select a production provider.*account.*model.*endpoint.*signer') 'The v2 schema must document its provider-agnostic non-selection boundary.'
+        Assert-True (@($v2Schema.'$defs'.executionEvidence.required) -contains 'providerCalls') 'The v2 execution evidence must carry a recomputable per-work provider-call ledger.'
+        Assert-Equal $v2Schema.'$defs'.executionEvidence.properties.providerCalls.items.'$ref' '#/$defs/providerCallEvidence' 'The v2 provider-call ledger must use its closed typed row schema.'
+
+        Assert-AuthoritySchemaInstance -Value $policy -Schema $policySchema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'The policy with the v2 local bridge boundary must remain schema-valid.'
+        Assert-Equal $contract.semanticBridgeV2.schemaVersion 2 'The central v1 runner contract must reference v2 explicitly.'
+        Assert-Equal $contract.semanticBridgeV2.schemaPath 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json' 'The central runner contract must reference the v2 schema path.'
+        Assert-Equal $contract.semanticBridgeV2.mode 'development-harness-local-simulation-only' 'The central runner contract must keep v2 local-only.'
+        Assert-False ([bool]$contract.semanticBridgeV2.production.active) 'The central runner contract must not activate v2 in production.'
+        Assert-False ([bool]$contract.semanticBridgeV2.production.releaseEligible) 'The central runner contract must keep v2 release-ineligible.'
+        Assert-ExactStringSequence $contract.semanticBridgeV2.production.pending @('protected-trust-anchor', 'trusted-supervisor-authorization') 'The central runner contract must preserve the v2 production prerequisites.'
+        Assert-Equal $contract.semanticBridgeV2.v1Compatibility.canonicalAuthentication 'trusted-supervisor-signed-semantic-v1' 'The central runner contract must preserve semantic v1 authentication.'
+        Assert-False ([bool]$contract.semanticBridgeV2.v1Compatibility.v2SatisfiesV1) 'The v2 local bridge must not satisfy semantic v1 evidence.'
+
+        Assert-Equal $evidenceSchema.properties.semanticBridgeV2.'$ref' '#/$defs/semanticBridgeV2Reference' 'The v1 evidence schema must expose v2 only through an explicit reference descriptor.'
+        Assert-Equal $evidenceSchema.'$defs'.stage.properties.semanticBridgeV2Evidence.anyOf[0].'$ref' '#/$defs/semanticBridgeV2VerifiedEvidenceReference' 'A verified local v2 artifact must use a distinct stage reference instead of the production semantic v1 slot.'
+        $reference = [pscustomobject][ordered]@{
+            schemaVersion = 2
+            schemaPath = 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json'
+            artifactClassification = 'local-semantic-bridge-v2'
+            mode = 'development-harness-local-simulation-only'
+            verificationKey = 'caller-supplied-development-harness-local-simulation-only'
+            productionStatus = 'fail-closed-pending-protected-trust-anchor-and-supervisor-authorization'
+            releaseEligible = $false
+            v1Compatibility = [pscustomobject][ordered]@{
+                canonicalAuthentication = 'trusted-supervisor-signed-semantic-v1'
+                preserved = $true
+                v2SatisfiesV1 = $false
+            }
+        }
+        Assert-True (Test-AuthorityJsonSchemaValue -Value $reference -Schema $evidenceSchema.properties.semanticBridgeV2 -RootSchema $evidenceSchema) 'The v1 evidence schema v2 reference descriptor must be schema-valid.'
+        $invalidReference = Copy-TestJsonObject -Value $reference
+        $invalidReference.releaseEligible = $true
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $invalidReference -Schema $evidenceSchema.properties.semanticBridgeV2 -RootSchema $evidenceSchema) 'A v2 reference descriptor that claims release eligibility must fail closed.'
+    }
+
     # Scenario: The central runner contract changes without a versioned adapter/evidence boundary.
     # Purpose: Keep consumer declarations thin and make the production runner's barrier semantics machine-readable.
-    It 'UnitT92_binds_the_central_runner_to_versioned_adapter_evidence_and_barriers' {
+    It 'UnitT94_binds_the_central_runner_to_versioned_adapter_evidence_and_barriers' {
         foreach ($path in @($script:StandardValidationAdapterSchemaPath, $script:StandardValidationEvidenceSchemaPath, $script:StandardValidationContractPath)) {
             Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Missing central runner contract file '$path'."
             $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json

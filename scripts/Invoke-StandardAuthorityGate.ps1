@@ -2727,11 +2727,34 @@ function Get-AuthorityCandidateCommit {
         throw 'Authority gate could not resolve Git to an absolute application path.'
     }
     $gitPath = [System.IO.Path]::GetFullPath($gitPathValue)
-    $candidateOutput = @(& $gitPath -C $RepositoryRoot rev-parse HEAD 2>$null)
-    $gitExitCode = $LASTEXITCODE
-    $candidateCommit = ([string]($candidateOutput | Select-Object -First 1)).Trim()
+    $gitInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $gitInfo.FileName = $gitPath
+    $gitInfo.Arguments = 'rev-parse HEAD'
+    $gitInfo.WorkingDirectory = [System.IO.Path]::GetFullPath($RepositoryRoot)
+    $gitInfo.UseShellExecute = $false
+    $gitInfo.CreateNoWindow = $true
+    $gitInfo.RedirectStandardOutput = $true
+    $gitInfo.RedirectStandardError = $true
+    $gitProcess = New-Object System.Diagnostics.Process
+    $gitProcess.StartInfo = $gitInfo
+    try {
+        if (-not $gitProcess.Start()) {
+            throw 'Authority gate could not start Git to bind checkout HEAD.'
+        }
+        $candidateText = $gitProcess.StandardOutput.ReadToEnd()
+        $gitErrorText = $gitProcess.StandardError.ReadToEnd()
+        $gitProcess.WaitForExit()
+        $gitExitCode = $gitProcess.ExitCode
+    }
+    finally {
+        $gitProcess.Dispose()
+    }
+    $candidateLine = @($candidateText -split '[\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+    $candidateCommit = if ($candidateLine.Count -eq 0) { '' } else { ([string]$candidateLine[0]).Trim() }
     if ($gitExitCode -ne 0 -or $candidateCommit -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'Authority gate could not bind its candidate commit to checkout HEAD.'
+        $candidateLength = if ($null -eq $candidateText) { 0 } else { ([string]$candidateText).Length }
+        $gitErrorSummary = if ([string]::IsNullOrWhiteSpace($gitErrorText)) { '<empty>' } else { ([string]$gitErrorText).Trim() }
+        throw "Authority gate could not bind its candidate commit to checkout HEAD (Git exit code $gitExitCode; stdout length $candidateLength; stderr: $gitErrorSummary)."
     }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCommit)) {
         if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') {
@@ -2855,6 +2878,7 @@ $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-semantic-bridge.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-inventory-probe.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-preflight.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-semantic-raw-graph.Tests.ps1')

@@ -37,7 +37,8 @@
       "items": { "$ref": "#/$defs/stage" }
     },
     "failure": { "$ref": "#/$defs/failure" },
-    "artifacts": { "$ref": "#/$defs/artifacts" }
+    "artifacts": { "$ref": "#/$defs/artifacts" },
+    "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" }
   },
   "allOf": [
     {
@@ -187,7 +188,7 @@
     "authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "trustAnchors", "binding"],
+      "required": ["repository", "runnerPath", "runnerSha256", "contractPath", "contractSha256", "policyPath", "policySha256", "authorityGatePath", "authorityGateSha256", "resolverPath", "resolverSha256", "semanticBridgeModulePath", "semanticBridgeModuleSha256", "semanticBridgeSchemaPath", "semanticBridgeSchemaSha256", "trustAnchors", "binding"],
       "properties": {
         "repository": { "type": "string", "format": "uri" },
         "runnerPath": { "$ref": "#/$defs/safeRelativePath" },
@@ -200,6 +201,10 @@
         "authorityGateSha256": { "$ref": "#/$defs/sha256" },
         "resolverPath": { "$ref": "#/$defs/safeRelativePath" },
         "resolverSha256": { "$ref": "#/$defs/sha256" },
+        "semanticBridgeModulePath": { "$ref": "#/$defs/safeRelativePath" },
+        "semanticBridgeModuleSha256": { "$ref": "#/$defs/sha256" },
+        "semanticBridgeSchemaPath": { "$ref": "#/$defs/safeRelativePath" },
+        "semanticBridgeSchemaSha256": { "$ref": "#/$defs/sha256" },
         "trustAnchors": {
           "type": "array",
           "minItems": 2,
@@ -297,6 +302,7 @@
         "reason": { "type": ["string", "null"] },
         "triggerDecision": { "anyOf": [{ "$ref": "#/$defs/triggerDecision" }, { "type": "null" }] },
         "semanticEvidence": { "anyOf": [{ "$ref": "#/$defs/semanticEvidence" }, { "type": "null" }] },
+        "semanticBridgeV2Evidence": { "anyOf": [{ "$ref": "#/$defs/semanticBridgeV2VerifiedEvidenceReference" }, { "type": "null" }] },
         "aiReviewEvidence": { "anyOf": [{ "$ref": "#/$defs/aiReviewEvidence" }, { "type": "null" }] },
         "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
       }
@@ -448,6 +454,69 @@
       "properties": {
         "root": { "type": "string", "minLength": 1 },
         "lockPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "semanticBridgeV2VerifiedEvidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "artifactType",
+        "artifactClassification",
+        "evidenceSha256",
+        "evidencePath",
+        "attestationKeyId",
+        "consentRequestSha256",
+        "consentArtifactSha256",
+        "findingsSha256",
+        "verificationMode",
+        "releaseEligible"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "artifactType": { "const": "semantic-evidence-v2" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "evidenceSha256": { "$ref": "#/$defs/sha256" },
+        "evidencePath": { "type": "string", "minLength": 1 },
+        "attestationKeyId": { "type": "string", "minLength": 1 },
+        "consentRequestSha256": { "$ref": "#/$defs/sha256" },
+        "consentArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "verificationMode": { "const": "development-harness-local-simulation-only" },
+        "releaseEligible": { "const": false }
+      }
+    },
+    "semanticBridgeV2Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "schemaPath",
+        "artifactClassification",
+        "mode",
+        "verificationKey",
+        "productionStatus",
+        "releaseEligible",
+        "v1Compatibility"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "schemaPath": { "const": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "mode": { "const": "development-harness-local-simulation-only" },
+        "verificationKey": { "const": "caller-supplied-development-harness-local-simulation-only" },
+        "productionStatus": { "const": "fail-closed-pending-protected-trust-anchor-and-supervisor-authorization" },
+        "releaseEligible": { "const": false },
+        "v1Compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["canonicalAuthentication", "preserved", "v2SatisfiesV1"],
+          "properties": {
+            "canonicalAuthentication": { "const": "trusted-supervisor-signed-semantic-v1" },
+            "preserved": { "const": true },
+            "v2SatisfiesV1": { "const": false }
+          }
+        }
       }
     }
   }

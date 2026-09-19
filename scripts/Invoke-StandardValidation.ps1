@@ -27,6 +27,14 @@ param(
     [string] $SemanticPurpose,
     [string] $SemanticScope,
     [string] $SemanticEvidencePath,
+    [Alias('SemanticRequestPath', 'SemanticV2ConsentRequestPath')]
+    [string] $SemanticConsentRequestPath,
+    [Alias('SemanticDecisionPath', 'SemanticV2ConsentDecisionPath')]
+    [string] $SemanticConsentDecisionPath,
+    [Alias('SemanticPublicKey', 'SemanticV2PublicKeyPath')]
+    [string] $SemanticPublicKeyPath,
+    [Alias('SemanticKeyId', 'SemanticExpectedKeyId', 'SemanticV2KeyId')]
+    [string] $SemanticPublicKeyId,
     [string] $AiReviewEvidencePath,
     [string] $HumanApprovalEvidencePath,
     [string] $PublishInstallEvidencePath,
@@ -1691,6 +1699,7 @@ function Assert-StandardValidationAuthoritySnapshot {
     $expectedFiles = @(
         'docs/standards/schemas/standard-validation-adapter-v1.schema.json',
         'docs/standards/schemas/standard-validation-evidence-v1.schema.json',
+        'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json',
         'docs/standards/schemas/validation-security-gate-v1.schema.json',
         'docs/standards/standard-validation-contract-v1.json',
         'docs/standards/trust-anchors/human-approval-public-key.xml',
@@ -1699,7 +1708,8 @@ function Assert-StandardValidationAuthoritySnapshot {
         'docs/standards/validation-toolchain.json',
         'scripts/Invoke-StandardAuthorityGate.ps1',
         'scripts/Invoke-StandardValidation.ps1',
-        'scripts/Resolve-StandardValidationTool.ps1'
+        'scripts/Resolve-StandardValidationTool.ps1',
+        'scripts/StandardSemanticBridge.psm1'
     )
     if ($receipt.selectedFiles -isnot [array] -or @($receipt.selectedFiles).Count -ne $expectedFiles.Count) { throw "BLOCKED|$Context selected file inventory is incomplete." }
     $selected = @()
@@ -2047,6 +2057,248 @@ function Assert-StandardValidationCandidateUnchanged {
     }
 }
 
+function Assert-StandardValidationSemanticProviderTextInventory {
+    param(
+        [Parameter(Mandatory = $true)][string] $SnapshotRoot,
+        [Parameter(Mandatory = $true)] $CandidateInventory,
+        [Parameter(Mandatory = $true)] $ProviderTextInventory,
+        $Scope,
+        [Parameter(Mandatory = $true)][string] $ExpectedCandidateContentSha256,
+        [string] $Context = 'semantic provider text inventory'
+    )
+
+    # The v2 verifier authenticates an inventory digest, but the digest alone
+    # does not prove that the listed bytes came from this candidate.  Rebuild
+    # the source side from the retained, already verified candidate snapshot
+    # and compare every submitted component before allowing verifier egress.
+    Assert-StandardValidationSnapshotUnchanged `
+        -SnapshotRoot $SnapshotRoot `
+        -ExpectedSnapshotContentSha256 $ExpectedCandidateContentSha256
+
+    $candidateEntries = @($CandidateInventory | ForEach-Object { $_ })
+    $candidateByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($entry in $candidateEntries) {
+        $entryPath = [string](Get-StandardValidationProperty -Object $entry -Name 'path')
+        if ([string]::IsNullOrWhiteSpace($entryPath)) {
+            throw "BLOCKED|$Context candidate manifest contains an empty path."
+        }
+        if ($candidateByPath.ContainsKey($entryPath)) {
+            throw "BLOCKED|$Context candidate manifest contains a duplicate path '$entryPath'."
+        }
+        $candidateByPath[$entryPath] = $entry
+    }
+
+    $rawItems = Get-StandardValidationProperty -Object $ProviderTextInventory -Name 'items'
+    if ($null -eq $rawItems) {
+        # A provider inventory without a component list cannot be checked
+        # against source bytes.  It must not be treated as a digest-only
+        # authorization shortcut.
+        throw "BLOCKED|$Context must contain a full manifest subset."
+    }
+
+    $items = @($rawItems | ForEach-Object { $_ })
+    if ($items.Count -eq 0) { throw "BLOCKED|$Context must contain at least one manifest component." }
+    $scopePaths = @()
+    if ($null -ne $Scope) {
+        $rawScopePaths = Get-StandardValidationProperty -Object $Scope -Name 'paths'
+        if ($null -ne $rawScopePaths) { $scopePaths = @($rawScopePaths | ForEach-Object { [string]$_ }) }
+    }
+    if ($scopePaths.Count -eq 0) { throw "BLOCKED|$Context scope must declare at least one path." }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $rowKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $sourceItems = New-Object 'System.Collections.Generic.List[object]'
+    $normalizedRows = New-Object 'System.Collections.Generic.List[object]'
+    $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+    $totalBytes = [int64]0
+
+    foreach ($item in $items) {
+        $path = [string](Get-StandardValidationProperty -Object $item -Name 'path')
+        if ([string]::IsNullOrWhiteSpace($path)) { throw "BLOCKED|$Context contains an item without a path." }
+        Assert-StandardValidationSafeRelativePath -Value $path -Context "$Context item path"
+        if (-not $seen.Add($path)) { throw "BLOCKED|$Context contains a duplicate path '$path'." }
+        if ($scopePaths -cnotcontains $path) {
+            throw "BLOCKED|$Context path '$path' is outside the consented scope."
+        }
+        if (-not $candidateByPath.ContainsKey($path)) {
+            throw "BLOCKED|$Context path '$path' is not present in the verified candidate manifest."
+        }
+
+        $sourcePath = Get-StandardValidationFullPath `
+            -Path (Join-Path $SnapshotRoot ($path.Replace('/', [IO.Path]::DirectorySeparatorChar))) `
+            -Context "$Context source '$path'"
+        if (-not (Test-StandardValidationPathWithin -Path $sourcePath -Root $SnapshotRoot -IncludeRoot)) {
+            throw "BLOCKED|$Context path '$path' escapes the candidate snapshot."
+        }
+        Assert-StandardValidationRegularFile -Path $sourcePath -Context "$Context source '$path'"
+        $sourceBytes = [IO.File]::ReadAllBytes($sourcePath)
+        $sourceHash = Get-StandardValidationBytesSha256 -Bytes $sourceBytes
+        $manifestEntry = $candidateByPath[$path]
+        $manifestHash = [string](Get-StandardValidationProperty -Object $manifestEntry -Name 'sha256')
+        $manifestLength = [int64](Get-StandardValidationProperty -Object $manifestEntry -Name 'length')
+        if ($sourceHash -cne $manifestHash -or $sourceBytes.Length -ne $manifestLength) {
+            throw "FAILED|$Context source '$path' changed relative to the verified candidate manifest."
+        }
+
+        # Decode and re-encode the exact source bytes with a throwing UTF-8
+        # decoder.  This both rejects malformed input and proves that the
+        # provider's text digest is over the verified source representation.
+        try {
+            $decodedText = $utf8.GetString($sourceBytes)
+            $roundTripBytes = $utf8.GetBytes($decodedText)
+            if ($roundTripBytes.Length -ne $sourceBytes.Length) {
+                throw 'strict UTF-8 round-trip changed the source byte count.'
+            }
+            for ($byteIndex = 0; $byteIndex -lt $sourceBytes.Length; $byteIndex++) {
+                if ($roundTripBytes[$byteIndex] -ne $sourceBytes[$byteIndex]) {
+                    throw 'strict UTF-8 round-trip changed the source bytes.'
+                }
+            }
+        }
+        catch {
+            throw "BLOCKED|$Context source '$path' is not valid strict UTF-8: $($_.Exception.Message)"
+        }
+
+        $contentKind = [string](Get-StandardValidationProperty -Object $item -Name 'contentKind')
+        if ([string]::IsNullOrWhiteSpace($contentKind)) {
+            # Newer v2 inventory rows use source/provider digests instead of
+            # the original contentKind/byteCount pair.  Keep the source-side
+            # check shape-neutral while still requiring a non-empty semantic
+            # scope label when the legacy field is present.
+            $contentKind = [string](Get-StandardValidationProperty -Object $item -Name 'transformation')
+        }
+        if ([string]::IsNullOrWhiteSpace($contentKind)) {
+            throw "BLOCKED|$Context item '$path' has no content kind or transformation identity."
+        }
+        $transformation = Get-StandardValidationProperty -Object $item -Name 'transformation'
+        if ($null -ne $transformation -and [string]$transformation -cne 'strict-utf8-v1') {
+            throw "BLOCKED|$Context item '$path' uses an unsupported text transformation."
+        }
+
+        $sourceShaProperty = Get-StandardValidationProperty -Object $item -Name 'sourceSha256'
+        if ($null -ne $sourceShaProperty -and [string]$sourceShaProperty -cne $sourceHash) {
+            throw "BLOCKED|$Context item '$path' sourceSha256 does not match the verified source bytes."
+        }
+        $sourceBytesProperty = Get-StandardValidationProperty -Object $item -Name 'sourceBytes'
+        if ($null -ne $sourceBytesProperty -and ([int64]$sourceBytesProperty -ne [int64]$sourceBytes.Length)) {
+            throw "BLOCKED|$Context item '$path' sourceBytes does not match the verified source bytes."
+        }
+
+        $providerHash = Get-StandardValidationProperty -Object $item -Name 'providerTextSha256'
+        if ($null -eq $providerHash) { $providerHash = Get-StandardValidationProperty -Object $item -Name 'sha256' }
+        if ($null -eq $providerHash -or [string]$providerHash -cne (Get-StandardValidationBytesSha256 -Bytes $roundTripBytes)) {
+            throw "BLOCKED|$Context item '$path' provider text digest does not match strict UTF-8 source bytes."
+        }
+        $providerBytes = Get-StandardValidationProperty -Object $item -Name 'byteCount'
+        if ($null -ne $providerBytes -and [int64]$providerBytes -ne [int64]$roundTripBytes.Length) {
+            throw "BLOCKED|$Context item '$path' byteCount does not match strict UTF-8 source bytes."
+        }
+
+        $skillId = Get-StandardValidationProperty -Object $item -Name 'skillId'
+        $isManifestSubsetRow = $null -ne (Get-StandardValidationProperty -Object $item -Name 'sourceSha256') -or
+            $null -ne (Get-StandardValidationProperty -Object $item -Name 'sourceBytes') -or
+            $null -ne (Get-StandardValidationProperty -Object $item -Name 'transformation') -or
+            $null -ne (Get-StandardValidationProperty -Object $item -Name 'providerTextSha256')
+        if ($isManifestSubsetRow) {
+            foreach ($requiredName in @('skillId', 'sourceSha256', 'sourceBytes', 'transformation', 'providerTextSha256')) {
+                if ($null -eq (Get-StandardValidationProperty -Object $item -Name $requiredName)) {
+                    throw "BLOCKED|$Context item '$path' is missing manifest-subset field '$requiredName'."
+                }
+            }
+            if ([string]$transformation -cne 'strict-utf8-v1' -or
+                [string]$providerHash -cne (Get-StandardValidationBytesSha256 -Bytes $roundTripBytes)) {
+                throw "BLOCKED|$Context item '$path' is not a strict-utf8-v1 manifest-subset row."
+            }
+        }
+        if ($null -ne $skillId -and $path -match '^skills/([^/]+)/') {
+            if ([string]$skillId -cne [string]$Matches[1]) {
+                throw "BLOCKED|$Context item '$path' skillId is not bound to its manifest path."
+            }
+        }
+        if ($isManifestSubsetRow) {
+            $rowKey = "{0}`n{1}" -f [string]$skillId, $path
+            if (-not $rowKeys.Add($rowKey)) {
+                throw "BLOCKED|$Context contains a duplicate (skillId,path) manifest-subset row."
+            }
+            [void]$normalizedRows.Add([pscustomobject][ordered]@{
+                    skillId = [string]$skillId
+                    path = $path
+                    sourceSha256 = [string](Get-StandardValidationProperty -Object $item -Name 'sourceSha256')
+                    sourceBytes = [int64]$sourceBytes.Length
+                    transformation = [string]$transformation
+                    providerTextSha256 = [string]$providerHash
+                })
+        }
+
+        [void]$sourceItems.Add([pscustomobject][ordered]@{
+                path = $path
+                contentKind = $contentKind
+                bytes = [byte[]]$sourceBytes
+            })
+        $totalBytes += [int64]$sourceBytes.Length
+    }
+
+    $declaredCount = Get-StandardValidationProperty -Object $ProviderTextInventory -Name 'fileCount'
+    if ($null -ne $declaredCount -and [int]$declaredCount -ne $items.Count) {
+        throw "BLOCKED|$Context fileCount does not match its manifest subset."
+    }
+    $declaredBytes = Get-StandardValidationProperty -Object $ProviderTextInventory -Name 'byteCount'
+    if ($null -ne $declaredBytes -and [int64]$declaredBytes -ne $totalBytes) {
+        throw "BLOCKED|$Context byteCount does not match its manifest subset."
+    }
+
+    $declaredProviderInventorySha256 = Get-StandardValidationProperty -Object $ProviderTextInventory -Name 'providerTextInventorySha256'
+    if ($null -ne $declaredProviderInventorySha256) {
+        if ($normalizedRows.Count -ne $items.Count) {
+            throw "BLOCKED|$Context providerTextInventorySha256 requires manifest-subset rows for every item."
+        }
+        $sortedRows = New-Object 'System.Collections.Generic.List[object]'
+        $sortedKeys = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($row in @($normalizedRows.ToArray())) {
+            $key = "{0}`n{1}" -f [string]$row.skillId, [string]$row.path
+            $insertAt = 0
+            while ($insertAt -lt $sortedKeys.Count -and [string]::CompareOrdinal($sortedKeys[$insertAt], $key) -le 0) { $insertAt++ }
+            $sortedKeys.Insert($insertAt, $key)
+            $sortedRows.Insert($insertAt, $row)
+        }
+        $inventoryCanonicalJson = Get-StandardSemanticBridgeCanonicalJson -Value ([object[]]$sortedRows.ToArray())
+        $expectedProviderInventorySha256 = Get-StandardValidationTextSha256 -Value $inventoryCanonicalJson
+        Assert-StandardValidationSha256 -Value $declaredProviderInventorySha256 -Context "$Context providerTextInventorySha256"
+        if ([string]$declaredProviderInventorySha256 -cne $expectedProviderInventorySha256) {
+            throw "BLOCKED|$Context providerTextInventorySha256 is not bound to the verified source rows."
+        }
+    }
+
+    # For the v1-shaped bridge inventory, rebuild the exact digest from the
+    # verified source bytes.  Future inventory shapes retain their own source
+    # and provider digests above and are still passed through the bridge's
+    # strict schema verifier below.
+    try {
+        $firstItem = @($items)[0]
+        $hasLegacyShape = $null -ne (Get-StandardValidationProperty -Object $firstItem -Name 'contentKind') -and
+            $null -ne (Get-StandardValidationProperty -Object $firstItem -Name 'sha256') -and
+            $null -eq $declaredProviderInventorySha256 -and $normalizedRows.Count -eq 0
+        if ($hasLegacyShape) {
+            $legacyInventoryItems = @($sourceItems.ToArray())
+            $rebuilt = New-StandardSemanticBridgeProviderTextInventory -TextItems $legacyInventoryItems
+            if ((Get-StandardSemanticBridgeCanonicalJson -Value $rebuilt) -cne
+                (Get-StandardSemanticBridgeCanonicalJson -Value $ProviderTextInventory)) {
+                throw "BLOCKED|$Context digest is not bound to the verified source bytes."
+            }
+        }
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match '^(?:BLOCKED|INVALID|FAILED)\|') { throw $message }
+        throw "BLOCKED|$Context could not be reconstructed from verified source bytes: $message"
+    }
+    # Recheck the complete snapshot after all source reads so a file changed
+    # during this inventory pass cannot be accepted on a partial observation.
+    Assert-StandardValidationSnapshotUnchanged `
+        -SnapshotRoot $SnapshotRoot `
+        -ExpectedSnapshotContentSha256 $ExpectedCandidateContentSha256
+    return $ProviderTextInventory
+}
+
 function Assert-StandardValidationSnapshotUnchanged {
     param(
         [Parameter(Mandatory = $true)][string] $SnapshotRoot,
@@ -2383,6 +2635,7 @@ function New-StandardValidationStages {
             reason = $null
             triggerDecision = $null
             semanticEvidence = $null
+            semanticBridgeV2Evidence = $null
             aiReviewEvidence = $null
             events = @()
         }
@@ -3009,7 +3262,11 @@ function Invoke-StandardValidationProcess {
                 $jobHandle = [StandardValidationProcessControlNative]::CreateKillOnCloseJob()
                 $jobClosed = $false
                 $bootstrapHost = Get-StandardValidationWindowsBootstrapHost
-                $windowsBootstrapReleasePath = Join-Path $WorkingDirectory ("process-bootstrap-{0}.signal" -f ([guid]::NewGuid().ToString('N')))
+                # Windows PowerShell 5.1/.NET Framework still observes the
+                # legacy MAX_PATH limit.  Keep the supervisor-only release
+                # marker short because the working root already carries the
+                # candidate/run identity and may live under a long temp path.
+                $windowsBootstrapReleasePath = Join-Path $WorkingDirectory ("b-{0}.sig" -f ([guid]::NewGuid().ToString('N')))
                 if (Test-Path -LiteralPath $windowsBootstrapReleasePath) {
                     throw 'The owned Windows process bootstrap signal path already exists.'
                 }
@@ -3037,7 +3294,7 @@ function Invoke-StandardValidationProcess {
                     throw 'No trusted setsid launcher is available for an owned Unix process group.'
                 }
                 $bootstrapHost = Get-StandardValidationUnixBootstrapHost
-                $unixBootstrapReleasePath = Join-Path $WorkingDirectory ("process-bootstrap-{0}.signal" -f ([guid]::NewGuid().ToString('N')))
+                $unixBootstrapReleasePath = Join-Path $WorkingDirectory ("b-{0}.sig" -f ([guid]::NewGuid().ToString('N')))
                 if (Test-Path -LiteralPath $unixBootstrapReleasePath) {
                     throw 'The owned Unix process bootstrap signal path already exists.'
                 }
@@ -3348,9 +3605,17 @@ function Invoke-StandardValidationProcess {
         catch { $stdout = '' }
         try {
             $stderrCaptureResult = $stderrTask.GetAwaiter().GetResult()
-            $stderr = [string]$stderrCaptureResult.Text
+            $capturedStderr = [string]$stderrCaptureResult.Text
+            if ([string]::IsNullOrWhiteSpace($stderr)) {
+                $stderr = $capturedStderr
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($capturedStderr)) {
+                $stderr = "$stderr`n$capturedStderr"
+            }
         }
-        catch { $stderr = '' }
+        catch {
+            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = '' }
+        }
         # The bounded reader is the primary memory guard. Normalize the values
         # once more before evidence serialization so platform-specific stream
         # decoding can never make a retained prefix exceed the contract quota.
@@ -3990,7 +4255,10 @@ function Invoke-StandardValidationCommandAndRecord {
     }
     Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedSnapshotContentSha256
     Assert-StandardValidationEvidenceArtifacts
-    $childWorkingDirectory = Join-Path $ChildWorkingRoot $eventId
+    # Use a path-safe directory name while retaining the full event ID in the
+    # evidence record.  The event GUID is already unique; omitting hyphens
+    # leaves more room for Windows PowerShell 5.1's legacy MAX_PATH boundary.
+    $childWorkingDirectory = Join-Path $ChildWorkingRoot $eventId.Replace('-', '')
     [void](New-Item -ItemType Directory -Path $childWorkingDirectory -Force)
     Assert-StandardValidationNoReparsePoints -Root $childWorkingDirectory -Context "$StageId/$ToolId child working directory"
     $environment = @{
@@ -4679,6 +4947,184 @@ function Assert-StandardValidationImportedEvidence {
     return $evidence
 }
 
+function Assert-StandardValidationSemanticBridgeV2Evidence {
+    param(
+        [Parameter(Mandatory = $true)][string] $ConsentRequestPath,
+        [Parameter(Mandatory = $true)][string] $ConsentDecisionPath,
+        [Parameter(Mandatory = $true)][string] $EvidencePath,
+        [Parameter(Mandatory = $true)][string] $PublicKeyPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedKeyId,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $SourceRepository,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $BaseRevision,
+        [Parameter(Mandatory = $true)][string] $ExpectedCandidateContentSha256,
+        [Parameter(Mandatory = $true)][string] $SnapshotRoot,
+        [Parameter(Mandatory = $true)] $CandidateInventory,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][bool] $DevelopmentHarness,
+        [hashtable] $ReplayLedger = $null,
+        [string] $Context = 'semantic v2 evidence'
+    )
+
+    $rsa = $null
+    try {
+        # A caller-supplied key is deliberately a development-harness seam.  A
+        # production trust anchor must be selected and authenticated by the
+        # protected supervisor before this bridge can be enabled there.
+        if (-not $DevelopmentHarness) {
+            throw 'BLOCKED|Semantic bridge v2 accepts caller-supplied public keys only in the development harness.'
+        }
+        if ([string]::IsNullOrWhiteSpace($ExpectedKeyId) -or $ExpectedKeyId -match '[\x00-\x1F\x7F]') {
+            throw 'BLOCKED|Semantic bridge v2 requires a non-empty expected public-key identity.'
+        }
+
+        $requestFull = Get-StandardValidationFullPath -Path $ConsentRequestPath -Context "$Context consent request"
+        $decisionFull = Get-StandardValidationFullPath -Path $ConsentDecisionPath -Context "$Context consent decision"
+        $evidenceFull = Get-StandardValidationFullPath -Path $EvidencePath -Context "$Context evidence"
+        $publicKeyFull = Get-StandardValidationFullPath -Path $PublicKeyPath -Context "$Context public key"
+        foreach ($path in @(
+                [pscustomobject]@{ path = $requestFull; name = 'consent request' },
+                [pscustomobject]@{ path = $decisionFull; name = 'consent decision' },
+                [pscustomobject]@{ path = $evidenceFull; name = 'evidence' },
+                [pscustomobject]@{ path = $publicKeyFull; name = 'public key' })) {
+            Assert-StandardValidationOutsideRoot -Path ([string]$path.path) -Root $CandidateRoot -Context "$Context $($path.name)"
+            Assert-StandardValidationOutsideRoot -Path ([string]$path.path) -Root $ArtifactsRoot -Context "$Context $($path.name)"
+        }
+        foreach ($path in @(
+                [pscustomobject]@{ path = $requestFull; name = 'consent request' },
+                [pscustomobject]@{ path = $decisionFull; name = 'consent decision' },
+                [pscustomobject]@{ path = $evidenceFull; name = 'evidence' },
+                [pscustomobject]@{ path = $publicKeyFull; name = 'public key' })) {
+            Assert-StandardValidationRegularFile -Path ([string]$path.path) -Context "$Context $($path.name)"
+        }
+
+        $requestSnapshot = Get-StandardValidationJsonSnapshot -Path $requestFull -Context "$Context consent request"
+        $decisionSnapshot = Get-StandardValidationJsonSnapshot -Path $decisionFull -Context "$Context consent decision"
+        $evidenceSnapshot = Get-StandardValidationJsonSnapshot -Path $evidenceFull -Context "$Context evidence"
+        # Read the key once, alongside the JSON snapshots.  The public key is
+        # an authenticated input just like request/decision/evidence; parsing
+        # it again from the path would reopen a TOCTOU window before Register.
+        $publicKeyBytes = [IO.File]::ReadAllBytes($publicKeyFull)
+        $publicKeySha256 = Get-StandardValidationBytesSha256 -Bytes $publicKeyBytes
+        $publicKeyUtf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        $publicKeyXml = $publicKeyUtf8.GetString($publicKeyBytes)
+        $request = $requestSnapshot.value
+        $decision = $decisionSnapshot.value
+        if ($request -is [array] -or $decision -is [array]) {
+            throw 'BLOCKED|Semantic bridge v2 consent request and decision must be JSON objects.'
+        }
+
+        # Bind the bridge to the candidate currently being validated for the
+        # fields the runner actually owns.  The remaining v2 binding fields are
+        # intentionally checked by the bridge against the consent decision;
+        # this runner does not invent provider, signer, or production tool data.
+        $decisionBindings = Get-StandardValidationProperty -Object $decision -Name 'bindings'
+        $candidateBinding = if ($null -eq $decisionBindings) { $null } else { Get-StandardValidationProperty -Object $decisionBindings -Name 'candidate' }
+        if ($null -eq $candidateBinding) {
+            throw 'BLOCKED|Semantic bridge v2 consent decision has no candidate binding.'
+        }
+        if ([string](Get-StandardValidationProperty -Object $candidateBinding -Name 'candidateId') -cne $CandidateId) {
+            throw 'BLOCKED|Semantic bridge v2 candidate binding does not match the current validation candidate.'
+        }
+        if ([string](Get-StandardValidationProperty -Object $candidateBinding -Name 'sourceRepository') -cne $SourceRepository -or
+            [string](Get-StandardValidationProperty -Object $candidateBinding -Name 'sourceRevision') -cne $SourceRevision -or
+            [string](Get-StandardValidationProperty -Object $candidateBinding -Name 'baseRevision') -cne $BaseRevision) {
+            throw 'BLOCKED|Semantic bridge v2 candidate binding does not match the current source revisions.'
+        }
+        if ([string](Get-StandardValidationProperty -Object $candidateBinding -Name 'inputInventorySha256') -cne $ExpectedCandidateContentSha256) {
+            throw 'BLOCKED|Semantic bridge v2 candidate input inventory does not match the current candidate inventory.'
+        }
+
+        $modulePath = Join-Path $script:StandardValidationRepositoryRoot 'scripts/StandardSemanticBridge.psm1'
+        Assert-StandardValidationRegularFile -Path $modulePath -Context "$Context verifier module"
+        try {
+            Import-Module -Name $modulePath -Force -ErrorAction Stop
+        }
+        catch {
+            throw "BLOCKED|Semantic bridge v2 verifier could not be loaded: $($_.Exception.Message)"
+        }
+
+        # The bridge inventory digest is consent-bound, but the runner also
+        # requires the submitted rows to resolve to exact, strict-UTF8 bytes
+        # in the verified candidate snapshot before verifier acceptance.
+        Assert-StandardValidationSemanticProviderTextInventory `
+            -SnapshotRoot $SnapshotRoot `
+            -CandidateInventory $CandidateInventory `
+            -ProviderTextInventory (Get-StandardValidationProperty -Object $decision -Name 'providerTextInventory') `
+            -Scope (Get-StandardValidationProperty -Object $decision -Name 'scope') `
+            -ExpectedCandidateContentSha256 $ExpectedCandidateContentSha256 `
+            -Context "$Context provider text inventory" | Out-Null
+
+        $canonicalUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        foreach ($artifact in @(
+                [pscustomobject]@{ snapshot = $requestSnapshot; value = $request; name = 'consent request' },
+                [pscustomobject]@{ snapshot = $decisionSnapshot; value = $decision; name = 'consent decision' })) {
+            $canonicalBytes = $canonicalUtf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $artifact.value))
+            $canonicalSha256 = Get-StandardValidationBytesSha256 -Bytes $canonicalBytes
+            if ([string]$artifact.snapshot.sha256 -cne $canonicalSha256) {
+                throw "BLOCKED|Semantic bridge v2 $($artifact.name) bytes are not canonical UTF-8 JSON."
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($publicKeyXml) -or
+            $publicKeyXml -notmatch '(?is)^\s*<RSAKeyValue>\s*<Modulus>[^<]+</Modulus>\s*<Exponent>[^<]+</Exponent>\s*</RSAKeyValue>\s*$' -or
+            $publicKeyXml -match '(?i)<D(?:\s|>)') {
+            throw 'BLOCKED|Semantic bridge v2 public key must be an RSA XML public key without private material.'
+        }
+        $rsa = [System.Security.Cryptography.RSA]::Create()
+        try { $rsa.FromXmlString($publicKeyXml) }
+        catch { throw "BLOCKED|Semantic bridge v2 public key could not be parsed: $($_.Exception.Message)" }
+        $publicParameters = $rsa.ExportParameters($false)
+        if ($null -eq $publicParameters.Modulus -or $publicParameters.Modulus.Length -eq 0 -or
+            $null -eq $publicParameters.Exponent -or $publicParameters.Exponent.Length -eq 0) {
+            throw 'BLOCKED|Semantic bridge v2 public key does not contain an RSA public key.'
+        }
+
+        if ($null -eq $ReplayLedger) { $ReplayLedger = @{} }
+        $verification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes ([byte[]]$evidenceSnapshot.bytes) `
+            -ConsentRequest $request `
+            -ConsentDecision $decision `
+            -PublicKey $rsa `
+            -ExpectedKeyId $ExpectedKeyId `
+            -ExpectedBindings $decisionBindings `
+            -ExpectedProviderRoute (Get-StandardValidationProperty -Object $decision -Name 'providerRoute') `
+            -ExpectedPurpose ([string](Get-StandardValidationProperty -Object $decision -Name 'purpose')) `
+            -ExpectedScope (Get-StandardValidationProperty -Object $decision -Name 'scope') `
+            -ExpectedProviderTextInventory (Get-StandardValidationProperty -Object $decision -Name 'providerTextInventory') `
+            -ReplayLedger $ReplayLedger
+        if ($null -eq $verification -or -not [bool]$verification.valid) {
+            $reason = if ($null -eq $verification) { 'verifier returned no result.' } else { [string]$verification.reason }
+            throw "BLOCKED|Semantic bridge v2 evidence rejected: $reason"
+        }
+
+        [void](Register-StandardValidationEvidenceArtifact -Path $requestFull -ExpectedSha256 ([string]$requestSnapshot.sha256) -Context "$Context consent request")
+        [void](Register-StandardValidationEvidenceArtifact -Path $decisionFull -ExpectedSha256 ([string]$decisionSnapshot.sha256) -Context "$Context consent decision")
+        [void](Register-StandardValidationEvidenceArtifact -Path $evidenceFull -ExpectedSha256 ([string]$evidenceSnapshot.sha256) -Context "$Context evidence")
+        [void](Register-StandardValidationEvidenceArtifact -Path $publicKeyFull -ExpectedSha256 $publicKeySha256 -Context "$Context public key")
+        return [pscustomobject][ordered]@{
+            evidence = $verification.evidence
+            evidenceSha256 = [string]$verification.evidenceSha256
+            request = $request
+            decision = $decision
+            requestPath = $requestFull
+            decisionPath = $decisionFull
+            evidencePath = $evidenceFull
+            publicKeyPath = $publicKeyFull
+        }
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match '^(?:BLOCKED|INVALID|FAILED)\|') { throw $message }
+        throw "BLOCKED|$Context failed closed: $message"
+    }
+    finally {
+        if ($null -ne $rsa) { $rsa.Dispose() }
+    }
+}
+
 function Assert-StandardValidationContractFiles {
     param([Parameter(Mandatory = $true)][string] $RepositoryRoot)
 
@@ -4724,7 +5170,9 @@ function Assert-StandardValidationContractFiles {
     if (($policyIds -join ',') -cne ($contractIds -join ',')) { throw 'INVALID|Validation contract and security policy stage orders diverge.' }
     $resolverPath = Join-Path $RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1'
     $toolchainPath = Join-Path $RepositoryRoot 'docs/standards/validation-toolchain.json'
-    foreach ($authorityFile in @($resolverPath, $toolchainPath, $authorityGatePath, (Join-Path $RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'))) {
+    $semanticBridgeModulePath = Join-Path $RepositoryRoot 'scripts/StandardSemanticBridge.psm1'
+    $semanticBridgeSchemaPath = Join-Path $RepositoryRoot 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json'
+    foreach ($authorityFile in @($resolverPath, $toolchainPath, $authorityGatePath, $semanticBridgeModulePath, $semanticBridgeSchemaPath, (Join-Path $RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'))) {
         if (-not (Test-Path -LiteralPath $authorityFile -PathType Leaf)) {
             throw "INVALID|Central authority file is missing: $authorityFile"
         }
@@ -4753,6 +5201,10 @@ function Assert-StandardValidationContractFiles {
         authorityGateSha256 = Get-StandardValidationFileSha256 -Path $authorityGatePath -Context 'canonical authority gate'
         resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'
         resolverSha256 = Get-StandardValidationFileSha256 -Path $resolverPath -Context 'central tool resolver'
+        semanticBridgeModulePath = 'scripts/StandardSemanticBridge.psm1'
+        semanticBridgeModuleSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeModulePath -Context 'semantic bridge verifier module'
+        semanticBridgeSchemaPath = 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json'
+        semanticBridgeSchemaSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeSchemaPath -Context 'semantic bridge v2 schema'
         trustAnchors = Get-StandardValidationTrustAnchorEvidence
     }
     return [pscustomobject][ordered]@{ contract = $contract; contractPath = $contractPath; policy = $policy; policyPath = $policyPath; authority = $authority }
@@ -4767,6 +5219,8 @@ function Assert-StandardValidationAuthorityUnchanged {
         [pscustomobject]@{ path = $Authority.policyPath; sha256 = $Authority.policySha256; context = 'canonical validation security gate' }
         [pscustomobject]@{ path = $Authority.authorityGatePath; sha256 = $Authority.authorityGateSha256; context = 'canonical authority gate' }
         [pscustomobject]@{ path = $Authority.resolverPath; sha256 = $Authority.resolverSha256; context = 'central tool resolver' }
+        [pscustomobject]@{ path = $Authority.semanticBridgeModulePath; sha256 = $Authority.semanticBridgeModuleSha256; context = 'semantic bridge verifier module' }
+        [pscustomobject]@{ path = $Authority.semanticBridgeSchemaPath; sha256 = $Authority.semanticBridgeSchemaSha256; context = 'semantic bridge v2 schema' }
     )
     foreach ($check in $checks) {
         $path = Join-Path $script:StandardValidationRepositoryRoot ([string]$check.path)
@@ -4824,7 +5278,7 @@ function New-StandardValidationCandidateEvidence {
         releaseEligible = $ReleaseEligible
         candidate = if ($null -eq $Candidate) { [ordered]@{ sourceRepository = 'https://invalid.invalid/invalid/invalid.git'; sourceRevision = ('0' * 40); baseRevision = ('0' * 40); eventName = 'invalid'; candidateId = ('0' * 64); contentSha256 = ('0' * 64); archiveSha256 = ('0' * 64); inventory = @([ordered]@{ path = 'unavailable'; sha256 = ('0' * 64); length = 0 }); activeSkills = @('invalid'); acquisition = [ordered]@{ status = 'unverified'; verified = $false; sourceRepository = 'unavailable'; sourceRevision = 'unavailable'; baseRevision = 'unavailable'; eventName = 'invalid'; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); contentSha256 = $null; evidencePath = $null; evidenceSha256 = ('0' * 64) } } } else { $Candidate }
         adapter = if ($null -eq $Adapter) { [ordered]@{ schemaVersion = 1; sha256 = ('0' * 64); mode = 'production'; canonicalValidatorPath = 'unavailable'; skillsRoot = 'unavailable'; activeSkills = @('invalid') } } else { $Adapter }
-        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
+        authority = if ($null -eq $Authority) { [ordered]@{ repository = $script:StandardValidationAuthorityRepository; runnerPath = 'scripts/Invoke-StandardValidation.ps1'; runnerSha256 = ('0' * 64); contractPath = 'docs/standards/standard-validation-contract-v1.json'; contractSha256 = ('0' * 64); policyPath = 'docs/standards/validation-security-gate.json'; policySha256 = ('0' * 64); authorityGatePath = 'scripts/Invoke-StandardAuthorityGate.ps1'; authorityGateSha256 = ('0' * 64); resolverPath = 'scripts/Resolve-StandardValidationTool.ps1'; resolverSha256 = ('0' * 64); semanticBridgeModulePath = 'scripts/StandardSemanticBridge.psm1'; semanticBridgeModuleSha256 = ('0' * 64); semanticBridgeSchemaPath = 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json'; semanticBridgeSchemaSha256 = ('0' * 64); trustAnchors = @([ordered]@{ id = 'supervisor'; path = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'; sha256 = ('0' * 64) }, [ordered]@{ id = 'humanApproval'; path = 'docs/standards/trust-anchors/human-approval-public-key.xml'; sha256 = ('0' * 64) }); binding = [ordered]@{ status = 'unverified'; verified = $false; repository = $script:StandardValidationAuthorityRepository; revision = $null; archivePath = $null; archiveUrl = $null; archivePrefix = $null; archiveSha256 = ('0' * 64); snapshotEvidencePath = $null; snapshotEvidenceSha256 = ('0' * 64); snapshotInventorySha256 = ('0' * 64); selectedFiles = @() } } } else { $Authority }
         launchBinding = if ($null -eq $LaunchBinding) {
             [ordered]@{ status = if ($DevelopmentHarness) { 'unverified-development-harness' } else { 'unverified-production' }; verified = $false; path = $null; sha256 = ('0' * 64); resolutionRunId = $RunId.ToString(); issuedAt = $null; expiresAt = $null; consumptionPath = $null; consumptionSha256 = ('0' * 64) }
         }
@@ -4934,6 +5388,10 @@ function Invoke-StandardValidationRun {
         [string] $SemanticPurpose,
         [string] $SemanticScope,
         [string] $SemanticEvidencePath,
+        [string] $SemanticConsentRequestPath,
+        [string] $SemanticConsentDecisionPath,
+        [string] $SemanticPublicKeyPath,
+        [string] $SemanticPublicKeyId,
         [string] $AiReviewEvidencePath,
         [string] $HumanApprovalEvidencePath,
         [string] $PublishInstallEvidencePath,
@@ -4978,6 +5436,7 @@ function Invoke-StandardValidationRun {
     $requiresHumanReview = $false
     $analyzerSemanticRequired = $false
     $semanticRequiredSources = New-Object 'System.Collections.Generic.List[string]'
+    $semanticReplayLedger = @{}
     $authorityBinding = $null
     $launchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
@@ -5215,7 +5674,12 @@ function Invoke-StandardValidationRun {
         catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
-        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey
+        # Keep the full execution key in the lock/run paths, but use a
+        # collision-resistant 128-bit directory prefix for child working
+        # files.  This prevents the private bootstrap marker path from
+        # exceeding Windows PowerShell 5.1/.NET Framework MAX_PATH when the
+        # artifact root is itself under a long temporary checkout path.
+        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey.Substring(0, 32)
         $childWorkingRoot = Assert-StandardValidationCanonicalRootPath -Path $childWorkingRoot -Context 'child working root'
         [void](New-Item -ItemType Directory -Path $childWorkingRoot -Force)
         Assert-StandardValidationNoReparsePoints -Root $childWorkingRoot -Context 'child working root'
@@ -5400,6 +5864,14 @@ function Invoke-StandardValidationRun {
 
         $stage = Get-StandardValidationStage -Stages $stages -Id 'conditional-semantic-scan'
         $effectiveSemanticTriggered = [bool]($SemanticTriggered -or $analyzerSemanticRequired)
+        $semanticBridgeV2Inputs = @(
+            $SemanticConsentRequestPath,
+            $SemanticConsentDecisionPath,
+            $SemanticPublicKeyPath,
+            $SemanticPublicKeyId
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        $semanticBridgeV2Requested = @($semanticBridgeV2Inputs).Count -gt 0
+        $semanticBridgeV2Complete = @($semanticBridgeV2Inputs).Count -eq 4 -and -not [string]::IsNullOrWhiteSpace($SemanticEvidencePath)
         $stage.triggerDecision = [ordered]@{
             callerRequested = [bool]$SemanticTriggered
             analyzerRequired = [bool]$analyzerSemanticRequired
@@ -5407,7 +5879,68 @@ function Invoke-StandardValidationRun {
             effectiveTriggered = $effectiveSemanticTriggered
         }
         if (-not $effectiveSemanticTriggered) {
+            if ($semanticBridgeV2Requested) {
+                Start-StandardValidationStage -Stage $stage
+                Complete-StandardValidationStage -Stage $stage -Status blocked -Reason 'Semantic bridge v2 inputs were supplied without an effective semantic trigger.'
+                Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
+                throw 'BLOCKED|Semantic bridge v2 inputs require an effective semantic trigger.'
+            }
             Complete-StandardValidationStage -Stage $stage -Status 'not-applicable' -Reason 'Canonical analyzer envelopes did not require semantic analysis and the caller did not add a trigger.'
+        }
+        elseif ($semanticBridgeV2Requested -and -not $semanticBridgeV2Complete) {
+            Start-StandardValidationStage -Stage $stage
+            Complete-StandardValidationStage -Stage $stage -Status blocked -Reason 'Semantic bridge v2 requires consent request, decision, evidence, public key, and expected key identity.'
+            Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
+            throw 'BLOCKED|Semantic bridge v2 inputs are incomplete.'
+        }
+        elseif ($semanticBridgeV2Complete) {
+            Start-StandardValidationStage -Stage $stage
+            $semanticBridgeResult = Assert-StandardValidationSemanticBridgeV2Evidence `
+                -ConsentRequestPath $SemanticConsentRequestPath `
+                -ConsentDecisionPath $SemanticConsentDecisionPath `
+                -EvidencePath $SemanticEvidencePath `
+                -PublicKeyPath $SemanticPublicKeyPath `
+                -ExpectedKeyId $SemanticPublicKeyId `
+                -CandidateId $candidateId `
+                -SourceRepository $SourceRepository `
+                -SourceRevision $SourceRevision `
+                -BaseRevision $BaseRevision `
+                -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+                -SnapshotRoot $snapshotRoot `
+                -CandidateInventory $candidateInventory `
+                -CandidateRoot $originalCandidateRoot `
+                -ArtifactsRoot $artifactRootFull `
+                -DevelopmentHarness $DevelopmentHarness `
+                -ReplayLedger $semanticReplayLedger `
+                -Context 'semantic v2 evidence'
+            $semantic = $semanticBridgeResult.evidence
+            $stage.semanticBridgeV2Evidence = [pscustomobject][ordered]@{
+                schemaVersion = 2
+                artifactType = 'semantic-evidence-v2'
+                artifactClassification = 'local-semantic-bridge-v2'
+                evidenceSha256 = [string]$semanticBridgeResult.evidenceSha256
+                evidencePath = [string]$semanticBridgeResult.evidencePath
+                attestationKeyId = [string]$semantic.attestation.keyId
+                consentRequestSha256 = [string]$semantic.consent.consentRequestSha256
+                consentArtifactSha256 = [string]$semantic.consent.consentArtifactSha256
+                findingsSha256 = [string]$semantic.execution.findingsSha256
+                verificationMode = 'development-harness-local-simulation-only'
+                releaseEligible = $false
+            }
+            $stage.events += [pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); stageId = $stage.id; toolId = 'imported-semantic-evidence-v2'; skillId = $null; candidateId = $candidateId; commandSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeResult.evidencePath -Context 'semantic v2 evidence'; exitCode = 0; status = 'passed'; outputSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeResult.evidencePath -Context 'semantic v2 evidence'; outputPath = $semanticBridgeResult.evidencePath; cleanedUp = $true }
+            $v2FindingProjection = @($semantic.findings | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    severity = [string]$_.severity
+                    fingerprint = [string]$_.fingerprint
+                    ruleId = [string]$_.ruleId
+                    message = [string]$_.message
+                    path = [string]$_.path
+                }
+            })
+            if ([bool](Assert-StandardValidationFindings -Envelope ([pscustomobject][ordered]@{ findings = $v2FindingProjection }) -Context 'semantic v2 evidence')) {
+                $requiresHumanReview = $true
+            }
+            Complete-StandardValidationStage -Stage $stage -Status passed
         }
         elseif (-not $SemanticConsent) {
             Start-StandardValidationStage -Stage $stage
@@ -5687,6 +6220,10 @@ $result = Invoke-StandardValidationRun `
     -SemanticPurpose $SemanticPurpose `
     -SemanticScope $SemanticScope `
     -SemanticEvidencePath $SemanticEvidencePath `
+    -SemanticConsentRequestPath $SemanticConsentRequestPath `
+    -SemanticConsentDecisionPath $SemanticConsentDecisionPath `
+    -SemanticPublicKeyPath $SemanticPublicKeyPath `
+    -SemanticPublicKeyId $SemanticPublicKeyId `
     -AiReviewEvidencePath $AiReviewEvidencePath `
     -HumanApprovalEvidencePath $HumanApprovalEvidencePath `
     -PublishInstallEvidencePath $PublishInstallEvidencePath `
