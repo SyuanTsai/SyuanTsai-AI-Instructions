@@ -27,7 +27,10 @@ Describe 'Standard validation resolver hardening' {
 
         function Assert-Match {
             param([string] $Actual, [string] $Pattern, [string] $Message)
-            if ($Actual -notmatch $Pattern) { throw "$Message Pattern='$Pattern'." }
+            if ($Actual -notmatch $Pattern) {
+                $actualDisplay = if ($null -eq $Actual) { '<null>' } else { [string]$Actual }
+                throw "$Message Actual='$actualDisplay' Pattern='$Pattern'."
+            }
         }
 
         function Assert-NotMatch {
@@ -776,30 +779,114 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
     # Scenario: A caller points either public report writer at an existing file containing unrelated bytes.
     # Purpose: Prove fail-closed existing-file behavior and byte preservation for both OutputPath contracts.
     It 'UnitT91_rejects_existing_caller_output_without_mutation' {
-        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
-
-        $sentinel = (New-Object Text.UTF8Encoding($false)).GetBytes('existing-report-must-remain-byte-identical')
-        $resolverOutput = Join-Path $TestDrive 'existing-resolver-output.json'
-        [IO.File]::WriteAllBytes($resolverOutput, $sentinel)
-        $resolverBefore = [IO.File]::ReadAllBytes($resolverOutput)
-        $resolverError = $null
-        try { & $script:ResolverPath -ValidatePolicyOnly -OutputPath $resolverOutput | Out-Null }
-        catch { $resolverError = $_.Exception.Message }
-        Assert-Match $resolverError 'exists|already' 'The resolver must fail closed when caller OutputPath already exists.'
-        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($resolverOutput)) -Expected $resolverBefore -Message 'The resolver must not mutate an existing caller output file.'
-
-        $adapterRoot = Join-Path $TestDrive 'existing-adapter-package'
-        [void](New-Item -ItemType Directory -Path $adapterRoot -Force)
-        $adapterOutput = Join-Path $TestDrive 'existing-adapter-output.json'
-        [IO.File]::WriteAllBytes($adapterOutput, $sentinel)
-        $adapterBefore = [IO.File]::ReadAllBytes($adapterOutput)
-        $adapterError = $null
+        $previousErrorActionPreference = $ErrorActionPreference
         try {
-            & $script:UpstreamAdapterValidatorPath -PackageRoot $adapterRoot -OutputPath $adapterOutput | Out-Null
+            $ErrorActionPreference = 'Stop'
+            $sentinel = (New-Object Text.UTF8Encoding($false)).GetBytes('existing-report-must-remain-byte-identical')
+            $childScript = Join-Path $TestDrive 'existing-output-conflict-child.ps1'
+            Write-TestUtf8File -Path $childScript -Text @'
+param(
+    [Parameter(Mandatory = $true)][ValidateSet('resolver', 'adapter')][string] $Mode,
+    [Parameter(Mandatory = $true)][string] $ResolverPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPath,
+    [Parameter(Mandatory = $true)][string] $ResolverPolicyPath,
+    [Parameter(Mandatory = $true)][string] $AdapterPolicyPath,
+    [Parameter(Mandatory = $true)][string] $PackageRoot,
+    [Parameter(Mandatory = $true)][string] $OutputPath
+)
+$ErrorActionPreference = 'Stop'
+$failureText = $null
+try {
+    if ($Mode -ceq 'resolver') {
+        & $ResolverPath -PolicyPath $ResolverPolicyPath -ValidatePolicyOnly -OutputPath $OutputPath -ErrorAction Stop | Out-Null
+    }
+    else {
+        & $AdapterPath -PackageRoot $PackageRoot -PolicyPath $AdapterPolicyPath -OutputPath $OutputPath -ErrorAction Stop | Out-Null
+    }
+}
+catch {
+    $failureText = $_.Exception.ToString()
+}
+if ([string]::IsNullOrWhiteSpace($failureText)) {
+    [Console]::Error.WriteLine('Expected an existing OutputPath conflict, but the command completed successfully.')
+    exit 2
+}
+[Console]::Error.WriteLine($failureText)
+if ($failureText -match 'writer-error-kind=existing-output') {
+    exit 0
+}
+exit 1
+'@
+
+            $powerShellExecutable = Get-TestPowerShellExecutable
+            $adapterRoot = Join-Path $TestDrive 'existing-adapter-package'
+            [void](New-Item -ItemType Directory -Path $adapterRoot -Force)
+            foreach ($case in @(
+                [pscustomobject]@{
+                    Mode = 'resolver'
+                    OutputPath = Join-Path $TestDrive 'existing-resolver-output.json'
+                    PackageRoot = $adapterRoot
+                    PolicyPath = $script:ToolchainPath
+                    AdapterPolicyPath = $script:UpstreamAdapterPolicyPath
+                    ErrorMessage = 'The resolver must report a stable existing-output conflict marker.'
+                    BytesMessage = 'The resolver must not mutate an existing caller output file.'
+                }
+                [pscustomobject]@{
+                    Mode = 'adapter'
+                    OutputPath = Join-Path $TestDrive 'existing-adapter-output.json'
+                    PackageRoot = $adapterRoot
+                    PolicyPath = $script:ToolchainPath
+                    AdapterPolicyPath = $script:UpstreamAdapterPolicyPath
+                    ErrorMessage = 'The upstream adapter must report a stable existing-output conflict marker.'
+                    BytesMessage = 'The upstream adapter must not mutate an existing caller output file.'
+                }
+            )) {
+                [IO.File]::WriteAllBytes($case.OutputPath, $sentinel)
+                $before = [IO.File]::ReadAllBytes($case.OutputPath)
+                $arguments = @(
+                    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', ('"' + $childScript + '"'),
+                    '-Mode', [string]$case.Mode,
+                    '-ResolverPath', ('"' + $script:ResolverPath + '"'),
+                    '-AdapterPath', ('"' + $script:UpstreamAdapterValidatorPath + '"'),
+                    '-ResolverPolicyPath', ('"' + $case.PolicyPath + '"'),
+                    '-AdapterPolicyPath', ('"' + $case.AdapterPolicyPath + '"'),
+                    '-PackageRoot', ('"' + $case.PackageRoot + '"'),
+                    '-OutputPath', ('"' + $case.OutputPath + '"')
+                )
+                $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $startInfo.FileName = $powerShellExecutable
+                $startInfo.Arguments = $arguments -join ' '
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $true
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError = $true
+                $process = New-Object System.Diagnostics.Process
+                $process.StartInfo = $startInfo
+                try {
+                    if (-not $process.Start()) { throw "Unable to start existing $($case.Mode) output conflict probe." }
+                    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                    $stderrTask = $process.StandardError.ReadToEndAsync()
+                    if (-not $process.WaitForExit(15000)) {
+                        try { $process.Kill() } catch { }
+                        throw "Existing $($case.Mode) output conflict probe did not finish within 15 seconds."
+                    }
+                    $process.WaitForExit()
+                    $exitCode = [int]$process.ExitCode
+                    $stdout = [string]$stdoutTask.Result
+                    $stderr = [string]$stderrTask.Result
+                }
+                finally {
+                    $process.Dispose()
+                }
+                Assert-Equal $exitCode 0 "The isolated $($case.Mode) output conflict probe must catch the expected writer error. stdout='$stdout' stderr='$stderr'."
+                Assert-Match $stderr 'writer-error-kind=existing-output' $case.ErrorMessage
+                Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($case.OutputPath)) -Expected $before -Message $case.BytesMessage
+            }
         }
-        catch { $adapterError = $_.Exception.Message }
-        Assert-Match $adapterError 'exists|already' 'The upstream adapter must fail closed when caller OutputPath already exists.'
-        Assert-TestBytesEqual -Actual ([IO.File]::ReadAllBytes($adapterOutput)) -Expected $adapterBefore -Message 'The upstream adapter must not mutate an existing caller output file.'
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
     }
 
     # Scenario: Two processes pass the same not-yet-created OutputPath after a deterministic file barrier.
@@ -1053,5 +1140,102 @@ catch {
         Assert-Equal $snapshot.value.identity 'authenticated-A' 'Receipt substitution must not change the parsed value retained for validation.'
         Assert-Equal $snapshot.sha256 $snapshotSha256 'Receipt substitution must retain the hash of the authenticated receipt bytes.'
         Assert-False ((Get-StandardValidationFileSha256 -Path $receiptPath -Context 'replacement resolver receipt') -ceq $snapshotSha256) 'The regression must replace the live receipt path after snapshot capture.'
+    }
+}
+Describe 'Installed closure path identity' {
+    BeforeAll {
+        $resolver = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1'
+        . $resolver -ValidatePolicyOnly | Out-Null
+        function Assert-ClosureCondition {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+        function Assert-ClosureFailure {
+            param([scriptblock] $Action, [string] $MessageFragment)
+            $failure = ''
+            try { & $Action } catch { $failure = $_.Exception.Message }
+            if ([string]::IsNullOrEmpty($failure) -or
+                $failure.IndexOf($MessageFragment, [StringComparison]::Ordinal) -lt 0) {
+                throw "Expected closure failure containing '$MessageFragment'; actual='$failure'."
+            }
+        }
+    }
+
+    # Scenario: A large installed inventory and a smaller identical sample are sorted.
+    # Purpose: Verify byte-identical Ordinal output and preserve the bounded sorting complexity contract without a wall-clock ratio.
+    It 'UnitT30_PreservesLargeOrdinalInventoryAndImprovesSorting' {
+        $entries = @(0..15278 | ForEach-Object { [pscustomobject]@{ path = ('lib/{0:D5}.py' -f (($_ * 7919) % 15279)); sha256 = ('a' * 64) } })
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $actual = @(Get-ResolverOrderedClosureEntries -Entries $entries)
+        $watch.Stop()
+        $largeMs = $watch.Elapsed.TotalMilliseconds
+        $expectedPaths = [string[]]@($entries | ForEach-Object { $_.path })
+        [Array]::Sort($expectedPaths, [StringComparer]::Ordinal)
+        $actualBytes = [Text.Encoding]::UTF8.GetBytes(($actual | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+        $expectedBytes = [Text.Encoding]::UTF8.GetBytes(($expectedPaths | ForEach-Object { "$_`t$('a' * 64)`n" }) -join '')
+        Assert-ClosureCondition ([string]::Equals([Convert]::ToBase64String($actualBytes), [Convert]::ToBase64String($expectedBytes), [StringComparison]::Ordinal)) 'Large closure canonical bytes differ.'
+        Assert-ClosureCondition ($largeMs -lt 10000) 'Large Ordinal sort exceeded its bounded time.'
+        $sample = @($entries | Select-Object -First 1024)
+        $old = New-Object 'System.Collections.Generic.List[object]'
+        $oldComparisonCount = 0
+        foreach ($entry in $sample) {
+            $insertAt = 0
+            while ($insertAt -lt $old.Count) {
+                $oldComparisonCount++
+                if ([string]::Compare([string]$old[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -ge 0) { break }
+                $insertAt++
+            }
+            $old.Insert($insertAt, $entry)
+        }
+        $new = @(Get-ResolverOrderedClosureEntries -Entries $sample)
+        Assert-ClosureCondition ([string]::Equals(($new.path -join "`n"), ($old.path -join "`n"), [StringComparison]::Ordinal)) 'Old and new Ordinal order differ.'
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $orderingFunctionMatch = [regex]::Match($resolver, '(?s)function\s+Get-ResolverOrderedClosureEntries\b.*?(?=\r?\nfunction\s|\z)')
+        Assert-ClosureCondition $orderingFunctionMatch.Success 'The resolver ordering function was not found for its complexity contract.'
+        $orderingFunction = $orderingFunctionMatch.Value
+        Assert-ClosureCondition ($orderingFunction -match 'System\.Collections\.Generic\.SortedDictionary\[string,object\]') 'Resolver ordering must use a balanced ordered map with logarithmic insertion complexity.'
+        Assert-ClosureCondition ($orderingFunction -match '\[StringComparer\]::Ordinal') 'Resolver ordering must retain ordinal comparison semantics.'
+        Assert-ClosureCondition ($orderingFunction -notmatch 'List\[object\]|\.Insert\s*\(') 'Resolver ordering must not regress to linear insertion into a growing list.'
+        $quadraticComparisonFloor = [int](($sample.Count * ($sample.Count - 1)) / 8)
+        Assert-ClosureCondition ($oldComparisonCount -gt $quadraticComparisonFloor) 'The deterministic sample must retain a superlinear insertion-sort comparison baseline.'
+        Write-Host "Ordinal sort: 15279 entries=$largeMs ms; identical 1024 entries; insertion baseline comparisons=$oldComparisonCount; implementation=SortedDictionary."
+    }
+
+    # Scenario: Sorting is called with duplicate ordinal paths, or no entries.
+    # Purpose: Preserve fail-closed duplicate detection and an empty helper result.
+    It 'UnitT40_RejectsDuplicateSortPathsAndAcceptsEmptyInput' {
+        Assert-ClosureFailure { Get-ResolverOrderedClosureEntries -Entries @(@{ path = 'a' }, @{ path = 'a' }) } 'duplicate path'
+        Assert-ClosureCondition (@(Get-ResolverOrderedClosureEntries -Entries @()).Count -eq 0) 'Empty input must yield no closure entries.'
+    }
+
+    # Scenario: Two real filenames are ordinally different but normalize to the same Unicode NFC path.
+    # Purpose: Enforce the existing collision contract independently of PowerShell culture comparisons.
+    It 'InterT10_RejectsDistinctUnicodeNormalizedFilenames' {
+        $root = Join-Path $TestDrive 'unicode-collision'
+        [void](New-Item -ItemType Directory -Path $root)
+        [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"), 'one')
+        [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"), 'two')
+        Assert-ClosureCondition (@(Get-ChildItem -LiteralPath $root -File).Count -eq 2) 'The Unicode fixture requires two distinct filenames.'
+        Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root } 'Unicode-normalization-colliding'
+    }
+
+    # Scenario: Case-varied and non-ASCII filenames have no normalization collision.
+    # Purpose: Preserve exact Ordinal ordering, canonical UTF-8 bytes and final SHA-256.
+    It 'InterT20_PreservesCanonicalClosureBytes' {
+        $root = Join-Path $TestDrive 'ordinal-closure'
+        [void](New-Item -ItemType Directory -Path $root)
+        $names = [string[]]@('a.txt', 'Z.txt', "$([char]0xE9).txt", "$([char]0x4E2D).txt")
+        foreach ($name in $names) { [IO.File]::WriteAllText((Join-Path $root $name), $name, [Text.UTF8Encoding]::new($false)) }
+        $identity = Get-DirectoryClosureIdentity -Path $root
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $expected = ($names | ForEach-Object { "$_`t$((Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant())`n" }) -join ''
+        $actual = ($identity.entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+        Assert-ClosureCondition ([string]::Equals([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($actual)), [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected)), [StringComparison]::Ordinal)) 'Canonical UTF-8 bytes differ.'
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $expectedHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($expected))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        Assert-ClosureCondition ([string]::Equals($identity.sha256, $expectedHash, [StringComparison]::Ordinal)) 'Canonical closure digest differs.'
+        [IO.File]::AppendAllText((Join-Path $root 'a.txt'), 'changed')
+        Assert-ClosureCondition (-not [string]::Equals((Get-DirectoryClosureIdentity -Path $root).sha256, $identity.sha256, [StringComparison]::Ordinal)) 'Content tampering must change the closure digest.'
     }
 }

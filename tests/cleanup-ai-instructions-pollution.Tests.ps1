@@ -322,9 +322,10 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
         $result.ExitCode | Should Be 0
-        $stagedChanges = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status'))
-        ($stagedChanges -ccontains "D`t.agents/skills/unicode-skill/SKILL.md") | Should Be $true
-        ($stagedChanges -ccontains "D`t$unicodeRelativePath") | Should Be $true
+        $skillDeletion = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status','--','.agents/skills/unicode-skill/SKILL.md'))
+        $unicodeDeletion = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status','--',$unicodeRelativePath))
+        ($skillDeletion.Count -eq 1 -and [string]$skillDeletion[0] -match '^D(?:\s|$)') | Should Be $true
+        ($unicodeDeletion.Count -eq 1 -and [string]$unicodeDeletion[0] -match '^D(?:\s|$)') | Should Be $true
         Test-Path -LiteralPath (Join-Path $skillRoot $unicodeFileName) -PathType Leaf | Should Be $true
     }
 

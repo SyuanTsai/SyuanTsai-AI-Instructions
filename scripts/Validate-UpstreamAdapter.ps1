@@ -24,12 +24,24 @@ function Write-AdapterJsonOutput {
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
 
-    $stream = [System.IO.File]::Open(
-        $fullPath,
-        [System.IO.FileMode]::CreateNew,
-        [System.IO.FileAccess]::Write,
-        [System.IO.FileShare]::None
-    )
+    try {
+        $stream = [System.IO.File]::Open(
+            $fullPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch {
+        $leafException = $_.Exception
+        while ($null -ne $leafException.InnerException) {
+            $leafException = $leafException.InnerException
+        }
+        if ($leafException -is [System.IO.IOException] -and [System.IO.File]::Exists($fullPath)) {
+            throw 'writer-error-kind=existing-output; output-file-exists=true'
+        }
+        throw
+    }
     try {
         $encoding = New-Object Text.UTF8Encoding($false)
         $writer = New-Object System.IO.StreamWriter($stream, $encoding)
