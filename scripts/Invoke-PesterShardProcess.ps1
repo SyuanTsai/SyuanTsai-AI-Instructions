@@ -882,7 +882,7 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
             }
         }
         else {
-            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|\bcredentials?\b\s*[:=]|(?:api|private|access)[-_ ]?key|bearer|cookie|session') {
+            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)(secret|password|token|authorization|credentials?|(api|private|access)[-_ ]?key|bearer|cookie|session(_?id)?)["'']?\s*[:=]') {
                 $redactSensitiveContinuation = $true
                 $line = '[redacted sensitive diagnostic line]'
             }
@@ -961,7 +961,7 @@ function Get-PesterShardFailureSummary {
         for ($index = $lines.Count - 1; $index -ge 0 -and $allowlistedFallback.Count -lt $MaxLines; $index--) {
             $line = ([string]$lines[$index]).Trim()
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|\bcredentials?\b\s*[:=]|(?:api|private|access)[-_ ]?key|bearer|cookie|session') {
+            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)(secret|password|token|authorization|credentials?|(api|private|access)[-_ ]?key|bearer|cookie|session(_?id)?)["'']?\s*[:=]') {
                 continue
             }
             $safeLine = if ($line -match '^PowerShell (?:5\.1|7(?:\.\d+)*) shard exited before writing its result file\.$') {
@@ -1997,7 +1997,7 @@ $childScript = @(
     '            }'
     '        }'
     'else {'
-    'if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match ''(?i)secret|password|token|authorization|\bcredentials?\b\s*[:=]|(?:api|private|access)[-_ ]?key|bearer|cookie|session'') {'
+    'if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match ''(?i)(secret|password|token|authorization|credentials?|(api|private|access)[-_ ]?key|bearer|cookie|session(_?id)?)["'''']?\s*[:=]'') {'
     '$redactSensitiveContinuation = $true'
     '$line = ''[redacted sensitive diagnostic line]'''
     '}'

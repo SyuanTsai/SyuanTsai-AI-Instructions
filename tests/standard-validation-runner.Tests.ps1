@@ -1183,6 +1183,13 @@ catch {
         Assert-False ($credentialLabelSummary -match 'q7F9opaqueValue') 'An opaque value after a credential label must never become the line preceding a workflow-visible failure marker.'
         Assert-Match $credentialLabelSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a credential-labeled block must be represented only by a fixed safe continuation marker.'
 
+        $ordinaryAuthorizationProgressPath = Join-Path $TestDrive 'ordinary-authorization-progress.txt'
+        Write-TestUtf8File -Path $ordinaryAuthorizationProgressPath -Text "[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] actionable fixture failure`nExpected: actionable expected value`nBut was: actionable actual value"
+        $ordinaryAuthorizationProgressSummary = Get-PesterShardFailureSummary -Paths @($ordinaryAuthorizationProgressPath)
+        Assert-Match $ordinaryAuthorizationProgressSummary '\[-\] actionable fixture failure' 'A non-credential test name containing authorization must not hide the following failure marker.'
+        Assert-Match $ordinaryAuthorizationProgressSummary 'Expected: actionable expected value' 'A non-credential test name must not hide actionable expectation context.'
+        Assert-Match $ordinaryAuthorizationProgressSummary 'But was: actionable actual value' 'A non-credential test name must not hide the observed failure value.'
+
         $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
         $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
         $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
@@ -1271,6 +1278,9 @@ PSSecurityException: fixture execution policy failure
         $parentDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[-] fixture failure`n`"token`":$ansiReset`nparent-ansi-key-credential`nExpected: parent-ansi-key-context"
         Assert-False ($parentDiagnostic -match 'parent-ansi-key-(?:credential|context)') 'The parent sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
         Assert-Match $parentDiagnostic '\[-\] fixture failure' 'Parent ANSI normalization must retain safe context that precedes the sensitive block.'
+        $parentAuthorizationProgress = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] parent actionable failure`nExpected: parent actionable expectation"
+        Assert-Match $parentAuthorizationProgress '\[-\] parent actionable failure' 'The parent sanitizer must not treat authorization in an ordinary test name as a sensitive field.'
+        Assert-Match $parentAuthorizationProgress 'Expected: parent actionable expectation' 'The parent sanitizer must retain actionable context after an ordinary authorization test name.'
 
         $escape = [string][char]27
         $indexedColor = $escape + '[38;5;8m'
@@ -1366,6 +1376,10 @@ PSSecurityException: fixture execution policy failure
         }, $true)
         Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
         Invoke-Expression $childDiagnosticFunction.Extent.Text
+        try { throw [InvalidOperationException]::new("[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] child actionable failure`nExpected: child actionable expectation") }
+        catch { $childAuthorizationProgress = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+        Assert-Match $childAuthorizationProgress '\[-\] child actionable failure' 'The generated child sanitizer must not treat authorization in an ordinary test name as a sensitive field.'
+        Assert-Match $childAuthorizationProgress 'Expected: child actionable expectation' 'The generated child sanitizer must retain actionable context after an ordinary authorization test name.'
         $childCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "fixture failure`nAuthorization:`n`nearly-child-blank-credential`nExpected: early-child-blank-context" },
             [pscustomobject]@{ Name = 'private-key-label'; Text = "fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nearly-child-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: early-child-private-key-label-context" },
