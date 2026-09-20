@@ -882,7 +882,7 @@ function ConvertTo-PesterShardSanitizedDiagnosticText {
             }
         }
         else {
-            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|api[-_]?key|bearer') {
+            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match '(?i)secret|password|token|authorization|(?:api|private|access)[-_ ]?key|bearer') {
                 $redactSensitiveContinuation = $true
                 $line = '[redacted sensitive diagnostic line]'
             }
@@ -1996,12 +1996,12 @@ $childScript = @(
     '                ''[redacted sensitive diagnostic continuation]'''
     '            }'
     '        }'
-    '        else {'
-    '            if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match ''(?i)secret|password|token|authorization|api[-_]?key|bearer'') {'
-    '                $redactSensitiveContinuation = $true'
-    '                $line = ''[redacted sensitive diagnostic line]'''
-    '            }'
-    '        }'
+    'else {'
+    'if ($line.IndexOf([char]0xE000) -ge 0 -or $line -match ''(?i)secret|password|token|authorization|(?:api|private|access)[-_ ]?key|bearer'') {'
+    '$redactSensitiveContinuation = $true'
+    '$line = ''[redacted sensitive diagnostic line]'''
+    '}'
+    '}'
     '        if ($line.Length -gt 512) { $line = $line.Substring(0, 512) }'
     '        if (-not $lines.Contains($line)) { [void]$lines.Add($line) }'
     '    }'

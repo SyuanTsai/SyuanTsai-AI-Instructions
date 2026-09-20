@@ -391,24 +391,47 @@ exit ([int]$LASTEXITCODE)
                             $treeKillMethod = $process.GetType().GetMethod('Kill', [type[]]@([bool]))
                             $relationReadError = $null
                             $relations = @()
-                            try {
-                                $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
-                                    [pscustomobject][ordered]@{
-                                        ProcessId = [int]$_.ProcessId
-                                        ParentProcessId = [int]$_.ParentProcessId
-                                    }
-                                })
-                            }
-                            catch {
+                            if ($env:OS -eq 'Windows_NT') {
                                 try {
-                                    $relations = @(Get-WmiObject -Class Win32_Process -ErrorAction Stop | ForEach-Object {
+                                    $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
                                         [pscustomobject][ordered]@{
                                             ProcessId = [int]$_.ProcessId
                                             ParentProcessId = [int]$_.ParentProcessId
                                         }
                                     })
                                 }
+                                catch {
+                                    try {
+                                        $relations = @(Get-WmiObject -Class Win32_Process -ErrorAction Stop | ForEach-Object {
+                                            [pscustomobject][ordered]@{
+                                                ProcessId = [int]$_.ProcessId
+                                                ParentProcessId = [int]$_.ParentProcessId
+                                            }
+                                        })
+                                    }
+                                    catch { $relationReadError = $_.Exception }
+                                }
+                            }
+                            elseif (Test-Path -LiteralPath '/proc' -PathType Container) {
+                                try {
+                                    $relations = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | ForEach-Object {
+                                        if ($_.Name -notmatch '^\d+$') { return }
+                                        try {
+                                            $stat = Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'stat') -ErrorAction Stop
+                                            if ($stat -match '^(\d+)\s+\(.*\)\s+\S\s+(\d+)\s') {
+                                                [pscustomobject][ordered]@{
+                                                    ProcessId = [int]$Matches[1]
+                                                    ParentProcessId = [int]$Matches[2]
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    })
+                                }
                                 catch { $relationReadError = $_.Exception }
+                            }
+                            else {
+                                $relationReadError = New-Object PlatformNotSupportedException('No supported process relationship source is available.')
                             }
                             for ($pass = 0; $pass -lt $relations.Count; $pass++) {
                                 $added = $false
@@ -422,6 +445,19 @@ exit ([int]$LASTEXITCODE)
                             }
 
                             $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
+                            $ownedDescendantProcesses = New-Object 'System.Collections.Generic.List[System.Diagnostics.Process]'
+                            foreach ($processId in @($descendantIds | Where-Object { $_ -ne $rootProcessId })) {
+                                $ownedProcess = $null
+                                try {
+                                    $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
+                                    [void]$ownedProcess.Handle
+                                    $ownedDescendantProcesses.Add($ownedProcess)
+                                    $ownedProcess = $null
+                                }
+                                catch [ArgumentException] { }
+                                catch { $cleanupErrors.Add("Descendant process $processId handle capture failed: $($_.Exception.Message)") }
+                                finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+                            }
                             if ($null -ne $treeKillMethod) {
                                 try { [void]$treeKillMethod.Invoke($process, @($true)) }
                                 catch { $cleanupErrors.Add("Process-tree termination failed: $($_.Exception.Message)") }
@@ -432,18 +468,15 @@ exit ([int]$LASTEXITCODE)
                             catch {
                                 try { if (-not $process.HasExited) { $cleanupErrors.Add("Root process termination failed: $($_.Exception.Message)") } } catch { }
                             }
-                            foreach ($processId in @($descendantIds | Where-Object { $_ -ne $rootProcessId })) {
-                                $ownedProcess = $null
+                            foreach ($ownedProcess in $ownedDescendantProcesses) {
                                 try {
-                                    $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
                                     if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
                                     if (-not $ownedProcess.WaitForExit(5000)) {
-                                        $cleanupErrors.Add("Descendant process $processId did not terminate during cleanup.")
+                                        $cleanupErrors.Add("Descendant process $($ownedProcess.Id) did not terminate during cleanup.")
                                     }
                                 }
-                                catch [ArgumentException] { }
-                                catch { $cleanupErrors.Add("Descendant process $processId cleanup failed: $($_.Exception.Message)") }
-                                finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+                                catch { $cleanupErrors.Add("Retained descendant process cleanup failed: $($_.Exception.Message)") }
+                                finally { $ownedProcess.Dispose() }
                             }
                             if (-not $process.WaitForExit(30000)) {
                                 $cleanupErrors.Add("Runner fixture process $rootProcessId did not terminate during cleanup.")
@@ -1249,6 +1282,8 @@ PSSecurityException: fixture execution policy failure
         $visibleReplacementCharacters = "safe$([char]0xFFFC)$([char]0xFFFD)context"
         $parentCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
+            [pscustomobject]@{ Name = 'private-key-label'; Text = "[-] fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nparent-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: parent-private-key-label-context" },
+            [pscustomobject]@{ Name = 'access-key-label'; Text = "[-] fixture failure`naccess_key:`nparent-access-key-label-credential`nExpected: parent-access-key-label-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "[-] fixture failure`n`"token`":$dcs`nparent-dcs-credential`nExpected: parent-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "[-] fixture failure`n`"token`":$c1Csi`nparent-c1-credential`nExpected: parent-c1-context" },
@@ -1317,6 +1352,8 @@ PSSecurityException: fixture execution policy failure
         Invoke-Expression $childDiagnosticFunction.Extent.Text
         $childCases = @(
             [pscustomobject]@{ Name = 'blank'; Text = "fixture failure`nAuthorization:`n`nearly-child-blank-credential`nExpected: early-child-blank-context" },
+            [pscustomobject]@{ Name = 'private-key-label'; Text = "fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nearly-child-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: early-child-private-key-label-context" },
+            [pscustomobject]@{ Name = 'access-key-label'; Text = "fixture failure`naccess_key:`nearly-child-access-key-label-credential`nExpected: early-child-access-key-label-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "fixture failure`n`"token`":$osc`nearly-child-osc-credential`nExpected: early-child-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "fixture failure`n`"token`":$dcs`nearly-child-dcs-credential`nExpected: early-child-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "fixture failure`n`"token`":$c1Csi`nearly-child-c1-credential`nExpected: early-child-c1-context" },
