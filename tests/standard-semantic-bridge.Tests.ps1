@@ -541,20 +541,24 @@ function Update-TestConsentDigests {
     # Purpose: Timeout must stop the actual callback pipeline, fail closed, and avoid accepting late callback output.
     It 'InterT130_provider_callback_deadline_stops_actual_callback' {
         $fixture = New-TestSemanticFixture
-        $state = [hashtable]@{ completed = $false }
+        $state = [hashtable]@{ completed = $false; startedAt = [long]0 }
         $slowProvider = {
             param($providerRequest)
+            $state.startedAt = [Diagnostics.Stopwatch]::GetTimestamp()
             Start-Sleep -Seconds 3
             $state.completed = $true
             return [pscustomobject][ordered]@{ findings = @(); analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery') }
         }.GetNewClosure()
-        $started = [Diagnostics.Stopwatch]::StartNew()
         $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $slowProvider -TimeoutSeconds 1
-        $started.Stop()
+        $returnedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+        $callbackElapsedSeconds = if ([long]$state.startedAt -gt 0) {
+            [double]($returnedAt - [long]$state.startedAt) / [double][Diagnostics.Stopwatch]::Frequency
+        }
+        else { [double]::PositiveInfinity }
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A provider callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The timed provider callback was not actually invoked.'
         Assert-TestCondition ($null -eq $run.evidenceBytes) 'A timed provider callback emitted evidence.'
-        Assert-TestCondition ($started.Elapsed.TotalSeconds -lt 2.5) 'The bridge waited for the provider callback after its deadline.'
+        Assert-TestCondition ($callbackElapsedSeconds -lt 2.5) 'The bridge waited for the provider callback after its deadline.'
         Start-Sleep -Milliseconds 250
         Assert-TestCondition (-not [bool]$state.completed) 'A timed-out provider callback continued and produced late output.'
     }
@@ -563,20 +567,24 @@ function Update-TestConsentDigests {
     # Purpose: Signing has an explicit fail-closed boundary and cannot emit an unsigned or late PASS artifact.
     It 'InterT140_signer_callback_deadline_fails_closed' {
         $fixture = New-TestSemanticFixture
-        $state = [hashtable]@{ completed = $false }
+        $state = [hashtable]@{ completed = $false; startedAt = [long]0 }
         $slowSigner = {
             param($signerRequest)
+            $state.startedAt = [Diagnostics.Stopwatch]::GetTimestamp()
             Start-Sleep -Seconds 3
             $state.completed = $true
             return [pscustomobject][ordered]@{ keyId = 'fixture-key'; algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'; signature = 'AA==' }
         }.GetNewClosure()
-        $started = [Diagnostics.Stopwatch]::StartNew()
         $run = Invoke-TestSemanticBridge -Fixture $fixture -Signer $slowSigner -TimeoutSeconds 1
-        $started.Stop()
+        $returnedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+        $callbackElapsedSeconds = if ([long]$state.startedAt -gt 0) {
+            [double]($returnedAt - [long]$state.startedAt) / [double][Diagnostics.Stopwatch]::Frequency
+        }
+        else { [double]::PositiveInfinity }
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A signer callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The signer timeout did not preserve the completed provider-call count.'
         Assert-TestCondition ($null -eq $run.evidenceBytes) 'A timed signer callback emitted evidence.'
-        Assert-TestCondition ($started.Elapsed.TotalSeconds -lt 2.5) 'The bridge waited for the signer callback after its deadline.'
+        Assert-TestCondition ($callbackElapsedSeconds -lt 2.5) 'The bridge waited for the signer callback after its deadline.'
         Start-Sleep -Milliseconds 250
         Assert-TestCondition (-not [bool]$state.completed) 'A timed-out signer callback continued and produced late output.'
     }
