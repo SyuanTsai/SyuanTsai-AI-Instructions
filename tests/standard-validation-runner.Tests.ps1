@@ -1171,6 +1171,12 @@ catch {
         Assert-False ($wrappedCredentialSummary -match '\[-\] fixture failure|Expected: safe diagnostic context') 'No raw line after a sensitive header may be trusted as a boundary.'
         Assert-Match $wrappedCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A boundary-looking continuation must be represented by a fixed safe marker.'
 
+        $cookieCredentialPath = Join-Path $TestDrive 'cookie-credential-before-marker.txt'
+        Write-TestUtf8File -Path $cookieCredentialPath -Text "Set-Cookie: session_id=cookie-credential-that-must-not-be-logged; HttpOnly`n[-] cookie fixture failure`nExpected: cookie-context-that-must-not-be-logged"
+        $cookieCredentialSummary = Get-PesterShardFailureSummary -Paths @($cookieCredentialPath)
+        Assert-False ($cookieCredentialSummary -match 'cookie-(?:credential|context)-that-must-not-be-logged') 'Cookie/session credentials immediately before a recognized failure marker must never enter the workflow-visible diagnostic window.'
+        Assert-Match $cookieCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a cookie credential must be represented only by a fixed safe continuation marker.'
+
         $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
         $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
         $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
@@ -1284,6 +1290,8 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
             [pscustomobject]@{ Name = 'private-key-label'; Text = "[-] fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nparent-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: parent-private-key-label-context" },
             [pscustomobject]@{ Name = 'access-key-label'; Text = "[-] fixture failure`naccess_key:`nparent-access-key-label-credential`nExpected: parent-access-key-label-context" },
+            [pscustomobject]@{ Name = 'set-cookie-label'; Text = "Set-Cookie: session_id=parent-set-cookie-label-credential; HttpOnly`n[-] fixture failure`nExpected: parent-set-cookie-label-context" },
+            [pscustomobject]@{ Name = 'session-id-label'; Text = "session_id: parent-session-id-label-credential`n[-] fixture failure`nExpected: parent-session-id-label-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "[-] fixture failure`n`"token`":$dcs`nparent-dcs-credential`nExpected: parent-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "[-] fixture failure`n`"token`":$c1Csi`nparent-c1-credential`nExpected: parent-c1-context" },
@@ -1354,6 +1362,8 @@ PSSecurityException: fixture execution policy failure
             [pscustomobject]@{ Name = 'blank'; Text = "fixture failure`nAuthorization:`n`nearly-child-blank-credential`nExpected: early-child-blank-context" },
             [pscustomobject]@{ Name = 'private-key-label'; Text = "fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nearly-child-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: early-child-private-key-label-context" },
             [pscustomobject]@{ Name = 'access-key-label'; Text = "fixture failure`naccess_key:`nearly-child-access-key-label-credential`nExpected: early-child-access-key-label-context" },
+            [pscustomobject]@{ Name = 'set-cookie-label'; Text = "Set-Cookie: session_id=early-child-set-cookie-label-credential; HttpOnly`n[-] fixture failure`nExpected: early-child-set-cookie-label-context" },
+            [pscustomobject]@{ Name = 'session-id-label'; Text = "session_id: early-child-session-id-label-credential`n[-] fixture failure`nExpected: early-child-session-id-label-context" },
             [pscustomobject]@{ Name = 'osc'; Text = "fixture failure`n`"token`":$osc`nearly-child-osc-credential`nExpected: early-child-osc-context" },
             [pscustomobject]@{ Name = 'dcs'; Text = "fixture failure`n`"token`":$dcs`nearly-child-dcs-credential`nExpected: early-child-dcs-context" },
             [pscustomobject]@{ Name = 'c1'; Text = "fixture failure`n`"token`":$c1Csi`nearly-child-c1-credential`nExpected: early-child-c1-context" },
