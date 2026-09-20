@@ -8,6 +8,7 @@ param(
         'standard-validation-runner.Tests.ps1',
         'syp101-production-smoke-contract.Tests.ps1'
     ),
+    [ValidateRange(1, 1024)][int] $BulkShardSize = 1,
     [int] $OuterTimeoutSeconds = 1800,
     [string] $CancellationPath,
     [string] $TestRoot = './tests',
@@ -1909,6 +1910,59 @@ function Invoke-PesterShardProcess {
     }
 }
 
+function New-PesterShardPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]] $AllTestPaths,
+        [Parameter(Mandatory = $true)][string[]] $IsolatedTestFileNames,
+        [ValidateRange(1, 1024)][int] $BulkShardSize = 1
+    )
+
+    if (@($AllTestPaths).Count -eq 0) { throw 'No Pester test files were discovered.' }
+
+    $isolatedPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $IsolatedTestFileNames) {
+        $matches = @($AllTestPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
+        if ($matches.Count -ne 1) { throw "Expected exactly one isolated test file named '$name'; found $($matches.Count)." }
+        $isolatedPaths.Add([string]$matches[0])
+    }
+
+    $bulkPaths = @($AllTestPaths | Where-Object { $isolatedPaths -notcontains [string]$_ })
+    $partitionedPaths = @($isolatedPaths.ToArray()) + @($bulkPaths)
+    if (($partitionedPaths.Count -ne $AllTestPaths.Count) -or
+        ((($partitionedPaths | Sort-Object) -join [Environment]::NewLine) -cne
+         (($AllTestPaths | Sort-Object) -join [Environment]::NewLine))) {
+        throw 'Pester shard inventory is not an exact partition of the discovered test files.'
+    }
+
+    $shards = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($name in $IsolatedTestFileNames) {
+        $shards.Add([pscustomobject][ordered]@{
+            Name = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($name))
+            Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
+        })
+    }
+
+    for ($offset = 0; $offset -lt $bulkPaths.Count; $offset += $BulkShardSize) {
+        $take = [Math]::Min($BulkShardSize, $bulkPaths.Count - $offset)
+        $paths = @($bulkPaths[$offset..($offset + $take - 1)])
+        $ordinal = [int](($offset / $BulkShardSize) + 1)
+        $name = if ($paths.Count -eq 1) {
+            $baseName = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension([string]$paths[0]))
+            'bulk-{0:D3}-{1}' -f $ordinal, $baseName
+        }
+        else {
+            'bulk-{0:D3}' -f $ordinal
+        }
+        $shards.Add([pscustomobject][ordered]@{
+            Name = $name
+            Paths = $paths
+        })
+    }
+
+    return @($shards.ToArray())
+}
+
 Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath -Context 'Pester module path'
 Import-Module $PesterModulePath -Force -ErrorAction Stop
 $loadedPester = Get-Module -Name Pester |
@@ -1927,30 +1981,13 @@ $allTestPaths = @(
         Sort-Object FullName |
         ForEach-Object { [string]$_.FullName }
 )
-if ($allTestPaths.Count -eq 0) { throw 'No Pester test files were discovered.' }
-
-$isolatedPaths = New-Object 'System.Collections.Generic.List[string]'
-foreach ($name in $IsolatedTestFileNames) {
-    $matches = @($allTestPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
-    if ($matches.Count -ne 1) { throw "Expected exactly one isolated test file named '$name'; found $($matches.Count)." }
-    $isolatedPaths.Add([string]$matches[0])
-}
-$bulkPaths = @($allTestPaths | Where-Object { $isolatedPaths -notcontains [string]$_ })
-$partitionedPaths = @($isolatedPaths.ToArray()) + @($bulkPaths)
-if (($partitionedPaths.Count -ne $allTestPaths.Count) -or
-    ((($partitionedPaths | Sort-Object) -join [Environment]::NewLine) -cne
-     (($allTestPaths | Sort-Object) -join [Environment]::NewLine))) {
-    throw 'Pester shard inventory is not an exact partition of the discovered test files.'
-}
-
 $shards = New-Object 'System.Collections.Generic.List[object]'
-foreach ($name in $IsolatedTestFileNames) {
-    $shards.Add([pscustomobject]@{
-        Name = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension($name))
-        Paths = @($isolatedPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
-    })
+foreach ($shard in @(New-PesterShardPlan `
+        -AllTestPaths $allTestPaths `
+        -IsolatedTestFileNames $IsolatedTestFileNames `
+        -BulkShardSize $BulkShardSize)) {
+    $shards.Add($shard)
 }
-$shards.Add([pscustomobject]@{ Name = 'bulk'; Paths = $bulkPaths })
 
 $childPowerShell = if ($PSVersionTable.PSEdition -eq 'Desktop') {
     (Get-Command powershell -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source

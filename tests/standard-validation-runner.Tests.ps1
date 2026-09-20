@@ -3098,3 +3098,50 @@ jobs:
         }
     }
 }
+
+Describe 'Pester shard plan contract' {
+    # Scenario: The complete repository suite contains many non-isolated test files and one file can terminate its hosted PowerShell process.
+    # Purpose: Give every bulk test file an independent owned process by default while retaining an exact, configurable partition for bounded diagnostics.
+    It 'UnitT10_partitions_bulk_tests_into_independent_owned_processes_by_default' {
+        $repositoryRoot = Split-Path -Parent $PSScriptRoot
+        $shardPath = Join-Path $repositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        if (@($errors).Count -ne 0) { throw 'The shard executor must parse before shard-plan testing.' }
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'New-PesterShardPlan'
+        }, $true)
+        if ($null -eq $definition) { throw 'The shard executor must expose a testable deterministic shard planner.' }
+        Invoke-Expression $definition.Extent.Text
+
+        $testRoot = Join-Path $TestDrive 'shard-plan-tests'
+        $allPaths = @(
+            (Join-Path $testRoot 'alpha.Tests.ps1'),
+            (Join-Path $testRoot 'standard-validation-runner.Tests.ps1'),
+            (Join-Path $testRoot 'beta.Tests.ps1'),
+            (Join-Path $testRoot 'syp101-production-smoke-contract.Tests.ps1'),
+            (Join-Path $testRoot 'gamma.Tests.ps1')
+        )
+        $isolatedNames = @(
+            'standard-validation-runner.Tests.ps1',
+            'syp101-production-smoke-contract.Tests.ps1'
+        )
+
+        $defaultPlan = @(New-PesterShardPlan -AllTestPaths $allPaths -IsolatedTestFileNames $isolatedNames)
+        if ($defaultPlan.Count -ne 5) { throw 'The default plan must create one owned process per discovered test file.' }
+        if (@($defaultPlan | Where-Object { @($_.Paths).Count -ne 1 }).Count -ne 0) { throw 'Every default shard must contain exactly one test file.' }
+        $defaultPartition = @($defaultPlan | ForEach-Object { @($_.Paths) })
+        if ((($defaultPartition | Sort-Object) -join "`n") -cne (($allPaths | Sort-Object) -join "`n")) { throw 'The default shard plan must be an exact partition of the discovered inventory.' }
+        if (@($defaultPartition | Group-Object | Where-Object { $_.Count -ne 1 }).Count -ne 0) { throw 'No test file may be duplicated across shards.' }
+        if ([string]$defaultPlan[2].Name -notmatch '^bulk-001-alpha$') { throw 'A single-file bulk shard name must identify its deterministic ordinal and public test basename.' }
+
+        $groupedPlan = @(New-PesterShardPlan -AllTestPaths $allPaths -IsolatedTestFileNames $isolatedNames -BulkShardSize 2)
+        if ($groupedPlan.Count -ne 4) { throw 'An explicit group size must retain two isolated shards and two bounded bulk shards.' }
+        if (@($groupedPlan[2].Paths).Count -ne 2) { throw 'The first configured bulk shard must contain at most the configured number of paths.' }
+        if (@($groupedPlan[3].Paths).Count -ne 1) { throw 'The final configured bulk shard must retain the remainder without padding or omission.' }
+        $groupedPartition = @($groupedPlan | ForEach-Object { @($_.Paths) })
+        if ((($groupedPartition | Sort-Object) -join "`n") -cne (($allPaths | Sort-Object) -join "`n")) { throw 'A configured shard plan must remain an exact partition.' }
+    }
+}
