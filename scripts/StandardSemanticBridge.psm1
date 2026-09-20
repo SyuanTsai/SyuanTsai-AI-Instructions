@@ -13,6 +13,173 @@ $script:StandardSemanticBridgeAttestationType = 'local-semantic-bridge-v2'
 $script:StandardSemanticBridgeAlgorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
 $script:StandardSemanticBridgeHex64 = '^[0-9a-f]{64}$'
 $script:StandardSemanticBridgeGitObject = '^(?:[0-9a-f]{40}|[0-9a-f]{64})$'
+$script:StandardSemanticBridgeCallbackStdoutQuotaCharacters = 16777216
+$script:StandardSemanticBridgeCallbackStderrQuotaCharacters = 16384
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+    $null -eq ('StandardSemanticBridgeProcessControlNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class StandardSemanticBridgeProcessControlNative
+{
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInformationClass = 9;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        ref JobObjectExtendedLimitInformation information,
+        uint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static IntPtr CreateKillOnCloseJob()
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed.");
+        }
+        JobObjectExtendedLimitInformation information = new JobObjectExtendedLimitInformation();
+        information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+        if (!SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformationClass,
+            ref information,
+            (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformation))))
+        {
+            int error = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new Win32Exception(error, "SetInformationJobObject failed.");
+        }
+        return job;
+    }
+
+    public static bool TryAssignProcessToJobObject(IntPtr job, IntPtr process)
+    {
+        return AssignProcessToJobObject(job, process);
+    }
+
+    public static bool TryTerminateJobObject(IntPtr job, uint exitCode)
+    {
+        return TerminateJobObject(job, exitCode);
+    }
+
+    public static bool TryCloseHandle(IntPtr handle)
+    {
+        return CloseHandle(handle);
+    }
+}
+'@
+}
+
+if ($null -eq ('StandardSemanticBridgeBoundedCapture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class StandardSemanticBridgeBoundedCaptureResult
+{
+    public string Text { get; private set; }
+    public bool Exceeded { get; private set; }
+    public int CharacterCount { get; private set; }
+
+    public StandardSemanticBridgeBoundedCaptureResult(string text, bool exceeded, int characterCount)
+    {
+        Text = text;
+        Exceeded = exceeded;
+        CharacterCount = characterCount;
+    }
+}
+
+public static class StandardSemanticBridgeBoundedCapture
+{
+    public static Task<StandardSemanticBridgeBoundedCaptureResult> Start(StreamReader reader, int quota)
+    {
+        if (reader == null) throw new ArgumentNullException("reader");
+        if (quota < 1) throw new ArgumentOutOfRangeException("quota");
+        return Task.Factory.StartNew(
+            () => Read(reader, quota),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+    }
+
+    private static StandardSemanticBridgeBoundedCaptureResult Read(StreamReader reader, int quota)
+    {
+        var builder = new StringBuilder(Math.Min(quota, 4096));
+        var buffer = new char[4096];
+        var count = 0;
+        while (true)
+        {
+            var read = reader.Read(buffer, 0, buffer.Length);
+            if (read == 0) return new StandardSemanticBridgeBoundedCaptureResult(builder.ToString(), false, count);
+            var remaining = quota - count;
+            if (read > remaining)
+            {
+                if (remaining > 0) builder.Append(buffer, 0, remaining);
+                return new StandardSemanticBridgeBoundedCaptureResult(builder.ToString(), true, quota);
+            }
+            builder.Append(buffer, 0, read);
+            count += read;
+        }
+    }
+}
+'@
+}
 
 function Get-StandardSemanticBridgePropertyNames {
     param([Parameter(Mandatory = $true)] $Object)
@@ -868,39 +1035,121 @@ catch {
     $started = $false
     $stdoutTask = $null
     $stderrTask = $null
+    $jobHandle = [IntPtr]::Zero
+    $jobAssigned = $false
+    $primaryException = $null
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $jobHandle = [StandardSemanticBridgeProcessControlNative]::CreateKillOnCloseJob()
+        }
         if (-not $process.Start()) { throw [InvalidOperationException]::new("$Context process did not start.") }
         $started = $true
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        # The child blocks on stdin until the payload is closed.  Assigning it
+        # before releasing that payload makes the Windows Job Object the
+        # authoritative owner of every callback descendant, including on
+        # Windows PowerShell 5.1 where Process.Kill(bool) is unavailable.
+        if ($jobHandle -ne [IntPtr]::Zero) {
+            if (-not [StandardSemanticBridgeProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
+                try { $process.Kill() } catch { }
+                throw [InvalidOperationException]::new("$Context process could not be assigned to its Windows Job Object.")
+            }
+            $jobAssigned = $true
+        }
+        $stdoutTask = [StandardSemanticBridgeBoundedCapture]::Start(
+            $process.StandardOutput,
+            $script:StandardSemanticBridgeCallbackStdoutQuotaCharacters
+        )
+        $stderrTask = [StandardSemanticBridgeBoundedCapture]::Start(
+            $process.StandardError,
+            $script:StandardSemanticBridgeCallbackStderrQuotaCharacters
+        )
         $process.StandardInput.Write($payloadXml)
         $process.StandardInput.Close()
-        $remaining = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
-        if ($remaining -le 0 -or -not $process.WaitForExit($remaining)) {
-            $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
-                    $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
-                    $_.GetParameters()[0].ParameterType -eq [bool]
-                } | Select-Object -First 1)
-            try {
-                if ($killTreeMethod.Count -eq 1) {
-                    [void]$killTreeMethod[0].Invoke($process, [object[]]@($true))
+
+        $quotaStream = $null
+        while ($true) {
+            foreach ($captureSpec in @(
+                [pscustomobject]@{ Name = 'stdout'; Task = $stdoutTask },
+                [pscustomobject]@{ Name = 'stderr'; Task = $stderrTask }
+            )) {
+                if (-not $captureSpec.Task.IsCompleted) { continue }
+                if ($captureSpec.Task.IsFaulted) {
+                    $captureError = [string]$captureSpec.Task.Exception.GetBaseException().Message
+                    throw [InvalidOperationException]::new("$Context isolated $($captureSpec.Name) capture failed: $captureError")
                 }
-                else { $process.Kill() }
+                $captureResult = $captureSpec.Task.GetAwaiter().GetResult()
+                if ([bool]$captureResult.Exceeded) {
+                    $quotaStream = [string]$captureSpec.Name
+                    break
+                }
             }
-            catch {
-                throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process could not be terminated.")
+            if ($null -ne $quotaStream) {
+                try {
+                    if ($jobAssigned) {
+                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
+                            throw 'TerminateJobObject returned false.'
+                        }
+                    }
+                    else {
+                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                                $_.GetParameters()[0].ParameterType -eq [bool]
+                            } | Select-Object -First 1)
+                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
+                        elseif (-not $process.HasExited) { $process.Kill() }
+                    }
+                }
+                catch {
+                    throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process tree could not be terminated.")
+                }
+                if (-not $process.HasExited -and -not $process.WaitForExit(5000)) {
+                    throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process did not terminate.")
+                }
+                throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
             }
-            if (-not $process.WaitForExit(5000)) {
-                throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process did not terminate.")
+
+            if ($process.HasExited -and $stdoutTask.IsCompleted -and $stderrTask.IsCompleted) { break }
+            $remaining = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
+            if ($remaining -le 0) {
+                try {
+                    if ($jobAssigned) {
+                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
+                            throw 'TerminateJobObject returned false.'
+                        }
+                    }
+                    else {
+                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                                $_.GetParameters()[0].ParameterType -eq [bool]
+                            } | Select-Object -First 1)
+                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
+                        elseif (-not $process.HasExited) { $process.Kill() }
+                    }
+                }
+                catch {
+                    throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process tree could not be terminated.")
+                }
+                if (-not $process.HasExited -and -not $process.WaitForExit(5000)) {
+                    throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process did not terminate.")
+                }
+                throw [TimeoutException]::new("$Context deadline was exceeded.")
             }
-            throw [TimeoutException]::new("$Context deadline was exceeded.")
+            if ($process.HasExited) { Start-Sleep -Milliseconds ([Math]::Min(50, $remaining)) }
+            else { [void]$process.WaitForExit([Math]::Min(50, $remaining)) }
         }
 
-        $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
-        $stderr = [string]$stderrTask.GetAwaiter().GetResult()
-        if ($stdout.Length -gt 16777216 -or $stderr.Length -gt 16384) {
-            throw [InvalidOperationException]::new("$Context exceeded its isolated output quota.")
+        $stdoutResult = $stdoutTask.GetAwaiter().GetResult()
+        $stderrResult = $stderrTask.GetAwaiter().GetResult()
+        $stdout = [string]$stdoutResult.Text
+        $stderr = [string]$stderrResult.Text
+        if ([bool]$stdoutResult.Exceeded -or [bool]$stderrResult.Exceeded) {
+            $quotaStream = if ([bool]$stdoutResult.Exceeded) { 'stdout' } else { 'stderr' }
+            try {
+                if ($jobAssigned) { [void][StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1) }
+            }
+            catch { }
+            throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
         }
         if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
             $diagnostic = if ([string]::IsNullOrWhiteSpace($stderr)) { 'isolated callback returned no result.' } else { $stderr.Trim() }
@@ -915,23 +1164,49 @@ catch {
         $normalizedOutput = ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $envelope.output
         return @($normalizedOutput)
     }
+    catch {
+        $primaryException = $_.Exception
+        throw
+    }
     finally {
         $deadline.Stop()
+        $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
         if ($started) {
             try {
                 if (-not $process.HasExited) {
-                    $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
-                            $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
-                            $_.GetParameters()[0].ParameterType -eq [bool]
-                        } | Select-Object -First 1)
-                    if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
-                    else { $process.Kill() }
-                    [void]$process.WaitForExit(5000)
+                    if ($jobAssigned) {
+                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
+                            $cleanupErrors.Add('TerminateJobObject returned false during callback cleanup.')
+                        }
+                    }
+                    else {
+                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                                $_.GetParameters()[0].ParameterType -eq [bool]
+                            } | Select-Object -First 1)
+                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
+                        else { $process.Kill() }
+                    }
+                    if (-not $process.WaitForExit(5000)) { $cleanupErrors.Add('Callback host did not terminate during cleanup.') }
                 }
             }
-            catch { }
+            catch { $cleanupErrors.Add("Callback process cleanup failed: $($_.Exception.Message)") }
         }
-        $process.Dispose()
+        if ($jobHandle -ne [IntPtr]::Zero) {
+            try {
+                if (-not [StandardSemanticBridgeProcessControlNative]::TryCloseHandle($jobHandle)) {
+                    $cleanupErrors.Add('Windows Job Object handle did not close during callback cleanup.')
+                }
+            }
+            catch { $cleanupErrors.Add("Windows Job Object cleanup failed: $($_.Exception.Message)") }
+        }
+        try { $process.Dispose() }
+        catch { $cleanupErrors.Add("Callback process handle disposal failed: $($_.Exception.Message)") }
+        if ($cleanupErrors.Count -gt 0) {
+            $cleanupMessage = $cleanupErrors -join ' '
+            if ($null -ne $primaryException) { $primaryException.Data['CallbackCleanupError'] = $cleanupMessage }
+            else { throw [InvalidOperationException]::new("$Context cleanup failed: $cleanupMessage") }
+        }
     }
 }
 

@@ -195,7 +195,7 @@
       "additionalProperties": false,
       "required": ["workItemId", "index", "idempotencyKey", "path", "contentKind", "textSha256", "byteCount", "analyzerSetIdentity", "plannedAnalyzerIds", "analyzerCoverage", "requestSha256", "responseSha256", "findingsSha256", "status"],
       "properties": {
-        "workItemId": { "type": "string", "pattern": "^semantic-work-item-[0-9]{4}$" },
+        "workItemId": { "type": "string", "pattern": "^semantic-work-item-[0-9]{4,}$" },
         "index": { "type": "integer", "minimum": 0 },
         "idempotencyKey": { "type": "string", "pattern": "^semantic-work-item-v2:[0-9a-f]{64}$" },
         "path": { "$ref": "#/$defs/nonEmptyScalar" },

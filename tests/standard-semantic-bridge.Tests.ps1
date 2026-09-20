@@ -591,14 +591,41 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([int]$validRun.providerCallCount -eq 1) 'Valid strict-UTF8 text did not reach the provider exactly once.'
     }
 
-    # Scenario: A provider callback records its actual invocation and then enters a non-cooperative .NET blocking call.
-    # Purpose: The deadline is measured from callback invocation and must terminate the callback boundary without waiting for cooperative cancellation.
-    It 'InterT130_provider_callback_deadline_stops_actual_callback' {
+    # Scenario: A provider callback spawns a blocking descendant and later a separate callback floods stderr before blocking.
+    # Purpose: The isolated boundary must kill the complete owned tree on PS5.1 and enforce stream quotas while reading, not after buffering.
+    It 'InterT130_provider_callback_boundary_kills_descendants_and_enforces_output_quotas' {
         $fixture = New-TestSemanticFixture
         $startedMarker = Join-Path $TestDrive 'provider-started.txt'
         $lateMarker = Join-Path $TestDrive 'provider-late-output.txt'
+        $childStartedMarker = Join-Path $TestDrive 'provider-child-started.txt'
+        $childLateMarker = Join-Path $TestDrive 'provider-child-late-output.txt'
+        $childPidMarker = Join-Path $TestDrive 'provider-child-pid.txt'
         $slowProvider = {
             param($providerRequest, $callbackContext)
+            $childStartedPath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$callbackContext.childStartedMarker))
+            $childLatePath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$callbackContext.childLateMarker))
+            $childScript = @"
+`$startedPath = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$childStartedPath'))
+`$latePath = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$childLatePath'))
+[IO.File]::WriteAllText(`$startedPath, 'started')
+[Threading.Thread]::Sleep(3000)
+[IO.File]::WriteAllText(`$latePath, 'late descendant output')
+"@
+            $childInfo = New-Object Diagnostics.ProcessStartInfo
+            $childInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $childInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $childInfo.UseShellExecute = $false
+            $childInfo.CreateNoWindow = $true
+            $child = New-Object Diagnostics.Process
+            $child.StartInfo = $childInfo
+            if (-not $child.Start()) { throw 'provider descendant did not start.' }
+            [IO.File]::WriteAllText([string]$callbackContext.childPidMarker, [string]$child.Id)
+            $child.Dispose()
+            $childStartDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+            while (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $childStartDeadline) {
+                [Threading.Thread]::Sleep(25)
+            }
+            if (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf)) { throw 'provider descendant did not record startup.' }
             [IO.File]::WriteAllText(
                 [string]$callbackContext.startedMarker,
                 [Diagnostics.Stopwatch]::GetTimestamp().ToString([Globalization.CultureInfo]::InvariantCulture)
@@ -610,17 +637,52 @@ function Update-TestConsentDigests {
         $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $slowProvider -ProviderContext ([pscustomobject]@{
                 startedMarker = $startedMarker
                 lateMarker = $lateMarker
+                childStartedMarker = $childStartedMarker
+                childLateMarker = $childLateMarker
+                childPidMarker = $childPidMarker
             }) -TimeoutSeconds 1
         $returnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A provider callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The timed provider callback was not actually invoked.'
         Assert-TestCondition ($null -eq $run.evidenceBytes) 'A timed provider callback emitted evidence.'
         Assert-TestCondition (Test-Path -LiteralPath $startedMarker -PathType Leaf) 'The provider callback did not record its actual invocation.'
+        Assert-TestCondition (Test-Path -LiteralPath $childStartedMarker -PathType Leaf) 'The provider descendant did not record its actual invocation.'
+        Assert-TestCondition (Test-Path -LiteralPath $childPidMarker -PathType Leaf) 'The provider descendant PID was not captured.'
         $callbackStartedTick = [long]([IO.File]::ReadAllText($startedMarker))
         $elapsedFromCallbackStartSeconds = ([double]($returnedTick - $callbackStartedTick)) / [double][Diagnostics.Stopwatch]::Frequency
         Assert-TestCondition ($elapsedFromCallbackStartSeconds -lt 2.5) 'The bridge waited for the provider callback after its invocation deadline.'
+        Start-Sleep -Milliseconds 250
+        $childProcess = Get-Process -Id ([int]([IO.File]::ReadAllText($childPidMarker))) -ErrorAction SilentlyContinue
+        Assert-TestCondition ($null -eq $childProcess) 'A timed-out provider callback descendant remained alive after boundary cleanup.'
         Start-Sleep -Milliseconds 2500
         Assert-TestCondition (-not (Test-Path -LiteralPath $lateMarker)) 'A timed-out provider callback continued and produced late output.'
+        Assert-TestCondition (-not (Test-Path -LiteralPath $childLateMarker)) 'A timed-out provider callback descendant continued and produced late output.'
+
+        $quotaStartedMarker = Join-Path $TestDrive 'provider-quota-started.txt'
+        $quotaLateMarker = Join-Path $TestDrive 'provider-quota-late-output.txt'
+        $noisyProvider = {
+            param($providerRequest, $callbackContext)
+            [IO.File]::WriteAllText(
+                [string]$callbackContext.startedMarker,
+                [Diagnostics.Stopwatch]::GetTimestamp().ToString([Globalization.CultureInfo]::InvariantCulture)
+            )
+            [Console]::Error.Write(('e' * 20000))
+            [Threading.Thread]::Sleep(3000)
+            [IO.File]::WriteAllText([string]$callbackContext.lateMarker, 'late quota output')
+            return [pscustomobject][ordered]@{ findings = @(); analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery') }
+        }
+        $quotaRun = Invoke-TestSemanticBridge -Fixture $fixture -Provider $noisyProvider -ProviderContext ([pscustomobject]@{
+                startedMarker = $quotaStartedMarker
+                lateMarker = $quotaLateMarker
+            }) -TimeoutSeconds 5
+        $quotaReturnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
+        Assert-TestCondition ([string]$quotaRun.status -ceq 'FAILED') 'A provider callback exceeding stderr quota unexpectedly passed.'
+        Assert-TestCondition (Test-Path -LiteralPath $quotaStartedMarker -PathType Leaf) 'The quota callback did not record its invocation.'
+        $quotaStartedTick = [long]([IO.File]::ReadAllText($quotaStartedMarker))
+        $quotaElapsedSeconds = ([double]($quotaReturnedTick - $quotaStartedTick)) / [double][Diagnostics.Stopwatch]::Frequency
+        Assert-TestCondition ($quotaElapsedSeconds -lt 2.5) 'The bridge buffered callback stderr until the callback deadline instead of enforcing the live quota.'
+        Start-Sleep -Milliseconds 2500
+        Assert-TestCondition (-not (Test-Path -LiteralPath $quotaLateMarker)) 'A quota-terminated provider callback continued and produced late output.'
     }
 
     # Scenario: Provider work completes, but the signer records its actual invocation and enters a non-cooperative .NET blocking call.

@@ -2993,6 +2993,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ([string]$v2Schema.description -match 'does not select a production provider.*account.*model.*endpoint.*signer') 'The v2 schema must document its provider-agnostic non-selection boundary.'
         Assert-True (@($v2Schema.'$defs'.executionEvidence.required) -contains 'providerCalls') 'The v2 execution evidence must carry a recomputable per-work provider-call ledger.'
         Assert-Equal $v2Schema.'$defs'.executionEvidence.properties.providerCalls.items.'$ref' '#/$defs/providerCallEvidence' 'The v2 provider-call ledger must use its closed typed row schema.'
+        Assert-Equal $v2Schema.'$defs'.providerCallEvidence.properties.workItemId.pattern '^semantic-work-item-[0-9]{4,}$' 'The v2 provider-call schema must accept the implementation format after index 9999.'
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $policySchema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'The policy with the v2 local bridge boundary must remain schema-valid.'
         Assert-Equal $contract.semanticBridgeV2.schemaVersion 2 'The central v1 runner contract must reference v2 explicitly.'
