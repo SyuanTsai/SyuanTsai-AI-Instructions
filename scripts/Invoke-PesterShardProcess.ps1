@@ -1919,19 +1919,23 @@ function New-PesterShardPlan {
     )
 
     if (@($AllTestPaths).Count -eq 0) { throw 'No Pester test files were discovered.' }
+    $orderedTestPaths = [string[]]@($AllTestPaths | ForEach-Object { [string]$_ })
+    [Array]::Sort($orderedTestPaths, [StringComparer]::Ordinal)
 
     $isolatedPaths = New-Object 'System.Collections.Generic.List[string]'
     foreach ($name in $IsolatedTestFileNames) {
-        $matches = @($AllTestPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
+        $matches = @($orderedTestPaths | Where-Object { (Split-Path -Leaf $_) -ceq $name })
         if ($matches.Count -ne 1) { throw "Expected exactly one isolated test file named '$name'; found $($matches.Count)." }
         $isolatedPaths.Add([string]$matches[0])
     }
 
-    $bulkPaths = @($AllTestPaths | Where-Object { $isolatedPaths -notcontains [string]$_ })
+    $bulkPaths = @($orderedTestPaths | Where-Object { $isolatedPaths -notcontains [string]$_ })
     $partitionedPaths = @($isolatedPaths.ToArray()) + @($bulkPaths)
-    if (($partitionedPaths.Count -ne $AllTestPaths.Count) -or
-        ((($partitionedPaths | Sort-Object) -join [Environment]::NewLine) -cne
-         (($AllTestPaths | Sort-Object) -join [Environment]::NewLine))) {
+    $partitionedPathsOrdinal = [string[]]@($partitionedPaths)
+    [Array]::Sort($partitionedPathsOrdinal, [StringComparer]::Ordinal)
+    if (($partitionedPaths.Count -ne $orderedTestPaths.Count) -or
+        (($partitionedPathsOrdinal -join [Environment]::NewLine) -cne
+         ($orderedTestPaths -join [Environment]::NewLine))) {
         throw 'Pester shard inventory is not an exact partition of the discovered test files.'
     }
 
@@ -1978,7 +1982,6 @@ if ($null -eq $invokePester) { throw "Invoke-Pester $PesterVersion could not be 
 
 $allTestPaths = @(
     Get-ChildItem -LiteralPath $resolvedTestRoot -Filter '*.Tests.ps1' -File |
-        Sort-Object FullName |
         ForEach-Object { [string]$_.FullName }
 )
 $shards = New-Object 'System.Collections.Generic.List[object]'

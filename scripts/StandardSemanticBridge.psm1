@@ -768,43 +768,170 @@ function Get-StandardSemanticBridgeLedgerDigest {
     return Get-StandardSemanticBridgeArtifactSha256 -Artifact @($sorted)
 }
 
+function ConvertFrom-StandardSemanticBridgeIsolatedValue {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType] -or $Value -is [byte[]]) {
+        return $Value
+    }
+    if ($Value -is [System.Collections.IList]) {
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($item in $Value) {
+            [void]$items.Add((ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $item))
+        }
+        Write-Output -NoEnumerate ([object[]]$items.ToArray())
+        return
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $dictionary = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $dictionary[[string]$key] = ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $Value[$key]
+        }
+        return $dictionary
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -in @('NoteProperty', 'Property') })
+    if ($properties.Count -gt 0) {
+        $normalized = [ordered]@{}
+        foreach ($property in $properties) {
+            $normalized[[string]$property.Name] = ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $property.Value
+        }
+        return [pscustomobject]$normalized
+    }
+    return $Value
+}
+
 function Invoke-StandardSemanticBridgeCallbackWithTimeout {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][scriptblock] $Callback,
         [AllowNull()] $Argument,
+        [AllowNull()] $CallbackContext,
         [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds,
         [string] $Context = 'callback'
     )
 
     if ($TimeoutMilliseconds -le 0) { throw [TimeoutException]::new("$Context deadline was exceeded before invocation.") }
-    $pipeline = [System.Management.Automation.PowerShell]::Create()
-    $asyncResult = $null
+    $hostExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ([string]::IsNullOrWhiteSpace($hostExecutable) -or -not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
+        throw [InvalidOperationException]::new("$Context could not resolve an isolated PowerShell host.")
+    }
+
+    # The callback runs in a separate process because PowerShell.Stop() is a
+    # cooperative boundary: it can wait indefinitely for a callback blocked in
+    # native or non-cooperative .NET code.  Only serialized request/context data
+    # crosses this boundary.  The bootstrap emits one CLIXML envelope on stdout.
+    $bootstrap = @'
+$ErrorActionPreference = 'Stop'
+$InformationPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+$VerbosePreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+try {
+    $payloadXml = [Console]::In.ReadToEnd()
+    $payload = [Management.Automation.PSSerializer]::Deserialize($payloadXml)
+    $argument = [Management.Automation.PSSerializer]::Deserialize([string]$payload.argumentXml)
+    $callbackContext = [Management.Automation.PSSerializer]::Deserialize([string]$payload.contextXml)
+    $callback = [scriptblock]::Create([string]$payload.callbackText)
+    $output = @(& $callback $argument $callbackContext)
+    $envelope = [pscustomobject][ordered]@{
+        succeeded = $true
+        output = @($output)
+        error = $null
+    }
+}
+catch {
+    $envelope = [pscustomobject][ordered]@{
+        succeeded = $false
+        output = @()
+        error = [string]$_.Exception.Message
+    }
+}
+[Console]::Out.Write([Management.Automation.PSSerializer]::Serialize($envelope, 100))
+'@
+    $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    $payload = [pscustomobject][ordered]@{
+        callbackText = $Callback.ToString()
+        argumentXml = [Management.Automation.PSSerializer]::Serialize($Argument, 100)
+        contextXml = [Management.Automation.PSSerializer]::Serialize($CallbackContext, 100)
+    }
+    $payloadXml = [Management.Automation.PSSerializer]::Serialize($payload, 100)
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $hostExecutable
+    $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedBootstrap"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $started = $false
+    $stdoutTask = $null
+    $stderrTask = $null
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
     try {
-        # A separate in-process pipeline is required here: invoking a
-        # scriptblock directly cannot be interrupted while it is blocked in a
-        # provider or signer callback.  Stop() is the local fail-closed
-        # boundary; no callback output is accepted after its deadline.
-        [void]$pipeline.AddScript({
-            param($callback, $argument)
-            & $callback $argument
-        }).AddArgument($Callback).AddArgument($Argument)
-        $asyncResult = $pipeline.BeginInvoke()
-        if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
-            try { $pipeline.Stop() } catch { }
+        if (-not $process.Start()) { throw [InvalidOperationException]::new("$Context process did not start.") }
+        $started = $true
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Write($payloadXml)
+        $process.StandardInput.Close()
+        $remaining = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
+        if ($remaining -le 0 -or -not $process.WaitForExit($remaining)) {
+            $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                    $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                    $_.GetParameters()[0].ParameterType -eq [bool]
+                } | Select-Object -First 1)
+            try {
+                if ($killTreeMethod.Count -eq 1) {
+                    [void]$killTreeMethod[0].Invoke($process, [object[]]@($true))
+                }
+                else { $process.Kill() }
+            }
+            catch {
+                throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process could not be terminated.")
+            }
+            if (-not $process.WaitForExit(5000)) {
+                throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process did not terminate.")
+            }
             throw [TimeoutException]::new("$Context deadline was exceeded.")
         }
-        $output = @($pipeline.EndInvoke($asyncResult))
-        if ($pipeline.Streams.Error.Count -gt 0) {
-            throw [InvalidOperationException]::new("$Context emitted an error stream.")
+
+        $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+        $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+        if ($stdout.Length -gt 16777216 -or $stderr.Length -gt 16384) {
+            throw [InvalidOperationException]::new("$Context exceeded its isolated output quota.")
         }
-        return $output
+        if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
+            $diagnostic = if ([string]::IsNullOrWhiteSpace($stderr)) { 'isolated callback returned no result.' } else { $stderr.Trim() }
+            throw [InvalidOperationException]::new("$Context failed in its isolated process: $diagnostic")
+        }
+        try { $envelope = [Management.Automation.PSSerializer]::Deserialize($stdout) }
+        catch { throw [InvalidOperationException]::new("$Context returned an invalid isolated result envelope.") }
+        if ($null -eq $envelope -or -not [bool]$envelope.succeeded) {
+            $message = if ($null -eq $envelope -or [string]::IsNullOrWhiteSpace([string]$envelope.error)) { 'callback failed without a diagnostic.' } else { [string]$envelope.error }
+            throw [InvalidOperationException]::new("$Context failed: $message")
+        }
+        $normalizedOutput = ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $envelope.output
+        return @($normalizedOutput)
     }
     finally {
-        if ($null -ne $asyncResult -and $null -ne $asyncResult.AsyncWaitHandle) {
-            try { $asyncResult.AsyncWaitHandle.Dispose() } catch { }
+        $deadline.Stop()
+        if ($started) {
+            try {
+                if (-not $process.HasExited) {
+                    $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                            $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                            $_.GetParameters()[0].ParameterType -eq [bool]
+                        } | Select-Object -First 1)
+                    if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
+                    else { $process.Kill() }
+                    [void]$process.WaitForExit(5000)
+                }
+            }
+            catch { }
         }
-        $pipeline.Dispose()
+        $process.Dispose()
     }
 }
 
@@ -927,11 +1054,17 @@ function Invoke-StandardSemanticBridge {
         [Parameter(Mandatory = $true)] $Analyzers,
         [Parameter(Mandatory = $true)][scriptblock] $ProviderCallback,
         [Parameter(Mandatory = $true)][scriptblock] $SignerCallback,
+        [AllowNull()] $ProviderCallbackContext = $null,
+        [AllowNull()] $SignerCallbackContext = $null,
         [hashtable] $IdempotencyLedger = @{},
         [int] $TimeoutSeconds = 30,
         [DateTime] $Now = [DateTime]::UtcNow
     )
 
+    # Provider and signer callbacks execute in isolated PowerShell processes.
+    # They receive (request, callbackContext), must not depend on caller closure
+    # state, and their optional contexts must be CLIXML-serializable.  Secrets
+    # supplied through a context travel only through the redirected stdin pipe.
     $providerCalls = 0
     $successfulCalls = 0
     $inventory = $null
@@ -964,6 +1097,7 @@ function Invoke-StandardSemanticBridge {
         $rawGraphRecords = New-Object System.Collections.Generic.List[object]
         $rawFindingRecords = New-Object System.Collections.Generic.List[object]
         $failureRecords = New-Object System.Collections.Generic.List[object]
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
         $workIndex = 0
         # Inventory order is the work-plan order.  The original input is used
         # only to recover the verified text/bytes for each sorted inventory row.
@@ -977,9 +1111,22 @@ function Invoke-StandardSemanticBridge {
             $text = $null
             if ($hasText) {
                 $text = [string](Get-StandardSemanticBridgeProperty $textItem 'text')
-                $itemBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($text)
+                $itemBytes = $strictUtf8.GetBytes($text)
             }
-            else { $itemBytes = [byte[]](Get-StandardSemanticBridgeProperty $textItem 'bytes') }
+            else {
+                $itemBytes = [byte[]](Get-StandardSemanticBridgeProperty $textItem 'bytes')
+                try {
+                    $text = $strictUtf8.GetString($itemBytes)
+                    $roundTripBytes = $strictUtf8.GetBytes($text)
+                    if ($roundTripBytes.Length -ne $itemBytes.Length) { throw 'strict UTF-8 round-trip changed the byte count.' }
+                    for ($byteIndex = 0; $byteIndex -lt $itemBytes.Length; $byteIndex++) {
+                        if ($roundTripBytes[$byteIndex] -ne $itemBytes[$byteIndex]) { throw 'strict UTF-8 round-trip changed the bytes.' }
+                    }
+                }
+                catch {
+                    throw "provider text bytes are not valid strict UTF-8: $($_.Exception.Message)"
+                }
+            }
             $itemSha = Get-StandardSemanticBridgeSha256FromBytes -Bytes $itemBytes
             if ([string]$inventoryItem.contentKind -cne $kind -or [string]$inventoryItem.sha256 -cne $itemSha -or [int64]$inventoryItem.byteCount -ne [int64]$itemBytes.Length) { throw 'provider text inventory changed before egress.' }
             $workItem = [pscustomobject][ordered]@{ index = [int]$workIndex; path = $path; contentKind = $kind; textSha256 = $itemSha; byteCount = [int64]$itemBytes.Length }
@@ -994,12 +1141,11 @@ function Invoke-StandardSemanticBridge {
                 $workIndex++
                 continue
             }
-            $requestBytes = if ($hasText) { $null } else { [byte[]]$itemBytes.Clone() }
-            $request = [pscustomobject][ordered]@{ workItemId = $requestForDigest.workItemId; idempotencyKey = $idempotencyKey; providerRoute = $normalizedRoute; path = $path; contentKind = $kind; analyzerSet = $normalizedAnalyzers; text = $text; bytes = $requestBytes }
+            $request = [pscustomobject][ordered]@{ workItemId = $requestForDigest.workItemId; idempotencyKey = $idempotencyKey; providerRoute = $normalizedRoute; path = $path; contentKind = $kind; analyzerSet = $normalizedAnalyzers; text = $text; bytes = $null }
             $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
             $providerCalls++
             try {
-                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'provider callback')
+                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -CallbackContext $ProviderCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'provider callback')
                 if ((Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedBindings) -cne $bindingsDigest -or
                     (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedRoute) -cne $routeDigest -or
                     (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedScope) -cne $scopeDigest -or
@@ -1058,11 +1204,11 @@ function Invoke-StandardSemanticBridge {
             $workIndex++
         }
         if ($failureRecords.Count -gt 0 -or $successfulCalls -ne [int]$inventory.fileCount) {
-            return [pscustomobject][ordered]@{ status = 'FAILED'; reason = if ($failureRecords.Count -gt 0) { 'provider execution was incomplete or a retry lacked prior response bytes.' } else { 'provider execution was incomplete.' }; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords); failures = @($failureRecords); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
+            return [pscustomobject][ordered]@{ status = 'FAILED'; reason = if ($failureRecords.Count -gt 0) { 'provider execution was incomplete or a retry lacked prior response bytes.' } else { 'provider execution was incomplete.' }; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords.ToArray()); failures = @($failureRecords.ToArray()); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
         }
         $missingAnalyzers = @($expectedAnalyzerIds | Where-Object { -not $coverage.Contains($_) })
         if ($missingAnalyzers.Count -gt 0) {
-            return [pscustomobject][ordered]@{ status = 'FAILED'; reason = 'analyzer coverage is incomplete.'; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords); failures = @([pscustomobject][ordered]@{ errorCode = 'incomplete-analyzer-coverage' }); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
+            return [pscustomobject][ordered]@{ status = 'FAILED'; reason = 'analyzer coverage is incomplete.'; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords.ToArray()); failures = @([pscustomobject][ordered]@{ errorCode = 'incomplete-analyzer-coverage' }); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
         }
         $canonicalFindings = @(Get-StandardSemanticBridgeCanonicalFindings -Findings @($allFindings.ToArray()))
         $findingsDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact @($canonicalFindings)
@@ -1105,7 +1251,7 @@ function Invoke-StandardSemanticBridge {
         $unsignedBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($unsignedJson)
         $signerRequest = [pscustomobject][ordered]@{ artifactType = 'semantic-evidence-v2'; algorithm = $script:StandardSemanticBridgeAlgorithm; payloadSha256 = $unsignedPayloadSha; payloadBytes = $unsignedBytes }
         $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
-        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'signer callback')
+        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'signer callback')
         if ($signatureItems.Count -ne 1 -or $null -eq $signatureItems[0]) { throw 'signer response shape is invalid.' }
         $signature = $signatureItems[0]
         Assert-StandardSemanticBridgeExactProperties -Object $signature -Expected @('keyId', 'algorithm', 'signature') -Context 'signer response'

@@ -102,28 +102,28 @@ function New-TestSemanticFixture {
     $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
     $publicRsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
     $publicRsa.ImportParameters($rsa.ExportParameters($false))
-    $state = [hashtable]@{ providerCallCount = 0; callsByPath = @{}; timeoutPath = $null; timeoutRemaining = $false; rsa = $rsa }
     $provider = {
-        param($providerRequest)
+        param($providerRequest, $callbackContext)
         $path = [string]$providerRequest.path
-        $state.providerCallCount++
-        if (-not $state.callsByPath.ContainsKey($path)) { $state.callsByPath[$path] = 0 }
-        $state.callsByPath[$path]++
-        if ($state.timeoutRemaining -and [string]$state.timeoutPath -ceq $path) {
-            $state.timeoutRemaining = $false
-            throw [TimeoutException]::new('fixture timeout')
+        if ($null -ne $callbackContext -and [string]$callbackContext.timeoutPath -ceq $path) {
+            [Threading.Thread]::Sleep(3000)
         }
         $findings = @(
             [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-intent"; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_developer_intent' }
             [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-security"; ruleId = 'fixture.security'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
         )
         return [pscustomobject][ordered]@{ findings = $findings; analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery') }
-    }.GetNewClosure()
+    }
     $signer = {
-        param($signerRequest)
-        $signature = $state.rsa.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
-        return [pscustomobject][ordered]@{ keyId = 'fixture-key'; algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'; signature = [Convert]::ToBase64String($signature) }
-    }.GetNewClosure()
+        param($signerRequest, $callbackContext)
+        $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+            $signature = $signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            return [pscustomobject][ordered]@{ keyId = 'fixture-key'; algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'; signature = [Convert]::ToBase64String($signature) }
+        }
+        finally { $signingKey.Dispose() }
+    }
 
     return [pscustomobject][ordered]@{
         Now = $now
@@ -139,7 +139,8 @@ function New-TestSemanticFixture {
         Authorizer = $authorizer
         Provider = $provider
         Signer = $signer
-        State = $state
+        ProviderContext = [pscustomobject][ordered]@{ timeoutPath = $null }
+        SignerContext = [pscustomobject][ordered]@{ privateKeyXml = $rsa.ToXmlString($true) }
         Rsa = $rsa
         PublicRsa = $publicRsa
     }
@@ -159,6 +160,8 @@ function Invoke-TestSemanticBridge {
         [DateTime] $Now = [DateTime]::MinValue,
         [scriptblock] $Provider = $null,
         [scriptblock] $Signer = $null,
+        $ProviderContext = $null,
+        $SignerContext = $null,
         [int] $TimeoutSeconds = 30
     )
     if ($null -eq $Bindings) { $Bindings = $Fixture.Bindings }
@@ -172,6 +175,8 @@ function Invoke-TestSemanticBridge {
         if ($Now -eq [DateTime]::MinValue) { $Now = $Fixture.Now.AddMinutes(2) }
         if ($null -eq $Provider) { $Provider = $Fixture.Provider }
         if ($null -eq $Signer) { $Signer = $Fixture.Signer }
+        if ($null -eq $ProviderContext) { $ProviderContext = $Fixture.ProviderContext }
+        if ($null -eq $SignerContext) { $SignerContext = $Fixture.SignerContext }
     return Invoke-StandardSemanticBridge `
         -ConsentRequest $Request `
         -ConsentDecision $Decision `
@@ -183,6 +188,8 @@ function Invoke-TestSemanticBridge {
         -Analyzers $Fixture.Analyzers `
         -ProviderCallback $Provider `
         -SignerCallback $Signer `
+        -ProviderCallbackContext $ProviderContext `
+        -SignerCallbackContext $SignerContext `
         -IdempotencyLedger $Ledger `
         -TimeoutSeconds $TimeoutSeconds `
         -Now $Now
@@ -237,7 +244,7 @@ function Update-TestConsentDigests {
     It 'InterT20_happy_path_returns_evidence_bytes_verified_by_explicit_public_key' {
         $fixture = New-TestSemanticFixture
         $run = Invoke-TestSemanticBridge -Fixture $fixture
-        Assert-TestCondition ([string]$run.status -ceq 'PASS') 'The happy-path bridge run did not pass.'
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "The happy-path bridge run did not pass: $($run.reason)"
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The happy-path provider call count changed.'
         Assert-TestCondition ([int]$run.successfulProviderCallCount -eq 1) 'The happy-path successful call count changed.'
         Assert-TestCondition (@($run.evidenceBytes).Count -gt 0) 'The happy-path bridge emitted no evidence bytes.'
@@ -271,19 +278,19 @@ function Update-TestConsentDigests {
         $fixture.Decision.consentGranted = $false
         $missing = Invoke-TestSemanticBridge -Fixture $fixture
         Assert-TestCondition ([string]$missing.status -ceq 'BLOCKED') 'Missing consent did not block the bridge.'
-        Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) 'Missing consent reached the provider.'
+        Assert-TestCondition ([int]$missing.providerCallCount -eq 0) 'Missing consent reached the provider.'
 
         $fixture = New-TestSemanticFixture
         $expired = Invoke-TestSemanticBridge -Fixture $fixture -Now $fixture.Now.AddHours(2)
         Assert-TestCondition ([string]$expired.status -ceq 'BLOCKED') 'Expired consent did not block the bridge.'
-        Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) 'Expired consent reached the provider.'
+        Assert-TestCondition ([int]$expired.providerCallCount -eq 0) 'Expired consent reached the provider.'
 
         $fixture = New-TestSemanticFixture
         $routeDrift = ConvertFrom-Json -InputObject ($fixture.Route | ConvertTo-Json -Depth 20)
         $routeDrift.model = 'different-fixture-model'
         $mismatched = Invoke-TestSemanticBridge -Fixture $fixture -ProviderRoute $routeDrift
         Assert-TestCondition ([string]$mismatched.status -ceq 'BLOCKED') 'Mismatched consent did not block the bridge.'
-        Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) 'Mismatched consent reached the provider.'
+        Assert-TestCondition ([int]$mismatched.providerCallCount -eq 0) 'Mismatched consent reached the provider.'
     }
 
     # Scenario: Candidate identity, source revision, outbound inventory, and provider route each drift independently.
@@ -291,7 +298,7 @@ function Update-TestConsentDigests {
     It 'UnitT40_candidate_source_inventory_and_route_drift_invalidate_consent' {
         $evidenceFixture = New-TestSemanticFixture
         $goodEvidence = Invoke-TestSemanticBridge -Fixture $evidenceFixture
-        Assert-TestCondition ([string]$goodEvidence.status -ceq 'PASS') 'The baseline evidence fixture did not pass.'
+        Assert-TestCondition ([string]$goodEvidence.status -ceq 'PASS') "The baseline evidence fixture did not pass: $($goodEvidence.reason)"
         foreach ($case in @('candidate', 'source', 'inventory', 'route')) {
             $fixture = New-TestSemanticFixture
             $bindings = $fixture.Bindings
@@ -321,7 +328,7 @@ function Update-TestConsentDigests {
             }
             $run = Invoke-TestSemanticBridge -Fixture $fixture -Bindings $bindings -ProviderRoute $route -Items $items
             Assert-TestCondition ([string]$run.status -ceq 'BLOCKED') "$case drift did not block the bridge."
-            Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 0) "$case drift reached the provider."
+            Assert-TestCondition ([int]$run.providerCallCount -eq 0) "$case drift reached the provider."
             $evidenceCheck = Test-StandardSemanticBridgeEvidence `
                 -EvidenceBytes $goodEvidence.evidenceBytes `
                 -ConsentRequest $evidenceFixture.Request `
@@ -368,7 +375,7 @@ function Update-TestConsentDigests {
                 findings = @([pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'only-one'; ruleId = 'fixture.one'; message = 'incomplete'; path = [string]$providerRequest.path; analyzerId = 'semantic_developer_intent' })
                 analyzerCoverage = @('semantic_developer_intent')
             }
-        }.GetNewClosure()
+        }
         $incomplete = Invoke-TestSemanticBridge -Fixture $fixture -Provider $incompleteProvider
         Assert-TestCondition ([string]$incomplete.status -ceq 'FAILED') 'Incomplete analyzer findings did not fail.'
         Assert-TestCondition ($null -eq $incomplete.evidenceBytes) 'Incomplete analyzer findings emitted evidence.'
@@ -395,22 +402,17 @@ function Update-TestConsentDigests {
     # Purpose: Successful outbound work is never sent twice; partial/timeout runs never report PASS, and route drift needs fresh consent.
     It 'InterT70_timeout_partial_retry_has_no_duplicate_success_and_requires_fresh_consent' {
         $fixture = New-TestSemanticFixture -ItemCount 2
-        $fixture.State.timeoutPath = 'skills/example/README.md'
-        $fixture.State.timeoutRemaining = $true
         $ledger = @{}
-        $first = Invoke-TestSemanticBridge -Fixture $fixture -Ledger $ledger
+        $timeoutContext = [pscustomobject][ordered]@{ timeoutPath = 'skills/example/README.md' }
+        $first = Invoke-TestSemanticBridge -Fixture $fixture -Ledger $ledger -ProviderContext $timeoutContext -TimeoutSeconds 1
         Assert-TestCondition ([string]$first.status -ceq 'FAILED') 'The partial timeout run did not fail.'
         Assert-TestCondition ($null -eq $first.evidenceBytes) 'The partial timeout run emitted evidence.'
         Assert-TestCondition ([int]$first.providerCallCount -eq 2) 'The first partial run did not call both work items once.'
-        Assert-TestCondition ([int]$fixture.State.callsByPath['skills/example/SKILL.md'] -eq 1) 'The first work item call count changed.'
-        Assert-TestCondition ([int]$fixture.State.callsByPath['skills/example/README.md'] -eq 1) 'The timed-out work item call count changed.'
 
         $second = Invoke-TestSemanticBridge -Fixture $fixture -Ledger $ledger
         Assert-TestCondition ([string]$second.status -ceq 'FAILED') 'The retry with unavailable prior response bytes did not fail closed.'
         Assert-TestCondition ($null -eq $second.evidenceBytes) 'The partial retry emitted evidence.'
         Assert-TestCondition ([int]$second.providerCallCount -eq 1) 'The retry resent an already successful work item.'
-        Assert-TestCondition ([int]$fixture.State.callsByPath['skills/example/SKILL.md'] -eq 1) 'The successful work item was sent twice.'
-        Assert-TestCondition ([int]$fixture.State.callsByPath['skills/example/README.md'] -eq 2) 'The failed work item was not retried exactly once.'
         foreach ($entry in @($ledger.Values)) {
             Assert-TestCondition (@($entry.PSObject.Properties.Name) -notcontains 'text') 'The idempotency ledger retained provider text.'
             Assert-TestCondition (@($entry.PSObject.Properties.Name) -notcontains 'bytes') 'The idempotency ledger retained provider bytes.'
@@ -420,7 +422,7 @@ function Update-TestConsentDigests {
         $driftedRoute.model = 'fresh-consent-model'
         $blocked = Invoke-TestSemanticBridge -Fixture $fixture -ProviderRoute $driftedRoute -Ledger $ledger
         Assert-TestCondition ([string]$blocked.status -ceq 'BLOCKED') 'Provider route drift reused stale consent.'
-        Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 3) 'Provider route drift reached the provider.'
+        Assert-TestCondition ([int]$blocked.providerCallCount -eq 0) 'Provider route drift reached the provider.'
 
         $freshInventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $fixture.Items
         $freshAnalyzerSet = New-StandardSemanticBridgeAnalyzerSet -Analyzers $fixture.Analyzers
@@ -432,7 +434,7 @@ function Update-TestConsentDigests {
             -Request $freshRequest -Authorizer $fixture.Authorizer -DecisionId '11111111-1111-4111-8111-111111111115' -AuthorizedAt $fixture.Now.AddMinutes(4)
         $fresh = Invoke-TestSemanticBridge -Fixture $fixture -ProviderRoute $driftedRoute -Request $freshRequest -Decision $freshDecision -Ledger $ledger -Now $fixture.Now.AddMinutes(5)
         Assert-TestCondition ([string]$fresh.status -ceq 'PASS') 'Fresh route-bound consent did not permit the retry.'
-        Assert-TestCondition ([int]$fixture.State.providerCallCount -eq 5) 'Fresh route-bound consent did not execute both work items.'
+        Assert-TestCondition ([int]$fresh.providerCallCount -eq 2) 'Fresh route-bound consent did not execute both work items.'
     }
 
     # Scenario: A schema-v1 semantic artifact is supplied to the v2 verifier.
@@ -481,7 +483,7 @@ function Update-TestConsentDigests {
                 findings = @([pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path"; ruleId = 'fixture.item'; message = 'synthetic finding'; path = $findingPath; analyzerId = 'semantic_developer_intent' })
                 analyzerCoverage = $coverage
             }
-        }.GetNewClosure()
+        }
         $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $provider
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A partial per-work-item analyzer response unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 2) 'The negative per-work-item provider was not actually called for both items.'
@@ -537,56 +539,120 @@ function Update-TestConsentDigests {
         }
     }
 
-    # Scenario: A provider callback blocks longer than the configured deadline and never returns a response.
-    # Purpose: Timeout must stop the actual callback pipeline, fail closed, and avoid accepting late callback output.
+    # Scenario: Provider input is supplied as malformed bytes, then as valid strict-UTF8 bytes.
+    # Purpose: Binary data must stop before egress, while valid bytes may cross only as decoded text.
+    It 'UnitT125_rejects_binary_bytes_before_provider_egress_and_decodes_strict_UTF8_text' {
+        $fixture = New-TestSemanticFixture
+        $invalidItems = @([pscustomobject][ordered]@{
+                path = 'skills/example/SKILL.md'
+                contentKind = 'skill-instructions'
+                bytes = [byte[]]@(0xc3, 0x28)
+            })
+        $invalidInventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $invalidItems
+        $invalidRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $invalidInventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111116' -RequestedAt $fixture.Now -ExpiresAt $fixture.Now.AddHours(1)
+        $invalidDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $invalidRequest -Authorizer $fixture.Authorizer -DecisionId '11111111-1111-4111-8111-111111111117' -AuthorizedAt $fixture.Now.AddMinutes(1)
+        $invalidRun = Invoke-TestSemanticBridge -Fixture $fixture -Items $invalidItems -Request $invalidRequest -Decision $invalidDecision
+        Assert-TestCondition ([string]$invalidRun.status -ceq 'FAILED') 'Malformed UTF-8 bytes did not fail closed.'
+        Assert-TestCondition ([int]$invalidRun.providerCallCount -eq 0) 'Malformed UTF-8 bytes reached the provider.'
+
+        $validText = 'strict UTF-8 text'
+        $validItems = @([pscustomobject][ordered]@{
+                path = 'skills/example/SKILL.md'
+                contentKind = 'skill-instructions'
+                bytes = (New-Object Text.UTF8Encoding($false, $true)).GetBytes($validText)
+            })
+        $validInventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $validItems
+        $validRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $validInventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111118' -RequestedAt $fixture.Now -ExpiresAt $fixture.Now.AddHours(1)
+        $validDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $validRequest -Authorizer $fixture.Authorizer -DecisionId '11111111-1111-4111-8111-111111111119' -AuthorizedAt $fixture.Now.AddMinutes(1)
+        $validProvider = {
+            param($providerRequest, $callbackContext)
+            if ([string]$providerRequest.text -cne [string]$callbackContext.expectedText -or $null -ne $providerRequest.bytes) {
+                throw 'provider request did not contain only the strict-UTF8 decoded text.'
+            }
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'valid-bytes-intent'; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = [string]$providerRequest.path; analyzerId = 'semantic_developer_intent' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'valid-bytes-security'; ruleId = 'fixture.security'; message = 'synthetic finding'; path = [string]$providerRequest.path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $validRun = Invoke-TestSemanticBridge -Fixture $fixture -Items $validItems -Request $validRequest -Decision $validDecision `
+            -Provider $validProvider -ProviderContext ([pscustomobject]@{ expectedText = $validText })
+        Assert-TestCondition ([string]$validRun.status -ceq 'PASS') "Valid strict-UTF8 bytes did not pass as text: $($validRun.reason)"
+        Assert-TestCondition ([int]$validRun.providerCallCount -eq 1) 'Valid strict-UTF8 text did not reach the provider exactly once.'
+    }
+
+    # Scenario: A provider callback records its actual invocation and then enters a non-cooperative .NET blocking call.
+    # Purpose: The deadline is measured from callback invocation and must terminate the callback boundary without waiting for cooperative cancellation.
     It 'InterT130_provider_callback_deadline_stops_actual_callback' {
         $fixture = New-TestSemanticFixture
-        $state = [hashtable]@{ completed = $false; startedAt = [long]0 }
+        $startedMarker = Join-Path $TestDrive 'provider-started.txt'
+        $lateMarker = Join-Path $TestDrive 'provider-late-output.txt'
         $slowProvider = {
-            param($providerRequest)
-            $state.startedAt = [Diagnostics.Stopwatch]::GetTimestamp()
-            Start-Sleep -Seconds 3
-            $state.completed = $true
+            param($providerRequest, $callbackContext)
+            [IO.File]::WriteAllText(
+                [string]$callbackContext.startedMarker,
+                [Diagnostics.Stopwatch]::GetTimestamp().ToString([Globalization.CultureInfo]::InvariantCulture)
+            )
+            [Threading.Thread]::Sleep(3000)
+            [IO.File]::WriteAllText([string]$callbackContext.lateMarker, 'late provider output')
             return [pscustomobject][ordered]@{ findings = @(); analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery') }
-        }.GetNewClosure()
-        $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $slowProvider -TimeoutSeconds 1
-        $returnedAt = [Diagnostics.Stopwatch]::GetTimestamp()
-        $callbackElapsedSeconds = if ([long]$state.startedAt -gt 0) {
-            [double]($returnedAt - [long]$state.startedAt) / [double][Diagnostics.Stopwatch]::Frequency
         }
-        else { [double]::PositiveInfinity }
+        $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $slowProvider -ProviderContext ([pscustomobject]@{
+                startedMarker = $startedMarker
+                lateMarker = $lateMarker
+            }) -TimeoutSeconds 1
+        $returnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A provider callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The timed provider callback was not actually invoked.'
         Assert-TestCondition ($null -eq $run.evidenceBytes) 'A timed provider callback emitted evidence.'
-        Assert-TestCondition ($callbackElapsedSeconds -lt 2.5) 'The bridge waited for the provider callback after its deadline.'
-        Start-Sleep -Milliseconds 250
-        Assert-TestCondition (-not [bool]$state.completed) 'A timed-out provider callback continued and produced late output.'
+        Assert-TestCondition (Test-Path -LiteralPath $startedMarker -PathType Leaf) 'The provider callback did not record its actual invocation.'
+        $callbackStartedTick = [long]([IO.File]::ReadAllText($startedMarker))
+        $elapsedFromCallbackStartSeconds = ([double]($returnedTick - $callbackStartedTick)) / [double][Diagnostics.Stopwatch]::Frequency
+        Assert-TestCondition ($elapsedFromCallbackStartSeconds -lt 2.5) 'The bridge waited for the provider callback after its invocation deadline.'
+        Start-Sleep -Milliseconds 2500
+        Assert-TestCondition (-not (Test-Path -LiteralPath $lateMarker)) 'A timed-out provider callback continued and produced late output.'
     }
 
-    # Scenario: Provider work completes, but the caller-supplied signer blocks beyond the same local deadline.
-    # Purpose: Signing has an explicit fail-closed boundary and cannot emit an unsigned or late PASS artifact.
+    # Scenario: Provider work completes, but the signer records its actual invocation and enters a non-cooperative .NET blocking call.
+    # Purpose: The signer deadline is measured from invocation; its terminable boundary cannot emit an unsigned or late PASS artifact.
     It 'InterT140_signer_callback_deadline_fails_closed' {
         $fixture = New-TestSemanticFixture
-        $state = [hashtable]@{ completed = $false; startedAt = [long]0 }
+        $startedMarker = Join-Path $TestDrive 'signer-started.txt'
+        $lateMarker = Join-Path $TestDrive 'signer-late-output.txt'
         $slowSigner = {
-            param($signerRequest)
-            $state.startedAt = [Diagnostics.Stopwatch]::GetTimestamp()
-            Start-Sleep -Seconds 3
-            $state.completed = $true
+            param($signerRequest, $callbackContext)
+            [IO.File]::WriteAllText(
+                [string]$callbackContext.startedMarker,
+                [Diagnostics.Stopwatch]::GetTimestamp().ToString([Globalization.CultureInfo]::InvariantCulture)
+            )
+            [Threading.Thread]::Sleep(3000)
+            [IO.File]::WriteAllText([string]$callbackContext.lateMarker, 'late signer output')
             return [pscustomobject][ordered]@{ keyId = 'fixture-key'; algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'; signature = 'AA==' }
-        }.GetNewClosure()
-        $run = Invoke-TestSemanticBridge -Fixture $fixture -Signer $slowSigner -TimeoutSeconds 1
-        $returnedAt = [Diagnostics.Stopwatch]::GetTimestamp()
-        $callbackElapsedSeconds = if ([long]$state.startedAt -gt 0) {
-            [double]($returnedAt - [long]$state.startedAt) / [double][Diagnostics.Stopwatch]::Frequency
         }
-        else { [double]::PositiveInfinity }
+        $run = Invoke-TestSemanticBridge -Fixture $fixture -Signer $slowSigner -SignerContext ([pscustomobject]@{
+                startedMarker = $startedMarker
+                lateMarker = $lateMarker
+            }) -TimeoutSeconds 1
+        $returnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A signer callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The signer timeout did not preserve the completed provider-call count.'
         Assert-TestCondition ($null -eq $run.evidenceBytes) 'A timed signer callback emitted evidence.'
-        Assert-TestCondition ($callbackElapsedSeconds -lt 2.5) 'The bridge waited for the signer callback after its deadline.'
-        Start-Sleep -Milliseconds 250
-        Assert-TestCondition (-not [bool]$state.completed) 'A timed-out signer callback continued and produced late output.'
+        Assert-TestCondition (Test-Path -LiteralPath $startedMarker -PathType Leaf) 'The signer callback did not record its actual invocation.'
+        $callbackStartedTick = [long]([IO.File]::ReadAllText($startedMarker))
+        $elapsedFromCallbackStartSeconds = ([double]($returnedTick - $callbackStartedTick)) / [double][Diagnostics.Stopwatch]::Frequency
+        Assert-TestCondition ($elapsedFromCallbackStartSeconds -lt 2.5) 'The bridge waited for the signer callback after its invocation deadline.'
+        Start-Sleep -Milliseconds 2500
+        Assert-TestCondition (-not (Test-Path -LiteralPath $lateMarker)) 'A timed-out signer callback continued and produced late output.'
     }
 
     # Scenario: Canonical hashing receives floating-point and non-finite numeric values.

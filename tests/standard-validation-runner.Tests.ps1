@@ -228,6 +228,22 @@ $result | ConvertTo-Json -Depth 10 -Compress
             }
         }
 
+        function Resolve-RunnerFixtureCleanupFailure {
+            param(
+                [AllowNull()][Exception] $PrimaryException,
+                [AllowEmptyCollection()][string[]] $CleanupErrors = @()
+            )
+
+            $errors = @($CleanupErrors | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            if ($errors.Count -eq 0) { return }
+            $message = $errors -join ' '
+            if ($null -ne $PrimaryException) {
+                $PrimaryException.Data['RunnerCleanupError'] = $message
+                return
+            }
+            throw $message
+        }
+
         function Invoke-RunnerFixture {
             param(
                 [Parameter(Mandatory = $true)] $Fixture,
@@ -375,6 +391,7 @@ exit ([int]$LASTEXITCODE)
             $process = New-Object Diagnostics.Process
             $process.StartInfo = $startInfo
             $processStarted = $false
+            $primaryException = $null
             try {
                 if (-not $process.Start()) { throw 'Runner fixture Process.Start returned false.' }
                 $processStarted = $true
@@ -390,6 +407,10 @@ exit ([int]$LASTEXITCODE)
                 $stderr = [string]$stderrTask.GetAwaiter().GetResult()
                 $exitCode = [int]$process.ExitCode
                 $captured = $stdout + $stderr
+            }
+            catch {
+                $primaryException = $_.Exception
+                throw
             }
             finally {
                 try {
@@ -496,9 +517,9 @@ exit ([int]$LASTEXITCODE)
                             if ($null -ne $relationReadError) {
                                 $cleanupErrors.Add("Runner fixture process-tree enumeration failed: $($relationReadError.Message)")
                             }
-                            if ($cleanupErrors.Count -gt 0) {
-                                throw ($cleanupErrors -join ' ')
-                            }
+                            Resolve-RunnerFixtureCleanupFailure `
+                                -PrimaryException $primaryException `
+                                -CleanupErrors @($cleanupErrors.ToArray())
                         }
                     }
                 }
@@ -831,13 +852,18 @@ exit ([int]$LASTEXITCODE)
                 }
             }
             $signer = {
-                param($signerRequest)
-                return [pscustomobject][ordered]@{
-                    keyId = 'fixture-semantic-key-v2'
-                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
-                    signature = [Convert]::ToBase64String($rsa.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                param($signerRequest, $callbackContext)
+                $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+                try {
+                    $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                    return [pscustomobject][ordered]@{
+                        keyId = 'fixture-semantic-key-v2'
+                        algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                        signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                    }
                 }
-            }.GetNewClosure()
+                finally { $signingKey.Dispose() }
+            }
             $run = Invoke-StandardSemanticBridge `
                 -ConsentRequest $request `
                 -ConsentDecision $decision `
@@ -849,6 +875,7 @@ exit ([int]$LASTEXITCODE)
                 -Analyzers $analyzers `
                 -ProviderCallback $provider `
                 -SignerCallback $signer `
+                -SignerCallbackContext ([pscustomobject][ordered]@{ privateKeyXml = $rsa.ToXmlString($true) }) `
                 -Now $now.AddMinutes(2)
             if ([string]$run.status -cne 'PASS') { throw "Could not create v2 runner evidence: $($run.reason)" }
             $requestPath = Join-Path $Fixture.Root 'semantic-v2-request.json'
@@ -1814,6 +1841,13 @@ catch {
     # Scenario: Stream capture aborts after the fixture runner process has started but before the normal wait completes.
     # Purpose: Terminate and wait for the owned runner process tree before releasing its process handle.
     It 'UnitT12_terminates_the_runner_fixture_when_capture_aborts_after_start' {
+        $precedenceProbe = New-Object InvalidOperationException('Injected runner fixture capture failure after process start.')
+        Resolve-RunnerFixtureCleanupFailure `
+            -PrimaryException $precedenceProbe `
+            -CleanupErrors @('Injected runner fixture cleanup failure after process start.')
+        Assert-Match $precedenceProbe.Message 'Injected runner fixture capture failure after process start' 'Cleanup diagnostics must not replace the primary fixture failure.'
+        Assert-Match ([string]$precedenceProbe.Data['RunnerCleanupError']) 'Injected runner fixture cleanup failure after process start' 'Cleanup diagnostics must remain attached to the primary fixture failure.'
+
         $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'fixture-capture-abort') -Behavior 'timeout'
         $caught = $null
         try {
@@ -3136,6 +3170,12 @@ Describe 'Pester shard plan contract' {
         if ((($defaultPartition | Sort-Object) -join "`n") -cne (($allPaths | Sort-Object) -join "`n")) { throw 'The default shard plan must be an exact partition of the discovered inventory.' }
         if (@($defaultPartition | Group-Object | Where-Object { $_.Count -ne 1 }).Count -ne 0) { throw 'No test file may be duplicated across shards.' }
         if ([string]$defaultPlan[2].Name -notmatch '^bulk-001-alpha$') { throw 'A single-file bulk shard name must identify its deterministic ordinal and public test basename.' }
+
+        $reversedPlan = @(New-PesterShardPlan -AllTestPaths @($allPaths[4], $allPaths[3], $allPaths[2], $allPaths[1], $allPaths[0]) -IsolatedTestFileNames $isolatedNames)
+        if ((($reversedPlan | ForEach-Object { "{0}:{1}" -f $_.Name, (@($_.Paths) -join '|') }) -join "`n") -cne
+            (($defaultPlan | ForEach-Object { "{0}:{1}" -f $_.Name, (@($_.Paths) -join '|') }) -join "`n")) {
+            throw 'Shard identities and path order must be ordinally deterministic regardless of discovery order or host culture.'
+        }
 
         $groupedPlan = @(New-PesterShardPlan -AllTestPaths $allPaths -IsolatedTestFileNames $isolatedNames -BulkShardSize 2)
         if ($groupedPlan.Count -ne 4) { throw 'An explicit group size must retain two isolated shards and two bounded bulk shards.' }
