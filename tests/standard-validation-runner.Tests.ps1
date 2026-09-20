@@ -1177,6 +1177,12 @@ catch {
         Assert-False ($cookieCredentialSummary -match 'cookie-(?:credential|context)-that-must-not-be-logged') 'Cookie/session credentials immediately before a recognized failure marker must never enter the workflow-visible diagnostic window.'
         Assert-Match $cookieCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a cookie credential must be represented only by a fixed safe continuation marker.'
 
+        $credentialLabelPath = Join-Path $TestDrive 'credential-label-before-marker.txt'
+        Write-TestUtf8File -Path $credentialLabelPath -Text "credentials:`nq7F9opaqueValue`n[-] credential-label fixture failure`nExpected: safe diagnostic context"
+        $credentialLabelSummary = Get-PesterShardFailureSummary -Paths @($credentialLabelPath)
+        Assert-False ($credentialLabelSummary -match 'q7F9opaqueValue') 'An opaque value after a credential label must never become the line preceding a workflow-visible failure marker.'
+        Assert-Match $credentialLabelSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a credential-labeled block must be represented only by a fixed safe continuation marker.'
+
         $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
         $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
         $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
@@ -1327,6 +1333,8 @@ PSSecurityException: fixture execution policy failure
             $caseDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text $case.Text
             if ($caseDiagnostic -match "parent-$($case.Name)-(?:credential|context)") { [void]$parentLeaks.Add($case.Name) }
         }
+        $parentCredentialLabelDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "credentials:`nq7F9ParentOpaqueValue`n[-] fixture failure"
+        if ($parentCredentialLabelDiagnostic -match 'q7F9ParentOpaqueValue') { [void]$parentLeaks.Add('credential-label') }
         Assert-Equal (Remove-PesterShardTerminalControlSequences -Text $visibleReplacementCharacters) $visibleReplacementCharacters 'Visible object and replacement glyphs must remain actionable parent diagnostics.'
 
         $childScriptAssignment = $ast.Find({ param($node)
@@ -1400,6 +1408,9 @@ PSSecurityException: fixture execution policy failure
             catch { $caseDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
             if ($caseDiagnostic -match "early-child-$($case.Name)-(?:credential|context)") { [void]$childLeaks.Add($case.Name) }
         }
+        try { throw [InvalidOperationException]::new("credentials:`nq7F9ChildOpaqueValue`n[-] fixture failure") }
+        catch { $childCredentialLabelDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+        if ($childCredentialLabelDiagnostic -match 'q7F9ChildOpaqueValue') { [void]$childLeaks.Add('credential-label') }
         Assert-Equal ($parentLeaks.Count + $childLeaks.Count) 0 "Fail-closed continuation leaks: parent=[$($parentLeaks -join ', ')]; child=[$($childLeaks -join ', ')]."
 
         try {
