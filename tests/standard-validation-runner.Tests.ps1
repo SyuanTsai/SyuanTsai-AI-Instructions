@@ -244,6 +244,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [string] $CancellationPath,
                 [string] $ValidationRunId,
                 [string] $SourceRepository = 'https://example.com/example/skills.git',
+                [switch] $InjectCaptureFailureAfterStart,
                 # Hosted Windows PowerShell 5.1 can spend more than twenty
                 # seconds creating the centrally owned child-process boundary;
                 # keep the fixture default aligned with the production ceiling,
@@ -291,11 +292,21 @@ $result | ConvertTo-Json -Depth 10 -Compress
 $ErrorActionPreference = 'Stop'
 $runnerPath = [string]$env:SYP154_TEST_RUNNER_PATH
 $encodedArguments = [string]$env:SYP154_TEST_RUNNER_ARGUMENTS_B64
-if ([string]::IsNullOrWhiteSpace($runnerPath) -or [string]::IsNullOrWhiteSpace($encodedArguments)) {
+$argumentCountText = [string]$env:SYP154_TEST_RUNNER_ARGUMENT_COUNT
+if ([string]::IsNullOrWhiteSpace($runnerPath) -or [string]::IsNullOrWhiteSpace($encodedArguments) -or
+    [string]::IsNullOrWhiteSpace($argumentCountText)) {
     throw 'Runner fixture bootstrap metadata is incomplete.'
 }
+$expectedArgumentCount = 0
+if (-not [int]::TryParse($argumentCountText, [ref]$expectedArgumentCount) -or $expectedArgumentCount -lt 1) {
+    throw 'Runner fixture argument count is invalid.'
+}
+$encodedArgumentItems = @($encodedArguments.Split([char[]]@(';'), [StringSplitOptions]::None))
+if ($encodedArgumentItems.Count -ne $expectedArgumentCount) {
+    throw "Runner fixture argument count mismatch: expected $expectedArgumentCount, got $($encodedArgumentItems.Count)."
+}
 $runnerArguments = @()
-foreach ($item in $encodedArguments.Split(';', [StringSplitOptions]::RemoveEmptyEntries)) {
+foreach ($item in $encodedArgumentItems) {
     $runnerArguments += [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($item))
 }
 $switchNames = @('DevelopmentHarness', 'SemanticTriggered', 'SemanticConsent', 'CompleteLifecycle')
@@ -326,6 +337,7 @@ for ($index = 0; $index -lt $runnerArguments.Count;) {
 }
 [Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_PATH', $null, 'Process')
 [Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_ARGUMENTS_B64', $null, 'Process')
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_ARGUMENT_COUNT', $null, 'Process')
 & $runnerPath @runnerParameters
 if ($null -eq $LASTEXITCODE) { exit 0 }
 exit ([int]$LASTEXITCODE)
@@ -344,15 +356,23 @@ exit ([int]$LASTEXITCODE)
             $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
                 $runnerArguments | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) }
             ) -join ';'
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
             foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
                 $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
             }
             $process = New-Object Diagnostics.Process
             $process.StartInfo = $startInfo
+            $processStarted = $false
             try {
                 if (-not $process.Start()) { throw 'Runner fixture Process.Start returned false.' }
+                $processStarted = $true
                 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
                 $stderrTask = $process.StandardError.ReadToEndAsync()
+                if ($InjectCaptureFailureAfterStart) {
+                    $injectedFailure = New-Object InvalidOperationException('Injected runner fixture capture failure after process start.')
+                    $injectedFailure.Data['RunnerProcessId'] = [int]$process.Id
+                    throw $injectedFailure
+                }
                 $process.WaitForExit()
                 $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
                 $stderr = [string]$stderrTask.GetAwaiter().GetResult()
@@ -360,7 +380,84 @@ exit ([int]$LASTEXITCODE)
                 $captured = $stdout + $stderr
             }
             finally {
-                $process.Dispose()
+                try {
+                    if ($processStarted) {
+                        $processIsRunning = $true
+                        try { $processIsRunning = -not $process.HasExited } catch { }
+                        if ($processIsRunning) {
+                            $descendantIds = New-Object 'System.Collections.Generic.HashSet[int]'
+                            $rootProcessId = [int]$process.Id
+                            [void]$descendantIds.Add($rootProcessId)
+                            $treeKillMethod = $process.GetType().GetMethod('Kill', [type[]]@([bool]))
+                            $relationReadError = $null
+                            $relations = @()
+                            try {
+                                $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
+                                    [pscustomobject][ordered]@{
+                                        ProcessId = [int]$_.ProcessId
+                                        ParentProcessId = [int]$_.ParentProcessId
+                                    }
+                                })
+                            }
+                            catch {
+                                try {
+                                    $relations = @(Get-WmiObject -Class Win32_Process -ErrorAction Stop | ForEach-Object {
+                                        [pscustomobject][ordered]@{
+                                            ProcessId = [int]$_.ProcessId
+                                            ParentProcessId = [int]$_.ParentProcessId
+                                        }
+                                    })
+                                }
+                                catch { $relationReadError = $_.Exception }
+                            }
+                            for ($pass = 0; $pass -lt $relations.Count; $pass++) {
+                                $added = $false
+                                foreach ($relation in $relations) {
+                                    if ($descendantIds.Contains($relation.ParentProcessId) -and
+                                        $descendantIds.Add($relation.ProcessId)) {
+                                        $added = $true
+                                    }
+                                }
+                                if (-not $added) { break }
+                            }
+
+                            $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
+                            if ($null -ne $treeKillMethod) {
+                                try { [void]$treeKillMethod.Invoke($process, @($true)) }
+                                catch { $cleanupErrors.Add("Process-tree termination failed: $($_.Exception.Message)") }
+                            }
+                            try {
+                                if (-not $process.HasExited) { $process.Kill() }
+                            }
+                            catch {
+                                try { if (-not $process.HasExited) { $cleanupErrors.Add("Root process termination failed: $($_.Exception.Message)") } } catch { }
+                            }
+                            foreach ($processId in @($descendantIds | Where-Object { $_ -ne $rootProcessId })) {
+                                $ownedProcess = $null
+                                try {
+                                    $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
+                                    if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
+                                    if (-not $ownedProcess.WaitForExit(5000)) {
+                                        $cleanupErrors.Add("Descendant process $processId did not terminate during cleanup.")
+                                    }
+                                }
+                                catch [ArgumentException] { }
+                                catch { $cleanupErrors.Add("Descendant process $processId cleanup failed: $($_.Exception.Message)") }
+                                finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+                            }
+                            if (-not $process.WaitForExit(30000)) {
+                                $cleanupErrors.Add("Runner fixture process $rootProcessId did not terminate during cleanup.")
+                            }
+                            if ($null -ne $relationReadError) {
+                                $cleanupErrors.Add("Runner fixture process-tree enumeration failed: $($relationReadError.Message)")
+                            }
+                            if ($cleanupErrors.Count -gt 0) {
+                                throw ($cleanupErrors -join ' ')
+                            }
+                        }
+                    }
+                }
+                finally { $process.Dispose() }
             }
             $evidence = $null
             if (Test-Path -LiteralPath $Fixture.Output -PathType Leaf) {
@@ -1460,6 +1557,43 @@ catch {
         $writeFailureIndex = $source.IndexOf('$outputWriteError = "stdout evidence write failed:', [StringComparison]::Ordinal)
         $failClosedIndex = $source.IndexOf('-Errors @($outputWriteError)', [StringComparison]::Ordinal)
         Assert-True ($writeFailureIndex -ge 0 -and $failClosedIndex -gt $writeFailureIndex) 'Output write failures must enter the fail-closed transition before process evidence is finalized.'
+    }
+
+    # Scenario: Stream capture aborts after the fixture runner process has started but before the normal wait completes.
+    # Purpose: Terminate and wait for the owned runner process tree before releasing its process handle.
+    It 'UnitT12_terminates_the_runner_fixture_when_capture_aborts_after_start' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'fixture-capture-abort') -Behavior 'timeout'
+        $caught = $null
+        try {
+            [void](Invoke-RunnerFixture -Fixture $fixture -InjectCaptureFailureAfterStart)
+        }
+        catch { $caught = $_ }
+
+        Assert-True ($null -ne $caught) 'The injected post-start capture failure must reach the caller.'
+        Assert-Match $caught.Exception.Message 'Injected runner fixture capture failure after process start' 'The injected failure must remain distinguishable from cleanup failures.'
+        $runnerProcessId = [int]$caught.Exception.Data['RunnerProcessId']
+        Assert-True ($runnerProcessId -gt 0) 'The injected failure must retain the started runner PID for cleanup verification.'
+
+        $processStillRunning = $false
+        $probe = $null
+        try {
+            $probe = [Diagnostics.Process]::GetProcessById($runnerProcessId)
+            $processStillRunning = -not $probe.HasExited
+        }
+        catch [ArgumentException] { $processStillRunning = $false }
+        finally { if ($null -ne $probe) { $probe.Dispose() } }
+        Assert-False $processStillRunning 'The fixture runner must not survive a post-start capture failure.'
+    }
+
+    # Scenario: A value-bearing runner option is deliberately supplied as an empty string.
+    # Purpose: Preserve the empty record in the counted base64 transport instead of shifting subsequent parameters.
+    It 'UnitT13_preserves_empty_values_in_runner_fixture_argument_transport' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'fixture-empty-argument')
+        $result = Invoke-RunnerFixture -Fixture $fixture -SourceRepository ''
+
+        Assert-True ($result.ExitCode -ne 0) 'The runner must reject an explicitly empty mandatory source repository.'
+        Assert-Match $result.Output 'SourceRepository|ParameterArgumentValidationErrorEmptyStringNotAllowed,Invoke-StandardValidation\.ps1' 'The empty value must reach the runner parameter binder.'
+        Assert-False ($result.Output -match 'argument name is invalid|not allowed or has no value|argument count mismatch') 'The bootstrap must not drop the empty record or shift later parameters.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,

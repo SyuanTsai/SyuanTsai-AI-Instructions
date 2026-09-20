@@ -72,7 +72,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 537
+            ExpectedTotalCount = 539
             ExpectedSkippedCount = 7
             OuterTimeoutSeconds = 1800
             TestRoot = './tests'
@@ -134,7 +134,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 537
+            ExpectedTotalCount = 539
             ExpectedSkippedCount = 6
             OuterTimeoutSeconds = 1800
             TestRoot = './tests'
