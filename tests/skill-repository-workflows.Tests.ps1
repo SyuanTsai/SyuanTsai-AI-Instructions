@@ -91,6 +91,11 @@ jobs:
             Assert-Equal ([regex]::Matches($workflow, 'persist-credentials:\s*false')).Count ([int]$entry.Value) "Every checkout in '$($entry.Key)' must disable persisted credentials."
             Assert-NotMatch $workflow 'actions/checkout@v[0-9]+' "Workflow '$($entry.Key)' must not use a mutable checkout tag."
         }
+        $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+        Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 1 'Only the direct Linux composition step may import Pester in workflow scope.'
+        Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 2 'Both Windows full-suite jobs must delegate module validation and import to the bounded executor.'
+        Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 2 'Workflow logging must use discovery metadata without importing the module first.'
     }
 
     # Scenario: An authority suite or the Ruleset-required bridge changes without running the complete shared gate.

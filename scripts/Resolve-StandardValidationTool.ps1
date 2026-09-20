@@ -110,12 +110,24 @@ function Write-ResolverJsonOutput {
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
 
-    $stream = [System.IO.File]::Open(
-        $fullPath,
-        [System.IO.FileMode]::CreateNew,
-        [System.IO.FileAccess]::Write,
-        [System.IO.FileShare]::None
-    )
+    try {
+        $stream = [System.IO.File]::Open(
+            $fullPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch {
+        $leafException = $_.Exception
+        while ($null -ne $leafException.InnerException) {
+            $leafException = $leafException.InnerException
+        }
+        if ($leafException -is [System.IO.IOException] -and [System.IO.File]::Exists($fullPath)) {
+            throw 'writer-error-kind=existing-output; output-file-exists=true'
+        }
+        throw
+    }
     try {
         $encoding = New-Object Text.UTF8Encoding($false)
         $writer = New-Object System.IO.StreamWriter($stream, $encoding)
@@ -689,7 +701,7 @@ function Get-ResolverSafeUnixSymlinkEntry {
 }
 
 function Get-ResolverOrderedClosureEntries {
-    param([Parameter(Mandatory = $true)][object[]] $Entries)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Entries)
 
     # The installed tool tree can contain many thousands of files. Keep the
     # canonical ordinal ordering in a native balanced tree instead of scanning
@@ -699,7 +711,11 @@ function Get-ResolverOrderedClosureEntries {
         if ($null -eq $entry -or [string]::IsNullOrEmpty([string]$entry.path)) {
             throw 'Installed tool closure contains an entry without a path.'
         }
-        $sorted.Add([string]$entry.path, $entry)
+        $path = [string]$entry.path
+        if ($sorted.ContainsKey($path)) {
+            throw "Installed tool closure contains a duplicate path: '$path'."
+        }
+        $sorted.Add($path, $entry)
     }
     foreach ($entry in $sorted.Values) { $entry }
 }
@@ -728,12 +744,12 @@ function Get-DirectoryClosureIdentity {
                 throw "Installed tool closure contains a duplicate path: '$($symlinkEntry.path)'."
             }
             $nfcSymlinkPath = ([string]$symlinkEntry.path).Normalize([Text.NormalizationForm]::FormC)
-            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and [string]$nfcPaths[$nfcSymlinkPath] -cne [string]$symlinkEntry.path) {
+            if ($nfcPaths.ContainsKey($nfcSymlinkPath) -and -not [string]::Equals([string]$nfcPaths[$nfcSymlinkPath], [string]$symlinkEntry.path, [StringComparison]::Ordinal)) {
                 throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfcSymlinkPath])' and '$($symlinkEntry.path)'."
             }
             $nfcPaths[$nfcSymlinkPath] = [string]$symlinkEntry.path
             $asciiCaseSymlinkPath = Get-ResolverAsciiCaseFold -Value $nfcSymlinkPath
-            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and [string]$asciiCasePaths[$asciiCaseSymlinkPath] -cne [string]$symlinkEntry.path) {
+            if ($asciiCasePaths.ContainsKey($asciiCaseSymlinkPath) -and -not [string]::Equals([string]$asciiCasePaths[$asciiCaseSymlinkPath], [string]$symlinkEntry.path, [StringComparison]::Ordinal)) {
                 throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCaseSymlinkPath])' and '$($symlinkEntry.path)'."
             }
             $asciiCasePaths[$asciiCaseSymlinkPath] = [string]$symlinkEntry.path
@@ -751,12 +767,12 @@ function Get-DirectoryClosureIdentity {
             throw "Installed tool closure contains a duplicate path: '$relative'."
         }
         $nfc = $relative.Normalize([Text.NormalizationForm]::FormC)
-        if ($nfcPaths.ContainsKey($nfc) -and [string]$nfcPaths[$nfc] -cne $relative) {
+        if ($nfcPaths.ContainsKey($nfc) -and -not [string]::Equals([string]$nfcPaths[$nfc], $relative, [StringComparison]::Ordinal)) {
             throw "Installed tool closure contains Unicode-normalization-colliding paths: '$($nfcPaths[$nfc])' and '$relative'."
         }
         $nfcPaths[$nfc] = $relative
         $asciiCase = Get-ResolverAsciiCaseFold -Value $nfc
-        if ($asciiCasePaths.ContainsKey($asciiCase) -and [string]$asciiCasePaths[$asciiCase] -cne $relative) {
+        if ($asciiCasePaths.ContainsKey($asciiCase) -and -not [string]::Equals([string]$asciiCasePaths[$asciiCase], $relative, [StringComparison]::Ordinal)) {
             throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
         }
         $asciiCasePaths[$asciiCase] = $relative

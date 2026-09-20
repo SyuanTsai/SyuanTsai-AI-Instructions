@@ -3213,6 +3213,33 @@ function Get-StandardValidationChildEnvironment {
     return $childEnvironment
 }
 
+function Merge-StandardValidationProcessStderr {
+    param(
+        [AllowEmptyString()][string] $Existing,
+        [AllowEmptyString()][string] $Captured,
+        [Parameter(Mandatory = $true)][int] $Quota
+    )
+
+    if ($Quota -lt 1) { throw 'The process stderr evidence quota must be at least one character.' }
+    $existingText = if ($null -eq $Existing) { '' } else { [string]$Existing }
+    $capturedText = if ($null -eq $Captured) { '' } else { [string]$Captured }
+    $existingLength = [Math]::Min($existingText.Length, $Quota)
+    $existingPrefix = if ($existingLength -eq 0) { '' } else { $existingText.Substring(0, $existingLength) }
+    if ([string]::IsNullOrEmpty($capturedText) -or $existingPrefix.Length -ge $Quota) {
+        return $existingPrefix
+    }
+    if ([string]::IsNullOrEmpty($existingPrefix)) {
+        $capturedLength = [Math]::Min($capturedText.Length, $Quota)
+        if ($capturedLength -eq 0) { return '' }
+        return $capturedText.Substring(0, $capturedLength)
+    }
+    $separator = [Environment]::NewLine
+    $remaining = $Quota - $existingPrefix.Length
+    if ($remaining -le $separator.Length) { return $existingPrefix }
+    $capturedLength = [Math]::Min($capturedText.Length, $remaining - $separator.Length)
+    return $existingPrefix + $separator + $capturedText.Substring(0, $capturedLength)
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -3411,7 +3438,10 @@ function Invoke-StandardValidationProcess {
             catch {
                 $protectionSetupFailed = $true
                 $terminationStatus = 'startup-failed'
-                $stderr = "Could not establish the owned Unix PID namespace: $($_.Exception.Message)"
+                $stderr = Merge-StandardValidationProcessStderr `
+                    -Existing $stderr `
+                    -Captured "Could not establish the owned Unix PID namespace: $($_.Exception.Message)" `
+                    -Quota $script:StandardValidationChildOutputQuotaCharacters
                 $cleanedUp = Stop-StandardValidationProcessTree `
                     -RootProcessId $rootProcessId `
                     -RootProcess $process `
@@ -3432,7 +3462,10 @@ function Invoke-StandardValidationProcess {
             catch {
                 $protectionSetupFailed = $true
                 $terminationStatus = 'startup-failed'
-                $stderr = "Could not assign the validator to the owned Windows job object: $($_.Exception.Message)"
+                $stderr = Merge-StandardValidationProcessStderr `
+                    -Existing $stderr `
+                    -Captured "Could not assign the validator to the owned Windows job object: $($_.Exception.Message)" `
+                    -Quota $script:StandardValidationChildOutputQuotaCharacters
                 $cleanedUp = Stop-StandardValidationProcessTree `
                     -RootProcessId $rootProcessId `
                     -RootProcess $process `
@@ -3458,7 +3491,10 @@ function Invoke-StandardValidationProcess {
                 catch {
                     $protectionSetupFailed = $true
                     $terminationStatus = 'startup-failed'
-                    $stderr = "Could not release the owned Windows process bootstrap: $($_.Exception.Message)"
+                    $stderr = Merge-StandardValidationProcessStderr `
+                        -Existing $stderr `
+                        -Captured "Could not release the owned Windows process bootstrap: $($_.Exception.Message)" `
+                        -Quota $script:StandardValidationChildOutputQuotaCharacters
                     $cleanedUp = Stop-StandardValidationProcessTree `
                         -RootProcessId $rootProcessId `
                         -RootProcess $process `
@@ -3532,7 +3568,10 @@ function Invoke-StandardValidationProcess {
                 if (-not $alreadyExited) {
                     $protectionSetupFailed = $true
                     $terminationStatus = 'startup-failed'
-                    $stderr = "Could not establish the owned Unix process group: $($_.Exception.Message)"
+                    $stderr = Merge-StandardValidationProcessStderr `
+                        -Existing $stderr `
+                        -Captured "Could not establish the owned Unix process group: $($_.Exception.Message)" `
+                        -Quota $script:StandardValidationChildOutputQuotaCharacters
                     $cleanedUp = Stop-StandardValidationProcessTree `
                         -RootProcessId $rootProcessId `
                         -RootProcess $process `
@@ -3605,17 +3644,12 @@ function Invoke-StandardValidationProcess {
         catch { $stdout = '' }
         try {
             $stderrCaptureResult = $stderrTask.GetAwaiter().GetResult()
-            $capturedStderr = [string]$stderrCaptureResult.Text
-            if ([string]::IsNullOrWhiteSpace($stderr)) {
-                $stderr = $capturedStderr
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($capturedStderr)) {
-                $stderr = "$stderr`n$capturedStderr"
-            }
+            $stderr = Merge-StandardValidationProcessStderr `
+                -Existing $stderr `
+                -Captured ([string]$stderrCaptureResult.Text) `
+                -Quota $script:StandardValidationChildOutputQuotaCharacters
         }
-        catch {
-            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = '' }
-        }
+        catch { }
         # The bounded reader is the primary memory guard. Normalize the values
         # once more before evidence serialization so platform-specific stream
         # decoding can never make a retained prefix exceed the contract quota.
@@ -3646,9 +3680,20 @@ function Invoke-StandardValidationProcess {
             try {
                 $jobCloseResult = [StandardValidationProcessControlNative]::TryCloseHandle($jobHandle)
                 $jobClosed = [bool]$jobCloseResult
-                if (-not $jobClosed) { $stderr = "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." }
+                if (-not $jobClosed) {
+                    $stderr = Merge-StandardValidationProcessStderr `
+                        -Existing "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." `
+                        -Captured $stderr `
+                        -Quota $script:StandardValidationChildOutputQuotaCharacters
+                }
             }
-            catch { $jobClosed = $false; $stderr = "The owned Windows job object could not be closed safely: $($_.Exception.Message)" }
+            catch {
+                $jobClosed = $false
+                $stderr = Merge-StandardValidationProcessStderr `
+                    -Existing "The owned Windows job object could not be closed safely: $($_.Exception.Message)" `
+                    -Captured $stderr `
+                    -Quota $script:StandardValidationChildOutputQuotaCharacters
+            }
             $jobHandle = [IntPtr]::Zero
         }
         if ($null -ne $process) { $process.Dispose() }
@@ -5674,12 +5719,13 @@ function Invoke-StandardValidationRun {
         catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
-        # Keep the full execution key in the lock/run paths, but use a
-        # collision-resistant 128-bit directory prefix for child working
-        # files.  This prevents the private bootstrap marker path from
-        # exceeding Windows PowerShell 5.1/.NET Framework MAX_PATH when the
-        # artifact root is itself under a long temporary checkout path.
-        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $executionKey.Substring(0, 32)
+        # Keep the process-boundary path compact for Windows PowerShell 5.1.
+        # The full execution key remains the canonical lock/run identity; the
+        # child directory is ephemeral and uses a fresh supervisor-generated
+        # N-format GUID so it cannot inherit caller-controlled identity or
+        # collide with a stale execution root.
+        $childWorkingKey = [guid]::NewGuid().ToString('N')
+        $childWorkingRoot = Join-Path (Join-Path $artifactRootFull 'child-work') $childWorkingKey
         $childWorkingRoot = Assert-StandardValidationCanonicalRootPath -Path $childWorkingRoot -Context 'child working root'
         [void](New-Item -ItemType Directory -Path $childWorkingRoot -Force)
         Assert-StandardValidationNoReparsePoints -Root $childWorkingRoot -Context 'child working root'

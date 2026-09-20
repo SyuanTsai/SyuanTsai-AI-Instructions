@@ -250,6 +250,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [string] $CancellationPath,
                 [string] $ValidationRunId,
                 [string] $SourceRepository = 'https://example.com/example/skills.git',
+                [switch] $InjectCaptureFailureAfterStart,
                 # Hosted Windows PowerShell 5.1 can spend more than twenty
                 # seconds creating the centrally owned child-process boundary;
                 # keep the fixture default aligned with the production ceiling,
@@ -297,19 +298,211 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 STANDARD_VALIDATION_INHERITED_SECRET = 'fixture-reserved-prefix-secret-must-not-cross-the-child-boundary'
                 SYP154_INHERITED_SECRET = 'fixture-secret-must-not-cross-the-child-boundary'
             }
-            $previousEnvironment = @{}
+            $runnerBootstrap = @'
+$ErrorActionPreference = 'Stop'
+$runnerPath = [string]$env:SYP154_TEST_RUNNER_PATH
+$encodedArguments = [string]$env:SYP154_TEST_RUNNER_ARGUMENTS_B64
+$argumentCountText = [string]$env:SYP154_TEST_RUNNER_ARGUMENT_COUNT
+if ([string]::IsNullOrWhiteSpace($runnerPath) -or [string]::IsNullOrWhiteSpace($encodedArguments) -or
+    [string]::IsNullOrWhiteSpace($argumentCountText)) {
+    throw 'Runner fixture bootstrap metadata is incomplete.'
+}
+$expectedArgumentCount = 0
+if (-not [int]::TryParse($argumentCountText, [ref]$expectedArgumentCount) -or $expectedArgumentCount -lt 1) {
+    throw 'Runner fixture argument count is invalid.'
+}
+$encodedArgumentItems = @($encodedArguments.Split([char[]]@(';'), [StringSplitOptions]::None))
+if ($encodedArgumentItems.Count -ne $expectedArgumentCount) {
+    throw "Runner fixture argument count mismatch: expected $expectedArgumentCount, got $($encodedArgumentItems.Count)."
+}
+$runnerArguments = @()
+foreach ($item in $encodedArgumentItems) {
+    $runnerArguments += [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($item))
+}
+$switchNames = @('DevelopmentHarness', 'SemanticTriggered', 'SemanticConsent', 'CompleteLifecycle')
+$valueNames = @(
+    'CandidateRoot', 'AdapterPath', 'ArtifactsRoot', 'OutputPath', 'SourceRepository',
+    'SourceRevision', 'BaseRevision', 'EventName', 'TimeoutSeconds', 'TrustedToolRoot',
+    'SemanticProvider', 'SemanticPurpose', 'SemanticScope', 'SemanticEvidencePath',
+    'SemanticConsentRequestPath', 'SemanticConsentDecisionPath', 'SemanticPublicKeyPath',
+    'SemanticPublicKeyId',
+    'AiReviewEvidencePath', 'HumanApprovalEvidencePath', 'PublishInstallEvidencePath',
+    'PostInstallEvidencePath', 'CancellationPath', 'RunId'
+)
+$runnerParameters = @{}
+for ($index = 0; $index -lt $runnerArguments.Count;) {
+    $token = [string]$runnerArguments[$index]
+    if (-not $token.StartsWith('-', [StringComparison]::Ordinal) -or $token.Length -lt 2) {
+        throw "Runner fixture argument name is invalid at index $index."
+    }
+    $name = $token.Substring(1)
+    if ($switchNames -contains $name) {
+        $runnerParameters[$name] = $true
+        $index++
+        continue
+    }
+    if ($valueNames -notcontains $name -or ($index + 1) -ge $runnerArguments.Count) {
+        throw "Runner fixture parameter '$name' is not allowed or has no value."
+    }
+    $runnerParameters[$name] = [string]$runnerArguments[$index + 1]
+    $index += 2
+}
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_PATH', $null, 'Process')
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_ARGUMENTS_B64', $null, 'Process')
+[Environment]::SetEnvironmentVariable('SYP154_TEST_RUNNER_ARGUMENT_COUNT', $null, 'Process')
+& $runnerPath @runnerParameters
+if ($null -eq $LASTEXITCODE) { exit 0 }
+exit ([int]$LASTEXITCODE)
+'@
+            $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($runnerBootstrap))
+            $startInfo = New-Object Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $script:PowerShellPath
+            $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedBootstrap"
+            $startInfo.WorkingDirectory = $script:RepositoryRoot
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
+            $runnerArguments = @($arguments | Select-Object -Skip 3)
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
+                $runnerArguments | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) }
+            ) -join ';'
+            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
             foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                $previousEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
-                [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+                $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
             }
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo = $startInfo
+            $processStarted = $false
             try {
-                $captured = & $script:PowerShellPath @arguments 2>&1 | Out-String
-                $exitCode = $LASTEXITCODE
+                if (-not $process.Start()) { throw 'Runner fixture Process.Start returned false.' }
+                $processStarted = $true
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                if ($InjectCaptureFailureAfterStart) {
+                    $injectedFailure = New-Object InvalidOperationException('Injected runner fixture capture failure after process start.')
+                    $injectedFailure.Data['RunnerProcessId'] = [int]$process.Id
+                    throw $injectedFailure
+                }
+                $process.WaitForExit()
+                $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+                $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+                $exitCode = [int]$process.ExitCode
+                $captured = $stdout + $stderr
             }
             finally {
-                foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                    [Environment]::SetEnvironmentVariable([string]$entry.Key, $previousEnvironment[$entry.Key], 'Process')
+                try {
+                    if ($processStarted) {
+                        $processIsRunning = $true
+                        try { $processIsRunning = -not $process.HasExited } catch { }
+                        if ($processIsRunning) {
+                            $descendantIds = New-Object 'System.Collections.Generic.HashSet[int]'
+                            $rootProcessId = [int]$process.Id
+                            [void]$descendantIds.Add($rootProcessId)
+                            $treeKillMethod = $process.GetType().GetMethod('Kill', [type[]]@([bool]))
+                            $relationReadError = $null
+                            $relations = @()
+                            if ($env:OS -eq 'Windows_NT') {
+                                try {
+                                    $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
+                                        [pscustomobject][ordered]@{
+                                            ProcessId = [int]$_.ProcessId
+                                            ParentProcessId = [int]$_.ParentProcessId
+                                        }
+                                    })
+                                }
+                                catch {
+                                    try {
+                                        $relations = @(Get-WmiObject -Class Win32_Process -ErrorAction Stop | ForEach-Object {
+                                            [pscustomobject][ordered]@{
+                                                ProcessId = [int]$_.ProcessId
+                                                ParentProcessId = [int]$_.ParentProcessId
+                                            }
+                                        })
+                                    }
+                                    catch { $relationReadError = $_.Exception }
+                                }
+                            }
+                            elseif (Test-Path -LiteralPath '/proc' -PathType Container) {
+                                try {
+                                    $relations = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | ForEach-Object {
+                                        if ($_.Name -notmatch '^\d+$') { return }
+                                        try {
+                                            $stat = Get-Content -Raw -LiteralPath (Join-Path $_.FullName 'stat') -ErrorAction Stop
+                                            if ($stat -match '^(\d+)\s+\(.*\)\s+\S\s+(\d+)\s') {
+                                                [pscustomobject][ordered]@{
+                                                    ProcessId = [int]$Matches[1]
+                                                    ParentProcessId = [int]$Matches[2]
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    })
+                                }
+                                catch { $relationReadError = $_.Exception }
+                            }
+                            else {
+                                $relationReadError = New-Object PlatformNotSupportedException('No supported process relationship source is available.')
+                            }
+                            for ($pass = 0; $pass -lt $relations.Count; $pass++) {
+                                $added = $false
+                                foreach ($relation in $relations) {
+                                    if ($descendantIds.Contains($relation.ParentProcessId) -and
+                                        $descendantIds.Add($relation.ProcessId)) {
+                                        $added = $true
+                                    }
+                                }
+                                if (-not $added) { break }
+                            }
+
+                            $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
+                            $ownedDescendantProcesses = New-Object 'System.Collections.Generic.List[System.Diagnostics.Process]'
+                            foreach ($processId in @($descendantIds | Where-Object { $_ -ne $rootProcessId })) {
+                                $ownedProcess = $null
+                                try {
+                                    $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
+                                    [void]$ownedProcess.Handle
+                                    $ownedDescendantProcesses.Add($ownedProcess)
+                                    $ownedProcess = $null
+                                }
+                                catch [ArgumentException] { }
+                                catch { $cleanupErrors.Add("Descendant process $processId handle capture failed: $($_.Exception.Message)") }
+                                finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+                            }
+                            if ($null -ne $treeKillMethod) {
+                                try { [void]$treeKillMethod.Invoke($process, @($true)) }
+                                catch { $cleanupErrors.Add("Process-tree termination failed: $($_.Exception.Message)") }
+                            }
+                            try {
+                                if (-not $process.HasExited) { $process.Kill() }
+                            }
+                            catch {
+                                try { if (-not $process.HasExited) { $cleanupErrors.Add("Root process termination failed: $($_.Exception.Message)") } } catch { }
+                            }
+                            foreach ($ownedProcess in $ownedDescendantProcesses) {
+                                try {
+                                    if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
+                                    if (-not $ownedProcess.WaitForExit(5000)) {
+                                        $cleanupErrors.Add("Descendant process $($ownedProcess.Id) did not terminate during cleanup.")
+                                    }
+                                }
+                                catch { $cleanupErrors.Add("Retained descendant process cleanup failed: $($_.Exception.Message)") }
+                                finally { $ownedProcess.Dispose() }
+                            }
+                            if (-not $process.WaitForExit(30000)) {
+                                $cleanupErrors.Add("Runner fixture process $rootProcessId did not terminate during cleanup.")
+                            }
+                            if ($null -ne $relationReadError) {
+                                $cleanupErrors.Add("Runner fixture process-tree enumeration failed: $($relationReadError.Message)")
+                            }
+                            if ($cleanupErrors.Count -gt 0) {
+                                throw ($cleanupErrors -join ' ')
+                            }
+                        }
+                    }
                 }
+                finally { $process.Dispose() }
             }
             $evidence = $null
             if (Test-Path -LiteralPath $Fixture.Output -PathType Leaf) {
@@ -890,6 +1083,769 @@ $result | ConvertTo-Json -Depth 10 -Compress
         $launchBindingIndex = $runnerSource.IndexOf('$launchBinding = Assert-StandardValidationSupervisorLaunchBinding', [StringComparison]::Ordinal)
         $productionReceiptIndex = $runnerSource.IndexOf('$runId = Get-StandardValidationProductionRunId', [StringComparison]::Ordinal)
         Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
+    }
+
+    # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
+    # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
+    It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
+        . $script:RunnerPath `
+            -CandidateRoot (Join-Path $TestDrive 'stderr-preservation-candidate') `
+            -AdapterPath (Join-Path $TestDrive 'stderr-preservation-adapter.json') `
+            -ArtifactsRoot (Join-Path $TestDrive 'stderr-preservation-artifacts') `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+        $firstError = 'Could not assign the validator to the owned Windows job object: AssignProcessToJobObject returned false.'
+        Assert-Equal (Merge-StandardValidationProcessStderr -Existing $firstError -Captured '' -Quota 200) $firstError 'An empty child stderr stream must not erase the first supervisor diagnostic.'
+        $merged = Merge-StandardValidationProcessStderr -Existing $firstError -Captured 'child stderr detail' -Quota 200
+        Assert-Match $merged '(?s)Could not assign the validator.*child stderr detail' 'A non-empty child stderr stream must be appended after the first supervisor diagnostic.'
+        Assert-True ($merged.Length -le 200) 'Merged supervisor and child stderr must remain within the process evidence quota.'
+        Assert-Equal (Merge-StandardValidationProcessStderr -Existing '' -Captured 'child-only stderr' -Quota 200) 'child-only stderr' 'A child stderr stream must remain available when no supervisor diagnostic exists.'
+        $nearQuota = Merge-StandardValidationProcessStderr -Existing 'first supervisor error' -Captured ('x' * 400) -Quota 64
+        Assert-True ($nearQuota.StartsWith('first supervisor error')) 'Quota trimming must preserve the first supervisor diagnostic prefix.'
+        Assert-True ($nearQuota.Length -le 64) 'Quota trimming must never exceed the process evidence quota.'
+        $cleanupError = 'The owned Windows job object could not be closed safely (handle=42).'
+        $cleanupFirst = Merge-StandardValidationProcessStderr -Existing $cleanupError -Captured ('child stderr detail ' * 40) -Quota 64
+        Assert-True ($cleanupFirst.StartsWith('The owned Windows job object could not be closed safely')) 'Cleanup failure diagnostics must take precedence over child stderr.'
+        Assert-True ($cleanupFirst.Length -le 64) 'Cleanup-priority stderr must remain within the process evidence quota.'
+        $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
+        Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
+        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
+        Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
+        Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
+        Assert-False ($shardExecutorSource -match '&\s+taskkill\.exe') 'The shard executor must not depend on taskkill for owned-process cleanup.'
+        Assert-Match $shardExecutorSource 'System\.Diagnostics\.Process\.Kill|Stop-Process' 'The shard executor must use a direct process termination API.'
+        Assert-Match $shardExecutorSource 'Get-PesterShardFailureSummary|failureSummary' 'A failed shard must retain a sanitized first-failure summary.'
+        Assert-Match $shardExecutorSource 'Read-PesterShardOutputTail' 'A result-less shard must preserve bounded tail diagnostics instead of retaining only the beginning of each stream.'
+        Assert-Match $shardExecutorSource '(?s)Get-PesterShardFailureSummary.*?Read-PesterShardOutputTail' 'Failure summarization must inspect the bounded stream tail where terminal errors are written.'
+        Assert-Match $shardExecutorSource 'allowlistedFallback' 'A result-less shard without a recognized Pester failure marker may expose only allowlisted bounded terminal context.'
+        Assert-Match $shardExecutorSource "Show = ''All''" 'Pester shards must emit bounded per-test progress so an abrupt hosted exit identifies the last completed test.'
+        Assert-Match $shardExecutorSource 'CreateKillOnCloseJob|AssignProcessToJobObject' 'The shard executor must establish a kernel-owned Job Object before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Assert-PesterShardPathAncestorsNoReparse' 'The shard preflight must reject reparse-point ancestors before creating shard artifacts.'
+        Assert-Match $shardExecutorSource 'symlinked or reparse-point ancestor' 'The shard preflight must preserve a precise ancestor trust diagnostic.'
+        Assert-Match $shardExecutorSource '\$isHardLink' 'The shard preflight must not mistake a legitimate hardlink executable for symlink traversal.'
+        Assert-Match $shardExecutorSource 'Terminate the Job Object before draining inherited output pipes' 'Owned Job Object termination must precede inherited pipe draining.'
+        Assert-Match $shardExecutorSource 'Cancellation marker observed before bootstrap release' 'Cancellation must be rechecked after ownership assignment and before bootstrap release.'
+        Assert-Match $shardExecutorSource 'Pester shard process status is not completed or output quota was exceeded' 'The aggregate must fail closed on non-completed shard evidence or output-quota overflow.'
+        Assert-Match $shardExecutorSource 'PesterShardBoundedCapture|outputQuotaCharacters' 'The shard executor must bound redirected child output.'
+        Assert-Match $shardExecutorSource 'failureKind[\s=]+.*early-child-failure' 'A child initialization or Invoke-Pester exception must be represented as an explicit failed result contract.'
+        Assert-Match $shardExecutorSource 'failurePhase\s*=\s*\$childFailurePhase' 'Early child evidence must identify the failing initialization or Invoke-Pester phase.'
+        Assert-Match $shardExecutorSource 'FailedCount\s*=\s*1' 'Early child failure evidence must contain a nonzero failed count.'
+        Assert-Match $shardExecutorSource 'childExitCode\s*-ne\s*0' 'An early child failure must retain a nonzero child exit code after writing evidence.'
+        Assert-Match $shardExecutorSource 'ConvertTo-PesterShardEarlyFailureDiagnostic' 'Early child diagnostics must be bounded and sanitized before result/evidence emission.'
+        Assert-Match $shardExecutorSource "invoke\.Parameters\.ContainsKey\(''Show''\)" 'The shard executor must gate the optional Show parameter for Pester versions that do not expose it.'
+        Assert-True ($shardExecutorSource.Contains("`$ErrorActionPreference = ''Continue''")) 'The shard executor must preserve the original non-terminating-warning behavior while Pester fixtures execute.'
+        Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardProcessIdentity')).Count -ge 2) 'Retained shard PIDs must be bound to immutable process identities.'
+        $moduleAncestorValidation = $shardExecutorSource.IndexOf('Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath', [StringComparison]::Ordinal)
+        $moduleImport = $shardExecutorSource.IndexOf('Import-Module $PesterModulePath', [StringComparison]::Ordinal)
+        Assert-True ($moduleAncestorValidation -ge 0 -and $moduleImport -ge 0 -and $moduleAncestorValidation -lt $moduleImport) 'The Pester module path and all existing ancestors must be validated before module initialization can execute.'
+
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before process-start cleanup testing.'
+        foreach ($functionName in @('New-PesterShardNotStartedCleanup', 'Get-PesterShardCleanupTarget', 'Resolve-PesterShardOutputFailure')) {
+            $definition = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $functionName
+            }, $true)
+            Assert-True ($null -ne $definition) "The shard executor must define $functionName."
+            Invoke-Expression $definition.Extent.Text
+        }
+
+        $unstartedProcess = New-Object Diagnostics.Process
+        try {
+            $notStarted = Get-PesterShardCleanupTarget `
+                -Process $unstartedProcess `
+                -ProcessStarted $false `
+                -RootProcessId $null
+            Assert-True ($null -eq $notStarted) 'An unstarted process must not enter process-tree cleanup or require its Id.'
+
+            $throwingIdProcess = New-Object psobject
+            $throwingIdProcess | Add-Member -MemberType ScriptProperty -Name Id -Value { throw 'The process Id getter must not be used.' }
+            $started = Get-PesterShardCleanupTarget `
+                -Process $throwingIdProcess `
+                -ProcessStarted $true `
+                -RootProcessId 4242
+            Assert-Equal $started.rootProcessId 4242 'A started process cleanup target must use the stored authenticated root process ID.'
+            Assert-True ([object]::ReferenceEquals($started.process, $throwingIdProcess)) 'The cleanup target must retain the original process object without reading its Id.'
+        }
+        finally { $unstartedProcess.Dispose() }
+
+        Assert-Match $shardExecutorSource 'if \(-not \$processStarted\)[\s\S]{0,180}\$status = ''startup-failed''' 'A Process.Start failure must retain the explicit startup-failed status.'
+        Assert-Match $shardExecutorSource '\$cleanupTarget\s*=\s*Get-PesterShardCleanupTarget[\s\S]{0,220}if \(\$null -ne \$cleanupTarget\)' 'Process-tree cleanup must be gated by the start-aware target.'
+        Assert-False ($shardExecutorSource -match '-RootProcessId\s+\(\[int\]\$process\.Id\)') 'Cleanup must not reacquire the root ID from a process object.'
+        $cleanupTargetIndex = $shardExecutorSource.IndexOf('$cleanupTarget = Get-PesterShardCleanupTarget', [StringComparison]::Ordinal)
+        $jobHandleCloseIndex = $shardExecutorSource.LastIndexOf('if ($jobHandle -ne [IntPtr]::Zero)', [StringComparison]::Ordinal)
+        $processEvidenceIndex = $shardExecutorSource.IndexOf('$diagnostic = [ordered]@{', [StringComparison]::Ordinal)
+        Assert-True ($cleanupTargetIndex -ge 0 -and $jobHandleCloseIndex -gt $cleanupTargetIndex -and $processEvidenceIndex -gt $jobHandleCloseIndex) 'Job Object closure must remain independent of process-tree cleanup and precede process evidence finalization.'
+
+        $preStartCleanup = New-PesterShardNotStartedCleanup
+        $strictShape = & {
+            Set-StrictMode -Version Latest
+            $shape = New-PesterShardNotStartedCleanup
+            [pscustomobject][ordered]@{
+                cleanedUp = [bool]$shape.cleanedUp
+                remainingCount = @($shape.remainingProcessIds).Count
+                errorCount = @($shape.errors).Count
+                warningCount = @($shape.warnings).Count
+                authoritative = [bool]$shape.jobObject.authoritative
+            }
+        }
+        Assert-True $strictShape.cleanedUp 'A process-not-started cleanup contract must begin clean.'
+        Assert-Equal $strictShape.remainingCount 0 'A process-not-started cleanup contract must expose an empty remaining-process collection.'
+        Assert-Equal $strictShape.errorCount 0 'A process-not-started cleanup contract must expose an empty error collection.'
+        Assert-Equal $strictShape.warningCount 0 'A process-not-started cleanup contract must expose an empty warning collection.'
+        Assert-False $strictShape.authoritative 'A Job Object that contains no started process must not be reported as authoritative containment.'
+        $closeFailure = Resolve-PesterShardOutputFailure `
+            -Cleanup $preStartCleanup `
+            -Errors @('The owned Windows Job Object handle could not be closed safely.') `
+            -Status 'startup-failed' `
+            -ExceptionText 'Process.Start returned false.'
+        Assert-Equal $closeFailure.status 'cleanup-failed' 'A pre-start Job Object close failure must become a cleanup failure.'
+        Assert-Match ($closeFailure.cleanup.errors -join ' | ') 'Job Object handle could not be closed safely' 'A pre-start cleanup shape must gain close-failure evidence without throwing.'
+        Assert-Match $closeFailure.exceptionText 'Process\.Start returned false.*Job Object handle could not be closed safely' 'The original startup failure and the cleanup failure must both remain available.'
+
+        $postCaptureCleanup = $shardExecutorSource.Substring($shardExecutorSource.IndexOf('$outputWriteFailure = Resolve-PesterShardOutputFailure', [StringComparison]::Ordinal))
+        Assert-False ($postCaptureCleanup -match '\$cleanup\.errors\s*=') 'Post-capture Job Object and bootstrap cleanup failures must not assign a missing cleanup.errors property directly.'
+        Assert-True (([regex]::Matches($postCaptureCleanup, 'Resolve-PesterShardOutputFailure')).Count -ge 4) 'Output, Job Object, and bootstrap cleanup failures must share the property-safe fail-closed transition.'
+    }
+
+    # Scenario: A caller supplies a visible cancellation marker to the shard wrapper.
+    # Purpose: Reject the unsupported channel in its own discoverable behavior test before any child or shard artifact can be created.
+    It 'UnitT05_rejects_a_caller_visible_cancellation_channel_before_child_execution' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        Assert-Match $shardExecutorSource 'does not accept a caller-visible CancellationPath' 'The shard executor must reject a caller-visible cancellation path before child execution.'
+        $rejectionProbe = @"
+try {
+    & '$($shardPath.Replace("'", "''"))' ``
+        -PesterModulePath '$((Join-Path $TestDrive 'missing-pester.psd1').Replace("'", "''"))' ``
+        -PesterVersion '4.10.1' ``
+        -ExpectedTotalCount 1 ``
+        -ExpectedSkippedCount 0 ``
+        -CancellationPath '$((Join-Path $TestDrive 'caller-visible.cancel').Replace("'", "''"))'
+}
+catch {
+    [Console]::Error.WriteLine([string]`$_.Exception.Message)
+    exit 1
+}
+"@
+        $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rejectionProbe))
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $script:PowerShellPath
+        $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedProbe"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $probeProcess = New-Object Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        try {
+            Assert-True $probeProcess.Start() 'The caller-visible cancellation rejection probe must start.'
+            $probeStdout = $probeProcess.StandardOutput.ReadToEnd()
+            $probeStderr = $probeProcess.StandardError.ReadToEnd()
+            $probeProcess.WaitForExit()
+            $probeExitCode = $probeProcess.ExitCode
+        }
+        finally { $probeProcess.Dispose() }
+        $rejectedOutput = "$probeStdout`n$probeStderr"
+        Assert-True ($probeExitCode -ne 0) 'A caller-visible cancellation path must cause a nonzero child exit.'
+        Assert-Match $rejectedOutput 'does not accept a caller-visible CancellationPath' 'A caller-visible shard cancellation path must be rejected before any child process or shard artifact is created.'
+    }
+
+    # Scenario: Windows PowerShell writes only module-initialization progress CLIXML to stderr while the useful terminal context is on stdout.
+    # Purpose: Keep progress serialization from masking the first actionable result-less shard diagnostic.
+    It 'UnitT06_skips_progress_only_clixml_before_fallback_diagnostics' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before diagnostic helper testing.'
+        foreach ($functionName in @(
+            'Read-PesterShardOutputPrefix',
+            'Read-PesterShardOutputTail',
+            'ConvertFrom-PesterShardCliXmlDiagnostic',
+            'Remove-PesterShardTerminalControlSequences',
+            'ConvertTo-PesterShardSanitizedDiagnosticText',
+            'Get-PesterShardFailureSummary'
+        )) {
+            $definition = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $functionName
+            }, $true)
+            Assert-True ($null -ne $definition) "The shard executor is missing $functionName."
+            Invoke-Expression $definition.Extent.Text
+        }
+        $script:PesterShardChildOutputQuotaCharacters = 1048576
+        $cliXmlDecoderSource = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertFrom-PesterShardCliXmlDiagnostic'
+        }, $true).Extent.Text
+        Assert-Match $cliXmlDecoderSource 'HashSet\[string\]' 'CLIXML diagnostic deduplication must use a set instead of repeatedly scanning the ordered list.'
+        Assert-Match $cliXmlDecoderSource 'StringComparer\]::Ordinal' 'CLIXML diagnostic deduplication must preserve exact ordinal identity.'
+        Assert-False ($cliXmlDecoderSource -match '\$diagnosticLines\.Contains\(') 'CLIXML diagnostic deduplication must not perform a linear list scan for every decoded line.'
+
+        $manyRecordBuilder = New-Object Text.StringBuilder
+        [void]$manyRecordBuilder.Append('#< CLIXML')
+        [void]$manyRecordBuilder.Append([Environment]::NewLine)
+        [void]$manyRecordBuilder.Append('<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">')
+        for ($recordIndex = 0; $recordIndex -lt 12000; $recordIndex++) {
+            [void]$manyRecordBuilder.Append(('<S S="information">unique-diagnostic-{0:D5}</S>' -f $recordIndex))
+        }
+        [void]$manyRecordBuilder.Append('<S S="information">unique-diagnostic-00000</S>')
+        [void]$manyRecordBuilder.Append('</Objs>')
+        $manyRecordCliXml = $manyRecordBuilder.ToString()
+        Assert-True ($manyRecordCliXml.Length -lt $script:PesterShardChildOutputQuotaCharacters) 'The adversarial CLIXML fixture must remain inside the accepted child-output quota.'
+        $manyRecordStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $manyRecordDiagnostic = ConvertFrom-PesterShardCliXmlDiagnostic -Text $manyRecordCliXml
+        $manyRecordStopwatch.Stop()
+        $manyRecordLines = @($manyRecordDiagnostic -split "`r?`n")
+        Assert-Equal $manyRecordLines.Count 12000 'Quota-bounded CLIXML must preserve ordered unique diagnostics while removing duplicates.'
+        Assert-Equal $manyRecordLines[0] 'unique-diagnostic-00000' 'CLIXML deduplication must preserve first-seen ordering.'
+        Assert-Equal $manyRecordLines[-1] 'unique-diagnostic-11999' 'CLIXML deduplication must retain the final unique record.'
+        Assert-True ($manyRecordStopwatch.Elapsed.TotalSeconds -lt 10) 'Quota-bounded CLIXML diagnostic decoding must finish within the absolute safety bound.'
+
+        $stderrPath = Join-Path $TestDrive 'progress-only-stderr.txt'
+        $stdoutPath = Join-Path $TestDrive 'terminal-stdout.txt'
+        Write-TestUtf8File -Path $stderrPath -Text @'
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.ProgressRecord</T></TN><Props><S N="Activity">Preparing modules for first use.</S><S N="StatusDescription">Preparing modules for first use.</S></Props></Obj></Objs>
+'@
+        Write-TestUtf8File -Path $stdoutPath -Text 'PowerShell 5.1 shard exited before writing its result file.'
+
+        $summary = Get-PesterShardFailureSummary -Paths @($stderrPath, $stdoutPath)
+        Assert-Match $summary 'PowerShell 5\.1 shard exited before writing its result file\.' 'A progress-only stderr stream must not mask useful stdout fallback context.'
+        Assert-False ($summary -match '(?i)#< CLIXML|Preparing modules for first use') 'Progress-only CLIXML must not become the first-failure summary.'
+
+        $fallbackTerminalPath = Join-Path $TestDrive 'terminal-control-fallback.txt'
+        $escape = [string][char]27
+        $bell = [string][char]7
+        Write-TestUtf8File -Path $fallbackTerminalPath -Text ($escape + ']0;untrusted terminal title' + $bell + 'PowerShell 5.1 shard exited before writing its result file.')
+        $fallbackTerminalSummary = Get-PesterShardFailureSummary -Paths @($fallbackTerminalPath)
+        Assert-Equal $fallbackTerminalSummary 'PowerShell 5.1 shard exited before writing its result file.' 'Fallback diagnostics must normalize terminal-control strings before applying the fixed allowlist.'
+        Assert-False ($fallbackTerminalSummary -match '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]|untrusted terminal title') 'Fallback diagnostics must not retain terminal controls or their payload.'
+
+        $credentialPath = Join-Path $TestDrive 'credential-continuation.txt'
+        Write-TestUtf8File -Path $credentialPath -Text "Authorization:`ncredential-value-that-must-not-be-logged"
+        $credentialSummary = Get-PesterShardFailureSummary -Paths @($credentialPath)
+        Assert-False ($credentialSummary -match 'credential-value-that-must-not-be-logged') 'An unlabeled value after a sensitive header must never enter the workflow-visible fallback diagnostic.'
+        Assert-Match $credentialSummary 'No allowlisted Pester diagnostic' 'Unrecognized arbitrary child output must be replaced by a fixed safe diagnostic.'
+
+        $recognizedCredentialPath = Join-Path $TestDrive 'recognized-credential-continuation.txt'
+        Write-TestUtf8File -Path $recognizedCredentialPath -Text "[-] fixture failure`nAuthorization:`nrecognized-credential-value-that-must-not-be-logged`n`nExpected: safe diagnostic context"
+        $recognizedCredentialSummary = Get-PesterShardFailureSummary -Paths @($recognizedCredentialPath)
+        Assert-False ($recognizedCredentialSummary -match 'recognized-credential-value-that-must-not-be-logged') 'A recognized failure block must not retain an unlabeled value after a sensitive header.'
+        Assert-Match $recognizedCredentialSummary '\[-\] fixture failure' 'Sanitizing a sensitive continuation must preserve the recognized failure marker.'
+        Assert-False ($recognizedCredentialSummary -match 'Expected: safe diagnostic context') 'A blank line must not restore raw output after a sensitive header.'
+        Assert-Match $recognizedCredentialSummary 'redacted sensitive diagnostic continuation' 'The sensitive block must be represented only by a fixed safe continuation marker.'
+
+        $wrappedCredentialPath = Join-Path $TestDrive 'wrapped-credential-before-marker.txt'
+        Write-TestUtf8File -Path $wrappedCredentialPath -Text "Authorization:`nwrapped-credential-fragment-one`nwrapped-credential-fragment-two`n`n[-] fixture failure`nExpected: safe diagnostic context"
+        $wrappedCredentialSummary = Get-PesterShardFailureSummary -Paths @($wrappedCredentialPath)
+        Assert-False ($wrappedCredentialSummary -match 'wrapped-credential-fragment-(?:one|two)') 'Every wrapped credential continuation before a recognized failure marker must be redacted.'
+        Assert-False ($wrappedCredentialSummary -match '\[-\] fixture failure|Expected: safe diagnostic context') 'No raw line after a sensitive header may be trusted as a boundary.'
+        Assert-Match $wrappedCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A boundary-looking continuation must be represented by a fixed safe marker.'
+
+        $cookieCredentialPath = Join-Path $TestDrive 'cookie-credential-before-marker.txt'
+        Write-TestUtf8File -Path $cookieCredentialPath -Text "Set-Cookie: session_id=cookie-credential-that-must-not-be-logged; HttpOnly`n[-] cookie fixture failure`nExpected: cookie-context-that-must-not-be-logged"
+        $cookieCredentialSummary = Get-PesterShardFailureSummary -Paths @($cookieCredentialPath)
+        Assert-False ($cookieCredentialSummary -match 'cookie-(?:credential|context)-that-must-not-be-logged') 'Cookie/session credentials immediately before a recognized failure marker must never enter the workflow-visible diagnostic window.'
+        Assert-Match $cookieCredentialSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a cookie credential must be represented only by a fixed safe continuation marker.'
+
+        $credentialLabelPath = Join-Path $TestDrive 'credential-label-before-marker.txt'
+        Write-TestUtf8File -Path $credentialLabelPath -Text "credentials:`nq7F9opaqueValue`n[-] credential-label fixture failure`nExpected: safe diagnostic context"
+        $credentialLabelSummary = Get-PesterShardFailureSummary -Paths @($credentialLabelPath)
+        Assert-False ($credentialLabelSummary -match 'q7F9opaqueValue') 'An opaque value after a credential label must never become the line preceding a workflow-visible failure marker.'
+        Assert-Match $credentialLabelSummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'A failure marker after a credential-labeled block must be represented only by a fixed safe continuation marker.'
+
+        $ordinaryAuthorizationProgressPath = Join-Path $TestDrive 'ordinary-authorization-progress.txt'
+        Write-TestUtf8File -Path $ordinaryAuthorizationProgressPath -Text "[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] actionable fixture failure`nExpected: actionable expected value`nBut was: actionable actual value"
+        $ordinaryAuthorizationProgressSummary = Get-PesterShardFailureSummary -Paths @($ordinaryAuthorizationProgressPath)
+        Assert-Match $ordinaryAuthorizationProgressSummary '\[-\] actionable fixture failure' 'A non-credential test name containing authorization must not hide the following failure marker.'
+        Assert-Match $ordinaryAuthorizationProgressSummary 'Expected: actionable expected value' 'A non-credential test name must not hide actionable expectation context.'
+        Assert-Match $ordinaryAuthorizationProgressSummary 'But was: actionable actual value' 'A non-credential test name must not hide the observed failure value.'
+
+        $windowBoundaryCredentialPath = Join-Path $TestDrive 'credential-crossing-tail-window.txt'
+        $windowSuffix = "Authorization:`nwindow-boundary-credential`n`n[-] fixture failure`nExpected: safe diagnostic context`n"
+        $windowFillerLength = (65536 + 5) - [Text.Encoding]::UTF8.GetByteCount($windowSuffix)
+        Assert-True ($windowFillerLength -gt 0) 'The tail-window fixture must place the read offset inside the sensitive header.'
+        Write-TestUtf8File -Path $windowBoundaryCredentialPath -Text ("safe prefix`n" + $windowSuffix + ('z' * $windowFillerLength))
+        $windowBoundarySummary = Get-PesterShardFailureSummary -Paths @($windowBoundaryCredentialPath)
+        Assert-False ($windowBoundarySummary -match 'window-boundary-credential') 'Sanitization must retain sensitive continuation state across a tail-window read boundary.'
+        Assert-False ($windowBoundarySummary -match '\[-\] fixture failure|Expected: safe diagnostic context') 'Window-boundary sanitization must not restore raw output after a blank line.'
+        Assert-Match $windowBoundarySummary '\[-\] \[redacted sensitive diagnostic continuation\]' 'Window-boundary sanitization must retain only a fixed safe boundary marker.'
+
+        $boundaryLookingCredentialPath = Join-Path $TestDrive 'boundary-looking-credential.txt'
+        Write-TestUtf8File -Path $boundaryLookingCredentialPath -Text "[-] fixture failure`nAuthorization:`n[-]window-boundary-credential`nExpected: expected-boundary-credential"
+        $boundaryLookingCredentialSummary = Get-PesterShardFailureSummary -Paths @($boundaryLookingCredentialPath)
+        Assert-False ($boundaryLookingCredentialSummary -match '(?:window|expected)-boundary-credential') 'Boundary-looking credential continuations must never be trusted as raw diagnostic structure.'
+        Assert-Match $boundaryLookingCredentialSummary '\[-\] fixture failure' 'A failure marker before a sensitive continuation must remain available.'
+
+        $quotedKeyCredentialPath = Join-Path $TestDrive 'quoted-key-credential.txt'
+        Write-TestUtf8File -Path $quotedKeyCredentialPath -Text "[-] fixture failure`n`"token`":`nquoted-key-credential-that-must-not-be-logged`nExpected: quoted-key-credential-context"
+        $quotedKeyCredentialSummary = Get-PesterShardFailureSummary -Paths @($quotedKeyCredentialPath)
+        Assert-False ($quotedKeyCredentialSummary -match 'quoted-key-credential-(?:that-must-not-be-logged|context)') 'A quoted sensitive key ending in a separator must enable continuation redaction.'
+        Assert-Match $quotedKeyCredentialSummary '\[-\] fixture failure' 'Quoted-key redaction must retain safe context that precedes the sensitive block.'
+
+        $oversizedCliXmlPath = Join-Path $TestDrive 'oversized-valid-clixml-stderr.txt'
+        $oversizedCliXmlPadding = 'p' * 140000
+        Write-TestUtf8File -Path $oversizedCliXmlPath -Text @"
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><Props><S N="Activity">$oversizedCliXmlPadding</S></Props></Obj><Obj S="information" RefId="1"><ToString>[-] oversized CLIXML fixture failure</ToString></Obj><Obj S="information" RefId="2"><ToString>Expected: safe oversized diagnostic context</ToString></Obj></Objs>
+"@
+        $oversizedCliXmlSummary = Get-PesterShardFailureSummary -Paths @($oversizedCliXmlPath)
+        Assert-Match $oversizedCliXmlSummary '\[-\] oversized CLIXML fixture failure' 'Valid CLIXML within the child-output quota must decode even when it exceeds the former parser limit.'
+        Assert-Match $oversizedCliXmlSummary 'Expected: safe oversized diagnostic context' 'Oversized valid CLIXML must preserve adjacent safe diagnostic context.'
+        Assert-False ($oversizedCliXmlSummary -match '(?i)#< CLIXML|PowerShell CLIXML diagnostic could not be safely decoded') 'Valid quota-bounded CLIXML must not fall back to an undecodable-stream diagnostic.'
+
+        $mixedStderrPath = Join-Path $TestDrive 'mixed-clixml-stderr.txt'
+        Write-TestUtf8File -Path $mixedStderrPath -Text @'
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.ProgressRecord</T></TN><Props><S N="Activity">Preparing modules for first use.</S></Props></Obj><Obj S="information" RefId="1"><ToString> [-] Error occurred in test script 'tests\fixture.Tests.ps1'</ToString></Obj><Obj S="information" RefId="2"><ToString>   PSSecurityException: fixture execution policy failure</ToString></Obj></Objs>
+'@
+        $mixedSummary = Get-PesterShardFailureSummary -Paths @($mixedStderrPath, $stdoutPath)
+        Assert-Match $mixedSummary 'PSSecurityException: fixture execution policy failure' 'Mixed CLIXML must decode the useful non-progress record instead of returning raw XML.'
+        Assert-False ($mixedSummary -match '(?i)#< CLIXML|S="progress"') 'Decoded mixed CLIXML must omit serialization markup and progress records.'
+
+        $truncatedStderrPath = Join-Path $TestDrive 'truncated-progress-clixml-stderr.txt'
+        Write-TestUtf8File -Path $truncatedStderrPath -Text @'
+#< CLIXML
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><MS><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0<
+'@
+        $actionableStdoutPath = Join-Path $TestDrive 'actionable-stdout.txt'
+        Write-TestUtf8File -Path $actionableStdoutPath -Text @'
+[-] Error occurred in test script 'tests\fixture.Tests.ps1'
+PSSecurityException: fixture execution policy failure
+'@
+        $truncatedSummary = Get-PesterShardFailureSummary -Paths @($truncatedStderrPath, $actionableStdoutPath)
+        Assert-Match $truncatedSummary 'PSSecurityException: fixture execution policy failure' 'Truncated progress CLIXML must be deferred behind actionable stdout.'
+        Assert-False ($truncatedSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Deferred truncated progress CLIXML must not mask actionable stdout.'
+
+        $preservedRawSummary = Get-PesterShardFailureSummary -Paths @($truncatedStderrPath)
+        Assert-Equal $preservedRawSummary 'PowerShell CLIXML diagnostic could not be safely decoded.' 'Unparseable CLIXML must retain a fixed diagnostic without exposing raw serialized values.'
+        Assert-False ($preservedRawSummary -match '(?i)#< CLIXML|Preparing modules for first use') 'Unparseable CLIXML must never be copied into workflow-visible diagnostics.'
+    }
+
+    # Scenario: Parent and generated-child diagnostics contain sensitive continuations split by complete, unterminated, or adversarial terminal controls.
+    # Purpose: Normalize terminal controls in one bounded pass before classifying sensitive boundaries and keep continuation values out of every workflow-visible diagnostic.
+    It 'UnitT07_normalizes_terminal_controls_before_redacting_parent_and_child_diagnostics_in_bounded_time' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before generated child diagnostic testing.'
+        $terminalControlFunction = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Remove-PesterShardTerminalControlSequences'
+        }, $true)
+        Assert-True ($null -ne $terminalControlFunction) 'The shard executor must define its terminal-control normalizer.'
+        Assert-False ($terminalControlFunction.Extent.Text -match '\[regex\]::Replace') 'Terminal-control normalization must not use a backtracking regex over quota-sized child output.'
+        Assert-Match $terminalControlFunction.Extent.Text 'while\s*\(' 'Terminal-control normalization must scan its bounded input directly.'
+        Invoke-Expression $terminalControlFunction.Extent.Text
+        $parentDiagnosticFunction = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertTo-PesterShardSanitizedDiagnosticText'
+        }, $true)
+        Assert-True ($null -ne $parentDiagnosticFunction) 'The shard executor must define its parent diagnostic sanitizer.'
+        Invoke-Expression $parentDiagnosticFunction.Extent.Text
+        $ansiReset = ([string][char]27) + '[0m'
+        $parentDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[-] fixture failure`n`"token`":$ansiReset`nparent-ansi-key-credential`nExpected: parent-ansi-key-context"
+        Assert-False ($parentDiagnostic -match 'parent-ansi-key-(?:credential|context)') 'The parent sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
+        Assert-Match $parentDiagnostic '\[-\] fixture failure' 'Parent ANSI normalization must retain safe context that precedes the sensitive block.'
+        $parentAuthorizationProgress = ConvertTo-PesterShardSanitizedDiagnosticText -Text "[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] parent actionable failure`nExpected: parent actionable expectation"
+        Assert-Match $parentAuthorizationProgress '\[-\] parent actionable failure' 'The parent sanitizer must not treat authorization in an ordinary test name as a sensitive field.'
+        Assert-Match $parentAuthorizationProgress 'Expected: parent actionable expectation' 'The parent sanitizer must retain actionable context after an ordinary authorization test name.'
+
+        $escape = [string][char]27
+        $indexedColor = $escape + '[38;5;8m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${indexedColor}context${ansiReset}") 'safe context' 'A color index numerically equal to the concealment opcode must remain ordinary readable SGR formatting.'
+        $colonColor = $escape + '[38:2::255:0:0m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'A valid colon-form RGB SGR sequence must remain ordinary readable formatting.'
+        $differentColors = $escape + '[38:2::255:0:0;48:2::0:0:255m'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${differentColors}context${ansiReset}") 'safe context' 'Different valid foreground and background colors must remain readable formatting.'
+        $bell = [string][char]7
+        $backspace = [string][char]8
+        $osc = $escape + ']0;fixture' + $bell
+        $dcs = $escape + 'P1;2|fixture' + $escape + '\'
+        $c1Csi = ([string][char]0x9B) + '0m'
+        $c1Index = [string][char]0x84
+        $cursorLeft = $escape + '[1D'
+        $zeroWidthSpace = [string][char]0x200B
+        $bidiOverride = [string][char]0x202E
+        $lineSeparator = [string][char]0x2028
+        $paragraphSeparator = [string][char]0x2029
+        $variationSelector = [string][char]0xFE0F
+        $visibleReplacementCharacters = "safe$([char]0xFFFC)$([char]0xFFFD)context"
+        $parentCases = @(
+            [pscustomobject]@{ Name = 'blank'; Text = "[-] fixture failure`nAuthorization:`n`nparent-blank-credential`nExpected: parent-blank-context" },
+            [pscustomobject]@{ Name = 'private-key-label'; Text = "[-] fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nparent-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: parent-private-key-label-context" },
+            [pscustomobject]@{ Name = 'access-key-label'; Text = "[-] fixture failure`naccess_key:`nparent-access-key-label-credential`nExpected: parent-access-key-label-context" },
+            [pscustomobject]@{ Name = 'set-cookie-label'; Text = "Set-Cookie: session_id=parent-set-cookie-label-credential; HttpOnly`n[-] fixture failure`nExpected: parent-set-cookie-label-context" },
+            [pscustomobject]@{ Name = 'session-id-label'; Text = "session_id: parent-session-id-label-credential`n[-] fixture failure`nExpected: parent-session-id-label-context" },
+            [pscustomobject]@{ Name = 'osc'; Text = "[-] fixture failure`n`"token`":$osc`nparent-osc-credential`nExpected: parent-osc-context" },
+            [pscustomobject]@{ Name = 'dcs'; Text = "[-] fixture failure`n`"token`":$dcs`nparent-dcs-credential`nExpected: parent-dcs-context" },
+            [pscustomobject]@{ Name = 'c1'; Text = "[-] fixture failure`n`"token`":$c1Csi`nparent-c1-credential`nExpected: parent-c1-context" },
+            [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "[-] fixture failure`nto${escape}[31`nken:`nparent-esc-csi-incomplete-credential`nExpected: parent-esc-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "[-] fixture failure`nto$([char]0x9B)31`nken:`nparent-c1-csi-incomplete-credential`nExpected: parent-c1-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "[-] fixture failure`nto${escape}(`nken:`nparent-esc-intermediate-incomplete-credential`nExpected: parent-esc-intermediate-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-low-final'; Text = "[-] fixture failure`nto${escape}#8ken:`nparent-esc-low-final-credential`nExpected: parent-esc-low-final-context" },
+            [pscustomobject]@{ Name = 'cursor-bs'; Text = "[-] fixture failure`ntox${backspace}ken:`nparent-cursor-bs-credential`nExpected: parent-cursor-bs-context" },
+            [pscustomobject]@{ Name = 'cursor-csi'; Text = "[-] fixture failure`ntox${cursorLeft}ken:`nparent-cursor-csi-credential`nExpected: parent-cursor-csi-context" },
+            [pscustomobject]@{ Name = 'cursor-cr'; Text = "[-] fixture failure`ntox`rken:`nparent-cursor-cr-credential`nExpected: parent-cursor-cr-context" },
+            [pscustomobject]@{ Name = 'cursor-c1'; Text = "[-] fixture failure`ntox${c1Index}ken:`nparent-cursor-c1-credential`nExpected: parent-cursor-c1-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal'; Text = "[-] fixture failure`nto${escape}[8mx${ansiReset}ken:`nparent-sgr-conceal-credential`nExpected: parent-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-colon'; Text = "[-] fixture failure`nto${escape}[38:2::255:0:0;48:2::255:0:0mx${ansiReset}ken:`nparent-sgr-equal-colon-credential`nExpected: parent-sgr-equal-colon-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "[-] fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nparent-sgr-equal-indexed-credential`nExpected: parent-sgr-equal-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "[-] fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nparent-sgr-equal-basic-credential`nExpected: parent-sgr-equal-basic-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "[-] fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-basic-indexed-credential`nExpected: parent-sgr-equal-basic-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "[-] fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nparent-sgr-equal-normalized-index-credential`nExpected: parent-sgr-equal-normalized-index-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-default-space'; Text = "[-] fixture failure`nto${escape}[38:2:0:255:0:0;48:2::255:0:0mx${ansiReset}ken:`nparent-sgr-equal-default-space-credential`nExpected: parent-sgr-equal-default-space-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-cube'; Text = "[-] fixture failure`nto${escape}[38:2::255:0:0;48;5;196mx${ansiReset}ken:`nparent-sgr-equal-fixed-cube-credential`nExpected: parent-sgr-equal-fixed-cube-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-gray'; Text = "[-] fixture failure`nto${escape}[38;5;244;48:2::128:128:128mx${ansiReset}ken:`nparent-sgr-equal-fixed-gray-credential`nExpected: parent-sgr-equal-fixed-gray-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "[-] fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nparent-sgr-equal-state-credential`nExpected: parent-sgr-equal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "[-] fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nparent-sgr-conceal-state-credential`nExpected: parent-sgr-conceal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "[-] fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nparent-sgr-malformed-color-credential`nExpected: parent-sgr-malformed-color-context" },
+            [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "[-] fixture failure`nto${zeroWidthSpace}ken:`nparent-unicode-zero-width-credential`nExpected: parent-unicode-zero-width-context" },
+            [pscustomobject]@{ Name = 'unicode-bidi'; Text = "[-] fixture failure`nto${bidiOverride}ken:`nparent-unicode-bidi-credential`nExpected: parent-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-line-separator'; Text = "[-] fixture failure`nto${lineSeparator}ken:`nparent-unicode-line-separator-credential`nExpected: parent-unicode-line-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-paragraph-separator'; Text = "[-] fixture failure`nto${paragraphSeparator}ken:`nparent-unicode-paragraph-separator-credential`nExpected: parent-unicode-paragraph-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-variation'; Text = "[-] fixture failure`nto${variationSelector}ken:`nparent-unicode-variation-credential`nExpected: parent-unicode-variation-context" },
+            [pscustomobject]@{ Name = 'block'; Text = "[-] fixture failure`ntoken: |-`nparent-block-credential`nExpected: parent-block-context" }
+        )
+        $parentLeaks = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($case in $parentCases) {
+            $caseDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text $case.Text
+            if ($caseDiagnostic -match "parent-$($case.Name)-(?:credential|context)") { [void]$parentLeaks.Add($case.Name) }
+        }
+        $parentCredentialLabelDiagnostic = ConvertTo-PesterShardSanitizedDiagnosticText -Text "credentials:`nq7F9ParentOpaqueValue`n[-] fixture failure"
+        if ($parentCredentialLabelDiagnostic -match 'q7F9ParentOpaqueValue') { [void]$parentLeaks.Add('credential-label') }
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text $visibleReplacementCharacters) $visibleReplacementCharacters 'Visible object and replacement glyphs must remain actionable parent diagnostics.'
+
+        $childScriptAssignment = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$childScript'
+        }, $true)
+        Assert-True ($null -ne $childScriptAssignment) 'The shard executor must define its generated child script.'
+        $PesterVersion = '4.10.1'
+        $childScriptText = Invoke-Expression $childScriptAssignment.Right.Extent.Text
+        $encodedChildScriptText = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScriptText))
+        $childCommandLineLength = ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedChildScriptText).Length
+        Assert-True ($childCommandLineLength -le 32000) "The generated child command line must retain safety headroom below the Windows 32,767-character limit. Actual=$childCommandLineLength."
+        $childTokens = $null
+        $childErrors = $null
+        $childAst = [Management.Automation.Language.Parser]::ParseInput($childScriptText, [ref]$childTokens, [ref]$childErrors)
+        Assert-Equal @($childErrors).Count 0 'The generated child script must parse before early-failure diagnostic testing.'
+        $childTerminalControlFunction = $childAst.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Remove-PesterShardTerminalControlSequences'
+        }, $true)
+        Assert-True ($null -ne $childTerminalControlFunction) 'The generated child must embed the same bounded terminal-control scanner.'
+        Invoke-Expression $childTerminalControlFunction.Extent.Text
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${colonColor}context${ansiReset}") 'safe context' 'The generated child must preserve valid colon-form RGB SGR formatting.'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text "safe ${differentColors}context${ansiReset}") 'safe context' 'The generated child must preserve different foreground and background colors.'
+        Assert-Equal (Remove-PesterShardTerminalControlSequences -Text $visibleReplacementCharacters) $visibleReplacementCharacters 'Visible object and replacement glyphs must remain actionable generated-child diagnostics.'
+        $childDiagnosticFunction = $childAst.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertTo-PesterShardEarlyFailureDiagnostic'
+        }, $true)
+        Assert-True ($null -ne $childDiagnosticFunction) 'The generated child script must define its early-failure diagnostic sanitizer.'
+        Invoke-Expression $childDiagnosticFunction.Extent.Text
+        try { throw [InvalidOperationException]::new("[+] InterT10_requires_explicit_authorization_before_git_index_changes 1s`n[-] child actionable failure`nExpected: child actionable expectation") }
+        catch { $childAuthorizationProgress = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+        Assert-Match $childAuthorizationProgress '\[-\] child actionable failure' 'The generated child sanitizer must not treat authorization in an ordinary test name as a sensitive field.'
+        Assert-Match $childAuthorizationProgress 'Expected: child actionable expectation' 'The generated child sanitizer must retain actionable context after an ordinary authorization test name.'
+        $childCases = @(
+            [pscustomobject]@{ Name = 'blank'; Text = "fixture failure`nAuthorization:`n`nearly-child-blank-credential`nExpected: early-child-blank-context" },
+            [pscustomobject]@{ Name = 'private-key-label'; Text = "fixture failure`nprivateKey:`n-----BEGIN PRIVATE KEY-----`nearly-child-private-key-label-credential`n-----END PRIVATE KEY-----`nExpected: early-child-private-key-label-context" },
+            [pscustomobject]@{ Name = 'access-key-label'; Text = "fixture failure`naccess_key:`nearly-child-access-key-label-credential`nExpected: early-child-access-key-label-context" },
+            [pscustomobject]@{ Name = 'set-cookie-label'; Text = "Set-Cookie: session_id=early-child-set-cookie-label-credential; HttpOnly`n[-] fixture failure`nExpected: early-child-set-cookie-label-context" },
+            [pscustomobject]@{ Name = 'session-id-label'; Text = "session_id: early-child-session-id-label-credential`n[-] fixture failure`nExpected: early-child-session-id-label-context" },
+            [pscustomobject]@{ Name = 'osc'; Text = "fixture failure`n`"token`":$osc`nearly-child-osc-credential`nExpected: early-child-osc-context" },
+            [pscustomobject]@{ Name = 'dcs'; Text = "fixture failure`n`"token`":$dcs`nearly-child-dcs-credential`nExpected: early-child-dcs-context" },
+            [pscustomobject]@{ Name = 'c1'; Text = "fixture failure`n`"token`":$c1Csi`nearly-child-c1-credential`nExpected: early-child-c1-context" },
+            [pscustomobject]@{ Name = 'esc-csi-incomplete'; Text = "fixture failure`nto${escape}[31`nken:`nearly-child-esc-csi-incomplete-credential`nExpected: early-child-esc-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'c1-csi-incomplete'; Text = "fixture failure`nto$([char]0x9B)31`nken:`nearly-child-c1-csi-incomplete-credential`nExpected: early-child-c1-csi-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-intermediate-incomplete'; Text = "fixture failure`nto${escape}(`nken:`nearly-child-esc-intermediate-incomplete-credential`nExpected: early-child-esc-intermediate-incomplete-context" },
+            [pscustomobject]@{ Name = 'esc-low-final'; Text = "fixture failure`nto${escape}#8ken:`nearly-child-esc-low-final-credential`nExpected: early-child-esc-low-final-context" },
+            [pscustomobject]@{ Name = 'cursor-bs'; Text = "fixture failure`ntox${backspace}ken:`nearly-child-cursor-bs-credential`nExpected: early-child-cursor-bs-context" },
+            [pscustomobject]@{ Name = 'cursor-csi'; Text = "fixture failure`ntox${cursorLeft}ken:`nearly-child-cursor-csi-credential`nExpected: early-child-cursor-csi-context" },
+            [pscustomobject]@{ Name = 'cursor-cr'; Text = "fixture failure`ntox`rken:`nearly-child-cursor-cr-credential`nExpected: early-child-cursor-cr-context" },
+            [pscustomobject]@{ Name = 'cursor-c1'; Text = "fixture failure`ntox${c1Index}ken:`nearly-child-cursor-c1-credential`nExpected: early-child-cursor-c1-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal'; Text = "fixture failure`nto${escape}[8mx${ansiReset}ken:`nearly-child-sgr-conceal-credential`nExpected: early-child-sgr-conceal-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-colon'; Text = "fixture failure`nto${escape}[38:2::255:0:0;48:2::255:0:0mx${ansiReset}ken:`nearly-child-sgr-equal-colon-credential`nExpected: early-child-sgr-equal-colon-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-indexed'; Text = "fixture failure`nto${escape}[38;5;8m${escape}[48;5;8mx${ansiReset}ken:`nearly-child-sgr-equal-indexed-credential`nExpected: early-child-sgr-equal-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic'; Text = "fixture failure`nto${escape}[31;41mx${ansiReset}ken:`nearly-child-sgr-equal-basic-credential`nExpected: early-child-sgr-equal-basic-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-basic-indexed'; Text = "fixture failure`nto${escape}[31;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-basic-indexed-credential`nExpected: early-child-sgr-equal-basic-indexed-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-normalized-index'; Text = "fixture failure`nto${escape}[38:5:01;48;5;1mx${ansiReset}ken:`nearly-child-sgr-equal-normalized-index-credential`nExpected: early-child-sgr-equal-normalized-index-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-default-space'; Text = "fixture failure`nto${escape}[38:2:0:255:0:0;48:2::255:0:0mx${ansiReset}ken:`nearly-child-sgr-equal-default-space-credential`nExpected: early-child-sgr-equal-default-space-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-cube'; Text = "fixture failure`nto${escape}[38:2::255:0:0;48;5;196mx${ansiReset}ken:`nearly-child-sgr-equal-fixed-cube-credential`nExpected: early-child-sgr-equal-fixed-cube-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-fixed-gray'; Text = "fixture failure`nto${escape}[38;5;244;48:2::128:128:128mx${ansiReset}ken:`nearly-child-sgr-equal-fixed-gray-credential`nExpected: early-child-sgr-equal-fixed-gray-context" },
+            [pscustomobject]@{ Name = 'sgr-equal-state'; Text = "fixture failure`n${escape}[31;41m`nx${ansiReset}token:`nearly-child-sgr-equal-state-credential`nExpected: early-child-sgr-equal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-conceal-state'; Text = "fixture failure`n${escape}[8m`nx${escape}[28mtoken:`nearly-child-sgr-conceal-state-credential`nExpected: early-child-sgr-conceal-state-context" },
+            [pscustomobject]@{ Name = 'sgr-malformed-color'; Text = "fixture failure`nto${escape}[38;5;999mx${ansiReset}ken:`nearly-child-sgr-malformed-color-credential`nExpected: early-child-sgr-malformed-color-context" },
+            [pscustomobject]@{ Name = 'unicode-zero-width'; Text = "fixture failure`nto${zeroWidthSpace}ken:`nearly-child-unicode-zero-width-credential`nExpected: early-child-unicode-zero-width-context" },
+            [pscustomobject]@{ Name = 'unicode-bidi'; Text = "fixture failure`nto${bidiOverride}ken:`nearly-child-unicode-bidi-credential`nExpected: early-child-unicode-bidi-context" },
+            [pscustomobject]@{ Name = 'unicode-line-separator'; Text = "fixture failure`nto${lineSeparator}ken:`nearly-child-unicode-line-separator-credential`nExpected: early-child-unicode-line-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-paragraph-separator'; Text = "fixture failure`nto${paragraphSeparator}ken:`nearly-child-unicode-paragraph-separator-credential`nExpected: early-child-unicode-paragraph-separator-context" },
+            [pscustomobject]@{ Name = 'unicode-variation'; Text = "fixture failure`nto${variationSelector}ken:`nearly-child-unicode-variation-credential`nExpected: early-child-unicode-variation-context" },
+            [pscustomobject]@{ Name = 'block'; Text = "fixture failure`ntoken: >-`nearly-child-block-credential`nExpected: early-child-block-context" }
+        )
+        $childLeaks = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($case in $childCases) {
+            try { throw [InvalidOperationException]::new($case.Text) }
+            catch { $caseDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+            if ($caseDiagnostic -match "early-child-$($case.Name)-(?:credential|context)") { [void]$childLeaks.Add($case.Name) }
+        }
+        try { throw [InvalidOperationException]::new("credentials:`nq7F9ChildOpaqueValue`n[-] fixture failure") }
+        catch { $childCredentialLabelDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_ }
+        if ($childCredentialLabelDiagnostic -match 'q7F9ChildOpaqueValue') { [void]$childLeaks.Add('credential-label') }
+        Assert-Equal ($parentLeaks.Count + $childLeaks.Count) 0 "Fail-closed continuation leaks: parent=[$($parentLeaks -join ', ')]; child=[$($childLeaks -join ', ')]."
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`nearly-child-credential-fragment-one`nearly-child-credential-fragment-two`n`nExpected: safe child context")
+        }
+        catch {
+            $childFailureDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($childFailureDiagnostic -match 'early-child-credential-fragment-(?:one|two)') 'Early child result and stderr diagnostics must not retain any wrapped value after a sensitive header.'
+        Assert-Match $childFailureDiagnostic 'fixture failure' 'Early child sanitization must preserve the exception summary.'
+        Assert-False ($childFailureDiagnostic -match 'Expected: safe child context') 'Early child sanitization must remain fail closed across blank lines.'
+        Assert-Match $childFailureDiagnostic 'redacted sensitive diagnostic continuation' 'Early child sanitization must emit only fixed markers after a sensitive header.'
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`nAuthorization:`n[-]early-child-boundary-credential`nExpected: early-child-expected-credential")
+        }
+        catch {
+            $boundaryLookingChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($boundaryLookingChildDiagnostic -match 'early-child-(?:boundary|expected)-credential') 'The generated child sanitizer must not trust boundary-looking text while a sensitive continuation is active.'
+        Assert-Match $boundaryLookingChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes the sensitive continuation.'
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`n`"token`":`nearly-child-quoted-key-credential`nExpected: early-child-quoted-key-context")
+        }
+        catch {
+            $quotedKeyChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($quotedKeyChildDiagnostic -match 'early-child-quoted-key-(?:credential|context)') 'The generated child sanitizer must enable continuation redaction for quoted sensitive keys.'
+        Assert-Match $quotedKeyChildDiagnostic 'fixture failure' 'The generated child sanitizer must retain safe context that precedes a quoted sensitive key.'
+
+        try {
+            throw [InvalidOperationException]::new("fixture failure`n`"token`":$ansiReset`nearly-child-ansi-key-credential`nExpected: early-child-ansi-key-context")
+        }
+        catch {
+            $ansiKeyChildDiagnostic = ConvertTo-PesterShardEarlyFailureDiagnostic -ErrorRecord $_
+        }
+        Assert-False ($ansiKeyChildDiagnostic -match 'early-child-ansi-key-(?:credential|context)') 'The generated child sanitizer must strip terminal formatting before classifying a sensitive continuation delimiter.'
+        Assert-Match $ansiKeyChildDiagnostic 'fixture failure' 'ANSI normalization must retain safe context that precedes the sensitive block.'
+    }
+
+    # Scenario: The configured evidence directory is missing beneath a junction or symbolic-link ancestor.
+    # Purpose: Reject the ancestor before New-Item can create any directory in the external target.
+    It 'UnitT08_rejects_a_reparse_ancestor_before_creating_the_evidence_root' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $fixtureRoot = Join-Path $TestDrive 'precreate-evidence-root'
+        $targetRoot = Join-Path $fixtureRoot 'target'
+        $aliasRoot = Join-Path $fixtureRoot 'alias'
+        $testRoot = Join-Path $fixtureRoot 'tests'
+        $moduleRoot = Join-Path $fixtureRoot 'module'
+        [void](New-Item -ItemType Directory -Path $targetRoot -Force)
+        [void](New-Item -ItemType Directory -Path $testRoot -Force)
+        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
+        $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+        [void](New-Item -ItemType $linkType -Path $aliasRoot -Target $targetRoot)
+        Write-TestUtf8File -Path (Join-Path $testRoot 'fixture.Tests.ps1') -Text "Describe 'fixture' { It 'passes' { } }"
+        Write-TestUtf8File -Path (Join-Path $moduleRoot 'Pester.psm1') -Text "function Invoke-Pester { }`nExport-ModuleMember -Function Invoke-Pester"
+        Write-TestUtf8File -Path (Join-Path $moduleRoot 'Pester.psd1') -Text @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '4.10.1'
+    GUID = 'a5e46c75-f24e-4c3f-baa2-57e93b50e620'
+    FunctionsToExport = @('Invoke-Pester')
+}
+'@
+        $evidenceRoot = Join-Path $aliasRoot 'must-not-be-created'
+        $probeScript = @"
+try {
+    & '$($shardPath.Replace("'", "''"))' ``
+        -PesterModulePath '$((Join-Path $moduleRoot 'Pester.psd1').Replace("'", "''"))' ``
+        -PesterVersion '4.10.1' ``
+        -ExpectedTotalCount 1 ``
+        -ExpectedSkippedCount 0 ``
+        -TestRoot '$($testRoot.Replace("'", "''"))' ``
+        -EvidenceRoot '$($evidenceRoot.Replace("'", "''"))' ``
+        -OuterTimeoutSeconds 5
+}
+catch {
+    [Console]::Error.WriteLine([string]`$_.Exception.Message)
+    exit 1
+}
+"@
+        $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $script:PowerShellPath
+        $startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedProbe"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $probeProcess = New-Object Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        try {
+            Assert-True $probeProcess.Start() 'The evidence-root pre-creation probe must start.'
+            $probeStdout = $probeProcess.StandardOutput.ReadToEnd()
+            $probeStderr = $probeProcess.StandardError.ReadToEnd()
+            $probeProcess.WaitForExit()
+            $probeExitCode = $probeProcess.ExitCode
+        }
+        finally { $probeProcess.Dispose() }
+        $probeOutput = "$probeStdout`n$probeStderr"
+        Assert-True ($probeExitCode -ne 0) 'A reparse-point evidence ancestor must be rejected.'
+        Assert-Match $probeOutput 'Preflight evidence root contains a symlinked or reparse-point ancestor' 'The rejection must identify the evidence-root trust boundary.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $targetRoot 'must-not-be-created')) 'Evidence-root rejection must happen before the external target is mutated.'
+    }
+
+    # Scenario: A bounded stdout or stderr capture task faults after the child wrote otherwise successful result evidence.
+    # Purpose: Make missing stream evidence a cleanup failure instead of accepting a completed shard.
+    It 'UnitT09_fails_closed_when_bounded_output_capture_faults' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before capture-failure state testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Resolve-PesterShardOutputFailure'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must define its bounded-capture failure transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $cleanup = [pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }
+        $faulted = Resolve-PesterShardOutputFailure `
+            -Cleanup $cleanup `
+            -Errors @('stderr bounded output capture failed: injected I/O fault') `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $faulted.status 'cleanup-failed' 'A capture task fault must override an otherwise completed shard.'
+        Assert-False ([bool]$faulted.cleanup.cleanedUp) 'A capture task fault must invalidate cleanup evidence.'
+        Assert-Match ($faulted.cleanup.errors -join ' | ') 'injected I/O fault' 'The capture fault must remain available in process evidence.'
+        Assert-Match $faulted.exceptionText 'injected I/O fault' 'The capture fault must remain available to the caller.'
+
+        $clean = Resolve-PesterShardOutputFailure `
+            -Cleanup ([pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }) `
+            -Errors @() `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $clean.status 'completed' 'The normal completed path must remain unchanged when capture has no errors.'
+        Assert-True ([bool]$clean.cleanup.cleanedUp) 'The normal completed path must preserve cleanup success.'
+    }
+
+    # Scenario: A bounded capture task faults while its child process is still running.
+    # Purpose: Surface the fault immediately so the supervisor can break the live wait and start Job Object cleanup.
+    It 'UnitT10_terminates_the_live_wait_when_bounded_capture_faults' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before live capture-fault testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Get-PesterShardLiveCaptureState'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must expose a testable live capture-state transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $faultSource = New-Object 'System.Threading.Tasks.TaskCompletionSource[object]'
+        $faultSource.SetException((New-Object IO.IOException('injected live pipe fault')))
+        $faulted = Get-PesterShardLiveCaptureState -Name 'stderr' -Task $faultSource.Task
+        Assert-True ([bool]$faulted.isCompleted) 'A faulted live capture task must be recognized as completed.'
+        Assert-True ([bool]$faulted.faulted) 'A faulted live capture task must be classified as a fault.'
+        Assert-Match $faulted.error 'stderr bounded output capture failed:.*injected live pipe fault' 'The live fault must retain its stream and cause.'
+
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        Assert-Match $source '\$captureFaultDetected\s*=\s*\$true' 'The live loop must record a detected capture fault.'
+        Assert-Match $source 'if \(\$captureFaultDetected\) \{ break \}' 'The live loop must break immediately after a capture fault.'
+    }
+
+    # Scenario: Persisting bounded stdout or stderr evidence fails after capture and child completion.
+    # Purpose: Prevent a successful shard result from being accepted without its bounded stream evidence.
+    It 'UnitT11_fails_closed_when_bounded_output_evidence_cannot_be_persisted' {
+        $shardPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($shardPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The shard executor must parse before output-persistence failure testing.'
+        $definition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Resolve-PesterShardOutputFailure'
+        }, $true)
+        Assert-True ($null -ne $definition) 'The shard executor must define its output-failure transition.'
+        Invoke-Expression $definition.Extent.Text
+
+        $faulted = Resolve-PesterShardOutputFailure `
+            -Cleanup ([pscustomobject][ordered]@{ errors = @(); cleanedUp = $true }) `
+            -Errors @('stdout evidence write failed: injected disk fault') `
+            -Status 'completed' `
+            -ExceptionText $null
+        Assert-Equal $faulted.status 'cleanup-failed' 'An output evidence write fault must override an otherwise completed shard.'
+        Assert-False ([bool]$faulted.cleanup.cleanedUp) 'An output evidence write fault must invalidate cleanup evidence.'
+        Assert-Match ($faulted.cleanup.errors -join ' | ') 'injected disk fault' 'The output evidence write fault must remain in process evidence.'
+
+        $startupFault = Resolve-PesterShardOutputFailure `
+            -Cleanup ([pscustomobject][ordered]@{ cleanedUp = $true; reason = 'process-not-started' }) `
+            -Errors @('stderr evidence write failed: injected startup disk fault') `
+            -Status 'startup-failed' `
+            -ExceptionText $null
+        Assert-Equal $startupFault.status 'cleanup-failed' 'An output write fault before process start must still fail closed.'
+        Assert-Match ($startupFault.cleanup.errors -join ' | ') 'injected startup disk fault' 'A pre-start cleanup shape must gain output-write error evidence safely.'
+
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $shardPath
+        $writeFailureIndex = $source.IndexOf('$outputWriteError = "stdout evidence write failed:', [StringComparison]::Ordinal)
+        $failClosedIndex = $source.IndexOf('-Errors @($outputWriteError)', [StringComparison]::Ordinal)
+        Assert-True ($writeFailureIndex -ge 0 -and $failClosedIndex -gt $writeFailureIndex) 'Output write failures must enter the fail-closed transition before process evidence is finalized.'
+    }
+
+    # Scenario: Stream capture aborts after the fixture runner process has started but before the normal wait completes.
+    # Purpose: Terminate and wait for the owned runner process tree before releasing its process handle.
+    It 'UnitT12_terminates_the_runner_fixture_when_capture_aborts_after_start' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'fixture-capture-abort') -Behavior 'timeout'
+        $caught = $null
+        try {
+            [void](Invoke-RunnerFixture -Fixture $fixture -InjectCaptureFailureAfterStart)
+        }
+        catch { $caught = $_ }
+
+        Assert-True ($null -ne $caught) 'The injected post-start capture failure must reach the caller.'
+        Assert-Match $caught.Exception.Message 'Injected runner fixture capture failure after process start' 'The injected failure must remain distinguishable from cleanup failures.'
+        $runnerProcessId = [int]$caught.Exception.Data['RunnerProcessId']
+        Assert-True ($runnerProcessId -gt 0) 'The injected failure must retain the started runner PID for cleanup verification.'
+
+        $processStillRunning = $false
+        $probe = $null
+        try {
+            $probe = [Diagnostics.Process]::GetProcessById($runnerProcessId)
+            $processStillRunning = -not $probe.HasExited
+        }
+        catch [ArgumentException] { $processStillRunning = $false }
+        finally { if ($null -ne $probe) { $probe.Dispose() } }
+        Assert-False $processStillRunning 'The fixture runner must not survive a post-start capture failure.'
+    }
+
+    # Scenario: A value-bearing runner option is deliberately supplied as an empty string.
+    # Purpose: Preserve the empty record in the counted base64 transport instead of shifting subsequent parameters.
+    It 'UnitT13_preserves_empty_values_in_runner_fixture_argument_transport' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'fixture-empty-argument')
+        $result = Invoke-RunnerFixture -Fixture $fixture -SourceRepository ''
+
+        Assert-True ($result.ExitCode -ne 0) 'The runner must reject an explicitly empty mandatory source repository.'
+        Assert-Match $result.Output 'SourceRepository|ParameterArgumentValidationErrorEmptyStringNotAllowed,Invoke-StandardValidation\.ps1' 'The empty value must reach the runner parameter binder.'
+        Assert-False ($result.Output -match 'argument name is invalid|not allowed or has no value|argument count mismatch') 'The bootstrap must not drop the empty record or shift later parameters.'
     }
 
     # Scenario: A production adapter tries to bind a resolver receipt from a different slot,
