@@ -205,6 +205,15 @@ function Get-TestEvidenceBytesWithSignatureMutation {
     return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
 }
 
+function Get-TestEvidenceBytesWithSignatureWhitespace {
+    param([Parameter(Mandatory = $true)] $EvidenceBytes)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $evidence = ConvertFrom-Json -InputObject $utf8.GetString([byte[]]$EvidenceBytes)
+    $signature = [string]$evidence.attestation.signature
+    $evidence.attestation.signature = $signature.Substring(0, 1) + ' ' + $signature.Substring(1)
+    return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
+}
+
 function Update-TestConsentDigests {
     param(
         [Parameter(Mandatory = $true)] $Request,
@@ -345,11 +354,38 @@ function Update-TestConsentDigests {
         }
     }
 
-    # Scenario: The signer emits a valid artifact, then the signature or expected key identity is substituted.
-    # Purpose: Authority-style verification must authenticate both bytes and the caller-supplied key identity.
+    # Scenario: The signer emits a valid artifact, then the signature syntax, bytes, or expected key identity is substituted.
+    # Purpose: Authority-style signing and verification must enforce schema-valid base64 and authenticate bytes and key identity.
     It 'UnitT50_wrong_signature_and_key_identity_are_rejected' {
         $fixture = New-TestSemanticFixture
         $run = Invoke-TestSemanticBridge -Fixture $fixture
+        $whitespaceSigner = {
+            param($signerRequest, $callbackContext)
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                $signatureBytes = $signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+                $signatureText = [Convert]::ToBase64String($signatureBytes)
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = $signatureText.Substring(0, 1) + ' ' + $signatureText.Substring(1)
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        $badSigner = Invoke-TestSemanticBridge -Fixture $fixture -Signer $whitespaceSigner
+        Assert-TestCondition ([string]$badSigner.status -ceq 'FAILED') 'A signer response with whitespace in base64 was accepted.'
+        Assert-TestCondition ($null -eq $badSigner.evidenceBytes) 'A signer response with whitespace emitted evidence.'
+
+        $whitespaceBytes = Get-TestEvidenceBytesWithSignatureWhitespace -EvidenceBytes $run.evidenceBytes
+        $badWhitespace = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $whitespaceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+        Assert-TestCondition (-not [bool]$badWhitespace.valid) 'Evidence with whitespace in signature base64 was accepted.'
+
         $mutatedBytes = Get-TestEvidenceBytesWithSignatureMutation -EvidenceBytes $run.evidenceBytes
         $badSignature = Test-StandardSemanticBridgeEvidence `
             -EvidenceBytes $mutatedBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `

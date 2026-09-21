@@ -13,6 +13,7 @@ $script:StandardSemanticBridgeAttestationType = 'local-semantic-bridge-v2'
 $script:StandardSemanticBridgeAlgorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
 $script:StandardSemanticBridgeHex64 = '^[0-9a-f]{64}$'
 $script:StandardSemanticBridgeGitObject = '^(?:[0-9a-f]{40}|[0-9a-f]{64})$'
+$script:StandardSemanticBridgeCanonicalBase64 = '^[A-Za-z0-9+/]+={0,2}$'
 $script:StandardSemanticBridgeCallbackStdoutQuotaCharacters = 16777216
 $script:StandardSemanticBridgeCallbackStderrQuotaCharacters = 16384
 
@@ -287,6 +288,24 @@ function Assert-StandardSemanticBridgeNonEmptyScalar {
         throw "$Context must be a non-empty scalar string."
     }
     return [string]$Value
+}
+
+function Assert-StandardSemanticBridgeCanonicalBase64 {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $text = Assert-StandardSemanticBridgeNonEmptyScalar -Value $Value -Context $Context
+    if ($text -cnotmatch $script:StandardSemanticBridgeCanonicalBase64) {
+        throw "$Context must match canonical base64 syntax."
+    }
+    try { $decoded = [Convert]::FromBase64String($text) }
+    catch { throw "$Context is not valid base64." }
+    if ([Convert]::ToBase64String($decoded) -cne $text) {
+        throw "$Context must use canonical base64 encoding."
+    }
+    return $text
 }
 
 function Assert-StandardSemanticBridgeSha256 {
@@ -1532,8 +1551,7 @@ function Invoke-StandardSemanticBridge {
         Assert-StandardSemanticBridgeExactProperties -Object $signature -Expected @('keyId', 'algorithm', 'signature') -Context 'signer response'
         $keyId = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $signature 'keyId') 'signer keyId'
         if ([string](Get-StandardSemanticBridgeProperty $signature 'algorithm') -cne $script:StandardSemanticBridgeAlgorithm) { throw 'signer algorithm is unsupported.' }
-        $signatureText = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $signature 'signature') 'signer signature'
-        try { [void][Convert]::FromBase64String($signatureText) } catch { throw 'signer signature is not valid base64.' }
+        $signatureText = Assert-StandardSemanticBridgeCanonicalBase64 (Get-StandardSemanticBridgeProperty $signature 'signature') 'signer signature'
         $evidence = [pscustomobject][ordered]@{}
         foreach ($property in @($evidenceUnsigned.PSObject.Properties)) { $evidence | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value }
         $evidence | Add-Member -MemberType NoteProperty -Name 'attestation' -Value ([pscustomobject][ordered]@{ attestationType = $script:StandardSemanticBridgeAttestationType; keyId = $keyId; algorithm = $script:StandardSemanticBridgeAlgorithm; signedPayloadSha256 = $unsignedPayloadSha; issuedAt = $generatedAt; signature = $signatureText })
@@ -1617,9 +1635,8 @@ function Test-StandardSemanticBridgeEvidence {
         $attestation = $evidence.attestation
         Assert-StandardSemanticBridgeExactProperties -Object $attestation -Expected @('attestationType', 'keyId', 'algorithm', 'signedPayloadSha256', 'issuedAt', 'signature') -Context 'evidence attestation'
         if ([string]$attestation.attestationType -cne $script:StandardSemanticBridgeAttestationType -or [string]$attestation.keyId -cne $ExpectedKeyId -or [string]$attestation.algorithm -cne $script:StandardSemanticBridgeAlgorithm) { throw 'evidence signer identity or algorithm is not trusted by the caller.' }
-        $signatureText = Assert-StandardSemanticBridgeNonEmptyScalar $attestation.signature 'evidence signature'
-        $signature = $null
-        try { $signature = [Convert]::FromBase64String($signatureText) } catch { throw 'evidence signature is not base64.' }
+        $signatureText = Assert-StandardSemanticBridgeCanonicalBase64 $attestation.signature 'evidence signature'
+        $signature = [Convert]::FromBase64String($signatureText)
         $unsigned = [ordered]@{}
         foreach ($property in @($evidence.PSObject.Properties | Where-Object { $_.Name -ne 'attestation' })) { $unsigned[$property.Name] = $property.Value }
         $unsignedObject = [pscustomobject]$unsigned
