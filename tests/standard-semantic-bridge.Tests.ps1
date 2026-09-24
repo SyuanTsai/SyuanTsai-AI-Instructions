@@ -975,19 +975,80 @@ Describe 'Unix callback containment boundary' {
         $script:UnixContainmentModule = Get-Module StandardSemanticBridge | Select-Object -First 1
     }
 
-    # Scenario: A callback returns normally without creating a descendant.
-    # Purpose: The Linux-first boundary must permit a clean callback and restore its parent state.
+    # Scenario: A callback returns normally without creating a descendant, or the host cannot prove Linux namespace capability.
+    # Purpose: The namespace-only boundary must permit a clean callback and fail closed before callback execution when its capability is unavailable.
     It 'InterT160_normal_callback_exit_completes_inside_verified_boundary' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
-        $run = & $script:UnixContainmentModule {
-            param($callback)
-            Invoke-StandardSemanticBridgeCallbackWithTimeout `
-                -Callback $callback `
-                -Argument ([pscustomobject]@{}) `
-                -CallbackContext ([pscustomobject]@{}) `
-                -TimeoutMilliseconds 5000 `
-                -Context 'normal Unix containment callback'
-        } { param($argument, $context) return 'normal-complete' }
-        if ($null -eq $run -or [string]$run[0] -cne 'normal-complete') {
+        $unsharePath = @('/usr/bin/unshare', '/bin/unshare') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).Target
+        if ([string]::IsNullOrWhiteSpace($parentNamespace)) { $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).LinkTarget }
+        $probeNamespace = $null
+        $probeExit = 127
+        if (-not [string]::IsNullOrWhiteSpace([string]$unsharePath)) {
+            $probeOutput = @(& $unsharePath --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid' 2>&1)
+            $probeExit = $LASTEXITCODE
+            if ($probeOutput.Count -gt 0) { $probeNamespace = [string]$probeOutput[-1] }
+        }
+        $namespaceCapabilityAvailable = ($probeExit -eq 0 -and
+            -not [string]::IsNullOrWhiteSpace([string]$probeNamespace) -and
+            [string]$probeNamespace -cne $parentNamespace)
+        $executionMarker = Join-Path $TestDrive 'unix-containment-normal-executed.txt'
+        $callback = {
+            param($argument, $context)
+            [IO.File]::WriteAllText([string]$context.executionMarker, 'executed')
+            return 'normal-complete'
+        }
+        $forcedMarker = Join-Path $TestDrive 'unix-containment-capability-forced-unavailable.txt'
+        $forcedErrorMessage = $null
+        & $script:UnixContainmentModule { $script:StandardSemanticBridgeTestForceLinuxNamespaceUnavailable = $true }
+        try {
+            try {
+                & $script:UnixContainmentModule {
+                    param($callback, $callbackContext)
+                    Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                        -Callback $callback `
+                        -Argument ([pscustomobject]@{}) `
+                        -CallbackContext $callbackContext `
+                        -TimeoutMilliseconds 5000 `
+                        -Context 'forced unavailable Unix containment callback'
+                } $callback ([pscustomobject]@{ executionMarker = $forcedMarker }) | Out-Null
+            }
+            catch { $forcedErrorMessage = [string]$_.Exception.Message }
+        }
+        finally { & $script:UnixContainmentModule { $script:StandardSemanticBridgeTestForceLinuxNamespaceUnavailable = $false } }
+        if ([string]::IsNullOrWhiteSpace($forcedErrorMessage) -or $forcedErrorMessage -notmatch 'namespace|unshare|containment|boundary') {
+            throw 'The forced unavailable capability path did not fail closed before callback execution.'
+        }
+        if (Test-Path -LiteralPath $forcedMarker -PathType Leaf) {
+            throw 'The callback marker appeared during the forced unavailable capability path.'
+        }
+        $run = $null
+        $errorMessage = $null
+        try {
+            $run = & $script:UnixContainmentModule {
+                param($callback, $callbackContext)
+                Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                    -Callback $callback `
+                    -Argument ([pscustomobject]@{}) `
+                    -CallbackContext $callbackContext `
+                    -TimeoutMilliseconds 5000 `
+                    -Context 'normal Unix containment callback'
+            } $callback ([pscustomobject]@{ executionMarker = $executionMarker })
+        }
+        catch { $errorMessage = [string]$_.Exception.Message }
+        if (-not $namespaceCapabilityAvailable) {
+            if ([string]::IsNullOrWhiteSpace($errorMessage) -or $errorMessage -notmatch 'namespace|unshare|containment|boundary') {
+                throw 'Unavailable Linux PID namespace capability must fail closed before callback execution.'
+            }
+            if (Test-Path -LiteralPath $executionMarker -PathType Leaf) {
+                throw 'A callback marker appeared even though Linux PID namespace capability was unavailable.'
+            }
+            return
+        }
+        if (-not [string]::IsNullOrWhiteSpace($errorMessage)) {
+            throw "A callback failed despite a successful namespace capability probe: $errorMessage"
+        }
+        $runValues = @($run)
+        if ($runValues.Count -eq 0 -or [string]$runValues[0] -cne 'normal-complete' -or -not (Test-Path -LiteralPath $executionMarker -PathType Leaf)) {
             throw 'A normal callback did not complete inside the verified Unix boundary.'
         }
     }
@@ -1041,7 +1102,7 @@ Describe 'Unix callback containment boundary' {
     }
 
     # Scenario: A callback launches a real Linux setsid child that leaves the original process group.
-    # Purpose: PID namespace or strict subreaper cleanup must contain a reparented, escaped descendant.
+    # Purpose: PID namespace cleanup must contain a reparented, escaped descendant.
     It 'InterT162_setsid_descendant_is_terminated_before_namespace_boundary_returns' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
         $setsidPath = @('/usr/bin/setsid', '/bin/setsid') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
         if ([string]::IsNullOrWhiteSpace([string]$setsidPath)) { throw 'Linux setsid executable is required for this regression.' }
@@ -1128,7 +1189,7 @@ Describe 'Unix callback containment boundary' {
     }
 
     # Scenario: The parent process carries a secret that is not part of the callback contract.
-    # Purpose: Namespace and fallback launches must preserve the existing allowlisted child environment boundary.
+    # Purpose: Namespace launch must preserve the existing allowlisted child environment boundary.
     It 'InterT164_parent_secret_is_excluded_from_callback_environment' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
         $secretName = 'STANDARD_SEMANTIC_BRIDGE_TEST_SECRET_' + ([Guid]::NewGuid().ToString('N'))
         $secretValue = 'parent-secret-' + ([Guid]::NewGuid().ToString('N'))
