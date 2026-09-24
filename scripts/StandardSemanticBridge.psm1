@@ -1090,6 +1090,27 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
     return $true
 }
 
+function Get-StandardSemanticBridgeChildEnvironment {
+    # ProcessStartInfo inherits the caller environment by default.  Callback
+    # input and context cross the boundary through explicit stdin payloads, so
+    # no bridge-specific environment variables are needed.  Keep only the
+    # small OS/runtime surface required to start the current PowerShell host
+    # consistently on Windows PowerShell 5.1, PowerShell 7, and Unix.
+    $safeInheritedNames = @('TEMP', 'TMP')
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $safeInheritedNames += @('Path', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'WINDIR', 'OS', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH')
+    }
+    else {
+        $safeInheritedNames += @('PATH', 'TMPDIR', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE')
+    }
+    $childEnvironment = [ordered]@{}
+    foreach ($name in $safeInheritedNames) {
+        $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if ($null -ne $value) { $childEnvironment[$name] = [string]$value }
+    }
+    return $childEnvironment
+}
+
 function Invoke-StandardSemanticBridgeCallbackWithTimeout {
     [CmdletBinding()]
     param(
@@ -1175,6 +1196,10 @@ catch {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables.Clear()
+    foreach ($entry in (Get-StandardSemanticBridgeChildEnvironment).GetEnumerator()) {
+        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+    }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
     $started = $false

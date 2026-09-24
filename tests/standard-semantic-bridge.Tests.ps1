@@ -306,6 +306,72 @@ function Update-TestConsentDigests {
         Assert-TestCondition ($replay.Count -eq 1) 'The verifier did not record the consumed evidence ID.'
     }
 
+    # Scenario: The parent process contains an unrelated secret while both isolated callback paths execute.
+    # Purpose: Provider and signer callbacks must start with only the minimal PowerShell OS/runtime environment.
+    It 'InterT25_provider_and_signer_callbacks_do_not_inherit_parent_secrets' {
+        $fixture = New-TestSemanticFixture
+        $secretName = 'SYP154_CALLBACK_INHERITED_SECRET'
+        $previousSecret = [Environment]::GetEnvironmentVariable($secretName, [EnvironmentVariableTarget]::Process)
+        $provider = {
+            param($providerRequest, $callbackContext)
+            $inherited = [Environment]::GetEnvironmentVariable(
+                [string]$callbackContext.secretName,
+                [EnvironmentVariableTarget]::Process
+            )
+            if (-not [string]::IsNullOrWhiteSpace($inherited)) {
+                throw 'provider callback inherited a parent secret.'
+            }
+            $path = [string]$providerRequest.path
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-intent"; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_developer_intent' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-security"; ruleId = 'fixture.security'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $signer = {
+            param($signerRequest, $callbackContext)
+            $inherited = [Environment]::GetEnvironmentVariable(
+                [string]$callbackContext.secretName,
+                [EnvironmentVariableTarget]::Process
+            )
+            if (-not [string]::IsNullOrWhiteSpace($inherited)) {
+                throw 'signer callback inherited a parent secret.'
+            }
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                $signature = $signingKey.SignData(
+                    [byte[]]$signerRequest.payloadBytes,
+                    [Security.Cryptography.HashAlgorithmName]::SHA256,
+                    [Security.Cryptography.RSASignaturePadding]::Pkcs1
+                )
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = [Convert]::ToBase64String($signature)
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        [Environment]::SetEnvironmentVariable($secretName, 'parent-secret-must-not-cross-callback-boundary', [EnvironmentVariableTarget]::Process)
+        try {
+            $run = Invoke-TestSemanticBridge `
+                -Fixture $fixture `
+                -Provider $provider `
+                -Signer $signer `
+                -ProviderContext ([pscustomobject][ordered]@{ secretName = $secretName }) `
+                -SignerContext ([pscustomobject][ordered]@{ secretName = $secretName; privateKeyXml = $fixture.Rsa.ToXmlString($true) })
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable($secretName, $previousSecret, [EnvironmentVariableTarget]::Process)
+        }
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "Callbacks inherited parent environment or otherwise failed: $($run.reason)"
+        Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The provider callback regression did not execute exactly once.'
+        Assert-TestCondition ($null -ne $run.evidenceBytes) 'The signer callback regression emitted no evidence.'
+    }
+
     # Scenario: Consent is absent in substance, expired, or the current route is no longer consent-bound.
     # Purpose: No provider callback may occur before every consent condition passes.
     It 'UnitT30_missing_expired_or_mismatched_consent_has_zero_provider_calls' {
