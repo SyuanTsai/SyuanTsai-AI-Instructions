@@ -12,7 +12,8 @@ on:
       - syp-86
       - main
     # This required context intentionally has no paths filter, so every PR
-    # runs the shared gate, including scripts/Validate-UpstreamAdapter.ps1.
+    # runs the shared gate, including the Unix callback regression and
+    # scripts/Validate-UpstreamAdapter.ps1.
   workflow_dispatch:
 
 permissions:
@@ -72,7 +73,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 564
+            ExpectedTotalCount = 565
             ExpectedSkippedCount = 7
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
@@ -134,7 +135,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 564
+            ExpectedTotalCount = 565
             ExpectedSkippedCount = 6
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
@@ -212,6 +213,26 @@ jobs:
             $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           }
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+
+      - name: Run Unix callback process group regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in focused test step.' }
+          Import-Module $pester.Path -Force
+          $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback process group boundary' -PassThru
+          if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback process group regression.' }
+          Write-Host "UnixProcessGroup - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
+          if ([int]$result.TotalCount -ne 1 -or
+              [int]$result.PassedCount -ne 1 -or
+              [int]$result.FailedCount -ne 0 -or
+              [int]$result.SkippedCount -ne 0 -or
+              [int]$result.PendingCount -ne 0 -or
+              [int]$result.InconclusiveCount -ne 0) {
+            throw 'Unix callback process group regression did not produce exactly one passing test.'
+          }
 
       - name: Run cross-platform composition and acquisition tests
         shell: pwsh

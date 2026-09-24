@@ -124,6 +124,52 @@ public static class StandardSemanticBridgeProcessControlNative
 '@
 }
 
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
+    $null -eq ('StandardSemanticBridgeUnixProcessControlNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class StandardSemanticBridgeUnixProcessControlNative
+{
+    [DllImport("libc", SetLastError = true)]
+    private static extern int setpgid(int processId, int processGroupId);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getpgid(int processId);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int processId, int signal);
+
+    public static bool TrySetOwnProcessGroup()
+    {
+        return setpgid(0, 0) == 0;
+    }
+
+    public static int GetProcessGroupId(int processId)
+    {
+        return getpgid(processId);
+    }
+
+    public static bool TryTerminateProcessGroup(int processGroupId, int signal)
+    {
+        if (processGroupId <= 0) return false;
+        int result = kill(-processGroupId, signal);
+        if (result == 0) return true;
+        return Marshal.GetLastWin32Error() == 3; // ESRCH: the group is already gone.
+    }
+
+    public static bool IsProcessGroupAlive(int processGroupId)
+    {
+        if (processGroupId <= 0) return false;
+        int result = kill(-processGroupId, 0);
+        if (result == 0) return true;
+        return Marshal.GetLastWin32Error() != 3; // ESRCH means the group is gone.
+    }
+}
+'@
+}
+
 if ($null -eq ('StandardSemanticBridgeBoundedCapture' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -986,6 +1032,64 @@ function ConvertFrom-StandardSemanticBridgeIsolatedValue {
     return $Value
 }
 
+function Get-StandardSemanticBridgeUnixProcessGroupId {
+    param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return 0 }
+    try { return [StandardSemanticBridgeUnixProcessControlNative]::GetProcessGroupId($Process.Id) }
+    catch { return -1 }
+}
+
+function Stop-StandardSemanticBridgeOwnedCallbackProcess {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory = $true)][bool] $JobAssigned,
+        [Parameter(Mandatory = $true)][IntPtr] $JobHandle,
+        [Parameter(Mandatory = $true)][int] $UnixProcessGroupId
+    )
+
+    if ($JobAssigned) {
+        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($JobHandle, 1)) {
+            throw 'TerminateJobObject returned false.'
+        }
+        return
+    }
+    if ($UnixProcessGroupId -gt 0) {
+        if (-not [StandardSemanticBridgeUnixProcessControlNative]::TryTerminateProcessGroup($UnixProcessGroupId, 9)) {
+            throw 'Unix process-group termination returned false.'
+        }
+        return
+    }
+    $killTreeMethod = @($Process.GetType().GetMethods() | Where-Object {
+            $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType -eq [bool]
+        } | Select-Object -First 1)
+    if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($Process, [object[]]@($true)) }
+    elseif (-not $Process.HasExited) { $Process.Kill() }
+}
+
+function Wait-StandardSemanticBridgeOwnedCallbackProcess {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory = $true)][int] $UnixProcessGroupId,
+        [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds
+    )
+
+    if ($UnixProcessGroupId -gt 0) {
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            while ([StandardSemanticBridgeUnixProcessControlNative]::IsProcessGroupAlive($UnixProcessGroupId)) {
+                if ($deadline.ElapsedMilliseconds -ge $TimeoutMilliseconds) { return $false }
+                Start-Sleep -Milliseconds 25
+            }
+            return $true
+        }
+        finally { $deadline.Stop() }
+    }
+    if (-not $Process.HasExited) { return $Process.WaitForExit($TimeoutMilliseconds) }
+    return $true
+}
+
 function Invoke-StandardSemanticBridgeCallbackWithTimeout {
     [CmdletBinding()]
     param(
@@ -1013,6 +1117,28 @@ $ProgressPreference = 'SilentlyContinue'
 $VerbosePreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
 try {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+        if ($null -eq ('StandardSemanticBridgeUnixProcessControlNative' -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class StandardSemanticBridgeUnixProcessControlNative
+{
+    [DllImport("libc", SetLastError = true)]
+    private static extern int setpgid(int processId, int processGroupId);
+
+    public static bool TrySetOwnProcessGroup()
+    {
+        return setpgid(0, 0) == 0;
+    }
+}
+"@
+        }
+        if (-not [StandardSemanticBridgeUnixProcessControlNative]::TrySetOwnProcessGroup()) {
+            throw 'Unix callback host could not establish its owned process group.'
+        }
+    }
     $payloadXml = [Console]::In.ReadToEnd()
     $payload = [Management.Automation.PSSerializer]::Deserialize($payloadXml)
     $argument = [Management.Automation.PSSerializer]::Deserialize([string]$payload.argumentXml)
@@ -1056,6 +1182,8 @@ catch {
     $stderrTask = $null
     $jobHandle = [IntPtr]::Zero
     $jobAssigned = $false
+    $unixProcessGroupId = 0
+    $callbackProcessTerminationRequested = $false
     $primaryException = $null
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     try {
@@ -1074,6 +1202,30 @@ catch {
                 throw [InvalidOperationException]::new("$Context process could not be assigned to its Windows Job Object.")
             }
             $jobAssigned = $true
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+            # The Unix bootstrap establishes its process group before it reads
+            # stdin.  Do not release the callback payload until the parent has
+            # observed that group.  If the host exits during this handshake,
+            # callback code has not run and cannot have created a descendant;
+            # an observed group is therefore the cleanup boundary for every
+            # callback descendant that can exist.
+            $groupDeadline = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                do {
+                    $candidateGroupId = Get-StandardSemanticBridgeUnixProcessGroupId -Process $process
+                    if ($candidateGroupId -eq $process.Id) {
+                        $unixProcessGroupId = $candidateGroupId
+                        break
+                    }
+                    if ($process.HasExited -or $groupDeadline.ElapsedMilliseconds -ge 1000) { break }
+                    Start-Sleep -Milliseconds 10
+                } while ($true)
+            }
+            finally { $groupDeadline.Stop() }
+            if ($unixProcessGroupId -le 0) {
+                throw [InvalidOperationException]::new("$Context process could not establish its owned Unix process group.")
+            }
         }
         $stdoutTask = [StandardSemanticBridgeBoundedCapture]::Start(
             $process.StandardOutput,
@@ -1105,51 +1257,54 @@ catch {
             }
             if ($null -ne $quotaStream) {
                 try {
-                    if ($jobAssigned) {
-                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
-                            throw 'TerminateJobObject returned false.'
-                        }
-                    }
-                    else {
-                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
-                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
-                                $_.GetParameters()[0].ParameterType -eq [bool]
-                            } | Select-Object -First 1)
-                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
-                        elseif (-not $process.HasExited) { $process.Kill() }
-                    }
+                    Stop-StandardSemanticBridgeOwnedCallbackProcess `
+                        -Process $process `
+                        -JobAssigned $jobAssigned `
+                        -JobHandle $jobHandle `
+                        -UnixProcessGroupId $unixProcessGroupId
+                    $callbackProcessTerminationRequested = $true
                 }
                 catch {
                     throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process tree could not be terminated.")
                 }
-                if (-not $process.HasExited -and -not $process.WaitForExit(5000)) {
+                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process -UnixProcessGroupId $unixProcessGroupId -TimeoutMilliseconds 5000)) {
                     throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process did not terminate.")
                 }
                 throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
             }
 
             if ($process.HasExited -and $stdoutTask.IsCompleted -and $stderrTask.IsCompleted) { break }
+            if ($process.HasExited -and -not $callbackProcessTerminationRequested) {
+                # A callback child may inherit one of the host's output handles.
+                # Terminate the owned boundary as soon as the host exits so the
+                # bounded capture tasks cannot wait for a late descendant side
+                # effect before cleanup runs.
+                try {
+                    Stop-StandardSemanticBridgeOwnedCallbackProcess `
+                        -Process $process `
+                        -JobAssigned $jobAssigned `
+                        -JobHandle $jobHandle `
+                        -UnixProcessGroupId $unixProcessGroupId
+                    $callbackProcessTerminationRequested = $true
+                }
+                catch {
+                    throw [InvalidOperationException]::new("$Context callback host exited but its owned process boundary could not be terminated.")
+                }
+            }
             $remaining = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
             if ($remaining -le 0) {
                 try {
-                    if ($jobAssigned) {
-                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
-                            throw 'TerminateJobObject returned false.'
-                        }
-                    }
-                    else {
-                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
-                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
-                                $_.GetParameters()[0].ParameterType -eq [bool]
-                            } | Select-Object -First 1)
-                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
-                        elseif (-not $process.HasExited) { $process.Kill() }
-                    }
+                    Stop-StandardSemanticBridgeOwnedCallbackProcess `
+                        -Process $process `
+                        -JobAssigned $jobAssigned `
+                        -JobHandle $jobHandle `
+                        -UnixProcessGroupId $unixProcessGroupId
+                    $callbackProcessTerminationRequested = $true
                 }
                 catch {
                     throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process tree could not be terminated.")
                 }
-                if (-not $process.HasExited -and -not $process.WaitForExit(5000)) {
+                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process -UnixProcessGroupId $unixProcessGroupId -TimeoutMilliseconds 5000)) {
                     throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process did not terminate.")
                 }
                 throw [TimeoutException]::new("$Context deadline was exceeded.")
@@ -1165,9 +1320,15 @@ catch {
         if ([bool]$stdoutResult.Exceeded -or [bool]$stderrResult.Exceeded) {
             $quotaStream = if ([bool]$stdoutResult.Exceeded) { 'stdout' } else { 'stderr' }
             try {
-                if ($jobAssigned) { [void][StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1) }
+                Stop-StandardSemanticBridgeOwnedCallbackProcess `
+                    -Process $process `
+                    -JobAssigned $jobAssigned `
+                    -JobHandle $jobHandle `
+                    -UnixProcessGroupId $unixProcessGroupId
+                $callbackProcessTerminationRequested = $true
             }
             catch { }
+            [void](Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process -UnixProcessGroupId $unixProcessGroupId -TimeoutMilliseconds 5000)
             throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
         }
         if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
@@ -1192,20 +1353,32 @@ catch {
         $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
         if ($started) {
             try {
-                if (-not $process.HasExited) {
-                    if ($jobAssigned) {
-                        if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
-                            $cleanupErrors.Add('TerminateJobObject returned false during callback cleanup.')
-                        }
+                if ($unixProcessGroupId -gt 0) {
+                    Stop-StandardSemanticBridgeOwnedCallbackProcess `
+                        -Process $process `
+                        -JobAssigned $false `
+                        -JobHandle [IntPtr]::Zero `
+                        -UnixProcessGroupId $unixProcessGroupId
+                    if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process -UnixProcessGroupId $unixProcessGroupId -TimeoutMilliseconds 5000)) {
+                        $cleanupErrors.Add('Unix callback process group did not terminate during callback cleanup.')
                     }
-                    else {
-                        $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
-                                $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
-                                $_.GetParameters()[0].ParameterType -eq [bool]
-                            } | Select-Object -First 1)
-                        if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
-                        else { $process.Kill() }
+                }
+                elseif ($jobAssigned -and -not $callbackProcessTerminationRequested) {
+                    $callbackProcessTerminationRequested = $true
+                    if (-not [StandardSemanticBridgeProcessControlNative]::TryTerminateJobObject($jobHandle, 1)) {
+                        $cleanupErrors.Add('TerminateJobObject returned false during callback cleanup.')
                     }
+                    if (-not $process.HasExited -and -not $process.WaitForExit(5000)) {
+                        $cleanupErrors.Add('Callback host did not terminate during cleanup.')
+                    }
+                }
+                elseif (-not $jobAssigned -and -not $process.HasExited) {
+                    $killTreeMethod = @($process.GetType().GetMethods() | Where-Object {
+                            $_.Name -ceq 'Kill' -and $_.GetParameters().Count -eq 1 -and
+                            $_.GetParameters()[0].ParameterType -eq [bool]
+                        } | Select-Object -First 1)
+                    if ($killTreeMethod.Count -eq 1) { [void]$killTreeMethod[0].Invoke($process, [object[]]@($true)) }
+                    else { $process.Kill() }
                     if (-not $process.WaitForExit(5000)) { $cleanupErrors.Add('Callback host did not terminate during cleanup.') }
                 }
             }

@@ -827,3 +827,76 @@ function Update-TestConsentDigests {
         Assert-TestCondition ($errorMessage -match 'NaN|Infinity') 'Non-finite numeric canonicalization did not fail closed.'
     }
 }
+
+# Scenario: A successful callback host starts a real child process that holds
+# redirected output handles, returns, and exits before the child writes a marker.
+# Purpose: The owned process boundary must terminate the descendant immediately
+# after host exit so capture cannot wait for a late side effect.
+Describe 'Unix callback process group boundary' {
+    It 'InterT135_successful_callback_host_exit_terminates_forked_descendant_before_late_side_effect' {
+        Import-Module (Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1') -Force
+        $childStartedMarker = Join-Path $TestDrive 'provider-success-child-started.txt'
+        $childLateMarker = Join-Path $TestDrive 'provider-success-child-late-output.txt'
+        $forkedProvider = {
+            param($providerRequest, $callbackContext)
+            $childStartedPath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$callbackContext.childStartedMarker))
+            $childLatePath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$callbackContext.childLateMarker))
+            $childScript = @"
+`$startedPath = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$childStartedPath'))
+`$latePath = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$childLatePath'))
+[IO.File]::WriteAllText(`$startedPath, 'started')
+[Threading.Thread]::Sleep(2000)
+[IO.File]::WriteAllText(`$latePath, 'late descendant output')
+"@
+            $childInfo = New-Object Diagnostics.ProcessStartInfo
+            $childInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $childInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $childInfo.UseShellExecute = $false
+            $childInfo.CreateNoWindow = $true
+            $childInfo.RedirectStandardOutput = $true
+            $childInfo.RedirectStandardError = $true
+            $child = New-Object Diagnostics.Process
+            $child.StartInfo = $childInfo
+            try {
+                if (-not $child.Start()) { throw 'provider success descendant did not start.' }
+            }
+            finally { $child.Dispose() }
+            $childStartDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+            while (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $childStartDeadline) {
+                [Threading.Thread]::Sleep(25)
+            }
+            if (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf)) {
+                throw 'provider success descendant did not record startup.'
+            }
+            return [pscustomobject][ordered]@{
+                findings = @()
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $module = Get-Module StandardSemanticBridge | Select-Object -First 1
+        $run = & $module {
+            param($callback, $callbackContext)
+            Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                -Callback $callback `
+                -Argument ([pscustomobject]@{}) `
+                -CallbackContext $callbackContext `
+                -TimeoutMilliseconds 10000 `
+                -Context 'provider callback'
+        } $forkedProvider ([pscustomobject]@{
+                childStartedMarker = $childStartedMarker
+                childLateMarker = $childLateMarker
+            })
+        if ($null -eq $run) { throw 'A successful provider callback returned no result.' }
+        if (-not (Test-Path -LiteralPath $childStartedMarker -PathType Leaf)) {
+            throw 'The successful callback descendant did not record startup.'
+        }
+        Start-Sleep -Milliseconds 250
+        if (Test-Path -LiteralPath $childLateMarker) {
+            throw 'A successful callback descendant produced a late side effect after host exit.'
+        }
+        Start-Sleep -Milliseconds 2250
+        if (Test-Path -LiteralPath $childLateMarker) {
+            throw 'A successful callback descendant survived cleanup and produced late output.'
+        }
+    }
+}
