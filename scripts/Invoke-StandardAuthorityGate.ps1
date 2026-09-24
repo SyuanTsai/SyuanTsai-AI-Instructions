@@ -2897,8 +2897,8 @@ function Invoke-AuthorityLinuxIsolatedPester {
             [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('u+rwx,go-w', '--', [IO.Path]::GetFullPath([string]$protectedRoot)) -Context "Protect runner-owned authority output directory '$protectedRoot'")
         }
         [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('755', '--', $isolationRoot) -Context 'Expose isolated wrapper and candidate snapshot read-only')
-        [void](Invoke-AuthorityLinuxNativeCommand -Command $chownPath -Arguments @("nobody:$runnerGroupId", $scratchRoot) -Context 'Assign isolated scratch ownership')
-        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('2770', '--', $scratchRoot) -Context 'Set isolated scratch permissions')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chownPath, "nobody:$runnerGroupId", $scratchRoot) -Context 'Assign isolated scratch ownership')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chmodPath, '2770', '--', $scratchRoot) -Context 'Set isolated scratch permissions')
 
         $requiredAuthorityTestPaths = @(
             'tests/skill-repository-standard.Tests.ps1',
@@ -3137,8 +3137,8 @@ $json = $report | ConvertTo-Json -Depth 8
         foreach ($scratchChild in @((Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp'))) {
             if (-not (Test-Path -LiteralPath $scratchChild -PathType Container)) { [void](New-Item -ItemType Directory -Path $scratchChild -ErrorAction Stop) }
         }
-        [void](Invoke-AuthorityLinuxNativeCommand -Command $chownPath -Arguments @("nobody:$runnerGroupId", (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Assign scratch child directory ownership')
-        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('2770', '--', (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Set scratch child directory permissions')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chownPath, "nobody:$runnerGroupId", (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Assign scratch child directory ownership')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chmodPath, '2770', '--', (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Set scratch child directory permissions')
 
         $originalRunLocation = Get-Location
         try {
