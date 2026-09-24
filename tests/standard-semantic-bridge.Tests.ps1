@@ -18,7 +18,7 @@ function Get-TestErrorMessage {
 function New-TestSemanticFixture {
     param([int] $ItemCount = 1)
 
-    $now = [DateTime]::Parse('2026-09-19T02:00:00.000Z').ToUniversalTime()
+    $now = [DateTime]::UtcNow.AddMinutes(-5)
     $items = New-Object System.Collections.Generic.List[object]
     [void]$items.Add([pscustomobject][ordered]@{ path = 'skills/example/SKILL.md'; contentKind = 'skill-instructions'; text = 'synthetic semantic bridge text' })
     if ($ItemCount -gt 1) {
@@ -172,7 +172,7 @@ function Invoke-TestSemanticBridge {
     if ($null -eq $Request) { $Request = $Fixture.Request }
     if ($null -eq $Decision) { $Decision = $Fixture.Decision }
     if ($null -eq $Ledger) { $Ledger = @{} }
-        if ($Now -eq [DateTime]::MinValue) { $Now = $Fixture.Now.AddMinutes(2) }
+        if ($Now -eq [DateTime]::MinValue) { $Now = [DateTime]::UtcNow }
         if ($null -eq $Provider) { $Provider = $Fixture.Provider }
         if ($null -eq $Signer) { $Signer = $Fixture.Signer }
         if ($null -eq $ProviderContext) { $ProviderContext = $Fixture.ProviderContext }
@@ -188,6 +188,8 @@ function Invoke-TestSemanticBridge {
         -Analyzers $Fixture.Analyzers `
         -ProviderCallback $Provider `
         -SignerCallback $Signer `
+        -ExpectedSignerPublicKey $Fixture.PublicRsa `
+        -ExpectedSignerKeyId 'fixture-key' `
         -ProviderCallbackContext $ProviderContext `
         -SignerCallbackContext $SignerContext `
         -IdempotencyLedger $Ledger `
@@ -278,12 +280,17 @@ function Update-TestConsentDigests {
     # Purpose: The local bridge must execute inventory -> consent verification -> provider -> signed evidence.
     It 'InterT20_happy_path_returns_evidence_bytes_verified_by_explicit_public_key' {
         $fixture = New-TestSemanticFixture
-        $run = Invoke-TestSemanticBridge -Fixture $fixture
+        $invocationStartedAt = [DateTime]::UtcNow
+        $run = Invoke-TestSemanticBridge -Fixture $fixture -Now $fixture.Now.AddMinutes(2)
+        $invocationCompletedAt = [DateTime]::UtcNow
         Assert-TestCondition ([string]$run.status -ceq 'PASS') "The happy-path bridge run did not pass: $($run.reason)"
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The happy-path provider call count changed.'
         Assert-TestCondition ([int]$run.successfulProviderCallCount -eq 1) 'The happy-path successful call count changed.'
         Assert-TestCondition (@($run.evidenceBytes).Count -gt 0) 'The happy-path bridge emitted no evidence bytes.'
         Assert-TestCondition ([int]$run.evidence.execution.plannedWorkItemCount -eq [int]$fixture.Inventory.fileCount) 'The evidence execution count is not inventory-bound.'
+        $generatedAt = [DateTime]::Parse([string]$run.evidence.generatedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        Assert-TestCondition ($generatedAt -ge $invocationStartedAt.AddSeconds(-1) -and $generatedAt -le $invocationCompletedAt.AddSeconds(1)) 'The evidence generatedAt timestamp did not reflect the actual bridge invocation.'
+        Assert-TestCondition ([string]$run.evidence.attestation.issuedAt -ceq [string]$run.evidence.generatedAt) 'The signer attestation issuedAt timestamp diverged from generatedAt.'
         Assert-TestCondition (@($run.evidence.execution.providerCalls).Count -eq 1) 'The evidence omitted the concrete provider-call ledger row.'
         Assert-TestCondition ([string]$run.evidence.execution.providerCalls[0].path -ceq 'skills/example/SKILL.md') 'The concrete provider-call ledger row lost its inventory path.'
         Assert-TestCondition (@($run.evidence.execution.providerCalls[0].plannedAnalyzerIds).Count -eq 2 -and @($run.evidence.execution.providerCalls[0].analyzerCoverage).Count -eq 2) 'The concrete provider-call ledger row lost per-work-item analyzer coverage.'
@@ -299,7 +306,7 @@ function Update-TestConsentDigests {
             -ExpectedPurpose 'Synthetic test-only semantic review.' `
             -ExpectedScope $fixture.Scope `
             -ExpectedProviderTextInventory $fixture.Inventory `
-            -Now $fixture.Now.AddMinutes(2) `
+            -Now ([DateTime]::UtcNow) `
             -ReplayLedger $replay
         Assert-TestCondition ([bool]$verification.valid) 'The explicit public key did not verify the happy-path evidence.'
         Assert-TestCondition ([string]$verification.evidenceSha256 -ceq [string]$run.evidenceSha256) 'The verified evidence digest changed.'
@@ -374,6 +381,7 @@ function Update-TestConsentDigests {
 
     # Scenario: Consent is absent in substance, expired, or the current route is no longer consent-bound.
     # Purpose: No provider callback may occur before every consent condition passes.
+    Context 'UnitT30 consent expiry behavior' {
     It 'UnitT30_missing_expired_or_mismatched_consent_has_zero_provider_calls' {
         $fixture = New-TestSemanticFixture
         $fixture.Decision.consentGranted = $false
@@ -386,12 +394,257 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([string]$expired.status -ceq 'BLOCKED') 'Expired consent did not block the bridge.'
         Assert-TestCondition ([int]$expired.providerCallCount -eq 0) 'Expired consent reached the provider.'
 
+        $fixture = New-TestSemanticFixture -ItemCount 2
+        $consentStartedAt = [DateTime]::UtcNow
+        $shortRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111120' `
+            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(4)
+        $shortDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $shortRequest -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111121' -AuthorizedAt $consentStartedAt
+        $providerLog = Join-Path $TestDrive 'expired-provider-call-log.txt'
+        $slowFirstProvider = {
+            param($providerRequest, $callbackContext)
+            $priorCalls = if ([IO.File]::Exists([string]$callbackContext.callLogPath)) { [IO.File]::ReadAllLines([string]$callbackContext.callLogPath).Length } else { 0 }
+            [IO.File]::AppendAllText([string]$callbackContext.callLogPath, [string]$providerRequest.path + [Environment]::NewLine)
+            if ($priorCalls -eq 0) { [Threading.Thread]::Sleep([int]$callbackContext.firstCallDelayMilliseconds) }
+            $path = [string]$providerRequest.path
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "expiry-$path-intent"; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_developer_intent' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "expiry-$path-security"; ruleId = 'fixture.security'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $expiredDuringInventory = Invoke-TestSemanticBridge `
+            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
+            -Provider $slowFirstProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ callLogPath = $providerLog; firstCallDelayMilliseconds = 6000 }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        Assert-TestCondition ([string]$expiredDuringInventory.status -ceq 'BLOCKED') 'Consent that expired during the first provider callback did not block the remaining inventory.'
+        Assert-TestCondition ([int]$expiredDuringInventory.providerCallCount -eq 1) 'A second provider callback was released after consent expired.'
+        Assert-TestCondition (@(Get-Content -LiteralPath $providerLog).Count -eq 1) 'The provider call log showed egress for more than the first item after expiry.'
+        Assert-TestCondition ($null -eq $expiredDuringInventory.evidenceBytes) 'Expired inventory consent emitted signed evidence.'
+
+        $fixture = New-TestSemanticFixture
+        $consentStartedAt = [DateTime]::UtcNow
+        $shortRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111122' `
+            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(4)
+        $shortDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $shortRequest -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111123' -AuthorizedAt $consentStartedAt
+        $signerMarker = Join-Path $TestDrive 'expired-signer-was-called.txt'
+        $slowProviderLog = Join-Path $TestDrive 'expired-before-signer-provider-log.txt'
+        $expiredBeforeSignerSigner = {
+            param($signerRequest, $callbackContext)
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        $expiredBeforeSigner = Invoke-TestSemanticBridge `
+            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
+            -Provider $slowFirstProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ callLogPath = $slowProviderLog; firstCallDelayMilliseconds = 6000 }) `
+            -Signer $expiredBeforeSignerSigner `
+            -SignerContext ([pscustomobject][ordered]@{ markerPath = $signerMarker; privateKeyXml = $fixture.Rsa.ToXmlString($true) }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        Assert-TestCondition ([string]$expiredBeforeSigner.status -ceq 'BLOCKED') 'Consent that expired before signing did not block evidence release.'
+        Assert-TestCondition (-not (Test-Path -LiteralPath $signerMarker)) 'The signer callback ran after consent expired.'
+        Assert-TestCondition ($null -eq $expiredBeforeSigner.evidenceBytes) 'Expired signer consent emitted evidence.'
+
+        $fixture = New-TestSemanticFixture
+        $consentStartedAt = [DateTime]::UtcNow
+        $shortRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111124' `
+            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(4)
+        $shortDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $shortRequest -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $consentStartedAt
+        $slowSignerMarker = Join-Path $TestDrive 'consent-expired-during-signer.txt'
+        $slowSigner = {
+            param($signerRequest, $callbackContext)
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
+            [Threading.Thread]::Sleep([int]$callbackContext.delayMilliseconds)
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        $expiredDuringSigner = Invoke-TestSemanticBridge `
+            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
+            -Signer $slowSigner `
+            -SignerContext ([pscustomobject][ordered]@{ markerPath = $slowSignerMarker; delayMilliseconds = 6000; privateKeyXml = $fixture.Rsa.ToXmlString($true) }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        Assert-TestCondition ([string]$expiredDuringSigner.status -ceq 'BLOCKED') 'Consent that expired while the signer callback ran did not block the final result.'
+        Assert-TestCondition ((Test-Path -LiteralPath $slowSignerMarker)) 'The signer callback did not start while consent was active.'
+        Assert-TestCondition ($null -eq $expiredDuringSigner.evidenceBytes) 'Consent expiry during signing released evidence bytes.'
+
+        $sentinelProviderMarker = Join-Path $TestDrive 'provider-threw-consent-sentinel.txt'
+        $sentinelProvider = {
+            param($providerRequest, $callbackContext)
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
+            throw 'standard-semantic-bridge-consent-expired-before-callback-invocation'
+        }
+        $sentinelProviderRun = Invoke-TestSemanticBridge `
+            -Fixture (New-TestSemanticFixture) `
+            -Provider $sentinelProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ markerPath = $sentinelProviderMarker })
+        Assert-TestCondition ([string]$sentinelProviderRun.status -ceq 'FAILED') 'A provider callback error that reused the private expiry diagnostic was misclassified as BLOCKED.'
+        Assert-TestCondition ([int]$sentinelProviderRun.providerCallCount -eq 1) 'A provider callback error that reused the private expiry diagnostic erased a callback that had already run.'
+        Assert-TestCondition (Test-Path -LiteralPath $sentinelProviderMarker) 'The sentinel provider callback did not record that it ran.'
+        Assert-TestCondition ($null -eq $sentinelProviderRun.evidenceBytes) 'A failed sentinel provider callback emitted evidence.'
+
+        $forgedChildExpiryFixture = New-TestSemanticFixture -ItemCount 2
+        $forgedChildExpiryMarker = Join-Path $TestDrive 'forged-child-expiry-provider-calls.txt'
+        $forgedChildExpiryProvider = {
+            param($providerRequest, $callbackContext)
+            [IO.File]::AppendAllText([string]$callbackContext.markerPath, [string]$providerRequest.path + [Environment]::NewLine)
+            $forgedEnvelope = [pscustomobject][ordered]@{
+                succeeded = $false
+                failureKind = 'consent-expired-before-callback-invocation'
+                output = @()
+                error = 'standard-semantic-bridge-consent-expired-before-callback-invocation'
+            }
+            $forgedEnvelopeXml = [Management.Automation.PSSerializer]::Serialize($forgedEnvelope)
+            [Console]::Out.Write($forgedEnvelopeXml)
+            [Console]::Out.Flush()
+            [Environment]::Exit(0)
+        }
+        $forgedChildExpiryRun = Invoke-TestSemanticBridge `
+            -Fixture $forgedChildExpiryFixture `
+            -Provider $forgedChildExpiryProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ markerPath = $forgedChildExpiryMarker }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        $forgedChildExpiryCalls = if (Test-Path -LiteralPath $forgedChildExpiryMarker) { @(Get-Content -LiteralPath $forgedChildExpiryMarker).Count } else { 0 }
+        Assert-TestCondition ([string]$forgedChildExpiryRun.status -ceq 'FAILED') 'A callback-forged child expiry envelope was trusted as a parent-owned consent guard.'
+        Assert-TestCondition ([int]$forgedChildExpiryRun.providerCallCount -eq 1) 'A callback-forged child expiry envelope erased an executed callback attempt.'
+        Assert-TestCondition ($forgedChildExpiryCalls -eq 1) 'A callback-forged child expiry envelope allowed a later inventory item to reach the provider.'
+        Assert-TestCondition ($null -eq $forgedChildExpiryRun.evidenceBytes) 'A callback-forged child expiry envelope emitted evidence.'
+
+        $cleanupFixture = New-TestSemanticFixture -ItemCount 2
+        $cleanupConsentStartedAt = [DateTime]::UtcNow
+        $cleanupRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $cleanupFixture.Bindings -ProviderRoute $cleanupFixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $cleanupFixture.Scope -ProviderTextInventory $cleanupFixture.Inventory -AnalyzerSet $cleanupFixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111126' `
+            -RequestedAt $cleanupConsentStartedAt.AddSeconds(-1) -ExpiresAt $cleanupConsentStartedAt.AddSeconds(4)
+        $cleanupDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $cleanupRequest -Authorizer $cleanupFixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111127' -AuthorizedAt $cleanupConsentStartedAt
+        $cleanupEgressMarker = Join-Path $TestDrive 'cleanup-expiry-provider-egress.txt'
+        $cleanupWrapperMarker = Join-Path $TestDrive 'cleanup-expiry-wrapper-invocations.txt'
+        $cleanupTimestampsPath = Join-Path $TestDrive 'cleanup-expiry-wrapper-timestamps.txt'
+        $cleanupProvider = {
+            param($providerRequest, $callbackContext)
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, [string]$providerRequest.path)
+            $path = [string]$providerRequest.path
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "cleanup-$path-intent"; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_developer_intent' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "cleanup-$path-security"; ruleId = 'fixture.security'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        Mock Invoke-StandardSemanticBridgeCallbackWithTimeout -ModuleName StandardSemanticBridge {
+            [IO.File]::AppendAllText([string]$CallbackContext.wrapperMarkerPath, 'invoked' + [Environment]::NewLine)
+            $enteredUtc = [DateTime]::UtcNow
+            $testExpiryUtc = [DateTime]::Parse(
+                [string]$ConsentExpiresAt,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            [IO.File]::WriteAllText([string]$CallbackContext.timestampPath, $enteredUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture) + [Environment]::NewLine + $testExpiryUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture) + [Environment]::NewLine)
+            while ([DateTime]::UtcNow -lt $testExpiryUtc) { Start-Sleep -Milliseconds 25 }
+            $expiredUtc = [DateTime]::UtcNow
+            [IO.File]::AppendAllText([string]$CallbackContext.timestampPath, $expiredUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))
+            $exception = [InvalidOperationException]::new('standard-semantic-bridge-consent-expired-before-callback-invocation')
+            $exception.Data['CallbackCleanupError'] = 'test-injected callback cleanup failure'
+            if ([bool]$CallbackContext.attachExpiryGuardMarker) {
+                $exception.Data['StandardSemanticBridge.InternalFailureKind'] = 'ConsentExpiredBeforeCallbackInvocation'
+            }
+            throw $exception
+        }
+        $cleanupFailureRun = Invoke-TestSemanticBridge `
+            -Fixture $cleanupFixture -Request $cleanupRequest -Decision $cleanupDecision `
+            -Provider $cleanupProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ markerPath = $cleanupEgressMarker; wrapperMarkerPath = $cleanupWrapperMarker; timestampPath = $cleanupTimestampsPath; attachExpiryGuardMarker = $false }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        $cleanupWrapperInvocations = if (Test-Path -LiteralPath $cleanupWrapperMarker) { @(Get-Content -LiteralPath $cleanupWrapperMarker).Count } else { 0 }
+        $cleanupTimestamps = @(Get-Content -LiteralPath $cleanupTimestampsPath)
+        $cleanupEnteredUtc = [DateTime]::Parse([string]$cleanupTimestamps[0], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $cleanupExpiresUtc = [DateTime]::Parse([string]$cleanupTimestamps[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $cleanupObservedExpiredUtc = [DateTime]::Parse([string]$cleanupTimestamps[2], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        Assert-TestCondition ($cleanupWrapperInvocations -eq 1) 'Cleanup regression did not intercept exactly the first callback wrapper invocation.'
+        Assert-TestCondition ($cleanupEnteredUtc -lt $cleanupExpiresUtc -and $cleanupExpiresUtc -le $cleanupObservedExpiredUtc) 'The cleanup-only callback mock did not enter before consent expiry and complete after expiry.'
+        Assert-TestCondition ([string]$cleanupFailureRun.status -ceq 'FAILED') 'Provider cleanup failure accompanying expired consent was hidden by a later clean BLOCKED result.'
+        Assert-TestCondition ([string]$cleanupFailureRun.reason -match 'test-injected callback cleanup failure') 'Terminal provider cleanup failure omitted its diagnostic.'
+        Assert-TestCondition ([int]$cleanupFailureRun.providerCallCount -eq 1) 'Cleanup-only failure changed the attempted provider-call count.'
+        Assert-TestCondition ([int]$cleanupFailureRun.successfulProviderCallCount -eq 0) 'Provider cleanup failure recorded a successful callback.'
+        Assert-TestCondition (-not (Test-Path -LiteralPath $cleanupEgressMarker)) 'The provider callback received text after the test expiry guard.'
+        Assert-TestCondition ($null -eq $cleanupFailureRun.evidenceBytes) 'Provider cleanup failure emitted evidence.'
+
+        $guardCleanupFixture = New-TestSemanticFixture -ItemCount 2
+        $guardCleanupStartedAt = [DateTime]::UtcNow
+        $guardCleanupRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $guardCleanupFixture.Bindings -ProviderRoute $guardCleanupFixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $guardCleanupFixture.Scope -ProviderTextInventory $guardCleanupFixture.Inventory -AnalyzerSet $guardCleanupFixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111128' `
+            -RequestedAt $guardCleanupStartedAt.AddSeconds(-1) -ExpiresAt $guardCleanupStartedAt.AddSeconds(4)
+        $guardCleanupDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $guardCleanupRequest -Authorizer $guardCleanupFixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111129' -AuthorizedAt $guardCleanupStartedAt
+        $guardCleanupEgressMarker = Join-Path $TestDrive 'guard-cleanup-expiry-provider-egress.txt'
+        $guardCleanupWrapperMarker = Join-Path $TestDrive 'guard-cleanup-expiry-wrapper-invocations.txt'
+        $guardCleanupTimestampsPath = Join-Path $TestDrive 'guard-cleanup-expiry-wrapper-timestamps.txt'
+        $guardAndCleanupFailureRun = Invoke-TestSemanticBridge `
+            -Fixture $guardCleanupFixture -Request $guardCleanupRequest -Decision $guardCleanupDecision `
+            -Provider $cleanupProvider `
+            -ProviderContext ([pscustomobject][ordered]@{ markerPath = $guardCleanupEgressMarker; wrapperMarkerPath = $guardCleanupWrapperMarker; timestampPath = $guardCleanupTimestampsPath; attachExpiryGuardMarker = $true }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        $guardCleanupWrapperInvocations = if (Test-Path -LiteralPath $guardCleanupWrapperMarker) { @(Get-Content -LiteralPath $guardCleanupWrapperMarker).Count } else { 0 }
+        $guardCleanupTimestamps = @(Get-Content -LiteralPath $guardCleanupTimestampsPath)
+        $guardCleanupEnteredUtc = [DateTime]::Parse([string]$guardCleanupTimestamps[0], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $guardCleanupExpiresUtc = [DateTime]::Parse([string]$guardCleanupTimestamps[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $guardCleanupObservedExpiredUtc = [DateTime]::Parse([string]$guardCleanupTimestamps[2], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        Assert-TestCondition ($guardCleanupWrapperInvocations -eq 1) 'Guard-plus-cleanup regression did not intercept exactly the first callback wrapper invocation.'
+        Assert-TestCondition ($guardCleanupEnteredUtc -lt $guardCleanupExpiresUtc -and $guardCleanupExpiresUtc -le $guardCleanupObservedExpiredUtc) 'The guard-plus-cleanup callback mock did not enter before consent expiry and complete after expiry.'
+        Assert-TestCondition ([string]$guardAndCleanupFailureRun.status -ceq 'FAILED') 'Cleanup did not take precedence over a simultaneous parent expiry marker.'
+        Assert-TestCondition ([string]$guardAndCleanupFailureRun.reason -match 'test-injected callback cleanup failure') 'Guard-plus-cleanup failure omitted its cleanup diagnostic.'
+        Assert-TestCondition ([int]$guardAndCleanupFailureRun.providerCallCount -eq 0) 'Guard-plus-cleanup failure counted a callback that did not receive text.'
+        Assert-TestCondition ([int]$guardAndCleanupFailureRun.successfulProviderCallCount -eq 0) 'Guard-plus-cleanup failure recorded a successful callback.'
+        Assert-TestCondition (-not (Test-Path -LiteralPath $guardCleanupEgressMarker)) 'The provider callback received text after parent expiry.'
+        Assert-TestCondition ($null -eq $guardAndCleanupFailureRun.evidenceBytes) 'Guard-plus-cleanup failure emitted evidence.'
+
         $fixture = New-TestSemanticFixture
         $routeDrift = ConvertFrom-Json -InputObject ($fixture.Route | ConvertTo-Json -Depth 20)
         $routeDrift.model = 'different-fixture-model'
         $mismatched = Invoke-TestSemanticBridge -Fixture $fixture -ProviderRoute $routeDrift
         Assert-TestCondition ([string]$mismatched.status -ceq 'BLOCKED') 'Mismatched consent did not block the bridge.'
         Assert-TestCondition ([int]$mismatched.providerCallCount -eq 0) 'Mismatched consent reached the provider.'
+    }
     }
 
     # Scenario: Candidate identity, source revision, outbound inventory, and provider route each drift independently.
@@ -441,7 +694,7 @@ function Update-TestConsentDigests {
                 -ExpectedPurpose 'Synthetic test-only semantic review.' `
                 -ExpectedScope $evidenceFixture.Scope `
                 -ExpectedProviderTextInventory $expectedInventory `
-                -Now $evidenceFixture.Now.AddMinutes(2)
+                -Now ([DateTime]::UtcNow)
             Assert-TestCondition (-not [bool]$evidenceCheck.valid) "$case drift did not invalidate old evidence."
         }
     }
@@ -470,12 +723,68 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([string]$badSigner.status -ceq 'FAILED') 'A signer response with whitespace in base64 was accepted.'
         Assert-TestCondition ($null -eq $badSigner.evidenceBytes) 'A signer response with whitespace emitted evidence.'
 
+        $shortSignatureSigner = {
+            param($signerRequest, $callbackContext)
+            return [pscustomobject][ordered]@{
+                keyId = 'fixture-key'
+                algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                signature = 'AA=='
+            }
+        }
+        $shortSignatureRun = Invoke-TestSemanticBridge -Fixture $fixture -Signer $shortSignatureSigner
+        Assert-TestCondition ([string]$shortSignatureRun.status -ceq 'FAILED') 'A canonical Base64 value that is not a valid RSA signature was accepted by the bridge.'
+        Assert-TestCondition ($null -eq $shortSignatureRun.evidenceBytes) 'An invalid RSA signature emitted evidence.'
+
+        $rsaSigner = {
+            param($signerRequest, $callbackContext)
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                return [pscustomobject][ordered]@{
+                    keyId = [string]$callbackContext.keyId
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        $rogueRsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            $sameIdWrongKey = Invoke-TestSemanticBridge `
+                -Fixture $fixture -Signer $rsaSigner `
+                -SignerContext ([pscustomobject][ordered]@{ privateKeyXml = $rogueRsa.ToXmlString($true); keyId = 'fixture-key' })
+            Assert-TestCondition ([string]$sameIdWrongKey.status -ceq 'FAILED') 'A signature from an untrusted RSA key with the expected keyId was accepted.'
+            Assert-TestCondition ($null -eq $sameIdWrongKey.evidenceBytes) 'An untrusted RSA key emitted evidence.'
+        }
+        finally { $rogueRsa.Dispose() }
+
+        $wrongKeyIdRun = Invoke-TestSemanticBridge `
+            -Fixture $fixture -Signer $rsaSigner `
+            -SignerContext ([pscustomobject][ordered]@{ privateKeyXml = $fixture.Rsa.ToXmlString($true); keyId = 'substituted-key-id' })
+        Assert-TestCondition ([string]$wrongKeyIdRun.status -ceq 'FAILED') 'A valid signature that claimed an untrusted keyId was accepted by the bridge.'
+        Assert-TestCondition ($null -eq $wrongKeyIdRun.evidenceBytes) 'A signer with an untrusted keyId emitted evidence.'
+
+        $sentinelSignerMarker = Join-Path $TestDrive 'signer-threw-consent-sentinel.txt'
+        $sentinelSigner = {
+            param($signerRequest, $callbackContext)
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
+            throw 'standard-semantic-bridge-consent-expired-before-callback-invocation'
+        }
+        $sentinelSignerRun = Invoke-TestSemanticBridge `
+            -Fixture $fixture `
+            -Signer $sentinelSigner `
+            -SignerContext ([pscustomobject][ordered]@{ markerPath = $sentinelSignerMarker })
+        Assert-TestCondition ([string]$sentinelSignerRun.status -ceq 'FAILED') 'A signer callback error that reused the private expiry diagnostic was misclassified as BLOCKED.'
+        Assert-TestCondition ([int]$sentinelSignerRun.providerCallCount -eq 1) 'A signer callback error that reused the private expiry diagnostic lost the completed provider call.'
+        Assert-TestCondition (Test-Path -LiteralPath $sentinelSignerMarker) 'The sentinel signer callback did not record that it ran.'
+        Assert-TestCondition ($null -eq $sentinelSignerRun.evidenceBytes) 'A failed sentinel signer callback emitted evidence.'
+
         $whitespaceBytes = Get-TestEvidenceBytesWithSignatureWhitespace -EvidenceBytes $run.evidenceBytes
         $badWhitespace = Test-StandardSemanticBridgeEvidence `
             -EvidenceBytes $whitespaceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition (-not [bool]$badWhitespace.valid) 'Evidence with whitespace in signature base64 was accepted.'
 
         $nonCanonicalSigner = {
@@ -514,7 +823,7 @@ function Update-TestConsentDigests {
             -EvidenceBytes $nonCanonicalPadBitsBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition (-not [bool]$badNonCanonicalPadBits.valid) 'Evidence with non-canonical base64 pad bits was accepted.'
 
         $mutatedBytes = Get-TestEvidenceBytesWithSignatureMutation -EvidenceBytes $run.evidenceBytes
@@ -522,14 +831,26 @@ function Update-TestConsentDigests {
             -EvidenceBytes $mutatedBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition (-not [bool]$badSignature.valid) 'A changed signature was accepted.'
         $wrongKey = Test-StandardSemanticBridgeEvidence `
             -EvidenceBytes $run.evidenceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'substituted-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition (-not [bool]$wrongKey.valid) 'A substituted signer identity was accepted.'
+
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $issuedAtMutation = ConvertFrom-Json -InputObject $utf8.GetString([byte[]]$run.evidenceBytes)
+        $generatedAt = [DateTime]::Parse([string]$issuedAtMutation.generatedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $issuedAtMutation.attestation.issuedAt = $generatedAt.AddMilliseconds(1).ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+        $issuedAtBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $issuedAtMutation))
+        $mismatchedIssuedAt = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $issuedAtBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition (-not [bool]$mismatchedIssuedAt.valid) 'Evidence with an attestation issuedAt different from generatedAt was accepted.'
     }
 
     # Scenario: A provider omits one analyzer's finding/coverage, and a signed artifact is then replayed.
@@ -554,12 +875,12 @@ function Update-TestConsentDigests {
             -EvidenceBytes $run.evidenceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2) -ReplayLedger $replay
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow) -ReplayLedger $replay
         $second = Test-StandardSemanticBridgeEvidence `
             -EvidenceBytes $run.evidenceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2) -ReplayLedger $replay
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow) -ReplayLedger $replay
         Assert-TestCondition ([bool]$first.valid) 'The first evidence consumption did not pass.'
         Assert-TestCondition (-not [bool]$second.valid) 'Replayed evidence was accepted.'
         Assert-TestCondition ([string]$second.reason -match 'replay') 'Replay rejection did not identify replay.'
@@ -614,7 +935,7 @@ function Update-TestConsentDigests {
             -EvidenceBytes $v1Bytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition (-not [bool]$result.valid) 'A v1-shaped artifact was accepted as v2 evidence.'
     }
 
@@ -631,7 +952,7 @@ function Update-TestConsentDigests {
             -EvidenceBytes $duplicateBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
             -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
-            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
 
         Assert-TestCondition (-not [bool]$result.valid) 'Duplicate JSON properties were accepted.'
         Assert-TestCondition ([string]$result.reason -match 'canonical UTF-8 JSON') 'Duplicate JSON rejection did not identify canonical byte failure.'
@@ -819,8 +1140,13 @@ function Update-TestConsentDigests {
         $elapsedFromCallbackStartSeconds = ([double]($returnedTick - $callbackStartedTick)) / [double][Diagnostics.Stopwatch]::Frequency
         Assert-TestCondition ($elapsedFromCallbackStartSeconds -lt 2.5) 'The bridge waited for the provider callback after its invocation deadline.'
         Start-Sleep -Milliseconds 250
-        $childProcess = Get-Process -Id ([int]([IO.File]::ReadAllText($childPidMarker))) -ErrorAction SilentlyContinue
-        Assert-TestCondition ($null -eq $childProcess) 'A timed-out provider callback descendant remained alive after boundary cleanup.'
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) {
+            # Windows reports the callback child in the host PID namespace.  On
+            # Linux this marker contains a namespace-local PID, so Get-Process
+            # could inspect an unrelated host process instead of the callback child.
+            $childProcess = Get-Process -Id ([int]([IO.File]::ReadAllText($childPidMarker))) -ErrorAction SilentlyContinue
+            Assert-TestCondition ($null -eq $childProcess) 'A timed-out provider callback descendant remained alive after boundary cleanup.'
+        }
         Start-Sleep -Milliseconds 2500
         Assert-TestCondition (-not (Test-Path -LiteralPath $lateMarker)) 'A timed-out provider callback continued and produced late output.'
         Assert-TestCondition (-not (Test-Path -LiteralPath $childLateMarker)) 'A timed-out provider callback descendant continued and produced late output.'
@@ -882,6 +1208,28 @@ function Update-TestConsentDigests {
         Assert-TestCondition ($elapsedFromCallbackStartSeconds -lt 2.5) 'The bridge waited for the signer callback after its invocation deadline.'
         Start-Sleep -Milliseconds 2500
         Assert-TestCondition (-not (Test-Path -LiteralPath $lateMarker)) 'A timed-out signer callback continued and produced late output.'
+
+        $expiredGuardMarker = Join-Path $TestDrive 'expired-wrapper-guard-callback-ran.txt'
+        $module = Get-Module StandardSemanticBridge | Select-Object -First 1
+        $expiredGuardError = Get-TestErrorMessage {
+            & $module {
+                param($markerPath)
+                $callback = {
+                    param($argument, $callbackContext)
+                    [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
+                    return 'callback-ran'
+                }
+                Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                    -Callback $callback `
+                    -Argument ([pscustomobject]@{}) `
+                    -CallbackContext ([pscustomobject]@{ markerPath = $markerPath }) `
+                    -TimeoutMilliseconds 5000 `
+                    -ConsentExpiresAt ([DateTime]::UtcNow.AddSeconds(-1)) `
+                    -Context 'guarded direct callback'
+            } $expiredGuardMarker
+        }
+        Assert-TestCondition ([string]$expiredGuardError -match 'consent-expired-before-callback-invocation') 'The isolated callback wrapper did not report an expired consent guard.'
+        Assert-TestCondition (-not (Test-Path -LiteralPath $expiredGuardMarker)) 'The isolated callback ran after the wrapper received an expired consent guard.'
     }
 
     # Scenario: Canonical hashing receives floating-point and non-finite numeric values.
@@ -969,7 +1317,7 @@ Describe 'Unix callback process group boundary' {
 
 $script:UnixContainmentIsLinuxAtDiscovery = ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and [IO.File]::Exists('/proc/self/ns/pid'))
 
-Describe 'Unix callback containment boundary' {
+Describe 'Unix callback containment boundary' -Tags LinuxContainment {
     BeforeAll {
         Import-Module (Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1') -Force
         $script:UnixContainmentModule = Get-Module StandardSemanticBridge | Select-Object -First 1

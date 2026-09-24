@@ -864,19 +864,26 @@ exit ([int]$LASTEXITCODE)
                 }
                 finally { $signingKey.Dispose() }
             }
-            $run = Invoke-StandardSemanticBridge `
-                -ConsentRequest $request `
-                -ConsentDecision $decision `
-                -Bindings $bindings `
-                -ProviderRoute $route `
-                -Purpose 'Synthetic runner v2 semantic review.' `
-                -Scope $scope `
-                -TextItems $items `
-                -Analyzers $analyzers `
-                -ProviderCallback $provider `
-                -SignerCallback $signer `
-                -SignerCallbackContext ([pscustomobject][ordered]@{ privateKeyXml = $rsa.ToXmlString($true) }) `
-                -Now $now.AddMinutes(2)
+            $publicRsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $publicRsa.ImportParameters($rsa.ExportParameters($false))
+                $run = Invoke-StandardSemanticBridge `
+                    -ConsentRequest $request `
+                    -ConsentDecision $decision `
+                    -Bindings $bindings `
+                    -ProviderRoute $route `
+                    -Purpose 'Synthetic runner v2 semantic review.' `
+                    -Scope $scope `
+                    -TextItems $items `
+                    -Analyzers $analyzers `
+                    -ProviderCallback $provider `
+                    -SignerCallback $signer `
+                    -ExpectedSignerPublicKey $publicRsa `
+                    -ExpectedSignerKeyId 'fixture-semantic-key-v2' `
+                    -SignerCallbackContext ([pscustomobject][ordered]@{ privateKeyXml = $rsa.ToXmlString($true) }) `
+                    -Now $now.AddMinutes(2)
+            }
+            finally { $publicRsa.Dispose() }
             if ([string]$run.status -cne 'PASS') { throw "Could not create v2 runner evidence: $($run.reason)" }
             $requestPath = Join-Path $Fixture.Root 'semantic-v2-request.json'
             $decisionPath = Join-Path $Fixture.Root 'semantic-v2-decision.json'

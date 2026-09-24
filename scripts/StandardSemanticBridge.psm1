@@ -11,6 +11,11 @@ $script:StandardSemanticBridgeSchemaVersion = 2
 $script:StandardSemanticBridgeArtifactClassification = 'local-semantic-bridge-v2'
 $script:StandardSemanticBridgeAttestationType = 'local-semantic-bridge-v2'
 $script:StandardSemanticBridgeAlgorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+$script:StandardSemanticBridgeConsentExpiryGuardMessage = 'standard-semantic-bridge-consent-expired-before-callback-invocation'
+$script:StandardSemanticBridgeConsentExpiryGuardDataKey = 'StandardSemanticBridge.InternalFailureKind'
+$script:StandardSemanticBridgeConsentExpiryGuardFailureKind = 'ConsentExpiredBeforeCallbackInvocation'
+$script:StandardSemanticBridgeChildReportedExpiryFailureKind = 'ChildReportedConsentExpiry'
+$script:StandardSemanticBridgeCallbackCleanupFailureDataKey = 'CallbackCleanupError'
 $script:StandardSemanticBridgeHex64 = '^[0-9a-f]{64}$'
 $script:StandardSemanticBridgeGitObject = '^(?:[0-9a-f]{40}|[0-9a-f]{64})$'
 $script:StandardSemanticBridgeCanonicalBase64 = '^[A-Za-z0-9+/]+={0,2}$'
@@ -1266,6 +1271,60 @@ function New-StandardSemanticBridgePrivateDirectory {
     }
 }
 
+function New-StandardSemanticBridgeConsentExpiryGuardException {
+    param([Parameter(Mandatory = $true)][string] $Context)
+
+    $exception = [InvalidOperationException]::new($script:StandardSemanticBridgeConsentExpiryGuardMessage)
+    $exception.Data[$script:StandardSemanticBridgeConsentExpiryGuardDataKey] = $script:StandardSemanticBridgeConsentExpiryGuardFailureKind
+    return $exception
+}
+
+function Test-StandardSemanticBridgeConsentExpiryGuardException {
+    param([AllowNull()][Exception] $Exception)
+
+    if ($null -eq $Exception) { return $false }
+    $dataKey = $script:StandardSemanticBridgeConsentExpiryGuardDataKey
+    if (-not $Exception.Data.Contains($dataKey)) { return $false }
+    return [string]::Equals(
+        [string]$Exception.Data[$dataKey],
+        $script:StandardSemanticBridgeConsentExpiryGuardFailureKind,
+        [StringComparison]::Ordinal
+    )
+}
+
+function New-StandardSemanticBridgeChildReportedExpiryException {
+    param(
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+
+    $exception = [InvalidOperationException]::new("$Context returned an untrusted child-reported consent-expiry failure: $Message")
+    $exception.Data[$script:StandardSemanticBridgeConsentExpiryGuardDataKey] = $script:StandardSemanticBridgeChildReportedExpiryFailureKind
+    return $exception
+}
+
+function Test-StandardSemanticBridgeChildReportedExpiryException {
+    param([AllowNull()][Exception] $Exception)
+
+    if ($null -eq $Exception) { return $false }
+    $dataKey = $script:StandardSemanticBridgeConsentExpiryGuardDataKey
+    if (-not $Exception.Data.Contains($dataKey)) { return $false }
+    return [string]::Equals(
+        [string]$Exception.Data[$dataKey],
+        $script:StandardSemanticBridgeChildReportedExpiryFailureKind,
+        [StringComparison]::Ordinal
+    )
+}
+
+function Test-StandardSemanticBridgeCallbackCleanupFailureException {
+    param([AllowNull()][Exception] $Exception)
+
+    if ($null -eq $Exception) { return $false }
+    $dataKey = $script:StandardSemanticBridgeCallbackCleanupFailureDataKey
+    if (-not $Exception.Data.Contains($dataKey)) { return $false }
+    return -not [string]::IsNullOrWhiteSpace([string]$Exception.Data[$dataKey])
+}
+
 function Invoke-StandardSemanticBridgeCallbackWithTimeout {
     [CmdletBinding()]
     param(
@@ -1273,10 +1332,15 @@ function Invoke-StandardSemanticBridgeCallbackWithTimeout {
         [AllowNull()] $Argument,
         [AllowNull()] $CallbackContext,
         [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds,
+        [AllowNull()] $ConsentExpiresAt = $null,
         [string] $Context = 'callback'
     )
 
     if ($TimeoutMilliseconds -le 0) { throw [TimeoutException]::new("$Context deadline was exceeded before invocation.") }
+    $consentExpiresAtUtc = $null
+    if ($null -ne $ConsentExpiresAt) {
+        $consentExpiresAtUtc = Get-StandardSemanticBridgeTimestamp -Value $ConsentExpiresAt -Context "$Context consent expiry"
+    }
     $hostExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     if ([string]::IsNullOrWhiteSpace($hostExecutable) -or -not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
         throw [InvalidOperationException]::new("$Context could not resolve an isolated PowerShell host.")
@@ -1322,16 +1386,50 @@ try {
     $argument = [Management.Automation.PSSerializer]::Deserialize([string]$payload.argumentXml)
     $callbackContext = [Management.Automation.PSSerializer]::Deserialize([string]$payload.contextXml)
     $callback = [scriptblock]::Create([string]$payload.callbackText)
-    $output = @(& $callback $argument $callbackContext)
-    $envelope = [pscustomobject][ordered]@{
-        succeeded = $true
-        output = @($output)
-        error = $null
+    $consentExpiryText = [string]$payload.consentExpiresAtUtc
+    $consentExpired = $false
+    if (-not [string]::IsNullOrWhiteSpace($consentExpiryText)) {
+        $consentExpiry = [DateTime]::Parse(
+            $consentExpiryText,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+        if ([DateTime]::UtcNow -ge $consentExpiry) {
+            $consentExpired = $true
+        }
+    }
+    if ($consentExpired) {
+        $envelope = [pscustomobject][ordered]@{
+            succeeded = $false
+            failureKind = 'consent-expired-before-callback-invocation'
+            output = @()
+            error = 'standard-semantic-bridge-consent-expired-before-callback-invocation'
+        }
+    }
+    else {
+        try {
+            $output = @(& $callback $argument $callbackContext)
+            $envelope = [pscustomobject][ordered]@{
+                succeeded = $true
+                failureKind = $null
+                output = @($output)
+                error = $null
+            }
+        }
+        catch {
+            $envelope = [pscustomobject][ordered]@{
+                succeeded = $false
+                failureKind = 'callback-failure'
+                output = @()
+                error = [string]$_.Exception.Message
+            }
+        }
     }
 }
 catch {
     $envelope = [pscustomobject][ordered]@{
         succeeded = $false
+        failureKind = 'bootstrap-failure'
         output = @()
         error = [string]$_.Exception.Message
     }
@@ -1343,6 +1441,7 @@ catch {
         callbackText = $Callback.ToString()
         argumentXml = [Management.Automation.PSSerializer]::Serialize($Argument, 100)
         contextXml = [Management.Automation.PSSerializer]::Serialize($CallbackContext, 100)
+        consentExpiresAtUtc = if ($null -eq $consentExpiresAtUtc) { $null } else { $consentExpiresAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
     }
     $payloadXml = [Management.Automation.PSSerializer]::Serialize($payload, 100)
     $launchFileName = $hostExecutable
@@ -1492,6 +1591,9 @@ catch {
             $process.StandardError,
             $script:StandardSemanticBridgeCallbackStderrQuotaCharacters
         )
+        if ($null -ne $consentExpiresAtUtc -and [DateTime]::UtcNow -ge $consentExpiresAtUtc) {
+            throw (New-StandardSemanticBridgeConsentExpiryGuardException -Context $Context)
+        }
         $process.StandardInput.Write($payloadXml)
         $process.StandardInput.Close()
 
@@ -1604,6 +1706,10 @@ catch {
         catch { throw [InvalidOperationException]::new("$Context returned an invalid isolated result envelope.") }
         if ($null -eq $envelope -or -not [bool]$envelope.succeeded) {
             $message = if ($null -eq $envelope -or [string]::IsNullOrWhiteSpace([string]$envelope.error)) { 'callback failed without a diagnostic.' } else { [string]$envelope.error }
+            $failureKind = if ($null -eq $envelope -or $null -eq $envelope.PSObject.Properties['failureKind']) { '' } else { [string]$envelope.failureKind }
+            if ($failureKind -ceq 'consent-expired-before-callback-invocation') {
+                throw (New-StandardSemanticBridgeChildReportedExpiryException -Context $Context -Message $message)
+            }
             throw [InvalidOperationException]::new("$Context failed: $message")
         }
         $normalizedOutput = ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $envelope.output
@@ -1687,8 +1793,17 @@ catch {
         }
         if ($cleanupErrors.Count -gt 0) {
             $cleanupMessage = $cleanupErrors -join ' '
-            if ($null -ne $primaryException) { $primaryException.Data['CallbackCleanupError'] = $cleanupMessage }
-            else { throw [InvalidOperationException]::new("$Context cleanup failed: $cleanupMessage") }
+            if ($null -ne $primaryException) {
+                # Preserve the primary failure marker as well as the cleanup
+                # marker.  Callers prioritize cleanup while retaining expiry
+                # and callback-invocation facts for accurate status/counting.
+                $primaryException.Data[$script:StandardSemanticBridgeCallbackCleanupFailureDataKey] = $cleanupMessage
+            }
+            else {
+                $cleanupException = [InvalidOperationException]::new("$Context cleanup failed: $cleanupMessage")
+                $cleanupException.Data[$script:StandardSemanticBridgeCallbackCleanupFailureDataKey] = $cleanupMessage
+                throw $cleanupException
+            }
         }
     }
 }
@@ -1812,6 +1927,8 @@ function Invoke-StandardSemanticBridge {
         [Parameter(Mandatory = $true)] $Analyzers,
         [Parameter(Mandatory = $true)][scriptblock] $ProviderCallback,
         [Parameter(Mandatory = $true)][scriptblock] $SignerCallback,
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.RSA] $ExpectedSignerPublicKey,
+        [Parameter(Mandatory = $true)][string] $ExpectedSignerKeyId,
         [AllowNull()] $ProviderCallbackContext = $null,
         [AllowNull()] $SignerCallbackContext = $null,
         [hashtable] $IdempotencyLedger = @{},
@@ -1828,6 +1945,8 @@ function Invoke-StandardSemanticBridge {
     $inventory = $null
     $analyzerSet = $null
     try {
+        if ($null -eq $ExpectedSignerPublicKey) { throw 'a trusted expected signer public key is required.' }
+        $expectedSignerKeyId = Assert-StandardSemanticBridgeNonEmptyScalar -Value $ExpectedSignerKeyId -Context 'trusted expected signer keyId'
         if ($TimeoutSeconds -le 0) { throw 'timeout must be positive.' }
         $inventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $TextItems
         $analyzerSet = New-StandardSemanticBridgeAnalyzerSet -Analyzers $Analyzers
@@ -1901,9 +2020,25 @@ function Invoke-StandardSemanticBridge {
             }
             $request = [pscustomobject][ordered]@{ workItemId = $requestForDigest.workItemId; idempotencyKey = $idempotencyKey; providerRoute = $normalizedRoute; path = $path; contentKind = $kind; analyzerSet = $normalizedAnalyzers; text = $text; bytes = $null }
             $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
+            $providerConsentParameters = $consentParameters.Clone()
+            $providerConsentParameters.Now = [DateTime]::UtcNow
+            $providerConsentResult = Test-StandardSemanticBridgeConsent @providerConsentParameters
+            if (-not [bool]$providerConsentResult.valid) {
+                return [pscustomobject][ordered]@{
+                    status = 'BLOCKED'
+                    reason = [string]$providerConsentResult.reason
+                    providerCallCount = $providerCalls
+                    successfulProviderCallCount = $successfulCalls
+                    providerCalls = @($successfulRecords.ToArray())
+                    failures = @($failureRecords.ToArray())
+                    idempotencyLedger = $IdempotencyLedger
+                    evidence = $null
+                    evidenceBytes = $null
+                }
+            }
             $providerCalls++
             try {
-                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -CallbackContext $ProviderCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'provider callback')
+                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -CallbackContext $ProviderCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'provider callback')
                 if ((Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedBindings) -cne $bindingsDigest -or
                     (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedRoute) -cne $routeDigest -or
                     (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedScope) -cne $scopeDigest -or
@@ -1955,6 +2090,53 @@ function Invoke-StandardSemanticBridge {
                 $successfulCalls++
             }
             catch {
+                if (Test-StandardSemanticBridgeCallbackCleanupFailureException -Exception $_.Exception) {
+                    if (Test-StandardSemanticBridgeConsentExpiryGuardException -Exception $_.Exception) { $providerCalls-- }
+                    $cleanupMessage = [string]$_.Exception.Data[$script:StandardSemanticBridgeCallbackCleanupFailureDataKey]
+                    $IdempotencyLedger[$idempotencyKey] = [pscustomobject][ordered]@{ idempotencyKey = $idempotencyKey; requestSha256 = $requestSha; status = 'failed'; errorCode = 'callback-cleanup-failure' }
+                    [void]$failureRecords.Add([pscustomobject][ordered]@{ workItemId = $request.workItemId; idempotencyKey = $idempotencyKey; path = $path; errorCode = 'callback-cleanup-failure' })
+                    return [pscustomobject][ordered]@{
+                        status = 'FAILED'
+                        reason = "provider callback cleanup failed: $cleanupMessage"
+                        providerCallCount = $providerCalls
+                        successfulProviderCallCount = $successfulCalls
+                        providerCalls = @($successfulRecords.ToArray())
+                        failures = @($failureRecords.ToArray())
+                        idempotencyLedger = $IdempotencyLedger
+                        evidence = $null
+                        evidenceBytes = $null
+                    }
+                }
+                if (Test-StandardSemanticBridgeConsentExpiryGuardException -Exception $_.Exception) {
+                    $providerCalls--
+                    return [pscustomobject][ordered]@{
+                        status = 'BLOCKED'
+                        reason = 'consent expired before the provider callback received its request.'
+                        providerCallCount = $providerCalls
+                        successfulProviderCallCount = $successfulCalls
+                        providerCalls = @($successfulRecords.ToArray())
+                        failures = @($failureRecords.ToArray())
+                        idempotencyLedger = $IdempotencyLedger
+                        evidence = $null
+                        evidenceBytes = $null
+                    }
+                }
+                if (Test-StandardSemanticBridgeChildReportedExpiryException -Exception $_.Exception) {
+                    $childExpiryMessage = [string]$_.Exception.Message
+                    $IdempotencyLedger[$idempotencyKey] = [pscustomobject][ordered]@{ idempotencyKey = $idempotencyKey; requestSha256 = $requestSha; status = 'failed'; errorCode = 'untrusted-child-consent-expiry' }
+                    [void]$failureRecords.Add([pscustomobject][ordered]@{ workItemId = $request.workItemId; idempotencyKey = $idempotencyKey; path = $path; errorCode = 'untrusted-child-consent-expiry' })
+                    return [pscustomobject][ordered]@{
+                        status = 'FAILED'
+                        reason = $childExpiryMessage
+                        providerCallCount = $providerCalls
+                        successfulProviderCallCount = $successfulCalls
+                        providerCalls = @($successfulRecords.ToArray())
+                        failures = @($failureRecords.ToArray())
+                        idempotencyLedger = $IdempotencyLedger
+                        evidence = $null
+                        evidenceBytes = $null
+                    }
+                }
                 $errorCode = if ($_.Exception -is [TimeoutException] -or $_.Exception.Message -match '(?i)timeout') { 'timeout' } elseif ($_.Exception.Message -eq 'provider-response-findings-missing') { 'incomplete-findings' } else { 'provider-failure' }
                 $IdempotencyLedger[$idempotencyKey] = [pscustomobject][ordered]@{ idempotencyKey = $idempotencyKey; requestSha256 = $requestSha; status = 'failed'; errorCode = $errorCode }
                 [void]$failureRecords.Add([pscustomobject][ordered]@{ workItemId = $request.workItemId; idempotencyKey = $idempotencyKey; path = $path; errorCode = $errorCode })
@@ -1971,7 +2153,24 @@ function Invoke-StandardSemanticBridge {
         $canonicalFindings = @(Get-StandardSemanticBridgeCanonicalFindings -Findings @($allFindings.ToArray()))
         $findingsDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact @($canonicalFindings)
         $analyzerCoverage = @(Sort-StandardSemanticBridgeOrdinalStrings -Values @($coverage))
-        $generatedAt = ConvertTo-StandardSemanticBridgeUtcTimestamp -Value $Now -Context 'generatedAt'
+        $generatedAtNow = [DateTime]::UtcNow
+        $generatedAtConsentParameters = $consentParameters.Clone()
+        $generatedAtConsentParameters.Now = $generatedAtNow
+        $generatedAtConsentResult = Test-StandardSemanticBridgeConsent @generatedAtConsentParameters
+        if (-not [bool]$generatedAtConsentResult.valid) {
+            return [pscustomobject][ordered]@{
+                status = 'BLOCKED'
+                reason = [string]$generatedAtConsentResult.reason
+                providerCallCount = $providerCalls
+                successfulProviderCallCount = $successfulCalls
+                providerCalls = @($successfulRecords.ToArray())
+                failures = @($failureRecords.ToArray())
+                idempotencyLedger = $IdempotencyLedger
+                evidence = $null
+                evidenceBytes = $null
+            }
+        }
+        $generatedAt = ConvertTo-StandardSemanticBridgeUtcTimestamp -Value $generatedAtNow -Context 'generatedAt'
         $evidenceUnsigned = [pscustomobject][ordered]@{
             schemaVersion = $script:StandardSemanticBridgeSchemaVersion
             artifactType = 'semantic-evidence-v2'
@@ -2009,22 +2208,98 @@ function Invoke-StandardSemanticBridge {
         $unsignedBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($unsignedJson)
         $signerRequest = [pscustomobject][ordered]@{ artifactType = 'semantic-evidence-v2'; algorithm = $script:StandardSemanticBridgeAlgorithm; payloadSha256 = $unsignedPayloadSha; payloadBytes = $unsignedBytes }
         $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
-        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -Context 'signer callback')
+        $signerConsentParameters = $consentParameters.Clone()
+        $signerConsentParameters.Now = [DateTime]::UtcNow
+        $signerConsentResult = Test-StandardSemanticBridgeConsent @signerConsentParameters
+        if (-not [bool]$signerConsentResult.valid) {
+            return [pscustomobject][ordered]@{
+                status = 'BLOCKED'
+                reason = [string]$signerConsentResult.reason
+                providerCallCount = $providerCalls
+                successfulProviderCallCount = $successfulCalls
+                providerCalls = @($successfulRecords.ToArray())
+                failures = @($failureRecords.ToArray())
+                idempotencyLedger = $IdempotencyLedger
+                evidence = $null
+                evidenceBytes = $null
+            }
+        }
+        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'signer callback')
+        $afterSignerConsentParameters = $consentParameters.Clone()
+        $afterSignerConsentParameters.Now = [DateTime]::UtcNow
+        $afterSignerConsentResult = Test-StandardSemanticBridgeConsent @afterSignerConsentParameters
+        if (-not [bool]$afterSignerConsentResult.valid) {
+            return [pscustomobject][ordered]@{
+                status = 'BLOCKED'
+                reason = [string]$afterSignerConsentResult.reason
+                providerCallCount = $providerCalls
+                successfulProviderCallCount = $successfulCalls
+                providerCalls = @($successfulRecords.ToArray())
+                failures = @($failureRecords.ToArray())
+                idempotencyLedger = $IdempotencyLedger
+                evidence = $null
+                evidenceBytes = $null
+            }
+        }
         if ($signatureItems.Count -ne 1 -or $null -eq $signatureItems[0]) { throw 'signer response shape is invalid.' }
         $signature = $signatureItems[0]
         Assert-StandardSemanticBridgeExactProperties -Object $signature -Expected @('keyId', 'algorithm', 'signature') -Context 'signer response'
         $keyId = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $signature 'keyId') 'signer keyId'
+        if (-not [string]::Equals($keyId, $expectedSignerKeyId, [StringComparison]::Ordinal)) { throw 'signer keyId does not match the trusted expected identity.' }
         if ([string](Get-StandardSemanticBridgeProperty $signature 'algorithm') -cne $script:StandardSemanticBridgeAlgorithm) { throw 'signer algorithm is unsupported.' }
         $signatureText = Assert-StandardSemanticBridgeCanonicalBase64 (Get-StandardSemanticBridgeProperty $signature 'signature') 'signer signature'
+        $signatureBytes = [Convert]::FromBase64String($signatureText)
+        if (-not $ExpectedSignerPublicKey.VerifyData($unsignedBytes, $signatureBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) {
+            throw 'signer signature verification failed.'
+        }
         $evidence = [pscustomobject][ordered]@{}
         foreach ($property in @($evidenceUnsigned.PSObject.Properties)) { $evidence | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value }
         $evidence | Add-Member -MemberType NoteProperty -Name 'attestation' -Value ([pscustomobject][ordered]@{ attestationType = $script:StandardSemanticBridgeAttestationType; keyId = $keyId; algorithm = $script:StandardSemanticBridgeAlgorithm; signedPayloadSha256 = $unsignedPayloadSha; issuedAt = $generatedAt; signature = $signatureText })
         $evidenceJson = Get-StandardSemanticBridgeCanonicalJson -Value $evidence
         $evidenceBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($evidenceJson)
         $evidenceSha = Get-StandardSemanticBridgeSha256FromBytes -Bytes $evidenceBytes
+        $finalConsentParameters = $consentParameters.Clone()
+        $finalConsentParameters.Now = [DateTime]::UtcNow
+        $finalConsentResult = Test-StandardSemanticBridgeConsent @finalConsentParameters
+        if (-not [bool]$finalConsentResult.valid) {
+            return [pscustomobject][ordered]@{
+                status = 'BLOCKED'
+                reason = [string]$finalConsentResult.reason
+                providerCallCount = $providerCalls
+                successfulProviderCallCount = $successfulCalls
+                providerCalls = @($successfulRecords.ToArray())
+                failures = @($failureRecords.ToArray())
+                idempotencyLedger = $IdempotencyLedger
+                evidence = $null
+                evidenceBytes = $null
+            }
+        }
         return [pscustomobject][ordered]@{ status = 'PASS'; reason = $null; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords.ToArray()); failures = @(); idempotencyLedger = $IdempotencyLedger; evidence = $evidence; evidenceBytes = [byte[]]$evidenceBytes; evidenceSha256 = $evidenceSha }
     }
     catch {
+        if (Test-StandardSemanticBridgeCallbackCleanupFailureException -Exception $_.Exception) {
+            $cleanupMessage = [string]$_.Exception.Data[$script:StandardSemanticBridgeCallbackCleanupFailureDataKey]
+            $primaryMessage = [string]$_.Exception.Message
+            $reason = "signer callback cleanup failed: $cleanupMessage"
+            if (-not [string]::IsNullOrWhiteSpace($primaryMessage) -and
+                $primaryMessage.IndexOf($script:StandardSemanticBridgeConsentExpiryGuardMessage, [StringComparison]::Ordinal) -lt 0) {
+                $reason += " Primary callback failure: $primaryMessage"
+            }
+            return [pscustomobject][ordered]@{ status = 'FAILED'; reason = $reason; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @($successfulRecords.ToArray()); failures = @([pscustomobject][ordered]@{ errorCode = 'callback-cleanup-failure' }); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
+        }
+        if (Test-StandardSemanticBridgeConsentExpiryGuardException -Exception $_.Exception) {
+            return [pscustomobject][ordered]@{
+                status = 'BLOCKED'
+                reason = 'consent expired before the signer callback received its request.'
+                providerCallCount = $providerCalls
+                successfulProviderCallCount = $successfulCalls
+                providerCalls = @($successfulRecords.ToArray())
+                failures = @($failureRecords.ToArray())
+                idempotencyLedger = $IdempotencyLedger
+                evidence = $null
+                evidenceBytes = $null
+            }
+        }
         return [pscustomobject][ordered]@{ status = 'FAILED'; reason = [string]$_.Exception.Message; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @(); failures = @([pscustomobject][ordered]@{ errorCode = 'bridge-failure' }); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
     }
 }
@@ -2109,7 +2384,7 @@ function Test-StandardSemanticBridgeEvidence {
         $payloadSha = Get-StandardSemanticBridgeSha256FromBytes -Bytes $unsignedBytes
         if ([string]$attestation.signedPayloadSha256 -cne $payloadSha) { throw 'evidence signed payload digest is invalid.' }
         $issuedAt = Get-StandardSemanticBridgeTimestamp -Value $attestation.issuedAt -Context 'attestation issuedAt'
-        if ($issuedAt -gt $nowUtc -or $issuedAt -lt $generatedAt) { throw 'attestation timestamp is invalid.' }
+        if ($issuedAt -ne $generatedAt -or $issuedAt -gt $nowUtc) { throw 'attestation timestamp is invalid.' }
         if (-not $PublicKey.VerifyData($unsignedBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'evidence signature verification failed.' }
         if ($null -ne $ReplayLedger) {
             if ($ReplayLedger.ContainsKey($evidenceId)) { throw 'evidence replay was detected.' }

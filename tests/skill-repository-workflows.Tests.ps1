@@ -8,7 +8,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 4
-            '.github/workflows/standards-conformance.yml' = 1
+            '.github/workflows/standards-conformance.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
         }
@@ -98,20 +98,22 @@ jobs:
         Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 2 'Workflow logging must use discovery metadata without importing the module first.'
     }
 
-    # Scenario: A Unix callback containment regression is added without becoming the first gate for either workflow.
-    # Purpose: Require the five-case focused boundary suite before Windows full suites and before Standard authority validation.
+    # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
+    # Purpose: Isolate the five-case Linux boundary suite from a fresh authority checkout and preserve one required summary status.
     It 'UnitT15_runs_linux_callback_containment_before_full_suites_and_authority_gate' {
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
+        $focusedHelperPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-FocusedLinuxContainment.ps1'
         $semanticTestsPath = Join-Path $script:RepositoryRoot 'tests/standard-semantic-bridge.Tests.ps1'
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $focusedHelper = Get-Content -Raw -Encoding UTF8 -LiteralPath $focusedHelperPath
         $semanticTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $semanticTestsPath
         $focusedDescribe = 'Unix callback containment boundary'
 
         Assert-Match $required ([regex]::Escape($focusedDescribe)) 'PowerShell Regression must run the Unix callback containment Describe.'
         Assert-Match $standards ([regex]::Escape($focusedDescribe)) 'Standards Conformance must run the Unix callback containment Describe.'
-        $describeMarker = "Describe '$focusedDescribe'"
+        $describeMarker = "Describe '$focusedDescribe' -Tags LinuxContainment"
         Assert-Equal ([regex]::Matches($semanticTests, [regex]::Escape($describeMarker))).Count 1 'The semantic bridge tests must define one focused containment Describe.'
         $describeStart = $semanticTests.IndexOf($describeMarker)
         $nextDescribe = $semanticTests.IndexOf("`nDescribe ", $describeStart + $describeMarker.Length)
@@ -150,13 +152,68 @@ jobs:
             Assert-Match $workflow 'namespace probe exit' 'The Linux capability probe must record its exit status.'
             Assert-Match $workflow 'namespace probe result' 'The Linux capability probe must record its namespace result.'
             Assert-True ($workflow.IndexOf('Probe Linux PID namespace containment capability') -lt $workflow.IndexOf("Run required Unix callback containment boundary")) 'The Linux capability probe must fail before focused callback tests.'
-            Assert-Match $workflow '\[int64\]\$result\.TotalCount\s*-ne\s*5' 'The focused boundary gate must require exactly five discovered tests.'
-            Assert-Match $workflow '\[int\]\$result\.PassedCount\s*-ne\s*5' 'The focused boundary gate must require five passed tests.'
-            Assert-Match $workflow '\[int\]\$result\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed focused tests.'
-            Assert-Match $workflow '\[int\]\$result\.SkippedCount\s*-ne\s*0' 'The focused boundary gate must reject skipped focused tests.'
-            Assert-Match $workflow '\[int\]\$result\.PendingCount\s*-ne\s*0' 'The focused boundary gate must reject pending focused tests.'
-            Assert-Match $workflow '\[int\]\$result\.InconclusiveCount\s*-ne\s*0' 'The focused boundary gate must reject inconclusive focused tests.'
         }
+
+        Assert-Match $standards '& ./scripts/Invoke-FocusedLinuxContainment\.ps1' 'Standards Conformance must run the dedicated focused containment helper.'
+        Assert-NotMatch $standards 'Install-Module\s+Pester' 'Standards Conformance must resolve Pester through the central resolver.'
+        Assert-Match $focusedHelper 'Resolve-StandardValidationTool\.ps1' 'The focused helper must use the approved central tool resolver.'
+        Assert-Match $focusedHelper '-ToolName pester -Install' 'The focused helper must install the latest stable Pester through the central resolver.'
+        Assert-Match $focusedHelper 'ConvertFrom-Json' 'The focused helper must consume the resolver receipt.'
+        Assert-Match $focusedHelper '\$modulePath\s*=\s*\[IO\.Path\]::GetFullPath\(\[string\]\$receipt\.modulePath\)' 'The focused helper must use the module path identified by the resolver receipt.'
+        Assert-Match $focusedHelper 'Import-Module\s+-Name\s+\$modulePath' 'The focused helper must import the Pester module identified by the resolver receipt.'
+        Assert-Match $focusedHelper 'Invoke-Pester -Path \$testPath -TagFilter ''LinuxContainment'' -PassThru' 'The focused helper must select the tagged containment cases only.'
+        Assert-Match $focusedHelper '\[int64\]\$selectedCount\s*-ne\s*5' 'The Pester 6 focused gate must require exactly five selected test results.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.PassedCount\s*-ne\s*5' 'The Pester 6 focused gate must require five passed tests.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed tests.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.SkippedCount\s*-ne\s*0' 'The focused boundary gate must reject skipped tests.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.PendingCount\s*-ne\s*0' 'The focused boundary gate must reject pending tests.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.InconclusiveCount\s*-ne\s*0' 'The focused boundary gate must reject inconclusive tests.'
+        Assert-Match $focusedHelper 'NotRunCount' 'The focused gate must account for Pester results where TotalCount includes unselected tests.'
+        Assert-Match $focusedHelper '\$selectedCountFromDiscovery\s*=\s*\[int64\]\$counts\.TotalCount\s*-\s*\[int64\]\$counts\.NotRunCount' 'The focused gate must subtract Pester 6 NotRun cases from TotalCount to determine the selected count.'
+
+        $standardsJobsMatch = [regex]::Match($standards, '(?ms)^jobs:\r?\n(?<block>.*)\z')
+        Assert-True $standardsJobsMatch.Success 'Standards Conformance must define its workflow jobs block.'
+        $standardsJobs = $standardsJobsMatch.Groups['block'].Value
+        $standardsJobIds = [regex]::Matches($standardsJobs, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
+        Assert-Equal $standardsJobIds.Count 3 'Standards Conformance must isolate focused tests, authority validation, and the required summary into three jobs.'
+        $standardsJobNames = @($standardsJobIds | ForEach-Object { $_.Groups[1].Value })
+        foreach ($jobName in @('linux-callback-focused', 'authority-gate', 'latest-stable-authority-regression')) {
+            Assert-True ($standardsJobNames -contains $jobName) "Standards Conformance must define the '$jobName' job boundary."
+        }
+        $focusedJobMatch = [regex]::Match($standards, '(?ms)^  linux-callback-focused:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $authorityJobMatch = [regex]::Match($standards, '(?ms)^  authority-gate:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $summaryJobMatch = [regex]::Match($standards, '(?ms)^  latest-stable-authority-regression:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        Assert-True $focusedJobMatch.Success 'Standards Conformance must define an isolated focused containment job.'
+        Assert-True $authorityJobMatch.Success 'Standards Conformance must define an independent canonical authority job.'
+        Assert-True $summaryJobMatch.Success 'Standards Conformance must preserve its required summary job.'
+        $focusedJob = $focusedJobMatch.Groups['block'].Value
+        $authorityJob = $authorityJobMatch.Groups['block'].Value
+        $summaryJob = $summaryJobMatch.Groups['block'].Value
+        foreach ($job in @(@{ Name = 'focused'; Block = $focusedJob }, @{ Name = 'authority'; Block = $authorityJob })) {
+            Assert-Equal ([regex]::Matches($job.Block, '(?m)^\s+uses:\s*actions/checkout@[0-9a-f]{40}\b')).Count 1 "The $($job.Name) job must perform its own pinned checkout."
+            Assert-Match $job.Block 'persist-credentials:\s*false' "The $($job.Name) job checkout must not persist Git credentials."
+        }
+        Assert-NotMatch $summaryJob 'actions/checkout@' 'The required summary job must not check out or inspect mutable source files.'
+        Assert-NotMatch $standards 'upload-artifact|download-artifact|artifact:' 'Standards Conformance must not transfer workspace state between jobs.'
+        Assert-Match $standards '(?m)^permissions:\s*\r?\n\s+contents:\s*read\s*$' 'Standards Conformance must retain read-only repository permissions.'
+        Assert-NotMatch $focusedJob '(?m)^\s+needs:' 'The focused job must be independently runnable.'
+        Assert-Match $focusedJob 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu' 'The focused job must configure hosted Linux namespace support.'
+        Assert-Match $focusedJob 'Probe Linux PID namespace containment capability' 'The focused job must retain the exact namespace capability preflight.'
+        Assert-Match $focusedJob '& ./scripts/Invoke-FocusedLinuxContainment\.ps1' 'Only the focused job must run the tagged containment helper.'
+        Assert-NotMatch $focusedJob 'Invoke-StandardAuthorityGate\.ps1|Run canonical Standard v1 authority gate|setup-go@' 'The focused job must not run the authority gate or its Go runtime setup.'
+        Assert-Match $authorityJob 'Set up approved Go runtime' 'The authority job must set up the approved Go runtime after its fresh checkout.'
+        Assert-Match $authorityJob 'Run canonical Standard v1 authority gate' 'The authority job must execute the canonical authority gate.'
+        Assert-Match $authorityJob 'Check whitespace in the event range' 'The authority job must retain the event-range whitespace check.'
+        Assert-NotMatch $authorityJob 'Invoke-FocusedLinuxContainment\.ps1|Probe Linux PID namespace containment capability|Enable unprivileged user namespaces' 'The authority job must not run PR-controlled focused tests or namespace setup.'
+        Assert-Match $authorityJob '(?m)^\s+needs:\s*linux-callback-focused\s*$' 'The authority job must wait for the focused job while using its own runner and checkout.'
+        Assert-Match $summaryJob '(?m)^\s+name:\s*Standard v1 \(latest stable tooling\)\s*$' 'The required status job must keep its established display name.'
+        Assert-Match $summaryJob '(?m)^\s+needs:\s*\r?\n\s+- linux-callback-focused\s*\r?\n\s+- authority-gate\s*$' 'The required status job must wait for both independent jobs.'
+        Assert-Match $summaryJob '(?m)^\s+if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$' 'The required status job must run even when a dependency fails or is skipped.'
+        Assert-Match $summaryJob 'FOCUSED_RESULT:\s*\$\{\{\s*needs\.linux-callback-focused\.result\s*\}\}' 'The summary must bind the focused job result.'
+        Assert-Match $summaryJob 'AUTHORITY_RESULT:\s*\$\{\{\s*needs\.authority-gate\.result\s*\}\}' 'The summary must bind the authority job result.'
+        Assert-Match $summaryJob '\$env:FOCUSED_RESULT\s*-ne\s*''success''' 'The summary must fail unless the focused job result is success, including skipped or cancelled.'
+        Assert-Match $summaryJob '\$env:AUTHORITY_RESULT\s*-ne\s*''success''' 'The summary must fail unless the authority job result is success, including skipped or cancelled.'
+        Assert-Match $summaryJob '(?i)(throw|exit\s+1)' 'The summary must return a failing status when either dependency is not successful.'
 
         Assert-Match $required 'windows-powershell-51:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'Windows PowerShell 5.1 full suite must depend on the Linux focused job.'
         Assert-Match $required 'powershell-7:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'PowerShell 7 full suite must depend on the Linux focused job.'
@@ -200,6 +257,7 @@ jobs:
             $pattern = "'\.github/workflows/{0}'" -f [regex]::Escape($workflowName)
             Assert-Equal ([regex]::Matches($standards, $pattern)).Count 2 "Push and pull-request path filters must both include authority workflow '$workflowName'."
         }
+        Assert-Equal ([regex]::Matches($standards, "'scripts/Invoke-FocusedLinuxContainment\.ps1'")).Count 2 'Push and pull-request path filters must both include the focused Linux containment helper.'
         Assert-Equal ([regex]::Matches($standards, 'Invoke-StandardAuthorityGate\.ps1')).Count 3 'Dedicated CI must watch and invoke the shared authority gate.'
         Assert-Equal ([regex]::Matches($required, 'Invoke-StandardAuthorityGate\.ps1')).Count 1 'Required Composition CI must invoke the shared authority gate.'
         foreach ($testName in $script:AuthorityTests) {

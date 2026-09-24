@@ -9,6 +9,7 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-FocusedLinuxContainment.ps1'
       - 'scripts/Invoke-StandardValidation.ps1'
       - 'scripts/StandardSemanticBridge.psm1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
@@ -29,6 +30,7 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-FocusedLinuxContainment.ps1'
       - 'scripts/Invoke-StandardValidation.ps1'
       - 'scripts/StandardSemanticBridge.psm1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
@@ -47,14 +49,16 @@ permissions:
   contents: read
 
 jobs:
-  latest-stable-authority-regression:
-    name: Standard v1 (latest stable tooling)
+  linux-callback-focused:
+    name: Linux callback containment
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
@@ -146,35 +150,24 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure Pester 4.10.1 for Linux focused containment
-        shell: pwsh
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
-
       - name: Run required Unix callback containment boundary
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in focused test step.' }
-          Import-Module $pester.Path -Force
-          $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback containment boundary' -PassThru -Show All
-          if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback containment boundary.' }
-          Write-Host "UnixCallbackContainment - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount) Pending: $($result.PendingCount) Inconclusive: $($result.InconclusiveCount)"
-          if ([int64]$result.TotalCount -ne 5 -or
-              [int]$result.PassedCount -ne 5 -or
-              [int]$result.FailedCount -ne 0 -or
-              [int]$result.SkippedCount -ne 0 -or
-              [int]$result.PendingCount -ne 0 -or
-              [int]$result.InconclusiveCount -ne 0) {
-            throw 'Unix callback containment boundary did not produce exactly five passing tests.'
-          }
+          & ./scripts/Invoke-FocusedLinuxContainment.ps1
+
+  authority-gate:
+    name: Standard v1 authority gate
+    needs: linux-callback-focused
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up approved Go runtime
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -223,3 +216,24 @@ jobs:
           else
             git diff-tree --check --root -r HEAD
           fi
+
+  latest-stable-authority-regression:
+    name: Standard v1 (latest stable tooling)
+    needs:
+      - linux-callback-focused
+      - authority-gate
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require both isolated validation jobs to succeed
+        shell: pwsh
+        env:
+          FOCUSED_RESULT: ${{ needs.linux-callback-focused.result }}
+          AUTHORITY_RESULT: ${{ needs.authority-gate.result }}
+        run: |
+          if ($env:FOCUSED_RESULT -ne 'success' -or $env:AUTHORITY_RESULT -ne 'success') {
+            throw "Standard v1 required check failed: focused=$env:FOCUSED_RESULT authority=$env:AUTHORITY_RESULT"
+          }
+          Write-Host 'Focused Linux containment and Standard v1 authority validation both succeeded.'
