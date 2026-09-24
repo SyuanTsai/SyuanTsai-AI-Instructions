@@ -1003,8 +1003,12 @@ function Get-StandardSemanticBridgeLedgerDigest {
 function ConvertFrom-StandardSemanticBridgeIsolatedValue {
     param([AllowNull()] $Value)
 
-    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType] -or $Value -is [byte[]]) {
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) {
         return $Value
+    }
+    if ($Value -is [byte[]]) {
+        # Preserve binary values as one object on the PowerShell pipeline.
+        return ,([byte[]]$Value.Clone())
     }
     if ($Value -is [System.Collections.IList]) {
         $items = New-Object System.Collections.Generic.List[object]
@@ -1409,6 +1413,7 @@ function Invoke-StandardSemanticBridgeCallbackWithTimeout {
         [Parameter(Mandatory = $true)][scriptblock] $Callback,
         [AllowNull()] $Argument,
         [AllowNull()] $CallbackContext,
+        [AllowNull()][string] $SerializedCallbackContextXml = $null,
         [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds,
         [AllowNull()] $ConsentExpiresAt = $null,
         [string] $Context = 'callback'
@@ -1442,6 +1447,36 @@ $InformationPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 $VerbosePreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
+function ConvertFrom-StandardSemanticBridgeCallbackPayloadValue {
+    param([AllowNull()] $Value)
+
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [byte[]]) { return ,([byte[]]$Value.Clone()) }
+    if ($Value -is [System.Collections.IList]) {
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($item in $Value) {
+            [void]$items.Add((ConvertFrom-StandardSemanticBridgeCallbackPayloadValue -Value $item))
+        }
+        Write-Output -NoEnumerate ([object[]]$items.ToArray())
+        return
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $dictionary = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $dictionary[[string]$key] = ConvertFrom-StandardSemanticBridgeCallbackPayloadValue -Value $Value[$key]
+        }
+        return $dictionary
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -in @('NoteProperty', 'Property') })
+    if ($properties.Count -gt 0) {
+        $normalized = [ordered]@{}
+        foreach ($property in $properties) {
+            $normalized[[string]$property.Name] = ConvertFrom-StandardSemanticBridgeCallbackPayloadValue -Value $property.Value
+        }
+        return [pscustomobject]$normalized
+    }
+    return $Value
+}
 try {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
         $handshakePath = [Environment]::GetEnvironmentVariable('STANDARD_SEMANTIC_BRIDGE_PID_NAMESPACE_HANDSHAKE')
@@ -1526,8 +1561,8 @@ try {
     }
     $payloadXml = [Console]::In.ReadToEnd()
     $payload = [Management.Automation.PSSerializer]::Deserialize($payloadXml)
-    $argument = [Management.Automation.PSSerializer]::Deserialize([string]$payload.argumentXml)
-    $callbackContext = [Management.Automation.PSSerializer]::Deserialize([string]$payload.contextXml)
+    $argument = ConvertFrom-StandardSemanticBridgeCallbackPayloadValue -Value ([Management.Automation.PSSerializer]::Deserialize([string]$payload.argumentXml))
+    $callbackContext = ConvertFrom-StandardSemanticBridgeCallbackPayloadValue -Value ([Management.Automation.PSSerializer]::Deserialize([string]$payload.contextXml))
     $callback = [scriptblock]::Create([string]$payload.callbackText)
     $consentExpiryText = [string]$payload.consentExpiresAtUtc
     $consentExpired = $false
@@ -1583,7 +1618,7 @@ catch {
     $payload = [pscustomobject][ordered]@{
         callbackText = $Callback.ToString()
         argumentXml = [Management.Automation.PSSerializer]::Serialize($Argument, 100)
-        contextXml = [Management.Automation.PSSerializer]::Serialize($CallbackContext, 100)
+        contextXml = if (-not [string]::IsNullOrEmpty($SerializedCallbackContextXml)) { $SerializedCallbackContextXml } else { [Management.Automation.PSSerializer]::Serialize($CallbackContext, 100) }
         consentExpiresAtUtc = if ($null -eq $consentExpiresAtUtc) { $null } else { $consentExpiresAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
     }
     $payloadXml = [Management.Automation.PSSerializer]::Serialize($payload, 100)
@@ -2207,6 +2242,41 @@ function Get-StandardSemanticBridgeUtcNow {
     return [DateTime]::UtcNow
 }
 
+function Copy-StandardSemanticBridgeExecutionSnapshotValue {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowNull()] $Value)
+
+    # CLIXML gives the operation a detached data graph and preserves byte[] as
+    # byte[] on both Windows PowerShell 5.1 and PowerShell 7.  It represents
+    # ordinary arrays as ArrayList, so normalize the detached graph recursively
+    # to restore array shape before any schema validation or execution.  The
+    # returned snapshot is kept private to the bridge operation or verifier;
+    # callbacks only receive serialized copies of individual requests/contexts.
+    $serialized = [Management.Automation.PSSerializer]::Serialize($Value, 100)
+    if ([string]::IsNullOrWhiteSpace($serialized)) { throw 'execution snapshot serialization returned no data.' }
+    $deserialized = [Management.Automation.PSSerializer]::Deserialize($serialized)
+    return ,(ConvertFrom-StandardSemanticBridgeIsolatedValue -Value $deserialized)
+}
+
+function Test-StandardSemanticBridgeConsentExecutionWindow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][DateTime] $AuthorizedAtUtc,
+        [Parameter(Mandatory = $true)][DateTime] $ExpiresAtUtc
+    )
+
+    # This is the only per-boundary consent check: all schema, digest, scope,
+    # and binding checks were completed against the detached snapshot once.
+    $nowUtc = Get-StandardSemanticBridgeUtcNow
+    if ($nowUtc -lt $AuthorizedAtUtc) {
+        return [pscustomobject][ordered]@{ valid = $false; reason = 'consent is not yet active.' }
+    }
+    if ($nowUtc -ge $ExpiresAtUtc) {
+        return [pscustomobject][ordered]@{ valid = $false; reason = 'consent expired.' }
+    }
+    return [pscustomobject][ordered]@{ valid = $true; reason = $null }
+}
+
 function Invoke-StandardSemanticBridge {
     [CmdletBinding()]
     param(
@@ -2226,6 +2296,7 @@ function Invoke-StandardSemanticBridge {
         [AllowNull()] $SignerCallbackContext = $null,
         [hashtable] $IdempotencyLedger = @{},
         [int] $TimeoutSeconds = 30,
+        # Initial validation honors Now; every egress boundary also checks wall-clock UTC.
         [DateTime] $Now = [DateTime]::UtcNow
     )
 
@@ -2241,6 +2312,35 @@ function Invoke-StandardSemanticBridge {
         if ($null -eq $ExpectedSignerPublicKey) { throw 'a trusted expected signer public key is required.' }
         $expectedSignerKeyId = Assert-StandardSemanticBridgeNonEmptyScalar -Value $ExpectedSignerKeyId -Context 'trusted expected signer keyId'
         if ($TimeoutSeconds -le 0) { throw 'timeout must be positive.' }
+        if ($TextItems -isnot [array]) { throw 'provider text inventory requires an array.' }
+        if ($Analyzers -isnot [array]) { throw 'analyzers must be an array.' }
+        # Freeze all authorization and work-plan inputs as one detached object
+        # graph before validating or beginning egress.  Caller-owned references
+        # cannot change item count, text bytes, bindings, or evidence metadata
+        # while this operation is in flight.
+        $executionInputs = Copy-StandardSemanticBridgeExecutionSnapshotValue -Value ([pscustomobject][ordered]@{
+            consentRequest = $ConsentRequest
+            consentDecision = $ConsentDecision
+            bindings = $Bindings
+            providerRoute = $ProviderRoute
+            purpose = $Purpose
+            scope = $Scope
+            textItems = $TextItems
+            analyzers = $Analyzers
+            providerCallbackContext = $ProviderCallbackContext
+            signerCallbackContext = $SignerCallbackContext
+        })
+        $ConsentRequest = $executionInputs.consentRequest
+        $ConsentDecision = $executionInputs.consentDecision
+        $Bindings = $executionInputs.bindings
+        $ProviderRoute = $executionInputs.providerRoute
+        $Purpose = [string]$executionInputs.purpose
+        $Scope = $executionInputs.scope
+        $TextItems = $executionInputs.textItems
+        $Analyzers = $executionInputs.analyzers
+        $ProviderCallbackContext = $executionInputs.providerCallbackContext
+        $SignerCallbackContext = $executionInputs.signerCallbackContext
+
         $inventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $TextItems
         $analyzerSet = New-StandardSemanticBridgeAnalyzerSet -Analyzers $Analyzers
         $consentParameters = @{
@@ -2255,11 +2355,13 @@ function Invoke-StandardSemanticBridge {
         $normalizedRoute = Assert-StandardSemanticBridgeProviderRoute -ProviderRoute $ProviderRoute
         $normalizedScope = Assert-StandardSemanticBridgeScope -Scope $Scope
         $normalizedAnalyzers = Assert-StandardSemanticBridgeAnalyzerSet -AnalyzerSet $analyzerSet
-        $bindingsDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedBindings
-        $routeDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedRoute
-        $scopeDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedScope
-        $inventoryDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $inventory
-        $analyzerDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedAnalyzers
+        $consentAuthorizedAt = Get-StandardSemanticBridgeTimestamp -Value $ConsentDecision.authorizedAt -Context 'consent authorizedAt'
+        $consentExpiry = Get-StandardSemanticBridgeTimestamp -Value $ConsentDecision.expiresAt -Context 'consent expiry'
+        $providerCallbackContextXml = [Management.Automation.PSSerializer]::Serialize($ProviderCallbackContext, 100)
+        $signerCallbackContextXml = [Management.Automation.PSSerializer]::Serialize($SignerCallbackContext, 100)
+        if ([string]::IsNullOrWhiteSpace($providerCallbackContextXml) -or [string]::IsNullOrWhiteSpace($signerCallbackContextXml)) {
+            throw 'callback context snapshot serialization returned no data.'
+        }
         $expectedAnalyzerIds = @($normalizedAnalyzers.analyzers | ForEach-Object { [string]$_.id })
         $expectedAnalyzerIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         foreach ($analyzerId in $expectedAnalyzerIds) { [void]$expectedAnalyzerIdSet.Add([string]$analyzerId) }
@@ -2329,9 +2431,7 @@ function Invoke-StandardSemanticBridge {
             }
             $request = [pscustomobject][ordered]@{ workItemId = $requestForDigest.workItemId; idempotencyKey = $idempotencyKey; providerRoute = $normalizedRoute; path = $path; contentKind = $kind; analyzerSet = $normalizedAnalyzers; text = $text; bytes = $null }
             $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
-            $providerConsentParameters = $consentParameters.Clone()
-            $providerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
-            $providerConsentResult = Test-StandardSemanticBridgeConsent @providerConsentParameters
+            $providerConsentResult = Test-StandardSemanticBridgeConsentExecutionWindow -AuthorizedAtUtc $consentAuthorizedAt -ExpiresAtUtc $consentExpiry
             if (-not [bool]$providerConsentResult.valid) {
                 return [pscustomobject][ordered]@{
                     status = 'BLOCKED'
@@ -2347,14 +2447,7 @@ function Invoke-StandardSemanticBridge {
             }
             $providerCalls++
             try {
-                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -CallbackContext $ProviderCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'provider callback')
-                if ((Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedBindings) -cne $bindingsDigest -or
-                    (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedRoute) -cne $routeDigest -or
-                    (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedScope) -cne $scopeDigest -or
-                    (Get-StandardSemanticBridgeArtifactSha256 -Artifact $inventory) -cne $inventoryDigest -or
-                    (Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedAnalyzers) -cne $analyzerDigest) {
-                    throw 'provider-input-mutated-during-callback'
-                }
+                $responseItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $ProviderCallback -Argument $request -CallbackContext $ProviderCallbackContext -SerializedCallbackContextXml $providerCallbackContextXml -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'provider callback')
                 if ($responseItems.Count -ne 1 -or $null -eq $responseItems[0]) { throw 'provider-response-shape' }
                 $response = $responseItems[0]
                 Assert-StandardSemanticBridgeExactProperties -Object $response -Expected @('findings', 'analyzerCoverage') -Context 'provider response'
@@ -2463,9 +2556,7 @@ function Invoke-StandardSemanticBridge {
         $findingsDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact @($canonicalFindings)
         $analyzerCoverage = @(Sort-StandardSemanticBridgeOrdinalStrings -Values @($coverage))
         $generatedAtNow = Get-StandardSemanticBridgeUtcNow
-        $generatedAtConsentParameters = $consentParameters.Clone()
-        $generatedAtConsentParameters.Now = $generatedAtNow
-        $generatedAtConsentResult = Test-StandardSemanticBridgeConsent @generatedAtConsentParameters
+        $generatedAtConsentResult = Test-StandardSemanticBridgeConsentExecutionWindow -AuthorizedAtUtc $consentAuthorizedAt -ExpiresAtUtc $consentExpiry
         if (-not [bool]$generatedAtConsentResult.valid) {
             return [pscustomobject][ordered]@{
                 status = 'BLOCKED'
@@ -2517,9 +2608,7 @@ function Invoke-StandardSemanticBridge {
         $unsignedBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($unsignedJson)
         $signerRequest = [pscustomobject][ordered]@{ artifactType = 'semantic-evidence-v2'; algorithm = $script:StandardSemanticBridgeAlgorithm; payloadSha256 = $unsignedPayloadSha; payloadBytes = $unsignedBytes }
         $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
-        $signerConsentParameters = $consentParameters.Clone()
-        $signerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
-        $signerConsentResult = Test-StandardSemanticBridgeConsent @signerConsentParameters
+        $signerConsentResult = Test-StandardSemanticBridgeConsentExecutionWindow -AuthorizedAtUtc $consentAuthorizedAt -ExpiresAtUtc $consentExpiry
         if (-not [bool]$signerConsentResult.valid) {
             return [pscustomobject][ordered]@{
                 status = 'BLOCKED'
@@ -2533,10 +2622,8 @@ function Invoke-StandardSemanticBridge {
                 evidenceBytes = $null
             }
         }
-        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'signer callback')
-        $afterSignerConsentParameters = $consentParameters.Clone()
-        $afterSignerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
-        $afterSignerConsentResult = Test-StandardSemanticBridgeConsent @afterSignerConsentParameters
+        $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -SerializedCallbackContextXml $signerCallbackContextXml -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'signer callback')
+        $afterSignerConsentResult = Test-StandardSemanticBridgeConsentExecutionWindow -AuthorizedAtUtc $consentAuthorizedAt -ExpiresAtUtc $consentExpiry
         if (-not [bool]$afterSignerConsentResult.valid) {
             return [pscustomobject][ordered]@{
                 status = 'BLOCKED'
@@ -2567,9 +2654,7 @@ function Invoke-StandardSemanticBridge {
         $evidenceJson = Get-StandardSemanticBridgeCanonicalJson -Value $evidence
         $evidenceBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($evidenceJson)
         $evidenceSha = Get-StandardSemanticBridgeSha256FromBytes -Bytes $evidenceBytes
-        $finalConsentParameters = $consentParameters.Clone()
-        $finalConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
-        $finalConsentResult = Test-StandardSemanticBridgeConsent @finalConsentParameters
+        $finalConsentResult = Test-StandardSemanticBridgeConsentExecutionWindow -AuthorizedAtUtc $consentAuthorizedAt -ExpiresAtUtc $consentExpiry
         if (-not [bool]$finalConsentResult.valid) {
             return [pscustomobject][ordered]@{
                 status = 'BLOCKED'

@@ -514,6 +514,22 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([string]$expired.status -ceq 'BLOCKED') 'Expired consent did not block the bridge.'
         Assert-TestCondition ([int]$expired.providerCallCount -eq 0) 'Expired consent reached the provider.'
 
+        $fixture = New-TestSemanticFixture
+        $actualUtcNow = [DateTime]::UtcNow
+        $backdatedRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111124' `
+            -RequestedAt $actualUtcNow.AddMinutes(-5) -ExpiresAt $actualUtcNow.AddMinutes(-2)
+        $backdatedDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $backdatedRequest -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $actualUtcNow.AddMinutes(-4)
+        $backdatedNow = $actualUtcNow.AddMinutes(-3)
+        $backdatedExpiredRun = Invoke-TestSemanticBridge -Fixture $fixture -Request $backdatedRequest -Decision $backdatedDecision -Now $backdatedNow
+        Assert-TestCondition ([string]$backdatedExpiredRun.status -ceq 'BLOCKED') 'A backdated Now value reopened consent already expired by wall-clock UTC.'
+        Assert-TestCondition ([int]$backdatedExpiredRun.providerCallCount -eq 0) 'Backdated Now released provider egress for expired consent.'
+        Assert-TestCondition ($null -eq $backdatedExpiredRun.evidenceBytes) 'Backdated Now caused expired consent to emit evidence.'
+
         $fixture = New-TestSemanticFixture -ItemCount 2
         $consentStartedAt = [DateTime]::UtcNow
         $shortRequest = New-StandardSemanticBridgeConsentRequest `
@@ -1351,6 +1367,256 @@ function Update-TestConsentDigests {
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
             -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
         Assert-TestCondition ([bool]$numericEquivalentVerification.valid) 'Numeric schemaVersion 2.0 was rejected although it is schema-equivalent to integer 2.'
+    }
+
+    # Scenario: A multi-item execution validates consent once, then uses its detached expiry gate.
+    # Purpose: Full request/decision/schema validation must not repeat at each provider boundary.
+    It 'InterT184_full_consent_validation_runs_once_for_multi_item_execution' {
+        $fixture = New-TestSemanticFixture -ItemCount 2
+        $module = Get-Module -Name StandardSemanticBridge | Select-Object -First 1
+        $originalValidator = & $module {
+            (Get-Item -Path Function:\Test-StandardSemanticBridgeConsent).ScriptBlock
+        }
+        & $module {
+            param($validator)
+            $script:StandardSemanticBridgeConsentPerfTestCount = 0
+            $script:StandardSemanticBridgeConsentPerfTestOriginal = $validator
+            Set-Item -Path Function:\Test-StandardSemanticBridgeConsent -Value {
+                [CmdletBinding()]
+                param(
+                    [Parameter(Mandatory = $true)] $ConsentRequest,
+                    [Parameter(Mandatory = $true)] $ConsentDecision,
+                    [Parameter(Mandatory = $true)] $CurrentBindings,
+                    [Parameter(Mandatory = $true)] $CurrentProviderRoute,
+                    [Parameter(Mandatory = $true)][string] $CurrentPurpose,
+                    [Parameter(Mandatory = $true)] $CurrentScope,
+                    [Parameter(Mandatory = $true)] $CurrentProviderTextInventory,
+                    [Parameter(Mandatory = $true)] $CurrentAnalyzerSet,
+                    [DateTime] $Now = [DateTime]::UtcNow
+                )
+                $script:StandardSemanticBridgeConsentPerfTestCount++
+                & $script:StandardSemanticBridgeConsentPerfTestOriginal @PSBoundParameters
+            }
+        } $originalValidator
+
+        try {
+            $run = Invoke-TestSemanticBridge -Fixture $fixture
+            $validationCount = & $module { $script:StandardSemanticBridgeConsentPerfTestCount }
+        }
+        finally {
+            & $module {
+                param($validator)
+                Set-Item -Path Function:\Test-StandardSemanticBridgeConsent -Value $validator
+                Remove-Variable -Name StandardSemanticBridgeConsentPerfTestCount, StandardSemanticBridgeConsentPerfTestOriginal -Scope Script -ErrorAction SilentlyContinue
+            } $originalValidator
+            $fixture.Rsa.Dispose()
+            $fixture.PublicRsa.Dispose()
+        }
+
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') 'The multi-item consent count fixture did not complete successfully.'
+        Assert-TestCondition ([int]$run.providerCallCount -eq 2) "The fixture did not reach all provider items: status=$($run.status), calls=$($run.providerCallCount), reason=$($run.reason)"
+        Assert-TestCondition ([int]$validationCount -eq 1) "Full consent/schema validation ran $validationCount times; it must run once per execution."
+    }
+
+    # Scenario: Another runspace mutates caller-owned inputs after the first provider starts.
+    # Purpose: Egress, evidence metadata, and later callback contexts must use the start-of-call snapshot.
+    It 'InterT185_execution_snapshot_is_detached_from_external_mutation' {
+        $fixture = New-TestSemanticFixture -ItemCount 2
+        $firstPath = [string]$fixture.Inventory.items[0].path
+        $secondPath = [string]$fixture.Inventory.items[1].path
+        $secondSourceItem = @($fixture.Items | Where-Object { [string]$_.path -ceq $secondPath })[0]
+        $originalSecondText = [string]$secondSourceItem.text
+        $originalAuthorizer = [string]$fixture.Decision.authorizer.subject
+        $providerStartedMarker = Join-Path $TestDrive 'snapshot-provider-started.txt'
+        $mutationCompletedMarker = Join-Path $TestDrive 'snapshot-mutation-completed.txt'
+        $providerContext = [pscustomobject][ordered]@{
+            marker = $providerStartedMarker
+            mutationCompletedMarker = $mutationCompletedMarker
+            firstPath = $firstPath
+            secondPath = $secondPath
+            expectedSecondText = $originalSecondText
+            emptyArray = @()
+            singletonArray = @('context-only')
+            manyArray = @('context-first', 'context-second', 'context-third')
+            nested = [pscustomobject][ordered]@{ singletonArray = @('nested-only') }
+        }
+        $provider = {
+            param($providerRequest, $callbackContext)
+            $path = [string]$providerRequest.path
+            if ($path -ceq [string]$callbackContext.firstPath) {
+                [IO.File]::WriteAllText([string]$callbackContext.marker, 'first-provider-started')
+                $deadline = [DateTime]::UtcNow.AddSeconds(20)
+                while (-not (Test-Path -LiteralPath ([string]$callbackContext.mutationCompletedMarker) -PathType Leaf)) {
+                    if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for the external mutation completion marker.' }
+                    [Threading.Thread]::Sleep(25)
+                }
+            }
+            if ($path -ceq [string]$callbackContext.secondPath -and
+                ([string]$providerRequest.text -cne [string]$callbackContext.expectedSecondText)) {
+                throw 'provider input or callback context changed after the execution snapshot.'
+            }
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "snapshot-$path-intent"; ruleId = 'fixture.intent'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_developer_intent' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "snapshot-$path-security"; ruleId = 'fixture.security'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $mutationRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $mutationRunspace.Open()
+        $mutationPowerShell = [System.Management.Automation.PowerShell]::Create()
+        $mutationPowerShell.Runspace = $mutationRunspace
+        [void]$mutationPowerShell.AddScript({
+            param($request, $decision, $bindings, $route, $scope, $secondItem, $analyzers, $providerContext, $signerContext, $marker, $completedMarker)
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            while (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+                if ([DateTime]::UtcNow -ge $deadline) { throw 'timed out waiting for the first provider marker.' }
+                [Threading.Thread]::Sleep(25)
+            }
+            $request.scope.description = 'externally mutated consent request.'
+            $decision.authorizer.subject = 'externally mutated authorizer.'
+            $bindings.tool.toolId = 'externally-mutated-tool'
+            $route.model = 'externally-mutated-model'
+            $scope.description = 'externally mutated current scope.'
+            $secondItem.text = 'externally mutated source text.'
+            $analyzers[0].version = '9.9.9'
+            $providerContext.expectedSecondText = 'externally mutated callback context.'
+            $signerContext.privateKeyXml = '<invalid external signer mutation />'
+            [IO.File]::WriteAllText($completedMarker, 'mutation-complete')
+            return 'mutation-applied'
+        }).AddArgument($fixture.Request).AddArgument($fixture.Decision).AddArgument($fixture.Bindings).AddArgument($fixture.Route).AddArgument($fixture.Scope).AddArgument($secondSourceItem).AddArgument($fixture.Analyzers).AddArgument($providerContext).AddArgument($fixture.SignerContext).AddArgument($providerStartedMarker).AddArgument($mutationCompletedMarker)
+        $mutationAsync = $mutationPowerShell.BeginInvoke()
+
+        try {
+            $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $provider -ProviderContext $providerContext -SignerContext $fixture.SignerContext -TimeoutSeconds 45
+            $mutationOutput = @($mutationPowerShell.EndInvoke($mutationAsync))
+            $mutationErrors = @($mutationPowerShell.Streams.Error)
+        }
+        finally {
+            $mutationPowerShell.Dispose()
+            $mutationRunspace.Dispose()
+            $fixture.Rsa.Dispose()
+            $fixture.PublicRsa.Dispose()
+        }
+
+        Assert-TestCondition ($mutationOutput -contains 'mutation-applied') 'The external mutation fixture did not modify caller-owned inputs.'
+        Assert-TestCondition (Test-Path -LiteralPath $providerStartedMarker -PathType Leaf) "The provider callback did not enter before the mutation fixture ran: status=$($run.status), calls=$($run.providerCallCount), reason=$($run.reason)"
+        Assert-TestCondition (Test-Path -LiteralPath $mutationCompletedMarker -PathType Leaf) 'The external mutation runspace did not complete all writes before provider response.'
+        Assert-TestCondition ($mutationErrors.Count -eq 0) "The external mutation runspace reported errors: $($mutationErrors -join '; ')"
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "External input mutation changed execution status: $($run.reason)"
+        Assert-TestCondition ([int]$run.providerCallCount -eq 2) 'External mutation changed the captured work-item count.'
+        Assert-TestCondition ([string]$run.evidence.consent.authorizer.subject -ceq $originalAuthorizer) 'Evidence metadata did not use the captured decision.'
+    }
+
+    # Scenario: CLIXML-detached values retain array shape and binary content.
+    # Purpose: Snapshot normalization must preserve 0/1/N arrays and byte[] values on Windows PowerShell and PowerShell 7.
+    It 'UnitT186_detached_snapshot_preserves_array_shape_and_binary_bytes' {
+        $module = Get-Module -Name StandardSemanticBridge | Select-Object -First 1
+        $sourceBytes = [byte[]](1, 2, 3, 4)
+        $nestedBytes = [byte[]](9, 8, 7)
+        $source = [pscustomobject][ordered]@{
+            zero = @()
+            one = @('only')
+            many = @('first', 'second', 'third')
+            bytes = $sourceBytes
+            nested = [pscustomobject][ordered]@{ values = @('nested-only'); bytes = $nestedBytes }
+        }
+        $snapshot = & $module {
+            param($value)
+            Copy-StandardSemanticBridgeExecutionSnapshotValue -Value $value
+        } $source
+
+        Assert-TestCondition ($snapshot.zero -is [array] -and $snapshot.zero.Count -eq 0) 'An empty array did not retain array shape.'
+        Assert-TestCondition ($snapshot.one -is [array] -and $snapshot.one.Count -eq 1 -and [string]$snapshot.one[0] -ceq 'only') 'A singleton array did not retain array shape.'
+        Assert-TestCondition ($snapshot.many -is [array] -and $snapshot.many.Count -eq 3 -and (@($snapshot.many) -join ',') -ceq 'first,second,third') 'A multi-item array did not retain array shape and values.'
+        Assert-TestCondition ($snapshot.bytes -is [byte[]] -and (@($snapshot.bytes) -join ',') -ceq '1,2,3,4') 'A root byte array did not retain its type and content.'
+        Assert-TestCondition (-not [object]::ReferenceEquals($sourceBytes, $snapshot.bytes)) 'The root byte-array snapshot aliases caller-owned bytes.'
+        Assert-TestCondition ($snapshot.nested.values -is [array] -and $snapshot.nested.values.Count -eq 1) 'A nested singleton array did not retain array shape.'
+        Assert-TestCondition ($snapshot.nested.bytes -is [byte[]] -and (@($snapshot.nested.bytes) -join ',') -ceq '9,8,7') 'A nested byte array did not retain its type and content.'
+        Assert-TestCondition (-not [object]::ReferenceEquals($nestedBytes, $snapshot.nested.bytes)) 'The nested byte-array snapshot aliases caller-owned bytes.'
+    }
+
+    # Scenario: A direct callback helper round-trips array and binary arguments through its child process.
+    # Purpose: Child bootstrap normalization must restore the exact schema payload shapes.
+    It 'UnitT187_callback_child_preserves_payload_array_and_binary_shapes' {
+        $argument = [pscustomobject][ordered]@{
+            emptyArray = @()
+            singletonArray = @('argument-only')
+            manyArray = @('argument-first', 'argument-second', 'argument-third')
+            nested = [pscustomobject][ordered]@{ singletonArray = @('argument-nested') }
+            bytes = [byte[]](0x11, 0x22, 0x33)
+        }
+        $callbackContext = [pscustomobject][ordered]@{
+            emptyArray = @()
+            singletonArray = @('context-only')
+            manyArray = @('context-first', 'context-second', 'context-third')
+            nested = [pscustomobject][ordered]@{ singletonArray = @('context-nested') }
+            bytes = [byte[]](0x44, 0x55, 0x66, 0x77)
+        }
+        $callback = {
+            param($callbackArgument, $context)
+            [pscustomobject][ordered]@{
+                callbackEntered = $true
+                argumentArraysPreserved = [bool]($callbackArgument.emptyArray -is [array] -and $callbackArgument.emptyArray.Count -eq 0 -and $callbackArgument.singletonArray -is [array] -and $callbackArgument.singletonArray.Count -eq 1 -and $callbackArgument.manyArray -is [array] -and $callbackArgument.manyArray.Count -eq 3 -and $callbackArgument.nested.singletonArray -is [array] -and $callbackArgument.nested.singletonArray.Count -eq 1)
+                contextArraysPreserved = [bool]($context.emptyArray -is [array] -and $context.emptyArray.Count -eq 0 -and $context.singletonArray -is [array] -and $context.singletonArray.Count -eq 1 -and $context.manyArray -is [array] -and $context.manyArray.Count -eq 3 -and $context.nested.singletonArray -is [array] -and $context.nested.singletonArray.Count -eq 1)
+                argumentByteArrayPreserved = [bool]($callbackArgument.bytes -is [byte[]] -and $callbackArgument.bytes.Count -eq 3 -and [int]$callbackArgument.bytes[0] -eq 0x11 -and [int]$callbackArgument.bytes[2] -eq 0x33)
+                contextByteArrayPreserved = [bool]($context.bytes -is [byte[]] -and $context.bytes.Count -eq 4 -and [int]$context.bytes[0] -eq 0x44 -and [int]$context.bytes[3] -eq 0x77)
+            }
+        }
+        $module = Get-Module -Name StandardSemanticBridge | Select-Object -First 1
+        $resultItems = @(& $module {
+            param($callback, $argument, $context)
+            Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $callback -Argument $argument -CallbackContext $context -TimeoutMilliseconds 10000 -Context 'payload shape test'
+        } $callback $argument $callbackContext)
+
+        Assert-TestCondition ($resultItems.Count -eq 1) 'The child callback did not return exactly one result.'
+        $shapeResult = $resultItems[0]
+        Assert-TestCondition ([bool]$shapeResult.callbackEntered) 'The child callback did not enter.'
+        Assert-TestCondition ([bool]$shapeResult.argumentArraysPreserved) 'The child callback argument lost a 0/1/N array shape.'
+        Assert-TestCondition ([bool]$shapeResult.contextArraysPreserved) 'The child callback context lost a 0/1/N array shape.'
+        Assert-TestCondition ([bool]$shapeResult.argumentByteArrayPreserved) 'The child callback argument lost its byte[] type or content.'
+        Assert-TestCondition ([bool]$shapeResult.contextByteArrayPreserved) 'The child callback context lost its byte[] type or content.'
+    }
+
+    # Scenario: Public execution receives scalar values at parameters whose contract requires arrays.
+    # Purpose: Snapshot normalization must not silently wrap invalid caller shapes into valid arrays.
+    It 'UnitT188_scalar_public_inputs_fail_closed_without_provider_egress' {
+        foreach ($invalidParameter in @('TextItems', 'Analyzers')) {
+            $fixture = New-TestSemanticFixture
+            $textItems = $fixture.Items
+            $analyzers = $fixture.Analyzers
+            if ($invalidParameter -ceq 'TextItems') { $textItems = $fixture.Items[0] }
+            else { $analyzers = $fixture.Analyzers[0] }
+
+            try {
+                $run = Invoke-StandardSemanticBridge `
+                    -ConsentRequest $fixture.Request `
+                    -ConsentDecision $fixture.Decision `
+                    -Bindings $fixture.Bindings `
+                    -ProviderRoute $fixture.Route `
+                    -Purpose 'Synthetic test-only semantic review.' `
+                    -Scope $fixture.Scope `
+                    -TextItems $textItems `
+                    -Analyzers $analyzers `
+                    -ProviderCallback $fixture.Provider `
+                    -SignerCallback $fixture.Signer `
+                    -ExpectedSignerPublicKey $fixture.PublicRsa `
+                    -ExpectedSignerKeyId 'fixture-key' `
+                    -ProviderCallbackContext $fixture.ProviderContext `
+                    -SignerCallbackContext $fixture.SignerContext `
+                    -TimeoutSeconds 30 `
+                    -Now ([DateTime]::UtcNow)
+
+                Assert-TestCondition ([string]$run.status -ceq 'FAILED') "Scalar $invalidParameter input did not fail closed."
+                Assert-TestCondition ([int]$run.providerCallCount -eq 0) "Scalar $invalidParameter input reached the provider."
+                Assert-TestCondition ($null -eq $run.evidenceBytes) "Scalar $invalidParameter input emitted evidence."
+            }
+            finally {
+                $fixture.Rsa.Dispose()
+                $fixture.PublicRsa.Dispose()
+            }
+        }
     }
 
     # Scenario: The caller supplies a safe Windows-style path that inventory construction canonicalizes to forward slashes.
