@@ -396,15 +396,19 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-FocusedLinuxContainment.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-PesterShardProcess.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
       "license": "Apache-2.0"
     },
     {
       "path": "scripts/Invoke-StandardValidation.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "scripts/Invoke-PesterShardProcess.ps1",
       "license": "Apache-2.0"
     },
     {
