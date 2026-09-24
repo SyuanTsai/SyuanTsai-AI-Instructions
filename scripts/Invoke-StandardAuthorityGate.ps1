@@ -3403,12 +3403,15 @@ if ($null -eq $approvedPythonItem -or $approvedPythonItem.PSIsContainer -or
     throw 'The frozen SkillSpector receipt does not expose a regular in-closure Python for semantic authority tests.'
 }
 $priorAuthorityPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
+$priorAuthoritySkillSpectorVersion = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')
 try {
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]$skillSpectorReceipt.resolvedVersion,'Process')
     [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$approvedSemanticPython,'Process')
     $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
 }
 finally {
     [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',$priorAuthoritySkillSpectorVersion,'Process')
 }
 Assert-AuthorityPesterResult `
     -Result $authorityResult `

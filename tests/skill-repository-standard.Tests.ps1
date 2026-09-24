@@ -1213,6 +1213,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
         }
         Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared gate must bind semantic Python tests to the frozen SkillSpector environment.'
+        Assert-Match $gate ([regex]::Escape("[Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')")) 'Shared gate must snapshot the caller SkillSpector version environment before semantic tests.'
+        Assert-Match $gate ([regex]::Escape("[Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]`$skillSpectorReceipt.resolvedVersion,'Process')")) 'Shared gate must bind semantic tests to the resolved SkillSpector receipt version.'
+        Assert-Match $gate ([regex]::Escape("[Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',`$priorAuthoritySkillSpectorVersion,'Process')")) 'Shared gate must restore the caller SkillSpector version environment after semantic tests.'
+        $inventoryProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot 'standard-semantic-inventory-probe.Tests.ps1')
+        Assert-Match $inventoryProbe ([regex]::Escape("GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')")) 'Installed scanner probe must consume the gate-bound SkillSpector version.'
+        Assert-Match $inventoryProbe 'IsNullOrWhiteSpace\(\$script:FrozenSkillSpectorVersion\)' 'Installed scanner probe must fail closed when the gate-bound SkillSpector version is missing.'
         foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
             Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must start Python in isolated mode."
