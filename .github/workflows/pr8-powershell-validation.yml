@@ -20,8 +20,49 @@ permissions:
   contents: read
 
 jobs:
+  linux-callback-focused:
+    name: Focused callback containment (PowerShell 7 on Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+
+      - name: Run required Unix callback containment boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in focused test step.' }
+          Import-Module $pester.Path -Force
+          $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback containment boundary' -PassThru -Show All
+          if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback containment boundary.' }
+          Write-Host "UnixCallbackContainment - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount) Pending: $($result.PendingCount) Inconclusive: $($result.InconclusiveCount)"
+          if ([int64]$result.TotalCount -ne 5 -or
+              [int]$result.PassedCount -ne 5 -or
+              [int]$result.FailedCount -ne 0 -or
+              [int]$result.SkippedCount -ne 0 -or
+              [int]$result.PendingCount -ne 0 -or
+              [int]$result.InconclusiveCount -ne 0) {
+            throw 'Unix callback containment boundary did not produce exactly five passing tests.'
+          }
+
   windows-powershell-51:
     name: Pester (Windows PowerShell 5.1)
+    needs: linux-callback-focused
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -73,8 +114,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 565
-            ExpectedSkippedCount = 7
+            ExpectedTotalCount = 572
+            ExpectedSkippedCount = 12
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -84,6 +125,7 @@ jobs:
 
   powershell-7:
     name: Pester (PowerShell 7)
+    needs: linux-callback-focused
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -135,8 +177,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 565
-            ExpectedSkippedCount = 6
+            ExpectedTotalCount = 572
+            ExpectedSkippedCount = 11
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -146,6 +188,7 @@ jobs:
 
   powershell-7-unix-composition:
     name: Composition (PowerShell 7 on Linux)
+    needs: linux-callback-focused
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -203,6 +246,7 @@ jobs:
           else
             git diff-tree --check --root -r HEAD
           fi
+          exit 0
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -214,29 +258,10 @@ jobs:
           }
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
 
-      - name: Run Unix callback process group regression
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in focused test step.' }
-          Import-Module $pester.Path -Force
-          $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback process group boundary' -PassThru
-          if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback process group regression.' }
-          Write-Host "UnixProcessGroup - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-          if ([int]$result.TotalCount -ne 1 -or
-              [int]$result.PassedCount -ne 1 -or
-              [int]$result.FailedCount -ne 0 -or
-              [int]$result.SkippedCount -ne 0 -or
-              [int]$result.PendingCount -ne 0 -or
-              [int]$result.InconclusiveCount -ne 0) {
-            throw 'Unix callback process group regression did not produce exactly one passing test.'
-          }
-
       - name: Run cross-platform composition and acquisition tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
@@ -261,4 +286,3 @@ jobs:
             if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
             if ([int]$result.PassedCount -ne [int]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
           }
-          exit 0

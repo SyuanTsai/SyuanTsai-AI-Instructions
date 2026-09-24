@@ -7,7 +7,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 3
+            '.github/workflows/pr8-powershell-validation.yml' = 4
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
@@ -93,9 +93,61 @@ jobs:
         }
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
-        Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 1 'Only the direct Linux composition step may import Pester in workflow scope.'
+        Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 2 'The dedicated Linux focused job and direct Linux composition step may import Pester in workflow scope; Windows full suites must stay behind the bounded executor.'
         Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 2 'Both Windows full-suite jobs must delegate module validation and import to the bounded executor.'
         Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 2 'Workflow logging must use discovery metadata without importing the module first.'
+    }
+
+    # Scenario: A Unix callback containment regression is added without becoming the first gate for either workflow.
+    # Purpose: Require the five-case focused boundary suite before Windows full suites and before Standard authority validation.
+    It 'UnitT15_runs_linux_callback_containment_before_full_suites_and_authority_gate' {
+        $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
+        $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
+        $semanticTestsPath = Join-Path $script:RepositoryRoot 'tests/standard-semantic-bridge.Tests.ps1'
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $semanticTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $semanticTestsPath
+        $focusedDescribe = 'Unix callback containment boundary'
+
+        Assert-Match $required ([regex]::Escape($focusedDescribe)) 'PowerShell Regression must run the Unix callback containment Describe.'
+        Assert-Match $standards ([regex]::Escape($focusedDescribe)) 'Standards Conformance must run the Unix callback containment Describe.'
+        $describeMarker = "Describe '$focusedDescribe'"
+        Assert-Equal ([regex]::Matches($semanticTests, [regex]::Escape($describeMarker))).Count 1 'The semantic bridge tests must define one focused containment Describe.'
+        $describeStart = $semanticTests.IndexOf($describeMarker)
+        $nextDescribe = $semanticTests.IndexOf("`nDescribe ", $describeStart + $describeMarker.Length)
+        $focusedTests = if ($nextDescribe -ge 0) {
+            $semanticTests.Substring($describeStart, $nextDescribe - $describeStart)
+        }
+        else {
+            $semanticTests.Substring($describeStart)
+        }
+        $focusedItMatches = [regex]::Matches($focusedTests, "(?m)^\s*It\s+'([^']+)'")
+        Assert-Equal $focusedItMatches.Count 5 'The focused containment Describe must contain exactly five independent It cases.'
+        $focusedItNames = ($focusedItMatches | ForEach-Object { $_.Groups[1].Value }) -join "`n"
+        foreach ($caseMarker in @('normal', 'timeout', 'setsid', 'late', 'secret')) {
+            Assert-Match $focusedItNames $caseMarker "The focused containment It names must include the '$caseMarker' case."
+        }
+        foreach ($workflow in @($required, $standards)) {
+            Assert-Match $workflow '\[int64\]\$result\.TotalCount\s*-ne\s*5' 'The focused boundary gate must require exactly five discovered tests.'
+            Assert-Match $workflow '\[int\]\$result\.PassedCount\s*-ne\s*5' 'The focused boundary gate must require five passed tests.'
+            Assert-Match $workflow '\[int\]\$result\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed focused tests.'
+            Assert-Match $workflow '\[int\]\$result\.SkippedCount\s*-ne\s*0' 'The focused boundary gate must reject skipped focused tests.'
+            Assert-Match $workflow '\[int\]\$result\.PendingCount\s*-ne\s*0' 'The focused boundary gate must reject pending focused tests.'
+            Assert-Match $workflow '\[int\]\$result\.InconclusiveCount\s*-ne\s*0' 'The focused boundary gate must reject inconclusive focused tests.'
+        }
+
+        Assert-Match $required 'windows-powershell-51:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'Windows PowerShell 5.1 full suite must depend on the Linux focused job.'
+        Assert-Match $required 'powershell-7:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'PowerShell 7 full suite must depend on the Linux focused job.'
+        Assert-Match $required 'powershell-7-unix-composition:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'The Linux composition job must depend on the dedicated focused job.'
+
+        $focusedStepIndex = $standards.IndexOf('Run required Unix callback containment boundary')
+        $goSetupIndex = $standards.IndexOf('Set up approved Go runtime')
+        $authorityGateIndex = $standards.IndexOf('Run canonical Standard v1 authority gate')
+        Assert-True ($focusedStepIndex -ge 0) 'Standards Conformance must define the Linux focused boundary step.'
+        Assert-True ($goSetupIndex -ge 0) 'Standards Conformance must retain approved Go setup.'
+        Assert-True ($authorityGateIndex -ge 0) 'Standards Conformance must retain the canonical authority gate.'
+        Assert-True ($focusedStepIndex -lt $goSetupIndex) 'Standards Conformance must run Linux focused cases before Go setup.'
+        Assert-True ($focusedStepIndex -lt $authorityGateIndex) 'Standards Conformance must run Linux focused cases before the authority gate.'
     }
 
     # Scenario: An authority suite or the Ruleset-required bridge changes without running the complete shared gate.

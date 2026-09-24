@@ -966,3 +966,196 @@ Describe 'Unix callback process group boundary' {
         }
     }
 }
+
+$script:UnixContainmentIsLinuxAtDiscovery = ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and [IO.File]::Exists('/proc/self/ns/pid'))
+
+Describe 'Unix callback containment boundary' {
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1') -Force
+        $script:UnixContainmentModule = Get-Module StandardSemanticBridge | Select-Object -First 1
+    }
+
+    # Scenario: A callback returns normally without creating a descendant.
+    # Purpose: The Linux-first boundary must permit a clean callback and restore its parent state.
+    It 'InterT160_normal_callback_exit_completes_inside_verified_boundary' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $run = & $script:UnixContainmentModule {
+            param($callback)
+            Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                -Callback $callback `
+                -Argument ([pscustomobject]@{}) `
+                -CallbackContext ([pscustomobject]@{}) `
+                -TimeoutMilliseconds 5000 `
+                -Context 'normal Unix containment callback'
+        } { param($argument, $context) return 'normal-complete' }
+        if ($null -eq $run -or [string]$run[0] -cne 'normal-complete') {
+            throw 'A normal callback did not complete inside the verified Unix boundary.'
+        }
+    }
+
+    # Scenario: A callback exceeds its invocation deadline while still running.
+    # Purpose: Timeout cleanup must terminate the host and every descendant before the late marker is written.
+    It 'InterT161_timeout_terminates_callback_and_descendants_before_late_side_effect' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $startedMarker = Join-Path $TestDrive 'unix-containment-timeout-started.txt'
+        $childStartedMarker = Join-Path $TestDrive 'unix-containment-timeout-child-started.txt'
+        $lateMarker = Join-Path $TestDrive 'unix-containment-timeout-late.txt'
+        $callback = {
+            param($argument, $context)
+            [IO.File]::WriteAllText([string]$context.startedMarker, 'callback-started')
+            $childScript = "[IO.File]::WriteAllText('$([string]$context.childStartedMarker)', 'child-started'); [Threading.Thread]::Sleep(3000); [IO.File]::WriteAllText('$([string]$context.lateMarker)', 'late timeout output')"
+            $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $childInfo = New-Object Diagnostics.ProcessStartInfo
+            $childInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $childInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedChild
+            $childInfo.UseShellExecute = $false
+            $childInfo.CreateNoWindow = $true
+            $childInfo.RedirectStandardOutput = $true
+            $childInfo.RedirectStandardError = $true
+            $child = New-Object Diagnostics.Process
+            $child.StartInfo = $childInfo
+            try { if (-not $child.Start()) { throw 'timeout child did not start.' } }
+            finally { $child.Dispose() }
+            [Threading.Thread]::Sleep(3000)
+            [IO.File]::WriteAllText([string]$context.lateMarker, 'late timeout output')
+        }
+        $errorMessage = $null
+        try {
+            & $script:UnixContainmentModule {
+                param($callback, $callbackContext)
+                Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                    -Callback $callback `
+                    -Argument ([pscustomobject]@{}) `
+                    -CallbackContext $callbackContext `
+                    -TimeoutMilliseconds 1500 `
+                    -Context 'timeout Unix containment callback'
+            } $callback ([pscustomobject]@{ startedMarker = $startedMarker; childStartedMarker = $childStartedMarker; lateMarker = $lateMarker }) | Out-Null
+        }
+        catch { $errorMessage = [string]$_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($errorMessage) -or $errorMessage -notmatch 'deadline|timeout') {
+            throw 'The timeout callback did not fail with a deadline diagnostic.'
+        }
+        if (-not (Test-Path -LiteralPath $startedMarker -PathType Leaf) -or -not (Test-Path -LiteralPath $childStartedMarker -PathType Leaf)) {
+            throw 'The timeout regression did not prove that the callback child started before cleanup.'
+        }
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $lateMarker) { throw 'A timed-out callback produced a late side effect.' }
+    }
+
+    # Scenario: A callback launches a real Linux setsid child that leaves the original process group.
+    # Purpose: PID namespace or strict subreaper cleanup must contain a reparented, escaped descendant.
+    It 'InterT162_setsid_descendant_is_terminated_before_namespace_boundary_returns' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $setsidPath = @('/usr/bin/setsid', '/bin/setsid') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string]$setsidPath)) { throw 'Linux setsid executable is required for this regression.' }
+        $startedMarker = Join-Path $TestDrive 'unix-containment-setsid-started.txt'
+        $lateMarker = Join-Path $TestDrive 'unix-containment-setsid-late.txt'
+        $callback = {
+            param($argument, $context)
+            $startedPath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$context.startedMarker))
+            $latePath = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([string]$context.lateMarker))
+            $childScript = "`$started = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$startedPath')); `$late = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$latePath')); [IO.File]::WriteAllText(`$started, 'started'); [Threading.Thread]::Sleep(2000); [IO.File]::WriteAllText(`$late, 'late setsid output')"
+            $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $childInfo = New-Object Diagnostics.ProcessStartInfo
+            $childInfo.FileName = [string]$context.setsidPath
+            $childInfo.Arguments = '"' + $hostPath + '" -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedChild
+            $childInfo.UseShellExecute = $false
+            $childInfo.CreateNoWindow = $true
+            $childInfo.RedirectStandardOutput = $true
+            $childInfo.RedirectStandardError = $true
+            $child = New-Object Diagnostics.Process
+            $child.StartInfo = $childInfo
+            try { if (-not $child.Start()) { throw 'setsid child did not start.' } }
+            finally { $child.Dispose() }
+            $startDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+            while (-not (Test-Path -LiteralPath ([string]$context.startedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $startDeadline) { Start-Sleep -Milliseconds 20 }
+            if (-not (Test-Path -LiteralPath ([string]$context.startedMarker) -PathType Leaf)) { throw 'setsid child did not record startup.' }
+            return 'setsid-started'
+        }
+        $run = & $script:UnixContainmentModule {
+            param($callback, $callbackContext)
+            Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                -Callback $callback `
+                -Argument ([pscustomobject]@{}) `
+                -CallbackContext $callbackContext `
+                -TimeoutMilliseconds 5000 `
+                -Context 'setsid Unix containment callback'
+        } $callback ([pscustomobject]@{ setsidPath = $setsidPath; startedMarker = $startedMarker; lateMarker = $lateMarker })
+        if ($null -eq $run) { throw 'The setsid callback returned no result.' }
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $lateMarker) { throw 'A setsid descendant produced a late side effect.' }
+        Start-Sleep -Milliseconds 2200
+        if (Test-Path -LiteralPath $lateMarker) { throw 'A reparented setsid descendant survived cleanup.' }
+    }
+
+    # Scenario: A callback exits successfully after starting a child that holds redirected output handles.
+    # Purpose: Host exit must trigger cleanup before capture waits on a descendant's late output.
+    It 'InterT163_successful_host_exit_closes_late_output_handles' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $startedMarker = Join-Path $TestDrive 'unix-containment-success-started.txt'
+        $lateMarker = Join-Path $TestDrive 'unix-containment-success-late.txt'
+        $callback = {
+            param($argument, $context)
+            $childScript = "[IO.File]::WriteAllText('$([string]$context.startedMarker)', 'started'); [Threading.Thread]::Sleep(2000); [IO.File]::WriteAllText('$([string]$context.lateMarker)', 'late output')"
+            $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $childInfo = New-Object Diagnostics.ProcessStartInfo
+            $childInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $childInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedChild
+            $childInfo.UseShellExecute = $false
+            $childInfo.CreateNoWindow = $true
+            $childInfo.RedirectStandardOutput = $true
+            $childInfo.RedirectStandardError = $true
+            $child = New-Object Diagnostics.Process
+            $child.StartInfo = $childInfo
+            try { if (-not $child.Start()) { throw 'late-output child did not start.' } }
+            finally { $child.Dispose() }
+            $startDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+            while (-not (Test-Path -LiteralPath ([string]$context.startedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $startDeadline) { Start-Sleep -Milliseconds 20 }
+            if (-not (Test-Path -LiteralPath ([string]$context.startedMarker) -PathType Leaf)) { throw 'late-output child did not record startup.' }
+            return 'host-exited'
+        }
+        $run = & $script:UnixContainmentModule {
+            param($callback, $callbackContext)
+            Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                -Callback $callback `
+                -Argument ([pscustomobject]@{}) `
+                -CallbackContext $callbackContext `
+                -TimeoutMilliseconds 5000 `
+                -Context 'late-output Unix containment callback'
+        } $callback ([pscustomobject]@{ startedMarker = $startedMarker; lateMarker = $lateMarker })
+        if ($null -eq $run) { throw 'The late-output callback returned no result.' }
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $lateMarker) { throw 'A callback descendant produced late output after host exit.' }
+        Start-Sleep -Milliseconds 2200
+        if (Test-Path -LiteralPath $lateMarker) { throw 'A callback descendant survived output-handle cleanup.' }
+    }
+
+    # Scenario: The parent process carries a secret that is not part of the callback contract.
+    # Purpose: Namespace and fallback launches must preserve the existing allowlisted child environment boundary.
+    It 'InterT164_parent_secret_is_excluded_from_callback_environment' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $secretName = 'STANDARD_SEMANTIC_BRIDGE_TEST_SECRET_' + ([Guid]::NewGuid().ToString('N'))
+        $secretValue = 'parent-secret-' + ([Guid]::NewGuid().ToString('N'))
+        $executionMarker = Join-Path $TestDrive 'unix-containment-secret-executed.txt'
+        [Environment]::SetEnvironmentVariable($secretName, $secretValue, [EnvironmentVariableTarget]::Process)
+        try {
+            $callback = {
+                param($argument, $context)
+                [IO.File]::WriteAllText([string]$context.executionMarker, 'executed')
+                return [Environment]::GetEnvironmentVariable([string]$context.secretName, [EnvironmentVariableTarget]::Process)
+            }
+            $run = & $script:UnixContainmentModule {
+                param($callback, $callbackContext)
+                Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                    -Callback $callback `
+                    -Argument ([pscustomobject]@{}) `
+                    -CallbackContext $callbackContext `
+                    -TimeoutMilliseconds 5000 `
+                    -Context 'secret exclusion Unix containment callback'
+            } $callback ([pscustomobject]@{ secretName = $secretName; executionMarker = $executionMarker })
+            if (-not (Test-Path -LiteralPath $executionMarker -PathType Leaf)) {
+                throw 'The secret exclusion callback did not execute.'
+            }
+            if ($null -ne $run -and -not [string]::IsNullOrWhiteSpace([string]$run[0])) {
+                throw 'A callback observed a parent secret outside its explicit contract.'
+            }
+        }
+        finally { [Environment]::SetEnvironmentVariable($secretName, $null, [EnvironmentVariableTarget]::Process) }
+    }
+}
