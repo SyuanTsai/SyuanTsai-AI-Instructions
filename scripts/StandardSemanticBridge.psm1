@@ -1080,6 +1080,47 @@ function Find-StandardSemanticBridgeLinuxNamespaceChildProcessIdentity {
     return $null
 }
 
+function Find-StandardSemanticBridgeLinuxNamespaceInitChildProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)][int] $WrapperProcessId,
+        [Parameter(Mandatory = $true)][string] $ParentNamespaceIdentity
+    )
+
+    $wrapperDirectory = "/proc/{0}" -f $WrapperProcessId
+    $childrenPath = Join-Path (Join-Path (Join-Path $wrapperDirectory 'task') ([string]$WrapperProcessId)) 'children'
+    if (-not [IO.Directory]::Exists($wrapperDirectory)) { return $null }
+    try { $childrenText = [IO.File]::ReadAllText($childrenPath) }
+    catch {
+        if ([IO.Directory]::Exists($wrapperDirectory)) { throw "Could not read callback wrapper children ${childrenPath}: $($_.Exception.Message)" }
+        return $null
+    }
+    foreach ($token in @($childrenText -split '\s+')) {
+        $childProcessId = 0
+        if (-not [int]::TryParse([string]$token, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$childProcessId) -or $childProcessId -le 0) { continue }
+        $item = Get-StandardSemanticBridgeLinuxProcessStat -ProcessId $childProcessId
+        if ($null -eq $item -or [int]$item.ParentProcessId -ne $WrapperProcessId) { continue }
+        try {
+            $namespaceIdentity = Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId ([int]$item.ProcessId)
+            if ([string]::Equals($namespaceIdentity, $ParentNamespaceIdentity, [StringComparison]::Ordinal)) { continue }
+            $status = [IO.File]::ReadAllText(("/proc/{0}/status" -f [int]$item.ProcessId))
+            $nspidMatch = [regex]::Match($status, '(?m)^NSpid:\s+(.+)$')
+            if (-not $nspidMatch.Success) { throw "Could not verify NSpid for process $($item.ProcessId)." }
+            $nspids = @($nspidMatch.Groups[1].Value.Trim() -split '\s+')
+            if ($nspids.Count -eq 0 -or [int]$nspids[$nspids.Count - 1] -ne 1) { continue }
+            return [pscustomobject][ordered]@{
+                ProcessId = [int]$item.ProcessId
+                StartTime = [long]$item.StartTime
+                State = [string]$item.State
+                NamespaceIdentity = $namespaceIdentity
+            }
+        }
+        catch {
+            if ([IO.Directory]::Exists(("/proc/{0}" -f [int]$item.ProcessId))) { throw }
+        }
+    }
+    return $null
+}
+
 function Get-StandardSemanticBridgeLinuxNamespaceInitState {
     param(
         [Parameter(Mandatory = $true)][int] $InitProcessId,
@@ -1616,54 +1657,10 @@ catch {
             }
             $jobAssigned = $true
         }
-        if ($isUnixHost) {
-            # The unshare wrapper is the only process handle we own.  The
-            # child writes its namespace-local PID (which may be 1) and its
-            # namespace link target before reading stdin.  Resolve the actual
-            # host PID only by finding the wrapper's direct child with that
-            # namespace identity; never inspect /proc/1 as a host PID.
-            $namespaceDeadline = [Diagnostics.Stopwatch]::StartNew()
-            $namespaceReady = $false
-            try {
-                $parentNamespaceIdentity = Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId $PID
-                while ($namespaceDeadline.ElapsedMilliseconds -lt 1000) {
-                    if (Test-Path -LiteralPath $pidNamespaceHandshakePath -PathType Leaf) {
-                        try {
-                            $handshakeLines = @([IO.File]::ReadAllLines($pidNamespaceHandshakePath))
-                            $namespacePid = 0
-                            if ($handshakeLines.Count -ge 2 -and
-                                [int]::TryParse([string]$handshakeLines[0], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$namespacePid) -and
-                                $namespacePid -eq 1 -and
-                                -not [string]::IsNullOrWhiteSpace([string]$handshakeLines[1]) -and
-                                [string]$handshakeLines[1].Trim() -cne $parentNamespaceIdentity) {
-                                $unixPidNamespaceIdentity = [string]$handshakeLines[1].Trim()
-                                $namespaceChildIdentity = Find-StandardSemanticBridgeLinuxNamespaceChildProcessIdentity `
-                                    -WrapperProcessId $process.Id `
-                                    -NamespaceIdentity $unixPidNamespaceIdentity
-                                if ($null -ne $namespaceChildIdentity -and
-                                    [int]$namespaceChildIdentity.ProcessId -gt 0 -and
-                                    [long]$namespaceChildIdentity.StartTime -gt 0 -and
-                                    [string]$namespaceChildIdentity.State -notin @('Z', 'X', 'x') -and
-                                    -not $process.HasExited) {
-                                    $unixPidNamespaceInitProcessId = [int]$namespaceChildIdentity.ProcessId
-                                    $unixPidNamespaceInitStartTime = [long]$namespaceChildIdentity.StartTime
-                                    $namespaceReady = $true
-                                    break
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-                    if ($process.HasExited) { break }
-                    Start-Sleep -Milliseconds 10
-                }
-            }
-            finally { $namespaceDeadline.Stop() }
-            if (-not $namespaceReady) {
-                throw [InvalidOperationException]::new("$Context could not prove a live private Linux PID namespace before releasing callback input.")
-            }
-            $unixPidNamespaceActive = $true
-        }
+        # Drain both redirected pipes as soon as the child starts.  The Linux
+        # bootstrap may report a pre-READY failure and exit before callback
+        # input is released; keeping these bounded readers active lets the
+        # parent retain that diagnostic without risking a full pipe deadlock.
         $stdoutTask = [StandardSemanticBridgeBoundedCapture]::Start(
             $process.StandardOutput,
             $script:StandardSemanticBridgeCallbackStdoutQuotaCharacters
@@ -1672,8 +1669,174 @@ catch {
             $process.StandardError,
             $script:StandardSemanticBridgeCallbackStderrQuotaCharacters
         )
+        if ($isUnixHost) {
+            # The unshare wrapper is the only process handle we own.  The
+            # child writes its namespace-local PID (which may be 1) and its
+            # namespace link target before reading stdin.  Resolve the actual
+            # host PID only by finding the wrapper's direct child with that
+            # namespace identity; never inspect /proc/1 as a host PID.
+            $namespaceReady = $false
+            $namespaceLauncherExitedBeforeReady = $false
+            $namespaceDeadlineExpired = $false
+            $lastHandshakeDiagnostic = 'the child bootstrap has not published its READY record.'
+            $remainingAtHandshakeStart = [int]([Math]::Max(0, $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)))
+            $namespaceHandshakeBudgetMilliseconds = [int]([Math]::Min(5000, $remainingAtHandshakeStart))
+            $namespaceHandshakeDeadline = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                $parentNamespaceIdentity = Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId $PID
+                while (-not $namespaceReady -and -not $namespaceLauncherExitedBeforeReady) {
+                    $remainingInvocationMilliseconds = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
+                    if ($remainingInvocationMilliseconds -le 0) {
+                        $namespaceDeadlineExpired = $true
+                        break
+                    }
+                    if ($namespaceHandshakeDeadline.ElapsedMilliseconds -ge $namespaceHandshakeBudgetMilliseconds) { break }
+
+                    if (Test-Path -LiteralPath $pidNamespaceHandshakePath -PathType Leaf) {
+                        try {
+                            $handshakeLines = @([IO.File]::ReadAllLines($pidNamespaceHandshakePath))
+                            $namespacePid = 0
+                            if ($handshakeLines.Count -lt 2 -or
+                                -not [int]::TryParse([string]$handshakeLines[0], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$namespacePid) -or
+                                $namespacePid -ne 1 -or
+                                [string]::IsNullOrWhiteSpace([string]$handshakeLines[1]) -or
+                                [string]$handshakeLines[1].Trim() -ceq $parentNamespaceIdentity) {
+                                $lastHandshakeDiagnostic = 'the READY record was malformed or did not identify PID 1 in a distinct namespace.'
+                            }
+                            else {
+                                $candidateNamespaceIdentity = [string]$handshakeLines[1].Trim()
+                                $namespaceChildIdentity = Find-StandardSemanticBridgeLinuxNamespaceChildProcessIdentity `
+                                    -WrapperProcessId $process.Id `
+                                    -NamespaceIdentity $candidateNamespaceIdentity
+                                if ($null -ne $namespaceChildIdentity -and
+                                    [int]$namespaceChildIdentity.ProcessId -gt 0 -and
+                                    [long]$namespaceChildIdentity.StartTime -gt 0 -and
+                                    [string]$namespaceChildIdentity.State -notin @('Z', 'X', 'x') -and
+                                    -not $process.HasExited) {
+                                    $unixPidNamespaceIdentity = $candidateNamespaceIdentity
+                                    $unixPidNamespaceInitProcessId = [int]$namespaceChildIdentity.ProcessId
+                                    $unixPidNamespaceInitStartTime = [long]$namespaceChildIdentity.StartTime
+                                    $unixPidNamespaceActive = $true
+                                    $namespaceReady = $true
+                                    break
+                                }
+                                $lastHandshakeDiagnostic = 'the READY record was valid, but no live matching direct PID-namespace init child was found.'
+                            }
+                        }
+                        catch { $lastHandshakeDiagnostic = "reading or validating the READY record failed: $($_.Exception.Message)" }
+                    }
+
+                    # Retain a kernel-verified PID-namespace init identity even
+                    # while the bootstrap is still validating procfs.  If the
+                    # invocation expires before READY, cleanup can then verify
+                    # the namespace became empty after killing its wrapper.
+                    if (-not $unixPidNamespaceActive) {
+                        try {
+                            $observedNamespaceChild = Find-StandardSemanticBridgeLinuxNamespaceInitChildProcessIdentity `
+                                -WrapperProcessId $process.Id `
+                                -ParentNamespaceIdentity $parentNamespaceIdentity
+                            if ($null -ne $observedNamespaceChild -and
+                                [int]$observedNamespaceChild.ProcessId -gt 0 -and
+                                [long]$observedNamespaceChild.StartTime -gt 0) {
+                                $unixPidNamespaceIdentity = [string]$observedNamespaceChild.NamespaceIdentity
+                                $unixPidNamespaceInitProcessId = [int]$observedNamespaceChild.ProcessId
+                                $unixPidNamespaceInitStartTime = [long]$observedNamespaceChild.StartTime
+                                $unixPidNamespaceActive = $true
+                                $lastHandshakeDiagnostic = 'the namespace init identity is live; the bootstrap has not yet published READY.'
+                            }
+                        }
+                        catch { $lastHandshakeDiagnostic = "finding the live namespace init child failed: $($_.Exception.Message)" }
+                    }
+
+                    foreach ($captureSpec in @(
+                        [pscustomobject]@{ Name = 'stdout'; Task = $stdoutTask },
+                        [pscustomobject]@{ Name = 'stderr'; Task = $stderrTask }
+                    )) {
+                        if (-not $captureSpec.Task.IsCompleted) { continue }
+                        if ($captureSpec.Task.IsFaulted) {
+                            $captureError = [string]$captureSpec.Task.Exception.GetBaseException().Message
+                            $lastHandshakeDiagnostic = "$($captureSpec.Name) capture failed: $captureError"
+                            continue
+                        }
+                        $captureResult = $captureSpec.Task.GetAwaiter().GetResult()
+                        if ([bool]$captureResult.Exceeded) {
+                            throw [InvalidOperationException]::new("$Context exceeded its isolated $($captureSpec.Name) quota before the Linux PID namespace handshake completed.")
+                        }
+                    }
+
+                    if ($process.HasExited) {
+                        $namespaceLauncherExitedBeforeReady = $true
+                        break
+                    }
+                    $remainingHandshakeMilliseconds = $namespaceHandshakeBudgetMilliseconds - [int][Math]::Min([int]::MaxValue, $namespaceHandshakeDeadline.ElapsedMilliseconds)
+                    $sleepMilliseconds = [int]([Math]::Min(10, [Math]::Min($remainingInvocationMilliseconds, $remainingHandshakeMilliseconds)))
+                    if ($sleepMilliseconds -gt 0) { Start-Sleep -Milliseconds $sleepMilliseconds }
+                }
+                if (-not $namespaceReady -and -not $namespaceLauncherExitedBeforeReady -and
+                    ($TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)) -le 0) {
+                    $namespaceDeadlineExpired = $true
+                }
+            }
+            finally { $namespaceHandshakeDeadline.Stop() }
+            if (-not $namespaceReady) {
+                if ($namespaceLauncherExitedBeforeReady -or $process.HasExited) {
+                    [void]$process.WaitForExit(0)
+                    try { [void]$stdoutTask.Wait(1000) } catch { }
+                    try { [void]$stderrTask.Wait(1000) } catch { }
+                    $startupDiagnostics = New-Object 'System.Collections.Generic.List[string]'
+                    [void]$startupDiagnostics.Add(("launcher exit code {0}" -f [int]$process.ExitCode))
+                    $bootstrapError = $null
+                    if ($stdoutTask.IsCompleted -and -not $stdoutTask.IsFaulted -and -not $stdoutTask.IsCanceled) {
+                        $startupStdoutResult = $stdoutTask.GetAwaiter().GetResult()
+                        $startupStdout = [string]$startupStdoutResult.Text
+                        if (-not [string]::IsNullOrWhiteSpace($startupStdout)) {
+                            try {
+                                $startupEnvelope = [Management.Automation.PSSerializer]::Deserialize($startupStdout)
+                                if ($null -ne $startupEnvelope -and
+                                    $null -ne $startupEnvelope.PSObject.Properties['failureKind'] -and
+                                    [string]$startupEnvelope.failureKind -ceq 'bootstrap-failure') {
+                                    $bootstrapError = [string]$startupEnvelope.error
+                                }
+                                else { $bootstrapError = 'child exited without a bootstrap failure envelope.' }
+                            }
+                            catch { $bootstrapError = 'child emitted an unreadable bootstrap envelope.' }
+                        }
+                    }
+                    elseif ($stdoutTask.IsFaulted) {
+                        $bootstrapError = "stdout capture failed: $($stdoutTask.Exception.GetBaseException().Message)"
+                    }
+                    else { $bootstrapError = 'stdout capture did not complete before the diagnostic bound.' }
+                    if (-not [string]::IsNullOrWhiteSpace($bootstrapError)) {
+                        $boundedBootstrapError = $bootstrapError.Trim()
+                        if ($boundedBootstrapError.Length -gt 512) { $boundedBootstrapError = $boundedBootstrapError.Substring(0, 512) }
+                        [void]$startupDiagnostics.Add("bootstrap: $boundedBootstrapError")
+                    }
+                    if ($stderrTask.IsCompleted -and -not $stderrTask.IsFaulted -and -not $stderrTask.IsCanceled) {
+                        $startupStderrResult = $stderrTask.GetAwaiter().GetResult()
+                        $startupStderr = ([string]$startupStderrResult.Text).Trim()
+                        if (-not [string]::IsNullOrWhiteSpace($startupStderr)) {
+                            if ($startupStderr.Length -gt 512) { $startupStderr = $startupStderr.Substring(0, 512) }
+                            [void]$startupDiagnostics.Add("stderr: $startupStderr")
+                        }
+                    }
+                    elseif ($stderrTask.IsFaulted) {
+                        [void]$startupDiagnostics.Add("stderr capture failed: $($stderrTask.Exception.GetBaseException().Message)")
+                    }
+                    [void]$startupDiagnostics.Add("last handshake: $lastHandshakeDiagnostic")
+                    throw [InvalidOperationException]::new("$Context Linux PID namespace launcher exited before READY ($($startupDiagnostics -join '; ')).")
+                }
+                if ($namespaceDeadlineExpired) {
+                    throw [TimeoutException]::new("$Context deadline was exceeded during the Linux PID namespace handshake. Last handshake diagnostic: $lastHandshakeDiagnostic")
+                }
+                throw [InvalidOperationException]::new("$Context could not prove a live private Linux PID namespace within the bounded startup window. Last handshake diagnostic: $lastHandshakeDiagnostic")
+            }
+        }
         if ($null -ne $consentExpiresAtUtc -and [DateTime]::UtcNow -ge $consentExpiresAtUtc) {
             throw (New-StandardSemanticBridgeConsentExpiryGuardException -Context $Context)
+        }
+        $remainingBeforePayloadMilliseconds = $TimeoutMilliseconds - [int][Math]::Min([int]::MaxValue, $deadline.ElapsedMilliseconds)
+        if ($remainingBeforePayloadMilliseconds -le 0) {
+            throw [TimeoutException]::new("$Context deadline was exceeded before callback input was released.")
         }
         $process.StandardInput.Write($payloadXml)
         $process.StandardInput.Close()

@@ -1392,6 +1392,32 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
             }
             return
         }
+        $tinyDeadlineMarker = Join-Path $TestDrive 'unix-containment-tiny-deadline-not-executed.txt'
+        $tinyDeadlineException = $null
+        try {
+            & $script:UnixContainmentModule {
+                param($callback, $callbackContext)
+                Invoke-StandardSemanticBridgeCallbackWithTimeout `
+                    -Callback $callback `
+                    -Argument ([pscustomobject]@{}) `
+                    -CallbackContext $callbackContext `
+                    -TimeoutMilliseconds 1 `
+                    -Context 'tiny-deadline Unix containment callback' | Out-Null
+            } $callback ([pscustomobject]@{ executionMarker = $tinyDeadlineMarker })
+        }
+        catch { $tinyDeadlineException = $_.Exception }
+        if ($tinyDeadlineException -isnot [TimeoutException] -or
+            [string]$tinyDeadlineException.Message -notmatch '(?i)deadline was exceeded') {
+            throw 'A Linux callback whose invocation deadline expired before READY did not report a deadline TimeoutException.'
+        }
+        $tinyDeadlineCleanupFailed = & $script:UnixContainmentModule {
+            param($exception)
+            Test-StandardSemanticBridgeCallbackCleanupFailureException -Exception $exception
+        } $tinyDeadlineException
+        if ([bool]$tinyDeadlineCleanupFailed) { throw 'The expired-before-READY callback did not verify its process-boundary cleanup.' }
+        if (Test-Path -LiteralPath $tinyDeadlineMarker -PathType Leaf) {
+            throw 'The callback payload was released after its invocation deadline expired before READY.'
+        }
         if (-not [string]::IsNullOrWhiteSpace($errorMessage)) {
             throw "A callback failed despite a successful namespace capability probe: $errorMessage"
         }
@@ -1410,7 +1436,7 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
         $callback = {
             param($argument, $context)
             [IO.File]::WriteAllText([string]$context.startedMarker, 'callback-started')
-            $childScript = "[IO.File]::WriteAllText('$([string]$context.childStartedMarker)', 'child-started'); [Threading.Thread]::Sleep(3000); [IO.File]::WriteAllText('$([string]$context.lateMarker)', 'late timeout output')"
+            $childScript = "[IO.File]::WriteAllText('$([string]$context.childStartedMarker)', 'child-started'); [Threading.Thread]::Sleep(10000); [IO.File]::WriteAllText('$([string]$context.lateMarker)', 'late timeout output')"
             $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
             $childInfo = New-Object Diagnostics.ProcessStartInfo
             $childInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -1423,10 +1449,11 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
             $child.StartInfo = $childInfo
             try { if (-not $child.Start()) { throw 'timeout child did not start.' } }
             finally { $child.Dispose() }
-            [Threading.Thread]::Sleep(3000)
+            [Threading.Thread]::Sleep(10000)
             [IO.File]::WriteAllText([string]$context.lateMarker, 'late timeout output')
         }
         $errorMessage = $null
+        $timeoutException = $null
         try {
             & $script:UnixContainmentModule {
                 param($callback, $callbackContext)
@@ -1434,23 +1461,33 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
                     -Callback $callback `
                     -Argument ([pscustomobject]@{}) `
                     -CallbackContext $callbackContext `
-                    -TimeoutMilliseconds 1500 `
+                    -TimeoutMilliseconds 8000 `
                     -Context 'timeout Unix containment callback'
             } $callback ([pscustomobject]@{ startedMarker = $startedMarker; childStartedMarker = $childStartedMarker; lateMarker = $lateMarker }) | Out-Null
         }
-        catch { $errorMessage = [string]$_.Exception.Message }
-        if ([string]::IsNullOrWhiteSpace($errorMessage) -or
-            $errorMessage -notmatch '(?i)deadline was exceeded\.$' -or
+        catch {
+            $timeoutException = $_.Exception
+            $errorMessage = [string]$_.Exception.Message
+        }
+        if ($timeoutException -isnot [TimeoutException] -or
+            [string]::IsNullOrWhiteSpace($errorMessage) -or
+            $errorMessage -notmatch '(?i)deadline was exceeded' -or
             $errorMessage -match '(?i)(could not terminate|did not terminate|cleanup)') {
             throw 'The timeout callback did not fail with a deadline diagnostic.'
         }
+        $timeoutCleanupFailed = & $script:UnixContainmentModule {
+            param($exception)
+            Test-StandardSemanticBridgeCallbackCleanupFailureException -Exception $exception
+        } $timeoutException
+        if ([bool]$timeoutCleanupFailed) { throw 'The timed-out callback did not verify its process-boundary cleanup.' }
         if (-not (Test-Path -LiteralPath $startedMarker -PathType Leaf) -or -not (Test-Path -LiteralPath $childStartedMarker -PathType Leaf)) {
             throw 'The timeout regression did not prove that the callback child started before cleanup.'
         }
-        # The child intentionally sleeps 3000 ms before its late write.  Wait
-        # past that deadline so a surviving descendant cannot write after this
-        # assertion has already passed.
-        Start-Sleep -Milliseconds 2200
+        # The child and parent intentionally sleep 10000 ms before their late
+        # writes.  Since the invocation budget is 8000 ms including up to 5000
+        # ms of startup, this final wait extends beyond the latest possible
+        # callback start plus its full sleep, even on a cold hosted runner.
+        Start-Sleep -Milliseconds 11000
         if (Test-Path -LiteralPath $lateMarker) { throw 'A timed-out callback produced a late side effect.' }
     }
 
@@ -1578,8 +1615,10 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
     It 'InterT165_callback_cannot_read_host_parent_procfs_or_initial_environment_secret' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
         $unsharePath = @('/usr/bin/unshare', '/bin/unshare') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
         $umountPath = @('/usr/bin/umount', '/bin/umount') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-        if ([string]::IsNullOrWhiteSpace([string]$unsharePath) -or [string]::IsNullOrWhiteSpace([string]$umountPath)) {
-            throw 'Linux unshare and umount executables are required for this regression.'
+        $pythonPath = @('/usr/bin/python3', '/bin/python3') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string]$unsharePath) -or [string]::IsNullOrWhiteSpace([string]$umountPath) -or
+            [string]::IsNullOrWhiteSpace([string]$pythonPath)) {
+            throw 'Linux unshare, umount, and /usr/bin/python3 executables are required for this regression.'
         }
         $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).Target
         if ([string]::IsNullOrWhiteSpace($parentNamespace)) { $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).LinkTarget }
@@ -1599,13 +1638,109 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
         $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1'))
         $markerPath = Join-Path $TestDrive 'unix-containment-parent-procfs-observation.json'
         $launcherResultPath = Join-Path $TestDrive 'unix-containment-parent-procfs-launcher-result.txt'
-        $nestedUmountProbePath = Join-Path $TestDrive 'unix-containment-nested-umount-probe.sh'
-        $nestedNamespaceObservationPath = Join-Path $TestDrive 'unix-containment-nested-namespace.txt'
+        $nestedUmountProbePath = Join-Path $TestDrive 'unix-containment-nested-umount-probe.py'
+        $nestedNamespaceObservationPath = Join-Path $TestDrive 'unix-containment-nested-namespace.json'
+        $nestedTmpfsMountPath = Join-Path $TestDrive 'unix-containment-nested-tmpfs-mount'
+        [void][IO.Directory]::CreateDirectory($nestedTmpfsMountPath)
+        $testDriveUnixMode = [IO.File]::GetUnixFileMode([string]$TestDrive)
+        [IO.File]::SetUnixFileMode([string]$TestDrive, ($testDriveUnixMode -bor [IO.UnixFileMode]::OtherExecute))
+        [IO.File]::SetUnixFileMode(
+            [string]$nestedTmpfsMountPath,
+            ([IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute -bor
+                [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherWrite -bor [IO.UnixFileMode]::OtherExecute)
+        )
         $nestedUmountProbeScript = @'
-#!/bin/sh
-printf '%s\n%s\n' "$(readlink /proc/self/ns/user)" "$(readlink /proc/self/ns/mnt)" > "$1"
-if "$2" -n /proc >/dev/null 2>&1; then exit 42; fi
-exit 0
+import ctypes
+import errno
+import json
+import os
+import sys
+
+result_fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+report = {}
+libc = ctypes.CDLL(None, use_errno=True)
+libc.unshare.argtypes = [ctypes.c_int]
+libc.unshare.restype = ctypes.c_int
+libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
+libc.mount.restype = ctypes.c_int
+libc.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+libc.umount2.restype = ctypes.c_int
+
+def read_status():
+    values = {}
+    with open('/proc/self/status', 'r', encoding='ascii') as status_file:
+        for line in status_file:
+            key, separator, value = line.partition(':')
+            if separator:
+                values[key] = value.strip()
+    return values
+
+def errno_result(result):
+    value = ctypes.get_errno() if result != 0 else 0
+    return {'succeeded': result == 0, 'errno': value, 'errno_name': errno.errorcode.get(value), 'error': os.strerror(value) if value else None}
+
+def main():
+    report['parent_user_namespace'] = os.readlink('/proc/self/ns/user')
+    report['parent_mount_namespace'] = os.readlink('/proc/self/ns/mnt')
+    report['thread_count_before_unshare'] = len(os.listdir('/proc/self/task'))
+    if report['thread_count_before_unshare'] != 1:
+        report['setup_error'] = 'Python helper is not single-threaded; unshare(CLONE_NEWUSER) is unsafe here.'
+        return
+
+    # Keep all observations in this process: exec after unshare would recalculate
+    # capabilities and, with CapBnd=0, discard the privilege needed to probe the
+    # locked inherited mount. No uid_map is written, so no CAP_SETFCAP mapping is
+    # needed. The already-open result descriptor survives the namespace change.
+    flags = 0x10000000 | 0x00020000  # CLONE_NEWUSER | CLONE_NEWNS
+    if libc.unshare(flags) != 0:
+        error_number = ctypes.get_errno()
+        report['unshare'] = {'succeeded': False, 'errno': error_number, 'error': os.strerror(error_number)}
+        return
+
+    report['unshare'] = {'succeeded': True, 'errno': 0, 'error': None}
+    report['user_namespace'] = os.readlink('/proc/self/ns/user')
+    report['mount_namespace'] = os.readlink('/proc/self/ns/mnt')
+    status = read_status()
+    report['cap_eff'] = status.get('CapEff')
+    report['cap_prm'] = status.get('CapPrm')
+    report['cap_bnd'] = status.get('CapBnd')
+    try:
+        report['cap_sys_admin'] = bool(int(status['CapEff'], 16) & (1 << 21))
+    except (KeyError, ValueError):
+        report['cap_sys_admin'] = False
+
+    # Isolate mount propagation before using a dedicated empty directory under
+    # TestDrive. The mount is private to this process's nested mount namespace.
+    make_private_result = libc.mount(None, b'/', None, 0x00040000 | 0x00004000, None)  # MS_PRIVATE | MS_REC
+    report['make_mounts_private'] = errno_result(make_private_result)
+    mount_point = os.fsencode(sys.argv[2])
+    report['tmpfs_mount_point'] = os.fsdecode(mount_point)
+    if make_private_result == 0:
+        mount_result = libc.mount(b'tmpfs', mount_point, b'tmpfs', 0, ctypes.c_void_p())
+        report['tmpfs_mount'] = errno_result(mount_result)
+        if mount_result == 0:
+            unmount_tmpfs_result = libc.umount2(mount_point, 0)
+            report['tmpfs_unmount'] = errno_result(unmount_tmpfs_result)
+        else:
+            report['tmpfs_unmount'] = {'succeeded': False, 'errno': 0, 'errno_name': None, 'error': 'tmpfs mount did not succeed'}
+    else:
+        report['tmpfs_mount'] = {'succeeded': False, 'errno': 0, 'errno_name': None, 'error': 'mount propagation could not be made private'}
+        report['tmpfs_unmount'] = {'succeeded': False, 'errno': 0, 'errno_name': None, 'error': 'tmpfs mount was not attempted'}
+
+    # Linux returns EINVAL when a less-privileged nested mount namespace tries
+    # to separate an inherited mount from its parent mount tree.
+    proc_unmount_result = libc.umount2(b'/proc', 0)
+    report['proc_unmount'] = errno_result(proc_unmount_result)
+
+try:
+    main()
+except BaseException as error:
+    report['helper_error'] = type(error).__name__ + ': ' + str(error)
+
+encoded = (json.dumps(report, sort_keys=True) + '\n').encode('utf-8')
+os.write(result_fd, encoded)
+os.close(result_fd)
+sys.stdout.write(encoded.decode('utf-8'))
 '@
         [IO.File]::WriteAllText($nestedUmountProbePath, $nestedUmountProbeScript)
         $markerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$markerPath))
@@ -1614,7 +1749,8 @@ exit 0
         $launcherResultBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$launcherResultPath))
         $nestedUmountProbeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$nestedUmountProbePath))
         $nestedNamespaceObservationBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$nestedNamespaceObservationPath))
-        $unsharePathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$unsharePath))
+        $nestedTmpfsMountPathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$nestedTmpfsMountPath))
+        $pythonPathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$pythonPath))
         $umountPathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$umountPath))
         $launcherScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -1624,8 +1760,9 @@ exit 0
 `$launcherResultPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$launcherResultBase64'))
 `$nestedUmountProbePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nestedUmountProbeBase64'))
 `$nestedNamespaceObservationPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nestedNamespaceObservationBase64'))
-`$unsharePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$unsharePathBase64'))
+`$nestedTmpfsMountPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nestedTmpfsMountPathBase64'))
 `$umountPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$umountPathBase64'))
+`$pythonPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pythonPathBase64'))
 `$initialSecret = [Environment]::GetEnvironmentVariable(`$secretName, [EnvironmentVariableTarget]::Process)
 if ([string]::IsNullOrWhiteSpace(`$initialSecret)) { throw 'The controlled callback host did not receive its initial environment secret.' }
 `$parentHostPid = [Diagnostics.Process]::GetCurrentProcess().Id
@@ -1677,34 +1814,51 @@ Import-Module -Name `$modulePath -Force -ErrorAction Stop
     }
     `$directUmountExitCode = [int]`$directUmountProcess.ExitCode
     `$directUmountProcess.Dispose()
-    `$nestedUnshareInfo = New-Object Diagnostics.ProcessStartInfo
-    `$nestedUnshareInfo.FileName = [string]`$context.unsharePath
-    `$nestedUnshareInfo.UseShellExecute = `$false
-    `$nestedUnshareInfo.CreateNoWindow = `$true
-    `$nestedUnshareInfo.ArgumentList.Add('--user')
-    `$nestedUnshareInfo.ArgumentList.Add('--map-root-user')
-    `$nestedUnshareInfo.ArgumentList.Add('--mount')
-    `$nestedUnshareInfo.ArgumentList.Add('--fork')
-    `$nestedUnshareInfo.ArgumentList.Add('--')
-    `$nestedUnshareInfo.ArgumentList.Add('/bin/sh')
-    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.nestedUmountProbePath)
-    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.nestedNamespaceObservationPath)
-    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.umountPath)
-    `$nestedUnshareProcess = [Diagnostics.Process]::Start(`$nestedUnshareInfo)
-    if (-not `$nestedUnshareProcess.WaitForExit(5000)) {
-        try { `$nestedUnshareProcess.Kill() } catch { }
-        throw 'Nested user and mount namespace umount probe did not exit within its 5-second bound.'
+    `$nestedProbeInfo = New-Object Diagnostics.ProcessStartInfo
+    `$nestedProbeInfo.FileName = [string]`$context.pythonPath
+    `$nestedProbeInfo.UseShellExecute = `$false
+    `$nestedProbeInfo.CreateNoWindow = `$true
+    `$nestedProbeInfo.RedirectStandardOutput = `$true
+    `$nestedProbeInfo.RedirectStandardError = `$true
+    `$nestedProbeInfo.ArgumentList.Add([string]`$context.nestedUmountProbePath)
+    `$nestedProbeInfo.ArgumentList.Add([string]`$context.nestedNamespaceObservationPath)
+    `$nestedProbeInfo.ArgumentList.Add([string]`$context.nestedTmpfsMountPath)
+    `$nestedProbeProcess = [Diagnostics.Process]::Start(`$nestedProbeInfo)
+    `$nestedProbeStdoutTask = `$nestedProbeProcess.StandardOutput.ReadToEndAsync()
+    `$nestedProbeStderrTask = `$nestedProbeProcess.StandardError.ReadToEndAsync()
+    if (-not `$nestedProbeProcess.WaitForExit(5000)) {
+        try { `$nestedProbeProcess.Kill() } catch { }
+        [void]`$nestedProbeProcess.WaitForExit(1000)
+        `$nestedProbeStdout = `$nestedProbeStdoutTask.GetAwaiter().GetResult()
+        `$nestedProbeStderr = `$nestedProbeStderrTask.GetAwaiter().GetResult()
+        `$nestedProbeExitCode = if (`$nestedProbeProcess.HasExited) { [int]`$nestedProbeProcess.ExitCode } else { -1 }
+        `$nestedProbeProcess.Dispose()
+        throw "Native nested namespace probe exceeded 5 seconds (exit=`$nestedProbeExitCode; stdout=`$nestedProbeStdout; stderr=`$nestedProbeStderr)."
     }
-    `$nestedUmountExitCode = [int]`$nestedUnshareProcess.ExitCode
-    `$nestedUnshareProcess.Dispose()
-    `$nestedNamespaceLines = if ([IO.File]::Exists([string]`$context.nestedNamespaceObservationPath)) { [IO.File]::ReadAllLines([string]`$context.nestedNamespaceObservationPath) } else { @() }
+    `$nestedProbeExitCode = [int]`$nestedProbeProcess.ExitCode
+    `$nestedProbeStdout = `$nestedProbeStdoutTask.GetAwaiter().GetResult()
+    `$nestedProbeStderr = `$nestedProbeStderrTask.GetAwaiter().GetResult()
+    `$nestedProbeProcess.Dispose()
+    `$nestedProbeObservation = `$null
+    if ([IO.File]::Exists([string]`$context.nestedNamespaceObservationPath)) {
+        try { `$nestedProbeObservation = [IO.File]::ReadAllText([string]`$context.nestedNamespaceObservationPath) | ConvertFrom-Json -ErrorAction Stop }
+        catch { `$nestedProbeStderr += (' Could not parse nested probe JSON: ' + [string]`$_.Exception.Message) }
+    }
     `$parentUserNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/user' -ErrorAction Stop).Target
     `$parentMountNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/mnt' -ErrorAction Stop).Target
-    `$nestedNamespaceSetupSucceeded = (`$nestedNamespaceLines.Count -ge 2 -and
-        -not [string]::IsNullOrWhiteSpace([string]`$nestedNamespaceLines[0]) -and
-        -not [string]::IsNullOrWhiteSpace([string]`$nestedNamespaceLines[1]) -and
-        [string]`$nestedNamespaceLines[0] -cne `$parentUserNamespace -and
-        [string]`$nestedNamespaceLines[1] -cne `$parentMountNamespace)
+    `$nestedNamespaceSetupSucceeded = (`$nestedProbeExitCode -eq 0 -and `$null -ne `$nestedProbeObservation -and
+        [bool]`$nestedProbeObservation.unshare.succeeded -and
+        -not [string]::IsNullOrWhiteSpace([string]`$nestedProbeObservation.user_namespace) -and
+        -not [string]::IsNullOrWhiteSpace([string]`$nestedProbeObservation.mount_namespace) -and
+        [string]`$nestedProbeObservation.user_namespace -cne `$parentUserNamespace -and
+        [string]`$nestedProbeObservation.mount_namespace -cne `$parentMountNamespace)
+    `$nestedCapSysAdmin = (`$null -ne `$nestedProbeObservation -and [bool]`$nestedProbeObservation.cap_sys_admin)
+    `$nestedMountPrivate = (`$null -ne `$nestedProbeObservation -and [bool]`$nestedProbeObservation.make_mounts_private.succeeded)
+    `$nestedTmpfsMountSucceeded = (`$null -ne `$nestedProbeObservation -and [bool]`$nestedProbeObservation.tmpfs_mount.succeeded)
+    `$nestedTmpfsUnmountSucceeded = (`$null -ne `$nestedProbeObservation -and [bool]`$nestedProbeObservation.tmpfs_unmount.succeeded)
+    `$nestedProcUnmountErrno = if (`$null -ne `$nestedProbeObservation -and `$null -ne `$nestedProbeObservation.proc_unmount) { [int]`$nestedProbeObservation.proc_unmount.errno } else { -1 }
+    `$nestedProcUnmountLocked = (`$null -ne `$nestedProbeObservation -and
+        [string]`$nestedProbeObservation.proc_unmount.errno_name -ceq 'EINVAL')
     `$observation = [pscustomobject][ordered]@{
         parentHostProcPathVisible = [bool]`$parentProcVisible
         parentEnvironmentReadable = [bool]`$parentProcReadSucceeded
@@ -1715,9 +1869,17 @@ Import-Module -Name `$modulePath -Force -ErrorAction Stop
         noNewPrivilegesEnabled = [bool]`$noNewPrivilegesEnabled
         selfPidOne = [bool]`$selfPidOne
         directProcUmountDenied = (`$directUmountExitCode -ne 0)
-        nestedUserMountNamespaceUmountDenied = (`$nestedUmountExitCode -eq 0)
+        nestedUserMountNamespaceUmountDenied = [bool]`$nestedProcUnmountLocked
         nestedNamespaceSetupSucceeded = [bool]`$nestedNamespaceSetupSucceeded
-        nestedUserMountNamespaceProbeExitCode = `$nestedUmountExitCode
+        nestedCapSysAdmin = [bool]`$nestedCapSysAdmin
+        nestedMountPrivate = [bool]`$nestedMountPrivate
+        nestedTmpfsMountSucceeded = [bool]`$nestedTmpfsMountSucceeded
+        nestedTmpfsUnmountSucceeded = [bool]`$nestedTmpfsUnmountSucceeded
+        nestedUserMountNamespaceProbeExitCode = `$nestedProbeExitCode
+        nestedUserMountNamespaceProbeStdout = [string]`$nestedProbeStdout
+        nestedUserMountNamespaceProbeStderr = [string]`$nestedProbeStderr
+        nestedUserMountNamespaceProbe = `$nestedProbeObservation
+        nestedProcUmountErrno = `$nestedProcUnmountErrno
     }
     [IO.File]::WriteAllText([string]`$context.markerPath, (ConvertTo-Json -InputObject `$observation -Compress))
     return 'callback-complete'
@@ -1726,7 +1888,7 @@ try {
     & `$bridgeModule {
         param(`$callback, `$callbackContext)
         Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback `$callback -Argument ([pscustomobject]@{}) -CallbackContext `$callbackContext -TimeoutMilliseconds 5000 -Context 'host parent procfs isolation regression'
-        } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath; unsharePath = `$unsharePath; umountPath = `$umountPath; nestedUmountProbePath = `$nestedUmountProbePath; nestedNamespaceObservationPath = `$nestedNamespaceObservationPath }) | Out-Null
+        } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath; umountPath = `$umountPath; pythonPath = `$pythonPath; nestedUmountProbePath = `$nestedUmountProbePath; nestedNamespaceObservationPath = `$nestedNamespaceObservationPath; nestedTmpfsMountPath = `$nestedTmpfsMountPath }) | Out-Null
     [IO.File]::WriteAllText(`$launcherResultPath, 'callback-completed')
 }
 catch {
@@ -1779,9 +1941,12 @@ catch {
         if ([bool]$observation.parentInitialSecretVisible) {
             throw 'The callback read the host parent initial environment secret through procfs.'
         }
-        foreach ($field in @('capEffZero', 'capPrmZero', 'capBndZero', 'noNewPrivilegesEnabled', 'selfPidOne', 'directProcUmountDenied', 'nestedNamespaceSetupSucceeded', 'nestedUserMountNamespaceUmountDenied')) {
+        foreach ($field in @('capEffZero', 'capPrmZero', 'capBndZero', 'noNewPrivilegesEnabled', 'selfPidOne', 'directProcUmountDenied', 'nestedNamespaceSetupSucceeded', 'nestedCapSysAdmin', 'nestedMountPrivate', 'nestedTmpfsMountSucceeded', 'nestedTmpfsUnmountSucceeded', 'nestedUserMountNamespaceUmountDenied')) {
             $property = $observation.PSObject.Properties[$field]
-            if ($null -eq $property -or -not [bool]$property.Value) { throw "The callback security boundary assertion failed: $field." }
+            if ($null -eq $property -or -not [bool]$property.Value) {
+                $nestedDiagnostic = " nestedProbeExitCode=$($observation.nestedUserMountNamespaceProbeExitCode); nestedProcUmountErrno=$($observation.nestedProcUmountErrno); nestedProbe=$($observation.nestedUserMountNamespaceProbe | ConvertTo-Json -Compress -Depth 6); stdout=$($observation.nestedUserMountNamespaceProbeStdout); stderr=$($observation.nestedUserMountNamespaceProbeStderr)"
+                throw "The callback security boundary assertion failed: $field.$nestedDiagnostic"
+            }
         }
 
         # Establish an inherited procfs alias before starting a second controlled
