@@ -2879,6 +2879,12 @@ function Invoke-AuthorityLinuxIsolatedPester {
         $snapshotGitDirectory = Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $snapshotRoot, 'rev-parse', '--absolute-git-dir') -Context 'Snapshot Git directory lookup'
 
         $goRoot = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $GoCommandPath)))
+        $powerShellRoot = [IO.Path]::GetFullPath($PSHOME)
+        $powerShellRootItem = Get-Item -Force -LiteralPath $powerShellRoot -ErrorAction Stop
+        if (-not $powerShellRootItem.PSIsContainer -or
+            ($powerShellRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The trusted PowerShell runtime root must be a non-reparse directory: $powerShellRoot"
+        }
         $protectedToolRoots = @(
             [IO.Path]::GetFullPath($InstallRoot),
             [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath)),
@@ -2890,6 +2896,7 @@ function Invoke-AuthorityLinuxIsolatedPester {
             }
             [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('-R', 'u+rwX,go-w', '--', $toolRoot) -Context "Protect trusted tool closure '$toolRoot'")
         }
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chmodPath, '-R', 'go-w', '--', $powerShellRoot) -Context "Protect trusted PowerShell runtime closure '$powerShellRoot'")
         [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('-R', 'u+rwX,go-w', '--', $snapshotRoot) -Context 'Protect exact-candidate snapshot')
         $runnerOwnedProtectedDirectories = @($ArtifactsRoot, $RunRoot)
         if (-not [string]::IsNullOrWhiteSpace([string]$env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
@@ -2953,11 +2960,11 @@ function Invoke-AuthorityLinuxIsolatedPester {
             [IO.Path]::GetFullPath($InstallRoot),
             [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath)),
             $goRoot,
-            [IO.Path]::GetFullPath($PSHOME),
+            $powerShellRoot,
             [IO.Path]::GetFullPath($ArtifactsRoot),
             [IO.Path]::GetFullPath($RunRoot)
         )
-        $protectedToolClosureRoots = @($goRoot)
+        $protectedToolClosureRoots = @($goRoot, $powerShellRoot) | Select-Object -Unique
         if (-not [string]::IsNullOrWhiteSpace([string]$env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
             $protectedDirectories += [IO.Path]::GetFullPath($env:RUNNER_TEMP)
         }
@@ -2967,7 +2974,7 @@ function Invoke-AuthorityLinuxIsolatedPester {
         }
 
         $pathEntries = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($entry in @('/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin', $PSHOME,
+        foreach ($entry in @('/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin', $powerShellRoot,
                 (Split-Path -Parent $GoCommandPath), (Split-Path -Parent $ApprovedPythonPath), (Split-Path -Parent $gitPath))) {
             if (-not [string]::IsNullOrWhiteSpace([string]$entry) -and (Test-Path -LiteralPath $entry -PathType Container) -and
                 -not $pathEntries.Contains([IO.Path]::GetFullPath([string]$entry))) {
@@ -3012,8 +3019,8 @@ function Invoke-AuthorityLinuxIsolatedPester {
             minimumTotalCount = $MinimumTotalCount
             pesterMajorVersion = $PesterMajorVersion
             path = ($pathEntries.ToArray() -join [IO.Path]::PathSeparator)
-            psModulePath = [IO.Path]::GetFullPath((Join-Path $PSHOME 'Modules'))
-            psHome = [IO.Path]::GetFullPath($PSHOME)
+            psModulePath = [IO.Path]::GetFullPath((Join-Path $powerShellRoot 'Modules'))
+            psHome = $powerShellRoot
             runningPowerShellPath = [IO.Path]::GetFullPath($pwshPath)
             gitSafeDirectory = $snapshotRoot
         }
@@ -3130,8 +3137,8 @@ $json = $report | ConvertTo-Json -Depth 8
             "TEMP=$scratchRoot/tmp",
             "TMP=$scratchRoot/tmp",
             "PATH=$($pathEntries.ToArray() -join [IO.Path]::PathSeparator)",
-            "PSModulePath=$([IO.Path]::GetFullPath((Join-Path $PSHOME 'Modules')))",
-            "PSHOME=$([IO.Path]::GetFullPath($PSHOME))",
+            "PSModulePath=$([IO.Path]::GetFullPath((Join-Path $powerShellRoot 'Modules')))",
+            "PSHOME=$powerShellRoot",
             'LANG=C.UTF-8',
             'LC_ALL=C.UTF-8',
             'GIT_CONFIG_COUNT=2',
