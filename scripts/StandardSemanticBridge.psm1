@@ -1078,8 +1078,13 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
     if ($UnixProcessGroupId -gt 0) {
         $deadline = [Diagnostics.Stopwatch]::StartNew()
         try {
+            # Reap an already exited host before probing the group.  A Unix
+            # process-group liveness probe can otherwise keep seeing the host
+            # as a zombie even after SIGKILL has closed every callback stream.
+            [void]$Process.WaitForExit(0)
             while ([StandardSemanticBridgeUnixProcessControlNative]::IsProcessGroupAlive($UnixProcessGroupId)) {
                 if ($deadline.ElapsedMilliseconds -ge $TimeoutMilliseconds) { return $false }
+                [void]$Process.WaitForExit(0)
                 Start-Sleep -Milliseconds 25
             }
             return $true
