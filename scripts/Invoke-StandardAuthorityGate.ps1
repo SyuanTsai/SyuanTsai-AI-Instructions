@@ -3013,6 +3013,7 @@ function Invoke-AuthorityLinuxIsolatedPester {
             path = ($pathEntries.ToArray() -join [IO.Path]::PathSeparator)
             psModulePath = [IO.Path]::GetFullPath((Join-Path $PSHOME 'Modules'))
             psHome = [IO.Path]::GetFullPath($PSHOME)
+            runningPowerShellPath = [IO.Path]::GetFullPath($pwshPath)
             gitSafeDirectory = $snapshotRoot
         }
         [IO.File]::WriteAllText($childConfigPath, ($config | ConvertTo-Json -Depth 8) + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
@@ -3062,6 +3063,9 @@ function Assert-AuthorityChildPathNotWritable {
             throw "Authority Pester child can open protected file '$Path' for writing."
         }
         catch [UnauthorizedAccessException] { }
+        catch [IO.IOException] {
+            if ($Path -cne [string]$config.runningPowerShellPath -or $_.Exception.Message -notmatch 'Text file busy') { throw }
+        }
         finally { if ($null -ne $stream) { $stream.Dispose() } }
     }
 }
