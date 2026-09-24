@@ -3124,7 +3124,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 $consistent.candidate.acquisition.verified = $true
                 $consistent.authority.binding.status = 'verified'
                 $consistent.authority.binding.verified = $true
-                $consistent.authority.binding.selectedFiles = @(1..11 | ForEach-Object {
+                $consistent.authority.binding.selectedFiles = @(1..13 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
                 $consistent.launchBinding.status = 'verified'

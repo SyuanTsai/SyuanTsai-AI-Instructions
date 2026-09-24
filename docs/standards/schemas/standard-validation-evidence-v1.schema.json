@@ -95,7 +95,7 @@
                 "properties": {
                   "status": { "const": "verified" },
                   "verified": { "const": true },
-                  "selectedFiles": { "type": "array", "minItems": 11, "maxItems": 11, "items": { "$ref": "#/$defs/selectedFile" } }
+                  "selectedFiles": { "type": "array", "minItems": 13, "maxItems": 13, "items": { "$ref": "#/$defs/selectedFile" } }
                 }
               }
             }
