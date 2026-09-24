@@ -5041,10 +5041,10 @@ function Assert-StandardValidationSemanticBridgeV2Evidence {
             throw 'BLOCKED|Semantic bridge v2 requires a non-empty expected public-key identity.'
         }
 
-        $requestFull = Get-StandardValidationFullPath -Path $ConsentRequestPath -Context "$Context consent request"
-        $decisionFull = Get-StandardValidationFullPath -Path $ConsentDecisionPath -Context "$Context consent decision"
-        $evidenceFull = Get-StandardValidationFullPath -Path $EvidencePath -Context "$Context evidence"
-        $publicKeyFull = Get-StandardValidationFullPath -Path $PublicKeyPath -Context "$Context public key"
+        $requestFull = Assert-StandardValidationCanonicalRootPath -Path $ConsentRequestPath -Context "$Context consent request"
+        $decisionFull = Assert-StandardValidationCanonicalRootPath -Path $ConsentDecisionPath -Context "$Context consent decision"
+        $evidenceFull = Assert-StandardValidationCanonicalRootPath -Path $EvidencePath -Context "$Context evidence"
+        $publicKeyFull = Assert-StandardValidationCanonicalRootPath -Path $PublicKeyPath -Context "$Context public key"
         foreach ($path in @(
                 [pscustomobject]@{ path = $requestFull; name = 'consent request' },
                 [pscustomobject]@{ path = $decisionFull; name = 'consent decision' },

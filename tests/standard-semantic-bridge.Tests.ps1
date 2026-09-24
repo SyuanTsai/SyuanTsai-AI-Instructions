@@ -747,6 +747,9 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([int]$mismatched.providerCallCount -eq 0) 'Mismatched consent reached the provider.'
     }
 
+    }
+
+    Context 'UnitT31 signer consent expiry behavior' {
     It 'UnitT31_consent_expiry_during_signer_blocks_signed_output' {
         $fixture = New-TestSemanticFixture
         $slowSignerMarker = Join-Path $TestDrive 'consent-expired-during-signer.txt'
@@ -791,11 +794,10 @@ function Update-TestConsentDigests {
             finally { $signingKey.Dispose() }
         }
 
-        # Test the parent consent state machine with a private module mock. The
-        # consent expiry stays an hour ahead of real time so full-suite load
-        # cannot expire the signer's own real-clock guard. The mock simulates
-        # parent consent expiry after the verified signer callback; real child
-        # clock enforcement is covered by hosted Linux callback-boundary tests.
+        # Test the parent consent state machine with a module-private clock
+        # override. Consent remains an hour ahead of real time, so the actual
+        # signer child process enforces its real-clock expiry guard and completes
+        # before the final parent clock sample simulates consent expiry.
         $consentStartedAt = [DateTime]::UtcNow
         $consentExpiresAt = $consentStartedAt.AddHours(1)
         $clockState = [pscustomobject][ordered]@{
@@ -805,24 +807,25 @@ function Update-TestConsentDigests {
             observationsPath = $clockObservationsPath
         }
         $bridgeModule = Get-Module StandardSemanticBridge
-        & $bridgeModule {
-            param($State)
-            $script:StandardSemanticBridgeTestClockState = $State
-        } $clockState
+        $originalClockProvider = & $bridgeModule {
+            (Get-Item -Path Function:\Get-StandardSemanticBridgeUtcNow).ScriptBlock
+        }
 
         try {
-            Mock Get-StandardSemanticBridgeUtcNow -ModuleName StandardSemanticBridge {
-                $state = $script:StandardSemanticBridgeTestClockState
-                $signatureCompleted = [IO.File]::Exists([string]$state.signatureCompletedMarkerPath)
-                $phase = if ($signatureCompleted) { 'expired' } else { 'active' }
-                $observation = '{0}|signatureCompleted={1}' -f $phase, $signatureCompleted.ToString().ToLowerInvariant()
-                [IO.File]::AppendAllText([string]$state.observationsPath, $observation + [Environment]::NewLine)
-                if ($signatureCompleted) { return [DateTime]$state.expiredUtc }
-                return [DateTime]$state.activeUtc
-            }
-            Mock Invoke-StandardSemanticBridgeCallbackWithTimeout -ModuleName StandardSemanticBridge {
-                return @(& $Callback $Argument $CallbackContext)
-            }
+            & $bridgeModule {
+                param($State)
+                $script:StandardSemanticBridgeTestClockState = $State
+                Set-Item -Path Function:\Get-StandardSemanticBridgeUtcNow -Value {
+                    $state = $script:StandardSemanticBridgeTestClockState
+                    if ($null -eq $state) { throw 'test clock override state is not configured.' }
+                    $signatureCompleted = [IO.File]::Exists([string]$state.signatureCompletedMarkerPath)
+                    $phase = if ($signatureCompleted) { 'expired' } else { 'active' }
+                    $observation = '{0}|signatureCompleted={1}' -f $phase, $signatureCompleted.ToString().ToLowerInvariant()
+                    [IO.File]::AppendAllText([string]$state.observationsPath, $observation + [Environment]::NewLine)
+                    if ($signatureCompleted) { return [DateTime]$state.expiredUtc }
+                    return [DateTime]$state.activeUtc
+                }
+            } $clockState
 
             $shortRequest = New-StandardSemanticBridgeConsentRequest `
                 -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
@@ -845,14 +848,23 @@ function Update-TestConsentDigests {
                 -Now $consentStartedAt -TimeoutSeconds 20
         }
         finally {
-            & $bridgeModule { Remove-Variable -Name StandardSemanticBridgeTestClockState -Scope Script -ErrorAction SilentlyContinue }
+            & $bridgeModule {
+                param($OriginalClockProvider)
+                Set-Item -Path Function:\Get-StandardSemanticBridgeUtcNow -Value $OriginalClockProvider
+                Remove-Variable -Name StandardSemanticBridgeTestClockState -Scope Script -ErrorAction SilentlyContinue
+            } $originalClockProvider
         }
 
-        Assert-TestCondition (Test-Path -LiteralPath $slowSignerMarker -PathType Leaf) 'The signer callback did not write its entry marker.'
+        $clockObservationSummary = if (Test-Path -LiteralPath $clockObservationsPath -PathType Leaf) {
+            (@(Get-Content -LiteralPath $clockObservationsPath) -join ';')
+        }
+        else { '<missing>' }
+        $signerEntryDiagnostic = "state=$($expiredDuringSigner.status); reason=$($expiredDuringSigner.reason); clockObservations=$clockObservationSummary"
+        Assert-TestCondition (Test-Path -LiteralPath $slowSignerMarker -PathType Leaf) "The signer callback did not write its entry marker. $signerEntryDiagnostic"
         Assert-TestCondition (Test-Path -LiteralPath $slowSignerCompletedMarker -PathType Leaf) 'The signer callback did not complete and verify its signature.'
         Assert-TestCondition ([IO.File]::ReadAllText($slowSignerCompletedMarker) -ceq 'signature-verified') 'The signer completion marker does not confirm signature verification.'
         Assert-TestCondition (Test-Path -LiteralPath $slowSignerTimestampsPath -PathType Leaf) 'The signer callback did not write its timestamps.'
-        Assert-TestCondition (Test-Path -LiteralPath $clockObservationsPath -PathType Leaf) 'The mocked clock did not record consent-gate observations.'
+        Assert-TestCondition (Test-Path -LiteralPath $clockObservationsPath -PathType Leaf) 'The test clock did not record consent-gate observations.'
         $signerTimestamps = @(Get-Content -LiteralPath $slowSignerTimestampsPath)
         Assert-TestCondition ($signerTimestamps.Count -eq 3) "Signer timestamp file must contain exactly 3 lines; found $($signerTimestamps.Count)."
         $parsedTimestamps = New-Object 'System.Collections.Generic.List[DateTime]'
@@ -1944,6 +1956,116 @@ function Update-TestConsentDigests {
         Assert-TestCondition ((Get-StandardSemanticBridgeCanonicalJson -Value ([decimal]1.50)) -ceq '1.5') 'Decimal canonical JSON was not normalized.'
         $errorMessage = Get-TestErrorMessage { Get-StandardSemanticBridgeCanonicalJson -Value ([double]::NaN) }
         Assert-TestCondition ($errorMessage -match 'NaN|Infinity') 'Non-finite numeric canonicalization did not fail closed.'
+    }
+
+    Context 'SYP154 replay ledger concurrency' {
+        # Scenario: Two verifier runspaces consume the same signed evidence through one caller-owned ledger.
+        # Purpose: The check-and-consume operation must be atomic, so at most one verifier can accept the evidence.
+        It 'InterT191_shared_replay_ledger_allows_only_one_concurrent_evidence_consumer' {
+            if (-not ('Syp154Replay.BarrierHashtable' -as [type])) {
+                $barrierSource = @"
+using System;
+using System.Collections;
+using System.Threading;
+
+namespace Syp154Replay {
+    public sealed class BarrierHashtable : Hashtable {
+        private readonly Barrier readers = new Barrier(2);
+        private readonly object writeLock = new object();
+
+        public override bool ContainsKey(object key) {
+            bool exists = base.ContainsKey(key);
+            if (!String.Equals(key as string, "SyncRoot", StringComparison.Ordinal) && !exists && !readers.SignalAndWait(TimeSpan.FromSeconds(8))) {
+                throw new TimeoutException("both verifier calls did not reach the replay check");
+            }
+            return exists;
+        }
+
+        public override object this[object key] {
+            get { return base[key]; }
+            set { lock (writeLock) { base[key] = value; } }
+        }
+    }
+}
+"@
+                Add-Type -TypeDefinition $barrierSource
+            }
+
+            $fixture = New-TestSemanticFixture
+            $publicKeyOne = $null
+            $publicKeyTwo = $null
+            $powerShellOne = $null
+            $powerShellTwo = $null
+            try {
+                $run = Invoke-TestSemanticBridge -Fixture $fixture
+                Assert-TestCondition ([string]$run.status -ceq 'PASS') 'The signed fixture evidence must pass before testing concurrent replay consumption.'
+
+                $publicKeyOne = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+                $publicKeyTwo = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+                $publicParameters = $fixture.PublicRsa.ExportParameters($false)
+                $publicKeyOne.ImportParameters($publicParameters)
+                $publicKeyTwo.ImportParameters($publicParameters)
+                $replayLedger = [Syp154Replay.BarrierHashtable]::new()
+                $sharedParameters = @{
+                    EvidenceBytes = [byte[]]$run.evidenceBytes
+                    ConsentRequest = $fixture.Request
+                    ConsentDecision = $fixture.Decision
+                    ExpectedKeyId = 'fixture-key'
+                    ExpectedBindings = $fixture.Bindings
+                    ExpectedProviderRoute = $fixture.Route
+                    ExpectedPurpose = 'Synthetic test-only semantic review.'
+                    ExpectedScope = $fixture.Scope
+                    ExpectedProviderTextInventory = $fixture.Inventory
+                    Now = [DateTime]::UtcNow
+                    ReplayLedger = $replayLedger
+                }
+                $parametersOne = [hashtable]$sharedParameters.Clone()
+                $parametersOne.PublicKey = $publicKeyOne
+                $parametersTwo = [hashtable]$sharedParameters.Clone()
+                $parametersTwo.PublicKey = $publicKeyTwo
+                $modulePath = Join-Path $script:RepositoryRoot 'scripts\StandardSemanticBridge.psm1'
+                $verifyScript = 'param($modulePath, $parameters); Import-Module -Name $modulePath -Force; Test-StandardSemanticBridgeEvidence @parameters'
+                $powerShellOne = [powershell]::Create()
+                $powerShellTwo = [powershell]::Create()
+                [void]$powerShellOne.AddScript($verifyScript).AddArgument($modulePath).AddArgument($parametersOne)
+                [void]$powerShellTwo.AddScript($verifyScript).AddArgument($modulePath).AddArgument($parametersTwo)
+                $asyncOne = $powerShellOne.BeginInvoke()
+                $asyncTwo = $powerShellTwo.BeginInvoke()
+                $resultOne = @($powerShellOne.EndInvoke($asyncOne))[0]
+                $resultTwo = @($powerShellTwo.EndInvoke($asyncTwo))[0]
+                $results = @($resultOne, $resultTwo)
+                $validResults = @($results | Where-Object { $null -ne $_ -and [bool]$_.valid })
+                $rejectedResults = @($results | Where-Object { $null -ne $_ -and -not [bool]$_.valid })
+                Assert-TestCondition ($validResults.Count -eq 1) "Concurrent duplicate evidence verification should have one winner; observed $($validResults.Count) valid results."
+                Assert-TestCondition ($rejectedResults.Count -eq 1 -and [string]$rejectedResults[0].reason -match 'replay') 'The losing verifier call must report a replay rejection.'
+                Assert-TestCondition (@($replayLedger.Keys).Count -eq 1) 'The shared replay ledger must contain exactly one consumed evidence ID.'
+
+                $shadowRun = Invoke-TestSemanticBridge -Fixture $fixture
+                Assert-TestCondition ([string]$shadowRun.status -ceq 'PASS') 'Fresh signed evidence must pass before testing the SyncRoot-key collision.'
+                $shadowLedger = @{}
+                $shadowLedger['SyncRoot'] = $null
+                $shadowParameters = [hashtable]$sharedParameters.Clone()
+                $shadowParameters.EvidenceBytes = [byte[]]$shadowRun.evidenceBytes
+                $shadowParameters.PublicKey = $publicKeyOne
+                $shadowParameters.Now = [DateTime]::UtcNow
+                $shadowParameters.ReplayLedger = $shadowLedger
+                $shadowResult = Test-StandardSemanticBridgeEvidence @shadowParameters
+                Assert-TestCondition ([bool]$shadowResult.valid) "A caller ledger with a null SyncRoot key must still verify fresh evidence; reason: $($shadowResult.reason)."
+                $shadowEvidenceId = [string]$shadowResult.evidence.evidenceId
+                Assert-TestCondition ($shadowLedger.ContainsKey($shadowEvidenceId)) 'The verifier did not consume evidence when the caller ledger contains a SyncRoot key.'
+                $shadowEntry = $shadowLedger[$shadowEvidenceId]
+                Assert-TestCondition ([string]$shadowEntry.status -ceq 'consumed' -and [string]$shadowEntry.evidenceSha256 -ceq [string]$shadowResult.evidenceSha256) 'The SyncRoot-key collision ledger entry does not match the verified evidence.'
+                Assert-TestCondition ($shadowLedger.ContainsKey('SyncRoot') -and $null -eq $shadowLedger['SyncRoot']) 'The verifier overwrote the caller-owned SyncRoot entry.'
+            }
+            finally {
+                if ($null -ne $powerShellOne) { $powerShellOne.Dispose() }
+                if ($null -ne $powerShellTwo) { $powerShellTwo.Dispose() }
+                if ($null -ne $publicKeyOne) { $publicKeyOne.Dispose() }
+                if ($null -ne $publicKeyTwo) { $publicKeyTwo.Dispose() }
+                $fixture.Rsa.Dispose()
+                $fixture.PublicRsa.Dispose()
+            }
+        }
     }
 }
 

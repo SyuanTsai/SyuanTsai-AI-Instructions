@@ -2813,7 +2813,9 @@ catch {
                 -SemanticPublicKeyId $signatureArtifacts.KeyId `
                 -ValidationRunId $signatureArtifacts.RunId
             Assert-True ($badSignature.ExitCode -ne 0) 'A changed v2 signature must fail the runner.'
-            Assert-Equal $badSignature.Evidence.state 'BLOCKED' 'A changed v2 signature must produce BLOCKED.'
+            $badSignatureReason = if ($null -ne $badSignature.Evidence) { [string]$badSignature.Evidence.failure.message } else { '<no runner evidence>' }
+            $badSignatureDiagnostic = "actualState=$($badSignature.Evidence.state); exitCode=$($badSignature.ExitCode); failure.message=$badSignatureReason"
+            Assert-Equal $badSignature.Evidence.state 'BLOCKED' "A changed v2 signature must produce BLOCKED. $badSignatureDiagnostic"
             Assert-Match ([string]$badSignature.Evidence.failure.message) 'signature|evidence rejected' 'The runner must identify v2 signature rejection.'
         }
         finally { $signatureArtifacts.Rsa.Dispose() }
@@ -3330,6 +3332,161 @@ jobs:
         Assert-False ([bool]$fullResult.Evidence.releaseEligible) 'Development harness evidence must never be release-eligible.'
         foreach ($stageId in @('ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
             Assert-Equal (@($fullResult.Evidence.stages | Where-Object id -eq $stageId)[0].status) 'passed' "Lifecycle stage '$stageId' must be independently recorded."
+        }
+    }
+
+    # Scenario: A signed v2 artifact supplies numeric purpose/keyId values that stringify to the caller's expected strings.
+    # Purpose: Keep JSON Schema native-string requirements enforced before comparison in both the verifier and runner.
+    It 'InterT192_rejects_numeric_v2_purpose_and_key_id_in_verifier_and_runner' {
+        $signEvidence = {
+            param($Evidence, $Rsa)
+            $unsigned = [ordered]@{}
+            foreach ($property in @($Evidence.PSObject.Properties | Where-Object { $_.Name -ne 'attestation' })) {
+                $unsigned[$property.Name] = $property.Value
+            }
+            $unsignedBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes(
+                (Get-StandardSemanticBridgeCanonicalJson -Value ([pscustomobject]$unsigned))
+            )
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $Evidence.attestation.signedPayloadSha256 = ([BitConverter]::ToString($sha256.ComputeHash($unsignedBytes))).Replace('-', '').ToLowerInvariant()
+            }
+            finally { $sha256.Dispose() }
+            $Evidence.attestation.signature = [Convert]::ToBase64String(
+                $Rsa.SignData($unsignedBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            )
+            return (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes(
+                (Get-StandardSemanticBridgeCanonicalJson -Value $Evidence)
+            )
+        }
+
+        foreach ($case in @('purpose', 'keyId')) {
+            $fixture = New-RunnerFixture -Root (Join-Path $TestDrive "semantic-v2-numeric-$case")
+            $artifacts = New-TestRunnerSemanticV2Artifacts -Fixture $fixture
+            try {
+                $request = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.RequestPath)
+                $decision = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.DecisionPath)
+                $evidence = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.EvidencePath)
+                $expectedKeyId = $artifacts.KeyId
+                $expectedPurpose = [string]$request.purpose
+
+                if ($case -ceq 'purpose') {
+                    $request.purpose = '42'
+                    $decision.purpose = '42'
+                    $requestPayload = [ordered]@{}
+                    foreach ($property in @($request.PSObject.Properties | Where-Object { $_.Name -ne 'consentPayloadSha256' })) { $requestPayload[$property.Name] = $property.Value }
+                    $request.consentPayloadSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact ([pscustomobject]$requestPayload)
+                    $decision.consentRequestSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $request
+                    $decisionPayload = [ordered]@{}
+                    foreach ($property in @($decision.PSObject.Properties | Where-Object { $_.Name -ne 'consentDecisionPayloadSha256' })) { $decisionPayload[$property.Name] = $property.Value }
+                    $decision.consentDecisionPayloadSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact ([pscustomobject]$decisionPayload)
+                    $evidence.consent.consentRequestSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $request
+                    $evidence.consent.consentArtifactSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $decision
+                    $evidence.purpose = [int]42
+                    $expectedPurpose = '42'
+                }
+                else {
+                    $evidence.attestation.keyId = [int]42
+                    $expectedKeyId = '42'
+                }
+
+                $evidenceBytes = & $signEvidence $evidence $artifacts.Rsa
+                $direct = Test-StandardSemanticBridgeEvidence `
+                    -EvidenceBytes $evidenceBytes `
+                    -ConsentRequest $request `
+                    -ConsentDecision $decision `
+                    -PublicKey $artifacts.Rsa `
+                    -ExpectedKeyId $expectedKeyId `
+                    -ExpectedBindings $artifacts.Bindings `
+                    -ExpectedProviderRoute $artifacts.Route `
+                    -ExpectedPurpose $expectedPurpose `
+                    -ExpectedScope $artifacts.Scope `
+                    -ExpectedProviderTextInventory $artifacts.Inventory `
+                    -Now ([DateTime]::UtcNow)
+                Assert-False ([bool]$direct.valid) "A re-signed numeric $case value must be rejected by the semantic bridge verifier."
+                Assert-Match ([string]$direct.reason) 'non-empty scalar string' "The verifier must identify the numeric $case type violation."
+
+                Write-TestUtf8File -Path $artifacts.RequestPath -Text (Get-StandardSemanticBridgeCanonicalJson -Value $request)
+                Write-TestUtf8File -Path $artifacts.DecisionPath -Text (Get-StandardSemanticBridgeCanonicalJson -Value $decision)
+                Write-TestUtf8File -Path $artifacts.EvidencePath -Text ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($evidenceBytes))
+                $runner = Invoke-RunnerFixture `
+                    -Fixture $fixture `
+                    -SemanticTriggered `
+                    -SemanticConsentRequestPath $artifacts.RequestPath `
+                    -SemanticConsentDecisionPath $artifacts.DecisionPath `
+                    -SemanticEvidencePath $artifacts.EvidencePath `
+                    -SemanticPublicKeyPath $artifacts.PublicKeyPath `
+                    -SemanticPublicKeyId $expectedKeyId `
+                    -ValidationRunId $artifacts.RunId
+                Assert-Equal $runner.ExitCode 10 "A signed numeric $case field must produce BLOCKED=10 at the runner boundary."
+                Assert-Equal $runner.Evidence.state 'BLOCKED' "A signed numeric $case field must never pass through the runner."
+                Assert-Match ([string]$runner.Evidence.failure.message) 'non-empty scalar string' "The runner must surface the numeric $case schema failure."
+            }
+            finally { $artifacts.Rsa.Dispose() }
+        }
+    }
+
+    # Scenario: A lexical path below a symlink/junction points into the candidate or artifact roots.
+    # Purpose: Reject every external v2 input at the canonical-path gate before parsing or reading candidate-controlled bytes.
+    It 'InterT193_rejects_symlinked_ancestors_for_all_external_v2_inputs_before_read' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-v2-external-input-aliases')
+        . $script:RunnerPath `
+            -CandidateRoot $fixture.Candidate `
+            -AdapterPath $fixture.Adapter `
+            -ArtifactsRoot $fixture.Artifacts `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -TrustedToolRoot $fixture.TrustedTools `
+            -DefineFunctionsOnly
+
+        $malformedTargetFiles = @{
+            'consent request' = Join-Path $fixture.Candidate 'syp154-alias-request.json'
+            'consent decision' = Join-Path $fixture.Candidate 'syp154-alias-decision.json'
+            'evidence' = Join-Path $fixture.Candidate 'syp154-alias-evidence.json'
+            'public key' = Join-Path $fixture.Artifacts 'syp154-alias-public-key.xml'
+        }
+        foreach ($targetFile in $malformedTargetFiles.Values) { Write-TestUtf8File -Path $targetFile -Text 'not-json-or-a-public-key' }
+
+        foreach ($aliasedName in @('consent request', 'consent decision', 'evidence', 'public key')) {
+            $targetRoot = if ($aliasedName -ceq 'public key') { $fixture.Artifacts } else { $fixture.Candidate }
+            $aliasRoot = Join-Path $fixture.Root ("alias-" + ($aliasedName -replace ' ', '-'))
+            $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+            [void](New-Item -ItemType $linkType -Path $aliasRoot -Target $targetRoot -ErrorAction Stop)
+            $aliasedPath = Join-Path $aliasRoot (Split-Path -Leaf $malformedTargetFiles[$aliasedName])
+            $paths = @{
+                'consent request' = Join-Path $fixture.Root 'unused-request.json'
+                'consent decision' = Join-Path $fixture.Root 'unused-decision.json'
+                'evidence' = Join-Path $fixture.Root 'unused-evidence.json'
+                'public key' = Join-Path $fixture.Root 'unused-public-key.xml'
+            }
+            $paths[$aliasedName] = $aliasedPath
+
+            $failure = $null
+            try {
+                [void](Assert-StandardValidationSemanticBridgeV2Evidence `
+                    -ConsentRequestPath $paths['consent request'] `
+                    -ConsentDecisionPath $paths['consent decision'] `
+                    -EvidencePath $paths['evidence'] `
+                    -PublicKeyPath $paths['public key'] `
+                    -ExpectedKeyId 'unused-key-id' `
+                    -CandidateId ('a' * 64) `
+                    -SourceRepository 'https://example.com/example/skills.git' `
+                    -SourceRevision ('a' * 40) `
+                    -BaseRevision ('b' * 40) `
+                    -ExpectedCandidateContentSha256 ('c' * 64) `
+                    -SnapshotRoot $fixture.Candidate `
+                    -CandidateInventory @([pscustomobject]@{ path = 'skills/alpha/SKILL.md'; sha256 = ('c' * 64); length = 1 }) `
+                    -CandidateRoot $fixture.Candidate `
+                    -ArtifactsRoot $fixture.Artifacts `
+                    -DevelopmentHarness $true `
+                    -CurrentRunId ([guid]::NewGuid())
+                )
+            }
+            catch { $failure = [string]$_.Exception.Message }
+            Assert-Match $failure 'symlinked or reparse-point ancestor' "The '$aliasedName' input must fail at the canonical path gate."
+            Assert-Match $failure ([regex]::Escape($aliasedName)) "The canonical path failure must identify '$aliasedName'."
         }
     }
 }

@@ -2776,7 +2776,8 @@ function Test-StandardSemanticBridgeEvidence {
         foreach ($name in @('bindings', 'providerRoute', 'scope', 'providerTextInventory', 'analyzerSet')) {
             if ((Get-StandardSemanticBridgeCanonicalJson (Get-StandardSemanticBridgeProperty $evidence $name)) -cne (Get-StandardSemanticBridgeCanonicalJson (Get-StandardSemanticBridgeProperty $ConsentDecision $name))) { throw "evidence $name is not consent-bound." }
         }
-        if ([string]$evidence.purpose -cne [string]$ExpectedPurpose) { throw 'evidence purpose is not consent-bound.' }
+        $evidencePurpose = Assert-StandardSemanticBridgeNonEmptyScalar -Value $evidence.purpose -Context 'evidence purpose'
+        if ($evidencePurpose -cne [string]$ExpectedPurpose) { throw 'evidence purpose is not consent-bound.' }
         Assert-StandardSemanticBridgeExactProperties -Object $evidence.consent -Expected @('consentRequestSha256', 'consentArtifactSha256', 'authorizer', 'authorizedAt', 'expiresAt', 'consentGranted') -Context 'evidence consent'
         if ([string]$evidence.consent.consentRequestSha256 -cne (Get-StandardSemanticBridgeArtifactSha256 -Artifact $ConsentRequest) -or [string]$evidence.consent.consentArtifactSha256 -cne (Get-StandardSemanticBridgeArtifactSha256 -Artifact $ConsentDecision)) { throw 'evidence consent artifact digest is invalid.' }
         if ($evidence.consent.consentGranted -isnot [bool] -or -not [bool]$evidence.consent.consentGranted) { throw 'evidence consent is not granted.' }
@@ -2808,7 +2809,8 @@ function Test-StandardSemanticBridgeEvidence {
         if ([string]$evidence.execution.findingsSha256 -cne $findingsSha) { throw 'evidence findings digest is invalid.' }
         $attestation = $evidence.attestation
         Assert-StandardSemanticBridgeExactProperties -Object $attestation -Expected @('attestationType', 'keyId', 'algorithm', 'signedPayloadSha256', 'issuedAt', 'signature') -Context 'evidence attestation'
-        if ([string]$attestation.attestationType -cne $script:StandardSemanticBridgeAttestationType -or [string]$attestation.keyId -cne $ExpectedKeyId -or [string]$attestation.algorithm -cne $script:StandardSemanticBridgeAlgorithm) { throw 'evidence signer identity or algorithm is not trusted by the caller.' }
+        $attestationKeyId = Assert-StandardSemanticBridgeNonEmptyScalar -Value $attestation.keyId -Context 'evidence attestation keyId'
+        if ([string]$attestation.attestationType -cne $script:StandardSemanticBridgeAttestationType -or $attestationKeyId -cne $ExpectedKeyId -or [string]$attestation.algorithm -cne $script:StandardSemanticBridgeAlgorithm) { throw 'evidence signer identity or algorithm is not trusted by the caller.' }
         $signatureText = Assert-StandardSemanticBridgeCanonicalBase64 $attestation.signature 'evidence signature'
         $signature = [Convert]::FromBase64String($signatureText)
         $unsigned = [ordered]@{}
@@ -2821,11 +2823,28 @@ function Test-StandardSemanticBridgeEvidence {
         $issuedAt = Get-StandardSemanticBridgeTimestamp -Value $attestation.issuedAt -Context 'attestation issuedAt'
         if ($issuedAt -ne $generatedAt -or $issuedAt -gt $nowUtc) { throw 'attestation timestamp is invalid.' }
         if (-not $publicKeySnapshot.VerifyData($unsignedBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'evidence signature verification failed.' }
+        $verifiedEvidenceSha256 = Get-StandardSemanticBridgeSha256FromBytes -Bytes $EvidenceBytes
         if ($null -ne $ReplayLedger) {
-            if ($ReplayLedger.ContainsKey($evidenceId)) { throw 'evidence replay was detected.' }
-            $ReplayLedger[$evidenceId] = [pscustomobject][ordered]@{ evidenceSha256 = Get-StandardSemanticBridgeSha256FromBytes -Bytes $EvidenceBytes; status = 'consumed' }
+            $replaySyncRoot = $ReplayLedger.get_SyncRoot()
+            $replayEntry = [pscustomobject][ordered]@{ evidenceSha256 = $verifiedEvidenceSha256; status = 'consumed' }
+            $replayLockTaken = $false
+            try {
+                [Threading.Monitor]::Enter($replaySyncRoot, [ref]$replayLockTaken)
+                try {
+                    $ReplayLedger.Add($evidenceId, $replayEntry)
+                }
+                catch {
+                    if ($_.Exception -is [ArgumentException] -or $_.Exception.InnerException -is [ArgumentException]) {
+                        throw 'evidence replay was detected.'
+                    }
+                    throw
+                }
+            }
+            finally {
+                if ($replayLockTaken) { [Threading.Monitor]::Exit($replaySyncRoot) }
+            }
         }
-        return [pscustomobject][ordered]@{ valid = $true; reason = $null; evidence = $evidence; evidenceSha256 = Get-StandardSemanticBridgeSha256FromBytes -Bytes $EvidenceBytes }
+        return [pscustomobject][ordered]@{ valid = $true; reason = $null; evidence = $evidence; evidenceSha256 = $verifiedEvidenceSha256 }
     }
     catch {
         return [pscustomobject][ordered]@{ valid = $false; reason = [string]$_.Exception.Message; evidence = $null; evidenceSha256 = $null }
