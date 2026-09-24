@@ -2200,6 +2200,13 @@ function Assert-StandardSemanticBridgeExecutionLedger {
     return $true
 }
 
+function Get-StandardSemanticBridgeUtcNow {
+    # The trusted parent uses this private seam for consent gates. The isolated
+    # callback bootstrap performs its own real-clock expiry check directly, so
+    # test mocks cannot weaken the child egress boundary.
+    return [DateTime]::UtcNow
+}
+
 function Invoke-StandardSemanticBridge {
     [CmdletBinding()]
     param(
@@ -2323,7 +2330,7 @@ function Invoke-StandardSemanticBridge {
             $request = [pscustomobject][ordered]@{ workItemId = $requestForDigest.workItemId; idempotencyKey = $idempotencyKey; providerRoute = $normalizedRoute; path = $path; contentKind = $kind; analyzerSet = $normalizedAnalyzers; text = $text; bytes = $null }
             $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
             $providerConsentParameters = $consentParameters.Clone()
-            $providerConsentParameters.Now = [DateTime]::UtcNow
+            $providerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
             $providerConsentResult = Test-StandardSemanticBridgeConsent @providerConsentParameters
             if (-not [bool]$providerConsentResult.valid) {
                 return [pscustomobject][ordered]@{
@@ -2455,7 +2462,7 @@ function Invoke-StandardSemanticBridge {
         $canonicalFindings = @(Get-StandardSemanticBridgeCanonicalFindings -Findings @($allFindings.ToArray()))
         $findingsDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact @($canonicalFindings)
         $analyzerCoverage = @(Sort-StandardSemanticBridgeOrdinalStrings -Values @($coverage))
-        $generatedAtNow = [DateTime]::UtcNow
+        $generatedAtNow = Get-StandardSemanticBridgeUtcNow
         $generatedAtConsentParameters = $consentParameters.Clone()
         $generatedAtConsentParameters.Now = $generatedAtNow
         $generatedAtConsentResult = Test-StandardSemanticBridgeConsent @generatedAtConsentParameters
@@ -2511,7 +2518,7 @@ function Invoke-StandardSemanticBridge {
         $signerRequest = [pscustomobject][ordered]@{ artifactType = 'semantic-evidence-v2'; algorithm = $script:StandardSemanticBridgeAlgorithm; payloadSha256 = $unsignedPayloadSha; payloadBytes = $unsignedBytes }
         $callbackTimeoutMilliseconds = Get-StandardSemanticBridgeCallbackTimeoutMilliseconds -TimeoutSeconds $TimeoutSeconds
         $signerConsentParameters = $consentParameters.Clone()
-        $signerConsentParameters.Now = [DateTime]::UtcNow
+        $signerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
         $signerConsentResult = Test-StandardSemanticBridgeConsent @signerConsentParameters
         if (-not [bool]$signerConsentResult.valid) {
             return [pscustomobject][ordered]@{
@@ -2528,7 +2535,7 @@ function Invoke-StandardSemanticBridge {
         }
         $signatureItems = @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $SignerCallback -Argument $signerRequest -CallbackContext $SignerCallbackContext -TimeoutMilliseconds $callbackTimeoutMilliseconds -ConsentExpiresAt $ConsentDecision.expiresAt -Context 'signer callback')
         $afterSignerConsentParameters = $consentParameters.Clone()
-        $afterSignerConsentParameters.Now = [DateTime]::UtcNow
+        $afterSignerConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
         $afterSignerConsentResult = Test-StandardSemanticBridgeConsent @afterSignerConsentParameters
         if (-not [bool]$afterSignerConsentResult.valid) {
             return [pscustomobject][ordered]@{
@@ -2561,7 +2568,7 @@ function Invoke-StandardSemanticBridge {
         $evidenceBytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($evidenceJson)
         $evidenceSha = Get-StandardSemanticBridgeSha256FromBytes -Bytes $evidenceBytes
         $finalConsentParameters = $consentParameters.Clone()
-        $finalConsentParameters.Now = [DateTime]::UtcNow
+        $finalConsentParameters.Now = Get-StandardSemanticBridgeUtcNow
         $finalConsentResult = Test-StandardSemanticBridgeConsent @finalConsentParameters
         if (-not [bool]$finalConsentResult.valid) {
             return [pscustomobject][ordered]@{

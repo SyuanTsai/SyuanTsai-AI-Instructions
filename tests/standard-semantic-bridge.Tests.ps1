@@ -735,6 +735,8 @@ function Update-TestConsentDigests {
         $fixture = New-TestSemanticFixture
         $slowSignerMarker = Join-Path $TestDrive 'consent-expired-during-signer.txt'
         $slowSignerTimestampsPath = Join-Path $TestDrive 'consent-expired-during-signer-timestamps.txt'
+        $slowSignerCompletedMarker = Join-Path $TestDrive 'consent-expired-during-signer-signature-completed.txt'
+        $clockObservationsPath = Join-Path $TestDrive 'consent-expired-during-signer-clock-observations.txt'
         $slowSigner = {
             param($signerRequest, $callbackContext)
             $expiresAtUtc = [DateTime]::Parse(
@@ -745,13 +747,16 @@ function Update-TestConsentDigests {
             $enteredAtUtc = [DateTime]::UtcNow
             [IO.File]::WriteAllText([string]$callbackContext.markerPath, $enteredAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))
             if ($enteredAtUtc -ge $expiresAtUtc) { throw 'test signer callback entered after consent expiry.' }
-            while ([DateTime]::UtcNow -lt $expiresAtUtc) { Start-Sleep -Milliseconds 25 }
 
             $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
             try {
                 $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
                 $signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
                 $signedAtUtc = [DateTime]::UtcNow
+                $signatureBytes = [Convert]::FromBase64String($signature)
+                if (-not $signingKey.VerifyData([byte[]]$signerRequest.payloadBytes, $signatureBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) {
+                    throw 'test signer callback did not produce a verifiable signature.'
+                }
                 [IO.File]::WriteAllText(
                     [string]$callbackContext.timestampsPath,
                     @(
@@ -760,6 +765,7 @@ function Update-TestConsentDigests {
                         $signedAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
                     ) -join [Environment]::NewLine
                 )
+                [IO.File]::WriteAllText([string]$callbackContext.signatureCompletedMarkerPath, 'signature-verified')
                 return [pscustomobject][ordered]@{
                     keyId = 'fixture-key'
                     algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
@@ -769,44 +775,96 @@ function Update-TestConsentDigests {
             finally { $signingKey.Dispose() }
         }
 
-        # This case tests the consent state machine. Invoke callback code directly
-        # so Windows PowerShell 5.1 child startup does not consume the consent
-        # window before the signer itself enters it. Isolated process behavior has
-        # separate coverage in the callback-boundary tests.
-        Mock Invoke-StandardSemanticBridgeCallbackWithTimeout -ModuleName StandardSemanticBridge {
-            return @(& $Callback $Argument $CallbackContext)
+        # Test the parent consent state machine with a private module mock. The
+        # consent expiry stays an hour ahead of real time so full-suite load
+        # cannot expire the signer's own real-clock guard. The mock simulates
+        # parent consent expiry after the verified signer callback; real child
+        # clock enforcement is covered by hosted Linux callback-boundary tests.
+        $consentStartedAt = [DateTime]::UtcNow
+        $consentExpiresAt = $consentStartedAt.AddHours(1)
+        $clockState = [pscustomobject][ordered]@{
+            activeUtc = $consentStartedAt
+            expiredUtc = $consentExpiresAt.AddTicks(1)
+            signatureCompletedMarkerPath = $slowSignerCompletedMarker
+            observationsPath = $clockObservationsPath
+        }
+        $bridgeModule = Get-Module StandardSemanticBridge
+        & $bridgeModule {
+            param($State)
+            $script:StandardSemanticBridgeTestClockState = $State
+        } $clockState
+
+        try {
+            Mock Get-StandardSemanticBridgeUtcNow -ModuleName StandardSemanticBridge {
+                $state = $script:StandardSemanticBridgeTestClockState
+                $signatureCompleted = [IO.File]::Exists([string]$state.signatureCompletedMarkerPath)
+                $phase = if ($signatureCompleted) { 'expired' } else { 'active' }
+                $observation = '{0}|signatureCompleted={1}' -f $phase, $signatureCompleted.ToString().ToLowerInvariant()
+                [IO.File]::AppendAllText([string]$state.observationsPath, $observation + [Environment]::NewLine)
+                if ($signatureCompleted) { return [DateTime]$state.expiredUtc }
+                return [DateTime]$state.activeUtc
+            }
+            Mock Invoke-StandardSemanticBridgeCallbackWithTimeout -ModuleName StandardSemanticBridge {
+                return @(& $Callback $Argument $CallbackContext)
+            }
+
+            $shortRequest = New-StandardSemanticBridgeConsentRequest `
+                -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+                -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+                -RequestId '11111111-1111-4111-8111-111111111124' `
+                -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentExpiresAt
+            $shortDecision = New-StandardSemanticBridgeConsentDecision `
+                -Request $shortRequest -Authorizer $fixture.Authorizer `
+                -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $consentStartedAt
+            $expiredDuringSigner = Invoke-TestSemanticBridge `
+                -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
+                -Signer $slowSigner `
+                -SignerContext ([pscustomobject][ordered]@{
+                    markerPath = $slowSignerMarker
+                    timestampsPath = $slowSignerTimestampsPath
+                    signatureCompletedMarkerPath = $slowSignerCompletedMarker
+                    expiresAtUtc = $shortRequest.expiresAt
+                    privateKeyXml = $fixture.Rsa.ToXmlString($true)
+                }) `
+                -Now $consentStartedAt -TimeoutSeconds 20
+        }
+        finally {
+            & $bridgeModule { Remove-Variable -Name StandardSemanticBridgeTestClockState -Scope Script -ErrorAction SilentlyContinue }
         }
 
-        $consentStartedAt = [DateTime]::UtcNow
-        $shortRequest = New-StandardSemanticBridgeConsentRequest `
-            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
-            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
-            -RequestId '11111111-1111-4111-8111-111111111124' `
-            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(6)
-        $shortDecision = New-StandardSemanticBridgeConsentDecision `
-            -Request $shortRequest -Authorizer $fixture.Authorizer `
-            -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $consentStartedAt
-        $expiredDuringSigner = Invoke-TestSemanticBridge `
-            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
-            -Signer $slowSigner `
-            -SignerContext ([pscustomobject][ordered]@{
-                markerPath = $slowSignerMarker
-                timestampsPath = $slowSignerTimestampsPath
-                expiresAtUtc = $shortRequest.expiresAt
-                privateKeyXml = $fixture.Rsa.ToXmlString($true)
-            }) `
-            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
-        $signerEnteredAtUtc = [DateTime]::Parse(
-            [IO.File]::ReadAllText($slowSignerMarker),
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind
-        ).ToUniversalTime()
+        Assert-TestCondition (Test-Path -LiteralPath $slowSignerMarker -PathType Leaf) 'The signer callback did not write its entry marker.'
+        Assert-TestCondition (Test-Path -LiteralPath $slowSignerCompletedMarker -PathType Leaf) 'The signer callback did not complete and verify its signature.'
+        Assert-TestCondition ([IO.File]::ReadAllText($slowSignerCompletedMarker) -ceq 'signature-verified') 'The signer completion marker does not confirm signature verification.'
+        Assert-TestCondition (Test-Path -LiteralPath $slowSignerTimestampsPath -PathType Leaf) 'The signer callback did not write its timestamps.'
+        Assert-TestCondition (Test-Path -LiteralPath $clockObservationsPath -PathType Leaf) 'The mocked clock did not record consent-gate observations.'
         $signerTimestamps = @(Get-Content -LiteralPath $slowSignerTimestampsPath)
-        $signerExpiresAtUtc = [DateTime]::Parse([string]$signerTimestamps[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
-        $signatureProducedAtUtc = [DateTime]::Parse([string]$signerTimestamps[2], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        Assert-TestCondition ($signerTimestamps.Count -eq 3) "Signer timestamp file must contain exactly 3 lines; found $($signerTimestamps.Count)."
+        $parsedTimestamps = New-Object 'System.Collections.Generic.List[DateTime]'
+        foreach ($timestampText in $signerTimestamps) {
+            $parsedTimestamp = [DateTime]::MinValue
+            $parsed = [DateTime]::TryParseExact(
+                [string]$timestampText,
+                'o',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$parsedTimestamp
+            )
+            Assert-TestCondition ([bool]$parsed) "Signer timestamp has an invalid round-trip format: '$timestampText'."
+            [void]$parsedTimestamps.Add($parsedTimestamp.ToUniversalTime())
+        }
+        $signerEnteredAtUtc = $parsedTimestamps[0]
+        $signerExpiresAtUtc = $parsedTimestamps[1]
+        $signatureProducedAtUtc = $parsedTimestamps[2]
+        $clockObservations = @(Get-Content -LiteralPath $clockObservationsPath)
+        Assert-TestCondition ($clockObservations.Count -ge 4) "Expected at least four parent consent clock samples; found $($clockObservations.Count)."
+        $preExpiryClockObservations = New-Object 'System.Collections.Generic.List[string]'
+        for ($clockIndex = 0; $clockIndex -lt ($clockObservations.Count - 1); $clockIndex++) {
+            [void]$preExpiryClockObservations.Add([string]$clockObservations[$clockIndex])
+        }
+        Assert-TestCondition (@($preExpiryClockObservations | Where-Object { $_ -cne 'active|signatureCompleted=false' }).Count -eq 0) 'The clock was not active for every parent consent check before the signer completed.'
+        Assert-TestCondition ([string]$clockObservations[$clockObservations.Count - 1] -ceq 'expired|signatureCompleted=true') 'The clock did not switch to expired after the signer completed.'
+        Assert-TestCondition ($signerEnteredAtUtc -lt $signerExpiresAtUtc -and $signerEnteredAtUtc -lt $signatureProducedAtUtc) 'The signer did not enter before consent expiry and finish after entry.'
         Assert-TestCondition ([string]$expiredDuringSigner.status -ceq 'BLOCKED') 'Consent that expired while the signer callback ran did not block the final result.'
-        Assert-TestCondition ((Test-Path -LiteralPath $slowSignerMarker) -and $signerEnteredAtUtc -lt $signerExpiresAtUtc) 'The signer callback did not start while consent was active.'
-        Assert-TestCondition ($signatureProducedAtUtc -ge $signerExpiresAtUtc) 'The signer callback did not create its signature after consent expired.'
         Assert-TestCondition ($null -eq $expiredDuringSigner.evidenceBytes) 'Consent expiry during signing released evidence bytes.'
     }
     }
