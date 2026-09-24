@@ -471,15 +471,33 @@ function ConvertTo-StandardSemanticBridgeUtcTimestamp {
 }
 
 function Get-StandardSemanticBridgeTimestamp {
-    param([Parameter(Mandatory = $true)] $Value, [Parameter(Mandatory = $true)][string] $Context)
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [switch] $AllowDateTime
+    )
+
     $parsed = [DateTime]::MinValue
-    $parsedDirectly = $Value -is [DateTime]
-    if ($parsedDirectly) { $parsed = [DateTime]$Value }
-    elseif (-not [DateTime]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) {
-        throw "$Context is not a valid UTC timestamp."
+    if ($Value -is [DateTime]) {
+        if (-not $AllowDateTime) { throw "$Context must be a valid RFC 3339 timestamp string." }
+        $parsed = [DateTime]$Value
     }
-    if (
-        $parsed.Kind -eq [DateTimeKind]::Unspecified) { throw "$Context is not a valid UTC timestamp." }
+    elseif ($Value -is [string]) {
+        $timestampPattern = '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[zZ]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])\z'
+        if (-not [Text.RegularExpressions.Regex]::IsMatch(
+                $Value,
+                $timestampPattern,
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+            throw "$Context must be a valid RFC 3339 timestamp string."
+        }
+        if (-not [DateTime]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) {
+            throw "$Context must be a valid RFC 3339 timestamp string."
+        }
+    }
+    else {
+        throw "$Context must be a valid RFC 3339 timestamp string."
+    }
+    if ($parsed.Kind -eq [DateTimeKind]::Unspecified) { throw "$Context must be a valid RFC 3339 timestamp string with an explicit UTC offset." }
     return $parsed.ToUniversalTime()
 }
 
@@ -1422,7 +1440,7 @@ function Invoke-StandardSemanticBridgeCallbackWithTimeout {
     if ($TimeoutMilliseconds -le 0) { throw [TimeoutException]::new("$Context deadline was exceeded before invocation.") }
     $consentExpiresAtUtc = $null
     if ($null -ne $ConsentExpiresAt) {
-        $consentExpiresAtUtc = Get-StandardSemanticBridgeTimestamp -Value $ConsentExpiresAt -Context "$Context consent expiry"
+        $consentExpiresAtUtc = Get-StandardSemanticBridgeTimestamp -Value $ConsentExpiresAt -Context "$Context consent expiry" -AllowDateTime
     }
     $hostExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     if ([string]::IsNullOrWhiteSpace($hostExecutable) -or -not (Test-Path -LiteralPath $hostExecutable -PathType Leaf)) {
@@ -2760,7 +2778,16 @@ function Test-StandardSemanticBridgeEvidence {
         if ($EvidenceBytes.Length -eq 0) { throw 'evidence bytes are empty.' }
         $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
         $json = $utf8.GetString($EvidenceBytes)
-        $evidence = ConvertFrom-Json -InputObject $json
+        $convertFromJsonCommand = Get-Command -Name ConvertFrom-Json -ErrorAction Stop
+        if ($convertFromJsonCommand.Parameters.ContainsKey('DateKind')) {
+            $evidence = ConvertFrom-Json -InputObject $json -DateKind String
+        }
+        elseif ($PSVersionTable.PSEdition -eq 'Core') {
+            throw 'evidence timestamps cannot be preserved as JSON strings by this PowerShell runtime.'
+        }
+        else {
+            $evidence = ConvertFrom-Json -InputObject $json
+        }
         $canonicalEvidenceBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
         if (-not (Test-StandardSemanticBridgeByteSequenceEqual -Left $EvidenceBytes -Right $canonicalEvidenceBytes)) { throw 'evidence bytes are not canonical UTF-8 JSON.' }
         Assert-StandardSemanticBridgeExactProperties -Object $evidence -Expected @('schemaVersion', 'artifactType', 'artifactClassification', 'evidenceId', 'generatedAt', 'status', 'decision', 'bindings', 'providerRoute', 'purpose', 'scope', 'providerTextInventory', 'analyzerSet', 'analyzerCoverage', 'analyzerCompleteness', 'consent', 'execution', 'findings', 'attestation') -Context 'evidence'

@@ -3489,6 +3489,77 @@ jobs:
             Assert-Match $failure ([regex]::Escape($aliasedName)) "The canonical path failure must identify '$aliasedName'."
         }
     }
+
+    # Scenario: A v2 runner import receives evidence with a parseable but non-RFC 3339 generatedAt value and a valid recomputed signature.
+    # Purpose: The runner must rely on the shared verifier's schema gate and report BLOCKED=10 for signed lexical timestamp violations.
+    It 'InterT194_blocks_resigned_non_rfc3339_v2_timestamp_at_runner_import' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-v2-non-rfc3339-timestamp')
+        $artifacts = New-TestRunnerSemanticV2Artifacts -Fixture $fixture
+        try {
+            $baseline = Invoke-RunnerFixture `
+                -Fixture $fixture `
+                -SemanticTriggered `
+                -SemanticConsentRequestPath $artifacts.RequestPath `
+                -SemanticConsentDecisionPath $artifacts.DecisionPath `
+                -SemanticEvidencePath $artifacts.EvidencePath `
+                -SemanticPublicKeyPath $artifacts.PublicKeyPath `
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
+            Assert-Equal $baseline.ExitCode 0 'A canonical RFC 3339 v2 artifact must pass the runner import baseline.'
+            Assert-Equal $baseline.Evidence.state 'PASS' 'A canonical RFC 3339 v2 artifact must produce PASS before the malformed timestamp mutation.'
+
+            $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+            $evidence = ConvertFrom-Json -InputObject $utf8.GetString([byte[]]$artifacts.EvidenceBytes)
+            $rawTimestamp = $evidence.generatedAt
+            if ($rawTimestamp -is [DateTime]) { $timestamp = [DateTimeOffset]::new(([DateTime]$rawTimestamp).ToUniversalTime()) }
+            elseif ($rawTimestamp -is [DateTimeOffset]) { $timestamp = ([DateTimeOffset]$rawTimestamp).ToUniversalTime() }
+            else { $timestamp = [DateTimeOffset]::Parse([string]$rawTimestamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).ToUniversalTime() }
+            $evidence.generatedAt = $timestamp.ToString('MM/dd/yyyy HH:mm:ss.fff zzz', [Globalization.CultureInfo]::InvariantCulture)
+            $unsigned = [ordered]@{}
+            foreach ($property in @($evidence.PSObject.Properties | Where-Object { $_.Name -ne 'attestation' })) { $unsigned[$property.Name] = $property.Value }
+            $unsignedBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value ([pscustomobject]$unsigned)))
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $evidence.attestation.signedPayloadSha256 = ([BitConverter]::ToString($sha256.ComputeHash($unsignedBytes))).Replace('-', '').ToLowerInvariant()
+            }
+            finally { $sha256.Dispose() }
+            $evidence.attestation.signature = [Convert]::ToBase64String(
+                $artifacts.Rsa.SignData($unsignedBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            )
+            $evidenceBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
+            $direct = Test-StandardSemanticBridgeEvidence `
+                -EvidenceBytes $evidenceBytes `
+                -ConsentRequest $artifacts.Request `
+                -ConsentDecision $artifacts.Decision `
+                -PublicKey $artifacts.Rsa `
+                -ExpectedKeyId $artifacts.KeyId `
+                -ExpectedBindings $artifacts.Bindings `
+                -ExpectedProviderRoute $artifacts.Route `
+                -ExpectedPurpose 'Synthetic runner v2 semantic review.' `
+                -ExpectedScope $artifacts.Scope `
+                -ExpectedProviderTextInventory $artifacts.Inventory `
+                -Now ([DateTime]::UtcNow)
+            Assert-False ([bool]$direct.valid) 'A re-signed locale-formatted generatedAt value must fail the shared verifier.'
+            Assert-Match ([string]$direct.reason) 'RFC 3339' 'The verifier must identify the timestamp lexical contract failure.'
+
+            Write-TestUtf8File -Path $artifacts.EvidencePath -Text $utf8.GetString($evidenceBytes)
+            $invalidRunnerArtifactsRoot = Join-Path $fixture.Root 'invalid-timestamp-runner-artifacts'
+            $runner = Invoke-RunnerFixture `
+                -Fixture $fixture `
+                -ArtifactsRoot $invalidRunnerArtifactsRoot `
+                -SemanticTriggered `
+                -SemanticConsentRequestPath $artifacts.RequestPath `
+                -SemanticConsentDecisionPath $artifacts.DecisionPath `
+                -SemanticEvidencePath $artifacts.EvidencePath `
+                -SemanticPublicKeyPath $artifacts.PublicKeyPath `
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
+            Assert-Equal $runner.ExitCode 10 "A signed non-RFC 3339 timestamp must produce BLOCKED=10 at the runner import boundary. state=$($runner.Evidence.state); failure.message=$($runner.Evidence.failure.message)"
+            Assert-Equal $runner.Evidence.state 'BLOCKED' 'A signed non-RFC 3339 timestamp must never produce PASS.'
+            Assert-Match ([string]$runner.Evidence.failure.message) 'RFC 3339' 'The runner must retain the timestamp schema failure.'
+        }
+        finally { $artifacts.Rsa.Dispose() }
+    }
 }
 
 Describe 'Pester shard plan contract' {

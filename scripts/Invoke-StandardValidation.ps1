@@ -662,7 +662,11 @@ function Get-StandardValidationJson {
 }
 
 function Get-StandardValidationJsonSnapshot {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [switch] $PreserveDateStrings
+    )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "INVALID|$Context JSON file is missing: $Path"
@@ -675,7 +679,22 @@ function Get-StandardValidationJsonSnapshot {
         if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
             $text = $text.Substring(1)
         }
-        $value = ConvertFrom-Json -InputObject $text
+        if ($PreserveDateStrings) {
+            $convertFromJsonCommand = Get-Command -Name ConvertFrom-Json -ErrorAction Stop
+            if ($convertFromJsonCommand.Parameters.ContainsKey('DateKind')) {
+                $value = ConvertFrom-Json -InputObject $text -DateKind String
+            }
+            elseif ($PSVersionTable.PSEdition -eq 'Core') {
+                throw "INVALID|$Context timestamp strings cannot be preserved by this PowerShell runtime."
+            }
+            else {
+                # Windows PowerShell 5.1 leaves ISO timestamp JSON values as strings by default.
+                $value = ConvertFrom-Json -InputObject $text
+            }
+        }
+        else {
+            $value = ConvertFrom-Json -InputObject $text
+        }
         return [pscustomobject][ordered]@{
             bytes = $bytes
             sha256 = $sha256
@@ -5061,9 +5080,9 @@ function Assert-StandardValidationSemanticBridgeV2Evidence {
             Assert-StandardValidationRegularFile -Path ([string]$path.path) -Context "$Context $($path.name)"
         }
 
-        $requestSnapshot = Get-StandardValidationJsonSnapshot -Path $requestFull -Context "$Context consent request"
-        $decisionSnapshot = Get-StandardValidationJsonSnapshot -Path $decisionFull -Context "$Context consent decision"
-        $evidenceSnapshot = Get-StandardValidationJsonSnapshot -Path $evidenceFull -Context "$Context evidence"
+        $requestSnapshot = Get-StandardValidationJsonSnapshot -Path $requestFull -Context "$Context consent request" -PreserveDateStrings
+        $decisionSnapshot = Get-StandardValidationJsonSnapshot -Path $decisionFull -Context "$Context consent decision" -PreserveDateStrings
+        $evidenceSnapshot = Get-StandardValidationJsonSnapshot -Path $evidenceFull -Context "$Context evidence" -PreserveDateStrings
         # Read the key once, alongside the JSON snapshots.  The public key is
         # an authenticated input just like request/decision/evidence; parsing
         # it again from the path would reopen a TOCTOU window before Register.

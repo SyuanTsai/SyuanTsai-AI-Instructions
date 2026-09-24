@@ -1381,6 +1381,65 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([bool]$numericEquivalentVerification.valid) 'Numeric schemaVersion 2.0 was rejected although it is schema-equivalent to integer 2.'
     }
 
+    # Scenario: A validly re-signed evidence artifact uses locale-formatted timestamp strings instead of RFC 3339 date-time values.
+    # Purpose: Every signed evidence timestamp must meet the schema lexical contract before parsed-instant comparisons, while offsets remain valid.
+    It 'UnitT95_rejects_non_rfc3339_resigned_evidence_timestamps_but_accepts_offsets' {
+        $fixture = New-TestSemanticFixture
+        try {
+            $run = Invoke-TestSemanticBridge -Fixture $fixture
+            Assert-TestCondition ([string]$run.status -ceq 'PASS') "The baseline timestamp fixture did not pass: $($run.reason)"
+
+            foreach ($field in @('generatedAt', 'attestation.issuedAt', 'consent.authorizedAt', 'consent.expiresAt')) {
+                $mutation = {
+                    param($evidence)
+                    $parts = $field -split '\.'
+                    $owner = $evidence
+                    for ($index = 0; $index -lt ($parts.Count - 1); $index++) { $owner = $owner.($parts[$index]) }
+                    $leaf = $parts[$parts.Count - 1]
+                    $raw = $owner.($leaf)
+                    if ($raw -is [DateTime]) { $timestamp = [DateTimeOffset]::new(([DateTime]$raw).ToUniversalTime()) }
+                    elseif ($raw -is [DateTimeOffset]) { $timestamp = ([DateTimeOffset]$raw).ToUniversalTime() }
+                    else { $timestamp = [DateTimeOffset]::Parse([string]$raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).ToUniversalTime() }
+                    $owner.($leaf) = $timestamp.ToString('MM/dd/yyyy HH:mm:ss.fff zzz', [Globalization.CultureInfo]::InvariantCulture)
+                }.GetNewClosure()
+                $invalidBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation $mutation
+                $invalid = Test-StandardSemanticBridgeEvidence `
+                    -EvidenceBytes $invalidBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+                    -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+                    -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+                    -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+                Assert-TestCondition (-not [bool]$invalid.valid) "A re-signed locale-formatted $field timestamp was accepted."
+                Assert-TestCondition ([string]$invalid.reason -match 'RFC 3339') "The $field rejection did not identify its RFC 3339 type/format failure: $($invalid.reason)"
+            }
+
+            $offsetMutation = {
+                param($evidence)
+                foreach ($field in @('generatedAt', 'attestation.issuedAt', 'consent.authorizedAt', 'consent.expiresAt')) {
+                    $parts = $field -split '\.'
+                    $owner = $evidence
+                    for ($index = 0; $index -lt ($parts.Count - 1); $index++) { $owner = $owner.($parts[$index]) }
+                    $leaf = $parts[$parts.Count - 1]
+                    $raw = $owner.($leaf)
+                    if ($raw -is [DateTime]) { $timestamp = [DateTimeOffset]::new(([DateTime]$raw).ToUniversalTime()) }
+                    elseif ($raw -is [DateTimeOffset]) { $timestamp = ([DateTimeOffset]$raw).ToUniversalTime() }
+                    else { $timestamp = [DateTimeOffset]::Parse([string]$raw, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).ToUniversalTime() }
+                    $owner.($leaf) = $timestamp.ToOffset([TimeSpan]::FromHours(5.5)).ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz", [Globalization.CultureInfo]::InvariantCulture)
+                }
+            }
+            $offsetBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation $offsetMutation
+            $offsetVerification = Test-StandardSemanticBridgeEvidence `
+                -EvidenceBytes $offsetBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+                -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+                -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+                -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+            Assert-TestCondition ([bool]$offsetVerification.valid) "Equivalent RFC 3339 timestamps with +05:30 offsets were rejected: $($offsetVerification.reason)"
+        }
+        finally {
+            $fixture.Rsa.Dispose()
+            $fixture.PublicRsa.Dispose()
+        }
+    }
+
     # Scenario: A multi-item execution validates consent once, then uses its detached expiry gate.
     # Purpose: Full request/decision/schema validation must not repeat at each provider boundary.
     It 'InterT184_full_consent_validation_runs_once_for_multi_item_execution' {
