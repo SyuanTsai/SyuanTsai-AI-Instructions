@@ -1006,78 +1006,59 @@ function Get-StandardSemanticBridgeLinuxNamespaceIdentity {
     return $target
 }
 
-function Get-StandardSemanticBridgeLinuxProcessUserId {
+function Get-StandardSemanticBridgeLinuxProcessStat {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
 
-    if (-not (Test-StandardSemanticBridgeLinuxHost)) { throw 'Linux process ownership inspection is unavailable.' }
-    $statusPath = "/proc/{0}/status" -f $ProcessId
-    try { $status = [IO.File]::ReadAllText($statusPath) }
-    catch { throw "Could not read required process ownership state ${statusPath}: $($_.Exception.Message)" }
-    $uidMatch = [regex]::Match($status, '(?m)^Uid:\s+(\d+)\s+\d+')
-    $userId = 0
-    if (-not $uidMatch.Success -or -not [int]::TryParse($uidMatch.Groups[1].Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$userId) -or $userId -lt 0) {
-        throw "Could not parse required process ownership state $statusPath."
+    if (-not (Test-StandardSemanticBridgeLinuxHost)) { throw 'Linux process inspection is unavailable.' }
+    if ($ProcessId -le 0) { throw 'Linux process identity must use a positive PID.' }
+    $processDirectory = "/proc/{0}" -f $ProcessId
+    $statPath = Join-Path $processDirectory 'stat'
+    if (-not [IO.Directory]::Exists($processDirectory)) { return $null }
+    try { $stat = [IO.File]::ReadAllText($statPath) }
+    catch {
+        if ([IO.Directory]::Exists($processDirectory)) { throw "Could not read required process state ${statPath}: $($_.Exception.Message)" }
+        return $null
     }
-    return $userId
+    $closeParen = $stat.LastIndexOf(')')
+    if ($closeParen -lt 0 -or $closeParen + 2 -ge $stat.Length) { throw "Could not parse required process state $statPath." }
+    $fields = $stat.Substring($closeParen + 2).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+    if ($fields.Count -le 19) { throw "Process state ${statPath} is incomplete." }
+    $parentId = 0
+    $startTime = 0L
+    if (-not [int]::TryParse($fields[1], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$parentId) -or
+        -not [long]::TryParse($fields[19], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$startTime) -or
+        $startTime -le 0) {
+        throw "Could not parse required process identity ${statPath}."
+    }
+    $state = [string]$fields[0]
+    if ([string]::IsNullOrWhiteSpace($state)) { throw "Could not parse required process state $statPath." }
+    return [pscustomobject][ordered]@{
+        ProcessId = $ProcessId
+        ParentProcessId = $parentId
+        StartTime = $startTime
+        State = $state.Substring(0, 1)
+    }
 }
 
-function Get-StandardSemanticBridgeLinuxProcessTable {
-    if (-not (Test-StandardSemanticBridgeLinuxHost)) { throw 'Strict Linux process inspection is unavailable.' }
-    $table = @{}
-    try { $entries = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | Where-Object { $_.Name -match '^\d+$' }) }
-    catch { throw "Could not enumerate /proc: $($_.Exception.Message)" }
-    foreach ($entry in $entries) {
-        $processId = 0
-        if (-not [int]::TryParse([string]$entry.Name, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$processId) -or $processId -le 0) { continue }
-        $statPath = Join-Path $entry.FullName 'stat'
-        try { $stat = [IO.File]::ReadAllText($statPath) }
-        catch {
-            if ([IO.Directory]::Exists($entry.FullName)) { throw "Could not read required process state ${statPath}: $($_.Exception.Message)" }
-            continue
-        }
-        $closeParen = $stat.LastIndexOf(')')
-        if ($closeParen -lt 0 -or $closeParen + 2 -ge $stat.Length) { throw "Could not parse required process state $statPath." }
-        $fields = $stat.Substring($closeParen + 2).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
-        if ($fields.Count -le 19) { throw "Process state ${statPath} is incomplete." }
-        $parentId = 0
-        $startTime = 0L
-        if (-not [int]::TryParse($fields[1], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$parentId) -or
-            -not [long]::TryParse($fields[19], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$startTime)) {
-            throw "Could not parse required process identity ${statPath}."
-        }
-        $statusPath = Join-Path $entry.FullName 'status'
-        try { $status = [IO.File]::ReadAllText($statusPath) }
-        catch {
-            if ([IO.Directory]::Exists($entry.FullName)) { throw "Could not read required process ownership state ${statusPath}: $($_.Exception.Message)" }
-            continue
-        }
-        $uidMatch = [regex]::Match($status, '(?m)^Uid:\s+(\d+)\s+\d+')
-        $userId = 0
-        if (-not $uidMatch.Success -or -not [int]::TryParse($uidMatch.Groups[1].Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$userId) -or $userId -lt 0) {
-            throw "Could not parse required process ownership state $statusPath."
-        }
-        $table[$processId] = [pscustomobject][ordered]@{
-            ProcessId = $processId
-            ParentProcessId = $parentId
-            StartTime = $startTime
-            UserId = $userId
-        }
-    }
-    return $table
-}
-
-function Find-StandardSemanticBridgeLinuxNamespaceChildProcessId {
+function Find-StandardSemanticBridgeLinuxNamespaceChildProcessIdentity {
     param(
         [Parameter(Mandatory = $true)][int] $WrapperProcessId,
-        [Parameter(Mandatory = $true)][string] $NamespaceIdentity,
-        [Parameter(Mandatory = $true)][int] $OwnerUserId
+        [Parameter(Mandatory = $true)][string] $NamespaceIdentity
     )
 
-    $table = Get-StandardSemanticBridgeLinuxProcessTable
-    if (-not $table.ContainsKey($WrapperProcessId)) { throw "Callback namespace wrapper $WrapperProcessId was not present in /proc." }
-    foreach ($item in $table.Values) {
-        if ([int]$item.ParentProcessId -ne $WrapperProcessId) { continue }
-        if ([int]$item.UserId -ne $OwnerUserId) { continue }
+    $wrapperDirectory = "/proc/{0}" -f $WrapperProcessId
+    $childrenPath = Join-Path (Join-Path (Join-Path $wrapperDirectory 'task') ([string]$WrapperProcessId)) 'children'
+    if (-not [IO.Directory]::Exists($wrapperDirectory)) { return $null }
+    try { $childrenText = [IO.File]::ReadAllText($childrenPath) }
+    catch {
+        if ([IO.Directory]::Exists($wrapperDirectory)) { throw "Could not read callback wrapper children ${childrenPath}: $($_.Exception.Message)" }
+        return $null
+    }
+    foreach ($token in @($childrenText -split '\s+')) {
+        $childProcessId = 0
+        if (-not [int]::TryParse([string]$token, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$childProcessId) -or $childProcessId -le 0) { continue }
+        $item = Get-StandardSemanticBridgeLinuxProcessStat -ProcessId $childProcessId
+        if ($null -eq $item -or [int]$item.ParentProcessId -ne $WrapperProcessId) { continue }
         try {
             if ((Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId ([int]$item.ProcessId)) -cne $NamespaceIdentity) { continue }
             $status = [IO.File]::ReadAllText(("/proc/{0}/status" -f [int]$item.ProcessId))
@@ -1085,37 +1066,32 @@ function Find-StandardSemanticBridgeLinuxNamespaceChildProcessId {
             if (-not $nspidMatch.Success) { throw "Could not verify NSpid for process $($item.ProcessId)." }
             $nspids = @($nspidMatch.Groups[1].Value.Trim() -split '\s+')
             if ($nspids.Count -eq 0 -or [int]$nspids[$nspids.Count - 1] -ne 1) { continue }
-            if ($nspids.Count -gt 0) {
-                return [int]$item.ProcessId
-            }
+            return $item
         }
         catch {
             if ([IO.Directory]::Exists(("/proc/{0}" -f [int]$item.ProcessId))) { throw }
         }
     }
-    return 0
+    return $null
 }
 
-function Get-StandardSemanticBridgeLinuxNamespaceProcessIds {
+function Get-StandardSemanticBridgeLinuxNamespaceInitState {
     param(
-        [Parameter(Mandatory = $true)][string] $NamespaceIdentity,
-        [Parameter(Mandatory = $true)][int] $OwnerUserId
+        [Parameter(Mandatory = $true)][int] $InitProcessId,
+        [Parameter(Mandatory = $true)][long] $InitStartTime
     )
 
-    $table = Get-StandardSemanticBridgeLinuxProcessTable
-    $result = New-Object 'System.Collections.Generic.List[int]'
-    foreach ($item in $table.Values) {
-        if ([int]$item.UserId -ne $OwnerUserId) { continue }
-        try {
-            if ((Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId ([int]$item.ProcessId)) -ceq $NamespaceIdentity) {
-                [void]$result.Add([int]$item.ProcessId)
-            }
-        }
-        catch {
-            if ([IO.Directory]::Exists(("/proc/{0}" -f [int]$item.ProcessId))) { throw }
-        }
+    $item = Get-StandardSemanticBridgeLinuxProcessStat -ProcessId $InitProcessId
+    if ($null -eq $item) {
+        return [pscustomobject][ordered]@{ State = 'Absent'; ProcessId = $InitProcessId; StartTime = $InitStartTime }
     }
-    return $result.ToArray()
+    if ([long]$item.StartTime -ne $InitStartTime) {
+        return [pscustomobject][ordered]@{ State = 'Reused'; ProcessId = $InitProcessId; StartTime = [long]$item.StartTime }
+    }
+    if ([string]$item.State -in @('Z', 'X', 'x')) {
+        return [pscustomobject][ordered]@{ State = 'Exited'; ProcessId = $InitProcessId; StartTime = $InitStartTime }
+    }
+    return [pscustomobject][ordered]@{ State = 'Running'; ProcessId = $InitProcessId; StartTime = $InitStartTime; LinuxState = [string]$item.State }
 }
 
 function Stop-StandardSemanticBridgeOwnedCallbackProcess {
@@ -1137,7 +1113,7 @@ function Stop-StandardSemanticBridgeOwnedCallbackProcess {
         # reference; a prior HasExited/PID query would create a check-then-kill
         # window.  The wrapper is the only Unix process reference used here,
         # and unshare --kill-child=SIGKILL is the namespace cleanup contract.
-        # The strict namespace scan after termination remains authoritative;
+        # The retained namespace-init identity is checked after termination;
         # never signal a raw PID or the wrapper's process group as a boundary.
         try { $Process.Kill() } catch { if (-not $Process.HasExited) { throw } }
         return
@@ -1150,8 +1126,8 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
         [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
         [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds,
         [bool] $UnixPidNamespaceActive = $false,
-        [string] $UnixPidNamespaceIdentity = $null,
-        [int] $UnixPidNamespaceOwnerUserId = -1,
+        [int] $UnixPidNamespaceInitProcessId = -1,
+        [long] $UnixPidNamespaceInitStartTime = -1,
         [ref] $FailureReason = $null
     )
 
@@ -1161,48 +1137,49 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
             return $false
         }
         [void]$Process.WaitForExit(0)
-        if ([string]::IsNullOrWhiteSpace($UnixPidNamespaceIdentity)) {
-            if ($null -ne $FailureReason) { $FailureReason.Value = 'Linux PID namespace identity was unavailable during cleanup.' }
-            return $false
-        }
-        if ($UnixPidNamespaceOwnerUserId -lt 0) {
-            if ($null -ne $FailureReason) { $FailureReason.Value = 'Linux callback owner UID was unavailable during cleanup.' }
+        if ($UnixPidNamespaceInitProcessId -le 0 -or $UnixPidNamespaceInitStartTime -le 0) {
+            if ($null -ne $FailureReason) { $FailureReason.Value = 'Verified Linux PID namespace init identity was unavailable during cleanup.' }
             return $false
         }
         $deadline = [Diagnostics.Stopwatch]::StartNew()
-        $emptyGraceStartedAt = $null
-        $lastScanError = $null
-        $lastNamespaceProcesses = @()
+        $stableExitStartedAt = $null
+        $lastStateError = $null
+        $lastState = $null
         try {
             do {
                 try {
-                    $remainingNamespaceProcesses = @(Get-StandardSemanticBridgeLinuxNamespaceProcessIds -NamespaceIdentity $UnixPidNamespaceIdentity -OwnerUserId $UnixPidNamespaceOwnerUserId)
-                    $lastScanError = $null
-                    $lastNamespaceProcesses = @($remainingNamespaceProcesses)
+                    $initState = Get-StandardSemanticBridgeLinuxNamespaceInitState `
+                        -InitProcessId $UnixPidNamespaceInitProcessId `
+                        -InitStartTime $UnixPidNamespaceInitStartTime
+                    $lastStateError = $null
+                    $lastState = [string]$initState.State
                 }
                 catch {
-                    # A process may disappear between the strict /proc table
-                    # and namespace reads.  Retry the complete scan inside the
-                    # bounded cleanup window; a persistent error remains a
-                    # fail-closed cleanup failure.
-                    $lastScanError = [string]$_.Exception.Message
-                    $emptyGraceStartedAt = $null
+                    # The retained PID is the only process identity observed
+                    # after launch.  A transient /proc read race is retried,
+                    # while a persistent read failure remains fail closed.
+                    $lastStateError = [string]$_.Exception.Message
+                    $lastState = $null
+                    $stableExitStartedAt = $null
                 }
-                if ($null -eq $lastScanError -and $remainingNamespaceProcesses.Count -eq 0) {
-                    if ($null -eq $emptyGraceStartedAt) { $emptyGraceStartedAt = $deadline.ElapsedMilliseconds }
-                    elseif (($deadline.ElapsedMilliseconds - $emptyGraceStartedAt) -ge 250) { return $true }
+                if ($null -eq $lastStateError -and $lastState -in @('Absent', 'Exited')) {
+                    if ($null -eq $stableExitStartedAt) { $stableExitStartedAt = $deadline.ElapsedMilliseconds }
+                    elseif (($deadline.ElapsedMilliseconds - $stableExitStartedAt) -ge 250) { return $true }
                 }
-                elseif ($null -eq $lastScanError) {
-                    $emptyGraceStartedAt = $null
+                elseif ($null -eq $lastStateError -and $lastState -eq 'Reused') {
+                    if ($null -ne $FailureReason) { $FailureReason.Value = 'Verified Linux PID namespace init PID was reused before cleanup completed.' }
+                    return $false
+                }
+                elseif ($null -eq $lastStateError) {
+                    $stableExitStartedAt = $null
                 }
                 if ($deadline.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
                     if ($null -ne $FailureReason) {
-                        if ($null -ne $lastScanError) {
-                            $FailureReason.Value = "strict Linux PID namespace scan failed: $lastScanError"
+                        if ($null -ne $lastStateError) {
+                            $FailureReason.Value = "Retained Linux PID namespace init state could not be verified: $lastStateError"
                         }
                         else {
-                            $ids = if ($lastNamespaceProcesses.Count -eq 0) { '<none>' } else { (@($lastNamespaceProcesses) -join ',') }
-                            $FailureReason.Value = "Linux PID namespace still contained process IDs after cleanup: $ids"
+                            $FailureReason.Value = "Retained Linux PID namespace init remained in state '$lastState'."
                         }
                     }
                     return $false
@@ -1436,7 +1413,8 @@ catch {
     $jobAssigned = $false
     $unixPidNamespaceActive = $false
     $unixPidNamespaceIdentity = $null
-    $unixPidNamespaceOwnerUserId = -1
+    $unixPidNamespaceInitProcessId = -1
+    $unixPidNamespaceInitStartTime = -1L
     $callbackProcessTerminationRequested = $false
     $primaryException = $null
     $deadline = [Diagnostics.Stopwatch]::StartNew()
@@ -1470,7 +1448,6 @@ catch {
             $namespaceReady = $false
             try {
                 $parentNamespaceIdentity = Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId $PID
-                $unixPidNamespaceOwnerUserId = Get-StandardSemanticBridgeLinuxProcessUserId -ProcessId $PID
                 while ($namespaceDeadline.ElapsedMilliseconds -lt 1000) {
                     if (Test-Path -LiteralPath $pidNamespaceHandshakePath -PathType Leaf) {
                         try {
@@ -1482,11 +1459,16 @@ catch {
                                 -not [string]::IsNullOrWhiteSpace([string]$handshakeLines[1]) -and
                                 [string]$handshakeLines[1].Trim() -cne $parentNamespaceIdentity) {
                                 $unixPidNamespaceIdentity = [string]$handshakeLines[1].Trim()
-                                $namespaceChildProcessId = Find-StandardSemanticBridgeLinuxNamespaceChildProcessId `
+                                $namespaceChildIdentity = Find-StandardSemanticBridgeLinuxNamespaceChildProcessIdentity `
                                     -WrapperProcessId $process.Id `
-                                    -NamespaceIdentity $unixPidNamespaceIdentity `
-                                    -OwnerUserId $unixPidNamespaceOwnerUserId
-                                if ($namespaceChildProcessId -gt 0 -and -not $process.HasExited) {
+                                    -NamespaceIdentity $unixPidNamespaceIdentity
+                                if ($null -ne $namespaceChildIdentity -and
+                                    [int]$namespaceChildIdentity.ProcessId -gt 0 -and
+                                    [long]$namespaceChildIdentity.StartTime -gt 0 -and
+                                    [string]$namespaceChildIdentity.State -notin @('Z', 'X', 'x') -and
+                                    -not $process.HasExited) {
+                                    $unixPidNamespaceInitProcessId = [int]$namespaceChildIdentity.ProcessId
+                                    $unixPidNamespaceInitStartTime = [long]$namespaceChildIdentity.StartTime
                                     $namespaceReady = $true
                                     break
                                 }
@@ -1544,7 +1526,7 @@ catch {
                 catch {
                     throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process tree could not be terminated.")
                 }
-                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceIdentity $unixPidNamespaceIdentity -UnixPidNamespaceOwnerUserId $unixPidNamespaceOwnerUserId)) {
+                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceInitProcessId $unixPidNamespaceInitProcessId -UnixPidNamespaceInitStartTime $unixPidNamespaceInitStartTime)) {
                     throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota and its process did not terminate.")
                 }
                 throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
@@ -1564,7 +1546,7 @@ catch {
                     $callbackProcessTerminationRequested = $true
                     if ($unixPidNamespaceActive) {
                         $waitFailure = $null
-                        if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceIdentity $unixPidNamespaceIdentity -UnixPidNamespaceOwnerUserId $unixPidNamespaceOwnerUserId -FailureReason ([ref]$waitFailure))) {
+                        if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceInitProcessId $unixPidNamespaceInitProcessId -UnixPidNamespaceInitStartTime $unixPidNamespaceInitStartTime -FailureReason ([ref]$waitFailure))) {
                             $detail = if ([string]::IsNullOrWhiteSpace([string]$waitFailure)) { 'no cleanup diagnostic was available' } else { [string]$waitFailure }
                             throw [InvalidOperationException]::new("$Context callback host exited but its PID namespace did not become empty: $detail")
                         }
@@ -1588,7 +1570,7 @@ catch {
                 catch {
                     throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process tree could not be terminated.")
                 }
-                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceIdentity $unixPidNamespaceIdentity -UnixPidNamespaceOwnerUserId $unixPidNamespaceOwnerUserId)) {
+                if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceInitProcessId $unixPidNamespaceInitProcessId -UnixPidNamespaceInitStartTime $unixPidNamespaceInitStartTime)) {
                     throw [TimeoutException]::new("$Context deadline was exceeded and its isolated process did not terminate.")
                 }
                 throw [TimeoutException]::new("$Context deadline was exceeded.")
@@ -1613,7 +1595,7 @@ catch {
                 $callbackProcessTerminationRequested = $true
             }
             catch { }
-            [void](Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceIdentity $unixPidNamespaceIdentity -UnixPidNamespaceOwnerUserId $unixPidNamespaceOwnerUserId)
+            [void](Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $unixPidNamespaceActive -UnixPidNamespaceInitProcessId $unixPidNamespaceInitProcessId -UnixPidNamespaceInitStartTime $unixPidNamespaceInitStartTime)
             throw [InvalidOperationException]::new("$Context exceeded its isolated $quotaStream quota.")
         }
         if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
@@ -1644,7 +1626,7 @@ catch {
                         -JobAssigned $false `
                         -JobHandle ([IntPtr]::Zero) `
                         -UnixPidNamespaceActive $true
-                    if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $true -UnixPidNamespaceIdentity $unixPidNamespaceIdentity -UnixPidNamespaceOwnerUserId $unixPidNamespaceOwnerUserId)) {
+                    if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process  -TimeoutMilliseconds 5000 -UnixPidNamespaceActive $true -UnixPidNamespaceInitProcessId $unixPidNamespaceInitProcessId -UnixPidNamespaceInitStartTime $unixPidNamespaceInitStartTime)) {
                         $cleanupErrors.Add('Linux callback PID namespace did not become empty during callback cleanup.')
                     }
                 }
