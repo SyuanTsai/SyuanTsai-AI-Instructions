@@ -57,6 +57,50 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Probe Linux PID namespace containment capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'uname:'
+          uname -a
+          if [[ ! -e /proc/self/ns/pid ]]; then
+            echo '/proc/self/ns/pid is unavailable.' >&2
+            exit 1
+          fi
+          parent_namespace="$(readlink /proc/self/ns/pid)"
+          echo "/proc/self/ns/pid: $parent_namespace"
+          if [[ -z "$parent_namespace" ]]; then
+            echo 'Could not identify the parent PID namespace.' >&2
+            exit 1
+          fi
+          unshare_path=''
+          for candidate in /usr/bin/unshare /bin/unshare; do
+            if [[ -x "$candidate" ]]; then
+              unshare_path="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$unshare_path" ]]; then
+            echo 'No trusted absolute unshare executable is available.' >&2
+            exit 1
+          fi
+          echo "unshare absolute path: $unshare_path"
+          echo "exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'"
+          set +e
+          probe_namespace="$($unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid')"
+          probe_exit=$?
+          set -e
+          echo "namespace probe exit: $probe_exit"
+          echo "namespace probe result: $probe_namespace"
+          if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" ]]; then
+            echo 'Linux PID namespace containment is unavailable; refusing to start callback tests.' >&2
+            exit 1
+          fi
+          if [[ "$probe_namespace" == "$parent_namespace" ]]; then
+            echo 'unshare did not create a distinct PID namespace.' >&2
+            exit 1
+          fi
+
       - name: Ensure Pester 4.10.1 for Linux focused containment
         shell: pwsh
         run: |

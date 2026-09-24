@@ -128,6 +128,13 @@ jobs:
             Assert-Match $focusedItNames $caseMarker "The focused containment It names must include the '$caseMarker' case."
         }
         foreach ($workflow in @($required, $standards)) {
+            Assert-Match $workflow 'Probe Linux PID namespace containment capability' 'Every Linux focused workflow must probe PID namespace support before callback tests.'
+            Assert-Match $workflow ([regex]::Escape("unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'")) 'Every Linux focused workflow must run the exact PID namespace capability probe.'
+            Assert-Match $workflow 'uname -a' 'The Linux capability probe must record kernel/runtime identity.'
+            Assert-Match $workflow '/proc/self/ns/pid' 'The Linux capability probe must record the parent PID namespace identity.'
+            Assert-Match $workflow 'namespace probe exit' 'The Linux capability probe must record its exit status.'
+            Assert-Match $workflow 'namespace probe result' 'The Linux capability probe must record its namespace result.'
+            Assert-True ($workflow.IndexOf('Probe Linux PID namespace containment capability') -lt $workflow.IndexOf("Run required Unix callback containment boundary")) 'The Linux capability probe must fail before focused callback tests.'
             Assert-Match $workflow '\[int64\]\$result\.TotalCount\s*-ne\s*5' 'The focused boundary gate must require exactly five discovered tests.'
             Assert-Match $workflow '\[int\]\$result\.PassedCount\s*-ne\s*5' 'The focused boundary gate must require five passed tests.'
             Assert-Match $workflow '\[int\]\$result\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed focused tests.'
