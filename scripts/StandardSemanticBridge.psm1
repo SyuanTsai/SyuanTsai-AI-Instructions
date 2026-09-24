@@ -1422,7 +1422,7 @@ catch {
                     Stop-StandardSemanticBridgeOwnedCallbackProcess `
                         -Process $process `
                         -JobAssigned $false `
-                        -JobHandle [IntPtr]::Zero `
+                        -JobHandle ([IntPtr]::Zero) `
                         -UnixProcessGroupId $unixProcessGroupId
                     if (-not (Wait-StandardSemanticBridgeOwnedCallbackProcess -Process $process -UnixProcessGroupId $unixProcessGroupId -TimeoutMilliseconds 5000)) {
                         $cleanupErrors.Add('Unix callback process group did not terminate during callback cleanup.')
