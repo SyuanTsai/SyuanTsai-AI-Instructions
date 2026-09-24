@@ -1091,6 +1091,49 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([string]$verification.reason -match 'analyzer') 'Undeclared imported analyzer rejection did not identify the analyzer failure.'
     }
 
+    # Scenario: A provider emits an enum spelling that differs only by case from the canonical severity.
+    # Purpose: Severity membership is ordinal so a signed uppercase medium cannot bypass the human-review policy.
+    It 'InterT180_provider_finding_severity_membership_is_ordinal' {
+        foreach ($severityVariant in @('MEDIUM', 'Medium')) {
+            $fixture = New-TestSemanticFixture
+            $caseVariantProvider = {
+                param($providerRequest, $callbackContext)
+                $path = [string]$providerRequest.path
+                return [pscustomobject][ordered]@{
+                    findings = @(
+                        [pscustomobject][ordered]@{ severity = [string]$callbackContext.severity; fingerprint = "fp-$path-medium"; ruleId = 'fixture.medium'; message = 'case-variant medium finding'; path = $path; analyzerId = 'semantic_developer_intent' }
+                        [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-info"; ruleId = 'fixture.info'; message = 'synthetic finding'; path = $path; analyzerId = 'semantic_security_discovery' }
+                    )
+                    analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+                }
+            }
+            $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $caseVariantProvider -ProviderContext ([pscustomobject]@{ severity = $severityVariant })
+            Assert-TestCondition ([string]$run.status -ceq 'FAILED') "Provider severity '$severityVariant' was accepted."
+            Assert-TestCondition ([int]$run.successfulProviderCallCount -eq 0) "Provider severity '$severityVariant' was recorded as successful."
+            Assert-TestCondition ($null -eq $run.evidenceBytes) "Provider severity '$severityVariant' emitted signed evidence."
+        }
+    }
+
+    # Scenario: A fully re-signed imported artifact changes a canonical medium severity to a case variant and recomputes every dependent digest.
+    # Purpose: Imported evidence must enforce the same ordinal severity contract as live provider output.
+    It 'InterT181_imported_resigned_finding_severity_membership_is_ordinal' {
+        $fixture = New-TestSemanticFixture
+        $run = Invoke-TestSemanticBridge -Fixture $fixture
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "The baseline evidence fixture did not pass: $($run.reason)"
+        $tamperedBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation {
+            param($evidence)
+            $evidence.findings[0].severity = 'MEDIUM'
+            Update-TestEvidenceExecutionDigests -Evidence $evidence
+        }
+        $verification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $tamperedBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition (-not [bool]$verification.valid) 'Re-signed imported severity MEDIUM was accepted.'
+        Assert-TestCondition ([string]$verification.reason -match 'severity') 'Imported severity MEDIUM rejection did not identify the severity failure.'
+    }
+
     # Scenario: Two signed provider-call records swap their work indexes and IDs while recomputing request, ledger, evidence, and signature digests.
     # Purpose: Each ledger index must bind to the inventory item at that exact normalized index, not merely to any path in the inventory.
     It 'InterT177_imported_provider_call_index_must_bind_to_indexed_inventory_item' {

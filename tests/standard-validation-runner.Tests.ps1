@@ -689,7 +689,8 @@ exit ([int]$LASTEXITCODE)
                 [Parameter(Mandatory = $true)] $Fixture,
                 [Parameter(Mandatory = $true)][string] $Path,
                 [Parameter(Mandatory = $true)][string] $CandidateId,
-                [Parameter(Mandatory = $true)][System.Security.Cryptography.RSACryptoServiceProvider] $Rsa
+                [Parameter(Mandatory = $true)][System.Security.Cryptography.RSACryptoServiceProvider] $Rsa,
+                [object[]] $Findings = @()
             )
 
             Write-TestUtf8File -Path (Join-Path $Fixture.TrustedTools 'trusted-supervisor-public-key.xml') -Text $Rsa.ToXmlString($false)
@@ -697,7 +698,8 @@ exit ([int]$LASTEXITCODE)
             $provider = 'fixture-semantic-provider'
             $purpose = 'fixture semantic regression'
             $scope = 'candidate'
-            $findingsSha256 = Get-TestTextSha256 -Value '[]'
+            $findingsJson = if (@($Findings).Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([object[]]$Findings) -Compress -Depth 20 }
+            $findingsSha256 = Get-TestTextSha256 -Value $findingsJson
             $fields = @{
                 analyzerCompleteness = 'complete'
                 analyzerIdentity = 'fixture-semantic-analyzer'
@@ -743,7 +745,7 @@ exit ([int]$LASTEXITCODE)
                 consentGranted = $true
                 analyzerIdentity = 'fixture-semantic-analyzer'
                 analyzerCompleteness = 'complete'
-                findings = @()
+                findings = @($Findings)
                 findingsSha256 = $findingsSha256
                 attestation = $attestation
             }
@@ -3074,6 +3076,110 @@ jobs:
         $modeResult = Invoke-RunnerFixture -Fixture $modeFixture
         Assert-Equal $modeResult.Evidence.state 'INVALID' 'A development supervisor must reject a production adapter mode.'
         Assert-False (Test-Path -LiteralPath $modeFixture.Log -PathType Leaf) 'Mode mismatch must not run a package tool.'
+    }
+
+    # Scenario: Package, static, v2, AI-review, and v1 semantic evidence supply severity strings with noncanonical casing.
+    # Purpose: Every consumer uses the same ordinal severity enum, and lowercase medium still requires human review.
+    It 'UnitT94_severity_enums_are_ordinal_across_runner_evidence_guards' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'ordinal-severity')
+        . $script:RunnerPath `
+            -CandidateRoot $fixture.Candidate `
+            -AdapterPath $fixture.Adapter `
+            -ArtifactsRoot $fixture.Artifacts `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+
+        foreach ($context in @('package adapter', 'Static analyzer', 'semantic v2 evidence')) {
+            foreach ($severityVariant in @('MEDIUM', 'Medium')) {
+                $errorMessage = $null
+                try {
+                    [void](Assert-StandardValidationFindings `
+                            -Envelope ([pscustomobject][ordered]@{ findings = @([pscustomobject][ordered]@{ severity = $severityVariant }) }) `
+                            -Context $context)
+                }
+                catch { $errorMessage = [string]$_.Exception.Message }
+                Assert-True ($errorMessage -match 'unknown severity') "$context accepted noncanonical severity '$severityVariant'."
+            }
+            Assert-True ([bool](Assert-StandardValidationFindings `
+                        -Envelope ([pscustomobject][ordered]@{ findings = @([pscustomobject][ordered]@{ severity = 'medium' }) }) `
+                        -Context $context)) "$context did not require human review for lowercase medium."
+            foreach ($severity in @('critical', 'high')) {
+                $errorMessage = $null
+                try {
+                    [void](Assert-StandardValidationFindings `
+                            -Envelope ([pscustomobject][ordered]@{ findings = @([pscustomobject][ordered]@{ severity = $severity }) }) `
+                            -Context $context)
+                }
+                catch { $errorMessage = [string]$_.Exception.Message }
+                Assert-True ($errorMessage -match 'contains a') "$context failed to reject lowercase $severity severity."
+            }
+            foreach ($severity in @('low', 'informational')) {
+                Assert-False ([bool](Assert-StandardValidationFindings `
+                            -Envelope ([pscustomobject][ordered]@{ findings = @([pscustomobject][ordered]@{ severity = $severity }) }) `
+                            -Context $context)) "$context changed the no-human-review behavior for lowercase $severity."
+            }
+        }
+
+        $nonStringError = $null
+        try {
+            [void](Assert-StandardValidationFindings `
+                    -Envelope ([pscustomobject][ordered]@{ findings = @([pscustomobject][ordered]@{ severity = 1 }) }) `
+                    -Context 'typed severity')
+        }
+        catch { $nonStringError = [string]$_.Exception.Message }
+        Assert-True ($nonStringError -match 'unknown severity') 'The runner accepted a non-string severity value.'
+
+        $candidateInventory = Get-StandardValidationInventory -Root $fixture.Candidate -Context 'ordinal severity candidate'
+        $candidateContentSha = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
+        $adapterSha = Get-StandardValidationFileSha256 -Path $fixture.Adapter -Context 'ordinal severity adapter'
+        $candidateId = Get-StandardValidationTextSha256 -Value ("https://example.com/example/skills.git`n$('a' * 40)`n$('b' * 40)`nlocal`n$candidateContentSha`n$adapterSha`n")
+        $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            foreach ($severityVariant in @('MEDIUM', 'Medium')) {
+                $aiPath = Join-Path $fixture.Root "ai-$severityVariant.json"
+                Write-TestAiReviewEvidence `
+                    -Fixture $fixture `
+                    -Path $aiPath `
+                    -CandidateId $candidateId `
+                    -ReviewFindings @([ordered]@{ severity = $severityVariant }) `
+                    -FindingDisposition @([ordered]@{ disposition = 'accepted'; findingId = 'finding-1' }) `
+                    -Rsa $rsa
+                $aiEvidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $aiPath | ConvertFrom-Json
+                $aiError = $null
+                try {
+                    [void](Assert-StandardValidationAiReviewEvidence `
+                            -Evidence $aiEvidence `
+                            -CandidateId $candidateId `
+                            -TrustAnchorRoot $fixture.TrustedTools `
+                            -Context 'signed AI ordinal severity')
+                }
+                catch { $aiError = [string]$_.Exception.Message }
+                Assert-True ($aiError -match 'non-canonical severity') "A validly signed AI review accepted severity '$severityVariant' or failed for another reason: '$aiError'."
+
+                $semanticPath = Join-Path $fixture.Root "semantic-$severityVariant.json"
+                Write-TestSemanticEvidence `
+                    -Fixture $fixture `
+                    -Path $semanticPath `
+                    -CandidateId $candidateId `
+                    -Rsa $rsa `
+                    -Findings @([pscustomobject][ordered]@{ severity = $severityVariant })
+                $semanticEvidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $semanticPath | ConvertFrom-Json
+                $semanticError = $null
+                try {
+                    [void](Assert-StandardValidationSemanticEvidence `
+                            -Evidence $semanticEvidence `
+                            -CandidateId $candidateId `
+                            -TrustAnchorRoot $fixture.TrustedTools `
+                            -Context 'signed v1 semantic ordinal severity')
+                }
+                catch { $semanticError = [string]$_.Exception.Message }
+                Assert-True ($semanticError -match 'non-canonical severity') "A validly signed v1 semantic result accepted severity '$severityVariant' or failed for another reason: '$semanticError'."
+            }
+        }
+        finally { $rsa.Dispose() }
     }
 
     # Scenario: Lifecycle evidence is supplied after validation, first without and then with independent human/release evidence.

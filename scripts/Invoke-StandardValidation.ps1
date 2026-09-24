@@ -4023,6 +4023,16 @@ function Assert-StandardValidationRepositoryTestEnvelope {
     }
 }
 
+function Test-StandardValidationCanonicalSeverity {
+    param([AllowNull()] $Severity)
+
+    if ($Severity -isnot [string]) { return $false }
+    foreach ($allowedSeverity in @('critical', 'high', 'medium', 'low', 'informational')) {
+        if ([string]::Equals([string]$Severity, $allowedSeverity, [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
 function Assert-StandardValidationFindings {
     param([Parameter(Mandatory = $true)] $Envelope, [Parameter(Mandatory = $true)][string] $Context)
 
@@ -4031,12 +4041,17 @@ function Assert-StandardValidationFindings {
     if ($null -eq $findings) { return $requiresHuman }
     if ($findings -isnot [array]) { throw "FAILED|$Context findings are not an array." }
     foreach ($finding in @($findings)) {
-        $severity = [string](Get-StandardValidationProperty -Object $finding -Name 'severity')
-        if ($severity -notin @('critical', 'high', 'medium', 'low', 'informational')) {
+        $severityValue = Get-StandardValidationProperty -Object $finding -Name 'severity'
+        if (-not (Test-StandardValidationCanonicalSeverity -Severity $severityValue)) {
+            $severity = [string]$severityValue
             throw "FAILED|$Context contains an unknown severity '$severity'."
         }
-        if ($severity -in @('critical', 'high')) { throw "FAILED|$Context contains a $severity finding." }
-        if ($severity -ceq 'medium') { $requiresHuman = $true }
+        $severity = [string]$severityValue
+        if ([string]::Equals($severity, 'critical', [StringComparison]::Ordinal) -or
+            [string]::Equals($severity, 'high', [StringComparison]::Ordinal)) {
+            throw "FAILED|$Context contains a $severity finding."
+        }
+        if ([string]::Equals($severity, 'medium', [StringComparison]::Ordinal)) { $requiresHuman = $true }
     }
     return $requiresHuman
 }
@@ -4190,7 +4205,7 @@ function Assert-StandardValidationAiReviewEvidence {
             throw "BLOCKED|$Context contains a malformed review finding."
         }
         $severityValue = Get-StandardValidationProperty -Object $finding -Name 'severity'
-        if ($severityValue -isnot [string] -or [string]$severityValue -notin @('critical', 'high', 'medium', 'low', 'informational')) {
+        if (-not (Test-StandardValidationCanonicalSeverity -Severity $severityValue)) {
             throw "BLOCKED|$Context contains a review finding with a non-canonical severity."
         }
         # Reduce the external review shape to the same canonical finding
@@ -4796,7 +4811,7 @@ function Convert-StandardValidationFindingsToCanonicalJson {
             throw "BLOCKED|$Context finding contains unsupported properties: $($unexpected -join ',')."
         }
         $severity = Get-StandardValidationRequiredProperty -Object $finding -Name 'severity' -Context $Context
-        if ($severity -isnot [string] -or [string]$severity -notin @('critical', 'high', 'medium', 'low', 'informational')) {
+        if (-not (Test-StandardValidationCanonicalSeverity -Severity $severity)) {
             throw "BLOCKED|$Context finding contains a non-canonical severity."
         }
         $canonicalFinding = [ordered]@{ severity = [string]$severity }

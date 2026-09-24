@@ -962,11 +962,22 @@ function Get-StandardSemanticBridgeWorkItemKey {
     return 'semantic-work-item-v2:{0}' -f (Get-StandardSemanticBridgeArtifactSha256 -Artifact $shape)
 }
 
+function Test-StandardSemanticBridgeCanonicalSeverity {
+    param([AllowNull()] $Severity)
+
+    if ($Severity -isnot [string]) { return $false }
+    foreach ($allowedSeverity in @('critical', 'high', 'medium', 'low', 'informational')) {
+        if ([string]::Equals([string]$Severity, $allowedSeverity, [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
 function Assert-StandardSemanticBridgeFinding {
     param([Parameter(Mandatory = $true)] $Finding, [string] $Context = 'finding')
     Assert-StandardSemanticBridgeExactProperties -Object $Finding -Expected @('severity', 'fingerprint', 'ruleId', 'message', 'path', 'analyzerId') -Context $Context
-    $severity = [string](Get-StandardSemanticBridgeProperty $Finding 'severity')
-    if ($severity -notin @('critical', 'high', 'medium', 'low', 'informational')) { throw "$Context severity is unsupported." }
+    $severityValue = Get-StandardSemanticBridgeProperty $Finding 'severity'
+    if (-not (Test-StandardSemanticBridgeCanonicalSeverity -Severity $severityValue)) { throw "$Context severity is unsupported." }
+    $severity = [string]$severityValue
     $fingerprint = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $Finding 'fingerprint') "$Context fingerprint"
     $ruleId = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $Finding 'ruleId') "$Context ruleId"
     $message = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $Finding 'message') "$Context message"
