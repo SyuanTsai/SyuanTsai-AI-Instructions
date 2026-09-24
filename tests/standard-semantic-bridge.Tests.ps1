@@ -207,6 +207,126 @@ function Get-TestEvidenceBytesWithSignatureMutation {
     return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
 }
 
+function Get-TestOrdinallySortedSemanticFindings {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()] $Findings)
+
+    $sorted = New-Object System.Collections.Generic.List[object]
+    $keys = New-Object System.Collections.Generic.List[string]
+    foreach ($finding in @($Findings)) {
+        $key = [string]$finding.analyzerId + [char]0 + [string]$finding.ruleId + [char]0 + [string]$finding.fingerprint + [char]0 + [string]$finding.path + [char]0 + [string]$finding.severity + [char]0 + [string]$finding.message
+        $index = 0
+        while ($index -lt $keys.Count -and [string]::CompareOrdinal($keys[$index], $key) -le 0) { $index++ }
+        $keys.Insert($index, $key)
+        $sorted.Insert($index, $finding)
+    }
+    return @($sorted.ToArray())
+}
+
+function Get-TestOrdinallySortedSemanticLedgerEntries {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()] $Entries)
+
+    $sorted = New-Object System.Collections.Generic.List[object]
+    $keys = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($Entries)) {
+        $key = [string]$entry.idempotencyKey
+        $index = 0
+        while ($index -lt $keys.Count -and [string]::CompareOrdinal($keys[$index], $key) -le 0) { $index++ }
+        $keys.Insert($index, $key)
+        $sorted.Insert($index, $entry)
+    }
+    return @($sorted.ToArray())
+}
+
+function Update-TestEvidenceExecutionDigests {
+    param([Parameter(Mandatory = $true)] $Evidence)
+
+    $execution = $Evidence.execution
+    $Evidence.findings = @(Get-TestOrdinallySortedSemanticFindings -Findings @($Evidence.findings))
+    $execution.findingsSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact @($Evidence.findings)
+    foreach ($record in @($execution.providerCalls)) {
+        $findingsForPath = @(Get-TestOrdinallySortedSemanticFindings -Findings @($Evidence.findings | Where-Object { [string]$_.path -ceq [string]$record.path }))
+        $record.findingsSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $findingsForPath
+        $response = [pscustomobject][ordered]@{
+            findings = $findingsForPath
+            analyzerCoverage = @(Get-TestOrdinallySortedSemanticAnalyzerIds -Values @($record.analyzerCoverage))
+        }
+        $record.responseSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $response
+    }
+    $normalizedRecords = @(
+        foreach ($record in @($execution.providerCalls)) {
+            [pscustomobject][ordered]@{
+                workItemId = [string]$record.workItemId
+                index = [int]$record.index
+                idempotencyKey = [string]$record.idempotencyKey
+                path = [string]$record.path
+                contentKind = [string]$record.contentKind
+                textSha256 = [string]$record.textSha256
+                byteCount = [int64]$record.byteCount
+                analyzerSetIdentity = [string]$record.analyzerSetIdentity
+                plannedAnalyzerIds = @($record.plannedAnalyzerIds)
+                analyzerCoverage = @($record.analyzerCoverage)
+                requestSha256 = [string]$record.requestSha256
+                responseSha256 = [string]$record.responseSha256
+                findingsSha256 = [string]$record.findingsSha256
+                status = [string]$record.status
+            }
+        }
+    )
+    $rawGraphRecords = @(
+        foreach ($record in @($execution.providerCalls)) {
+            [pscustomobject][ordered]@{ idempotencyKey = [string]$record.idempotencyKey; graphSha256 = [string]$record.responseSha256 }
+        }
+    )
+    $rawFindingRecords = @(
+        foreach ($record in @($execution.providerCalls)) {
+            [pscustomobject][ordered]@{ idempotencyKey = [string]$record.idempotencyKey; findingsSha256 = [string]$record.findingsSha256 }
+        }
+    )
+    $sortedNormalizedRecords = @(Get-TestOrdinallySortedSemanticLedgerEntries -Entries $normalizedRecords)
+    $sortedRawGraphRecords = @(Get-TestOrdinallySortedSemanticLedgerEntries -Entries $rawGraphRecords)
+    $sortedRawFindingRecords = @(Get-TestOrdinallySortedSemanticLedgerEntries -Entries $rawFindingRecords)
+    $execution.providerCallLedgerSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $sortedNormalizedRecords
+    $execution.rawGraphLedgerSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $sortedRawGraphRecords
+    $execution.rawFindingsLedgerSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $sortedRawFindingRecords
+}
+
+function Get-TestOrdinallySortedSemanticAnalyzerIds {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Values)
+
+    $sorted = New-Object System.Collections.Generic.List[string]
+    foreach ($value in @($Values)) {
+        $index = 0
+        while ($index -lt $sorted.Count -and [string]::CompareOrdinal($sorted[$index], [string]$value) -le 0) { $index++ }
+        $sorted.Insert($index, [string]$value)
+    }
+    return @($sorted.ToArray())
+}
+
+function Get-TestResignedEvidenceBytes {
+    param(
+        [Parameter(Mandatory = $true)] $EvidenceBytes,
+        [Parameter(Mandatory = $true)] $Fixture,
+        [Parameter(Mandatory = $true)][scriptblock] $Mutation
+    )
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $evidence = ConvertFrom-Json -InputObject $utf8.GetString([byte[]]$EvidenceBytes)
+    $null = & $Mutation $evidence
+    $unsigned = [ordered]@{}
+    foreach ($property in @($evidence.PSObject.Properties | Where-Object { $_.Name -ne 'attestation' })) { $unsigned[$property.Name] = $property.Value }
+    $unsignedBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value ([pscustomobject]$unsigned)))
+    $evidence.attestation.signedPayloadSha256 = Get-TestSha256Bytes -Bytes $unsignedBytes
+    $evidence.attestation.signature = [Convert]::ToBase64String($Fixture.Rsa.SignData($unsignedBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+    return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
+}
+
+function Get-TestSha256Bytes {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 function Get-TestEvidenceBytesWithSignatureWhitespace {
     param([Parameter(Mandatory = $true)] $EvidenceBytes)
     $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
@@ -466,41 +586,6 @@ function Update-TestConsentDigests {
         Assert-TestCondition (-not (Test-Path -LiteralPath $signerMarker)) 'The signer callback ran after consent expired.'
         Assert-TestCondition ($null -eq $expiredBeforeSigner.evidenceBytes) 'Expired signer consent emitted evidence.'
 
-        $fixture = New-TestSemanticFixture
-        $consentStartedAt = [DateTime]::UtcNow
-        $shortRequest = New-StandardSemanticBridgeConsentRequest `
-            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
-            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
-            -RequestId '11111111-1111-4111-8111-111111111124' `
-            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(4)
-        $shortDecision = New-StandardSemanticBridgeConsentDecision `
-            -Request $shortRequest -Authorizer $fixture.Authorizer `
-            -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $consentStartedAt
-        $slowSignerMarker = Join-Path $TestDrive 'consent-expired-during-signer.txt'
-        $slowSigner = {
-            param($signerRequest, $callbackContext)
-            [IO.File]::WriteAllText([string]$callbackContext.markerPath, 'invoked')
-            [Threading.Thread]::Sleep([int]$callbackContext.delayMilliseconds)
-            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
-            try {
-                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
-                return [pscustomobject][ordered]@{
-                    keyId = 'fixture-key'
-                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
-                    signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
-                }
-            }
-            finally { $signingKey.Dispose() }
-        }
-        $expiredDuringSigner = Invoke-TestSemanticBridge `
-            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
-            -Signer $slowSigner `
-            -SignerContext ([pscustomobject][ordered]@{ markerPath = $slowSignerMarker; delayMilliseconds = 6000; privateKeyXml = $fixture.Rsa.ToXmlString($true) }) `
-            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
-        Assert-TestCondition ([string]$expiredDuringSigner.status -ceq 'BLOCKED') 'Consent that expired while the signer callback ran did not block the final result.'
-        Assert-TestCondition ((Test-Path -LiteralPath $slowSignerMarker)) 'The signer callback did not start while consent was active.'
-        Assert-TestCondition ($null -eq $expiredDuringSigner.evidenceBytes) 'Consent expiry during signing released evidence bytes.'
-
         $sentinelProviderMarker = Join-Path $TestDrive 'provider-threw-consent-sentinel.txt'
         $sentinelProvider = {
             param($providerRequest, $callbackContext)
@@ -644,6 +729,85 @@ function Update-TestConsentDigests {
         $mismatched = Invoke-TestSemanticBridge -Fixture $fixture -ProviderRoute $routeDrift
         Assert-TestCondition ([string]$mismatched.status -ceq 'BLOCKED') 'Mismatched consent did not block the bridge.'
         Assert-TestCondition ([int]$mismatched.providerCallCount -eq 0) 'Mismatched consent reached the provider.'
+    }
+
+    It 'UnitT31_consent_expiry_during_signer_blocks_signed_output' {
+        $fixture = New-TestSemanticFixture
+        $slowSignerMarker = Join-Path $TestDrive 'consent-expired-during-signer.txt'
+        $slowSignerTimestampsPath = Join-Path $TestDrive 'consent-expired-during-signer-timestamps.txt'
+        $slowSigner = {
+            param($signerRequest, $callbackContext)
+            $expiresAtUtc = [DateTime]::Parse(
+                [string]$callbackContext.expiresAtUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            $enteredAtUtc = [DateTime]::UtcNow
+            [IO.File]::WriteAllText([string]$callbackContext.markerPath, $enteredAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))
+            if ($enteredAtUtc -ge $expiresAtUtc) { throw 'test signer callback entered after consent expiry.' }
+            while ([DateTime]::UtcNow -lt $expiresAtUtc) { Start-Sleep -Milliseconds 25 }
+
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                $signature = [Convert]::ToBase64String($signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1))
+                $signedAtUtc = [DateTime]::UtcNow
+                [IO.File]::WriteAllText(
+                    [string]$callbackContext.timestampsPath,
+                    @(
+                        $enteredAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                        $expiresAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                        $signedAtUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                    ) -join [Environment]::NewLine
+                )
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = $signature
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+
+        # This case tests the consent state machine. Invoke callback code directly
+        # so Windows PowerShell 5.1 child startup does not consume the consent
+        # window before the signer itself enters it. Isolated process behavior has
+        # separate coverage in the callback-boundary tests.
+        Mock Invoke-StandardSemanticBridgeCallbackWithTimeout -ModuleName StandardSemanticBridge {
+            return @(& $Callback $Argument $CallbackContext)
+        }
+
+        $consentStartedAt = [DateTime]::UtcNow
+        $shortRequest = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $fixture.Scope -ProviderTextInventory $fixture.Inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111124' `
+            -RequestedAt $consentStartedAt.AddSeconds(-1) -ExpiresAt $consentStartedAt.AddSeconds(6)
+        $shortDecision = New-StandardSemanticBridgeConsentDecision `
+            -Request $shortRequest -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111125' -AuthorizedAt $consentStartedAt
+        $expiredDuringSigner = Invoke-TestSemanticBridge `
+            -Fixture $fixture -Request $shortRequest -Decision $shortDecision `
+            -Signer $slowSigner `
+            -SignerContext ([pscustomobject][ordered]@{
+                markerPath = $slowSignerMarker
+                timestampsPath = $slowSignerTimestampsPath
+                expiresAtUtc = $shortRequest.expiresAt
+                privateKeyXml = $fixture.Rsa.ToXmlString($true)
+            }) `
+            -Now ([DateTime]::UtcNow) -TimeoutSeconds 20
+        $signerEnteredAtUtc = [DateTime]::Parse(
+            [IO.File]::ReadAllText($slowSignerMarker),
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+        $signerTimestamps = @(Get-Content -LiteralPath $slowSignerTimestampsPath)
+        $signerExpiresAtUtc = [DateTime]::Parse([string]$signerTimestamps[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $signatureProducedAtUtc = [DateTime]::Parse([string]$signerTimestamps[2], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        Assert-TestCondition ([string]$expiredDuringSigner.status -ceq 'BLOCKED') 'Consent that expired while the signer callback ran did not block the final result.'
+        Assert-TestCondition ((Test-Path -LiteralPath $slowSignerMarker) -and $signerEnteredAtUtc -lt $signerExpiresAtUtc) 'The signer callback did not start while consent was active.'
+        Assert-TestCondition ($signatureProducedAtUtc -ge $signerExpiresAtUtc) 'The signer callback did not create its signature after consent expired.'
+        Assert-TestCondition ($null -eq $expiredDuringSigner.evidenceBytes) 'Consent expiry during signing released evidence bytes.'
     }
     }
 
@@ -884,6 +1048,83 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([bool]$first.valid) 'The first evidence consumption did not pass.'
         Assert-TestCondition (-not [bool]$second.valid) 'Replayed evidence was accepted.'
         Assert-TestCondition ([string]$second.reason -match 'replay') 'Replay rejection did not identify replay.'
+    }
+
+    # Scenario: Provider output uses a case variant of a declared analyzer ID.
+    # Purpose: Analyzer identity membership is ordinal and must not inherit PowerShell's case-insensitive comparison defaults.
+    It 'InterT175_provider_finding_analyzer_identity_is_ordinal' {
+        $fixture = New-TestSemanticFixture
+        $caseVariantProvider = {
+            param($providerRequest)
+            $path = [string]$providerRequest.path
+            return [pscustomobject][ordered]@{
+                findings = @(
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-intent-case"; ruleId = 'fixture.intent'; message = 'case variant analyzer'; path = $path; analyzerId = 'SEMANTIC_DEVELOPER_INTENT' }
+                    [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = "fp-$path-security-case"; ruleId = 'fixture.security'; message = 'declared analyzer'; path = $path; analyzerId = 'semantic_security_discovery' }
+                )
+                analyzerCoverage = @('semantic_developer_intent', 'semantic_security_discovery')
+            }
+        }
+        $run = Invoke-TestSemanticBridge -Fixture $fixture -Provider $caseVariantProvider
+        Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'Provider output with a case-variant analyzer identity was accepted.'
+        Assert-TestCondition ([int]$run.successfulProviderCallCount -eq 0) 'Case-variant analyzer output was recorded as a successful provider call.'
+        Assert-TestCondition ($null -eq $run.evidenceBytes) 'Case-variant analyzer output emitted evidence.'
+    }
+
+    # Scenario: A valid signed artifact changes one finding to an undeclared analyzer and recomputes all dependent evidence digests.
+    # Purpose: Imported findings must be checked against the declared analyzer set even when the signer signs a self-consistent artifact.
+    It 'InterT176_imported_signed_finding_analyzer_must_be_declared' {
+        $fixture = New-TestSemanticFixture
+        $run = Invoke-TestSemanticBridge -Fixture $fixture
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "The baseline evidence fixture did not pass: $($run.reason)"
+        $tamperedBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation {
+            param($evidence)
+            $evidence.findings[1].analyzerId = 'semantic_undeclared_source'
+            Update-TestEvidenceExecutionDigests -Evidence $evidence
+        }
+        $verification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $tamperedBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition (-not [bool]$verification.valid) 'A re-signed finding with an undeclared analyzer identity was accepted.'
+        Assert-TestCondition ([string]$verification.reason -match 'analyzer') 'Undeclared imported analyzer rejection did not identify the analyzer failure.'
+    }
+
+    # Scenario: Two signed provider-call records swap their work indexes and IDs while recomputing request, ledger, evidence, and signature digests.
+    # Purpose: Each ledger index must bind to the inventory item at that exact normalized index, not merely to any path in the inventory.
+    It 'InterT177_imported_provider_call_index_must_bind_to_indexed_inventory_item' {
+        $fixture = New-TestSemanticFixture -ItemCount 2
+        $run = Invoke-TestSemanticBridge -Fixture $fixture
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "The baseline two-item evidence fixture did not pass: $($run.reason)"
+        $tamperedBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation {
+            param($evidence)
+            $records = @($evidence.execution.providerCalls)
+            $records[0].index = 1
+            $records[0].workItemId = 'semantic-work-item-0001'
+            $records[1].index = 0
+            $records[1].workItemId = 'semantic-work-item-0000'
+            foreach ($record in $records) {
+                $requestShape = [pscustomobject][ordered]@{
+                    workItemId = [string]$record.workItemId
+                    idempotencyKey = [string]$record.idempotencyKey
+                    providerRoute = $evidence.providerRoute
+                    path = [string]$record.path
+                    contentKind = [string]$record.contentKind
+                    textSha256 = [string]$record.textSha256
+                    byteCount = [int64]$record.byteCount
+                }
+                $record.requestSha256 = Get-StandardSemanticBridgeArtifactSha256 -Artifact $requestShape
+            }
+            Update-TestEvidenceExecutionDigests -Evidence $evidence
+        }
+        $verification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $tamperedBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition (-not [bool]$verification.valid) 'Provider-call indexes swapped across inventory paths were accepted after every evidence digest was recomputed.'
+        Assert-TestCondition ([string]$verification.reason -match 'inventory item|index') 'Index-to-inventory rejection did not identify the mismatched binding.'
     }
 
     # Scenario: One work item succeeds, the next times out, and the retry reuses the idempotency ledger.

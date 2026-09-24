@@ -181,7 +181,7 @@ jobs:
 
         Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
         Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*573').Count) 2 'Both full-suite shard jobs must expect 573 total Pester cases after the procfs regression was added.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*578').Count) 2 'Both full-suite shard jobs must expect 578 total Pester cases after the semantic bridge regressions were added.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*13').Count) 1 'Windows PowerShell 5.1 must account for the additional skipped Linux procfs case.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*12').Count) 1 'Windows PowerShell 7 must account for the additional skipped Linux procfs case.'
 
@@ -217,7 +217,8 @@ flags: 0100000
 mnt_id: 80
 ino: 1
 '@
-        $visibleProcMountId = [regex]::Match($visibleProcMountFdInfoFixture, '(?m)^mnt_id:\s*(?<id>[0-9]+)$').Groups['id'].Value
+        $visibleProcMountFdInfoFixture = $visibleProcMountFdInfoFixture -replace '\r?\n', "`r`n"
+        $visibleProcMountId = [regex]::Match($visibleProcMountFdInfoFixture, '(?m)^mnt_id:\s*(?<id>[0-9]+)\r?$').Groups['id'].Value
         Assert-Equal $oldFirstProcMountId '70' 'The previous first-row mountinfo probe selects the underlying procfs in a stacked mount fixture.'
         Assert-Equal $visibleProcMountId '80' 'fdinfo for a descriptor opened on /proc/mountinfo identifies the visible top procfs mount in a stacked fixture.'
         Assert-False ($oldFirstProcMountId -eq $visibleProcMountId) 'The stacked procfs fixture must distinguish the old first-entry probe from the visible-mount probe.'

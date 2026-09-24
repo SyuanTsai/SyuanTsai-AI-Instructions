@@ -247,6 +247,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
         function Invoke-RunnerFixture {
             param(
                 [Parameter(Mandatory = $true)] $Fixture,
+                [string] $ArtifactsRoot,
+                [string] $OutputPath,
                 [switch] $SemanticTriggered,
                 [switch] $SemanticConsent,
                 [string] $SemanticProvider,
@@ -274,12 +276,18 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 [int] $TimeoutSeconds = 300
             )
 
+            $effectiveArtifactsRoot = if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) { [string]$Fixture.Artifacts } else { $ArtifactsRoot }
+            $effectiveOutputPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+                if ([string]::Equals($effectiveArtifactsRoot, [string]$Fixture.Artifacts, [StringComparison]::OrdinalIgnoreCase)) { [string]$Fixture.Output }
+                else { Join-Path $effectiveArtifactsRoot 'standard-validation-evidence.json' }
+            }
+            else { $OutputPath }
             $arguments = @(
                 '-NoProfile', '-File', $script:RunnerPath,
                 '-CandidateRoot', $Fixture.Candidate,
                 '-AdapterPath', $Fixture.Adapter,
-                '-ArtifactsRoot', $Fixture.Artifacts,
-                '-OutputPath', $Fixture.Output,
+                '-ArtifactsRoot', $effectiveArtifactsRoot,
+                '-OutputPath', $effectiveOutputPath,
                 '-SourceRepository', $SourceRepository,
                 '-SourceRevision', ('a' * 40),
                 '-BaseRevision', ('b' * 40),
@@ -526,8 +534,8 @@ exit ([int]$LASTEXITCODE)
                 finally { $process.Dispose() }
             }
             $evidence = $null
-            if (Test-Path -LiteralPath $Fixture.Output -PathType Leaf) {
-                try { $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $Fixture.Output | ConvertFrom-Json } catch { }
+            if (Test-Path -LiteralPath $effectiveOutputPath -PathType Leaf) {
+                try { $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $effectiveOutputPath | ConvertFrom-Json } catch { }
             }
             return [pscustomobject][ordered]@{
                 Output = $captured
@@ -747,8 +755,18 @@ exit ([int]$LASTEXITCODE)
                 [Parameter(Mandatory = $true)] $Fixture,
                 [string] $SourceRepository = 'https://example.com/example/skills.git',
                 [string] $SourceRevision = ('a' * 40),
-                [string] $BaseRevision = ('b' * 40)
+                [string] $BaseRevision = ('b' * 40),
+                [string] $ValidationRunId
             )
+
+            if ([string]::IsNullOrWhiteSpace($ValidationRunId)) { $ValidationRunId = [guid]::NewGuid().ToString('N') }
+            $artifactRunId = [guid]::Empty
+            if (-not [guid]::TryParseExact($ValidationRunId, 'N', [ref]$artifactRunId) -or
+                $artifactRunId -eq [guid]::Empty -or $artifactRunId.ToString('N') -cne $ValidationRunId) {
+                throw 'ValidationRunId must be a lowercase 32-character hexadecimal value for v2 test artifacts.'
+            }
+            $artifactRunIdText = $artifactRunId.ToString()
+            $artifactRunIdSuffix = $artifactRunId.ToString('N')
 
             . $script:RunnerPath `
                 -CandidateRoot $Fixture.Candidate `
@@ -811,7 +829,7 @@ exit ([int]$LASTEXITCODE)
                     resolverReceiptSha256 = ('4' * 64)
                 }
                 launch = [pscustomobject][ordered]@{
-                    resolutionRunId = '11111111-1111-4111-8111-111111111111'
+                    resolutionRunId = $artifactRunIdText
                     launchReceiptSha256 = ('5' * 64)
                     consumptionSha256 = ('6' * 64)
                 }
@@ -885,10 +903,10 @@ exit ([int]$LASTEXITCODE)
             }
             finally { $publicRsa.Dispose() }
             if ([string]$run.status -cne 'PASS') { throw "Could not create v2 runner evidence: $($run.reason)" }
-            $requestPath = Join-Path $Fixture.Root 'semantic-v2-request.json'
-            $decisionPath = Join-Path $Fixture.Root 'semantic-v2-decision.json'
-            $evidencePath = Join-Path $Fixture.Root 'semantic-v2-evidence.json'
-            $publicKeyPath = Join-Path $Fixture.TrustedTools 'semantic-v2-public-key.xml'
+            $requestPath = Join-Path $Fixture.Root "semantic-v2-request-$artifactRunIdSuffix.json"
+            $decisionPath = Join-Path $Fixture.Root "semantic-v2-decision-$artifactRunIdSuffix.json"
+            $evidencePath = Join-Path $Fixture.Root "semantic-v2-evidence-$artifactRunIdSuffix.json"
+            $publicKeyPath = Join-Path $Fixture.TrustedTools "semantic-v2-public-key-$artifactRunIdSuffix.xml"
             Write-TestUtf8File -Path $requestPath -Text (Get-StandardSemanticBridgeCanonicalJson -Value $request)
             Write-TestUtf8File -Path $decisionPath -Text (Get-StandardSemanticBridgeCanonicalJson -Value $decision)
             Write-TestUtf8File -Path $evidencePath -Text (Get-StandardSemanticBridgeCanonicalJson -Value $run.evidence)
@@ -908,6 +926,7 @@ exit ([int]$LASTEXITCODE)
                 DecisionPath = $decisionPath
                 EvidencePath = $evidencePath
                 CandidateId = $candidateId
+                RunId = $artifactRunIdSuffix
                 KeyId = 'fixture-semantic-key-v2'
                 Rsa = $rsa
             }
@@ -2682,7 +2701,8 @@ catch {
                 -SemanticConsentDecisionPath $artifacts.DecisionPath `
                 -SemanticEvidencePath $artifacts.EvidencePath `
                 -SemanticPublicKeyPath $artifacts.PublicKeyPath `
-                -SemanticPublicKeyId $artifacts.KeyId
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
             Assert-Equal $result.ExitCode 0 'A valid v2 semantic bridge artifact must pass the runner.'
             Assert-Equal $result.Evidence.state 'PASS' 'A valid v2 semantic bridge artifact must produce PASS.'
             $stage = @($result.Evidence.stages | Where-Object id -eq 'conditional-semantic-scan')[0]
@@ -2706,6 +2726,69 @@ catch {
         finally { $artifacts.Rsa.Dispose() }
     }
 
+    # Scenario: A signed semantic v2 artifact is reused after the same candidate
+    # starts a second validation run, then replaced with evidence bound to that run.
+    # Purpose: Consent lifetime and candidate identity must not make old run evidence reusable.
+    It 'InterT63_accepts_only_current_run_bound_v2_evidence_across_validation_runs' {
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-v2-cross-run-replay')
+        $runA = [guid]::NewGuid().ToString('N')
+        $runB = [guid]::NewGuid().ToString('N')
+        $artifactsA = New-TestRunnerSemanticV2Artifacts -Fixture $fixture -ValidationRunId $runA
+        $artifactsB = $null
+        try {
+            $firstRun = Invoke-RunnerFixture `
+                -Fixture $fixture `
+                -SemanticTriggered `
+                -SemanticConsentRequestPath $artifactsA.RequestPath `
+                -SemanticConsentDecisionPath $artifactsA.DecisionPath `
+                -SemanticEvidencePath $artifactsA.EvidencePath `
+                -SemanticPublicKeyPath $artifactsA.PublicKeyPath `
+                -SemanticPublicKeyId $artifactsA.KeyId `
+                -ValidationRunId $runA
+            Assert-Equal $firstRun.ExitCode 0 'Fresh v2 evidence bound to run A must pass run A.'
+            Assert-Equal $firstRun.Evidence.state 'PASS' 'Fresh v2 evidence bound to run A must produce PASS.'
+            Assert-Equal ([string]$firstRun.Evidence.runId) ([guid]::ParseExact($runA, 'N').ToString()) 'Run A evidence must retain run A ID.'
+
+            $replayArtifactsRoot = Join-Path $fixture.Root 'artifacts-replay-run-b'
+            $replayedRun = Invoke-RunnerFixture `
+                -Fixture $fixture `
+                -ArtifactsRoot $replayArtifactsRoot `
+                -SemanticTriggered `
+                -SemanticConsentRequestPath $artifactsA.RequestPath `
+                -SemanticConsentDecisionPath $artifactsA.DecisionPath `
+                -SemanticEvidencePath $artifactsA.EvidencePath `
+                -SemanticPublicKeyPath $artifactsA.PublicKeyPath `
+                -SemanticPublicKeyId $artifactsA.KeyId `
+                -ValidationRunId $runB
+            Assert-True ($runA -cne $runB) 'The replay regression must exercise two distinct validation IDs.'
+            Assert-Equal ([string]$replayedRun.Evidence.runId) ([guid]::ParseExact($runB, 'N').ToString()) 'Run B evidence must retain run B ID.'
+            Assert-True ($replayedRun.ExitCode -ne 0) 'Run B must reject signed evidence issued for run A.'
+            Assert-Equal $replayedRun.Evidence.state 'BLOCKED' 'Cross-run v2 evidence replay must produce BLOCKED.'
+            Assert-Match ([string]$replayedRun.Evidence.failure.message) 'current validation run' 'The replay failure must identify the launch-run mismatch.'
+
+            $artifactsB = New-TestRunnerSemanticV2Artifacts -Fixture $fixture -ValidationRunId $runB
+            Assert-Equal $artifactsB.CandidateId $artifactsA.CandidateId 'Both runs must validate the same candidate.'
+            $freshArtifactsRoot = Join-Path $fixture.Root 'artifacts-fresh-run-b'
+            $freshRun = Invoke-RunnerFixture `
+                -Fixture $fixture `
+                -ArtifactsRoot $freshArtifactsRoot `
+                -SemanticTriggered `
+                -SemanticConsentRequestPath $artifactsB.RequestPath `
+                -SemanticConsentDecisionPath $artifactsB.DecisionPath `
+                -SemanticEvidencePath $artifactsB.EvidencePath `
+                -SemanticPublicKeyPath $artifactsB.PublicKeyPath `
+                -SemanticPublicKeyId $artifactsB.KeyId `
+                -ValidationRunId $runB
+            Assert-Equal $freshRun.ExitCode 0 'Fresh v2 evidence bound to run B must pass run B.'
+            Assert-Equal $freshRun.Evidence.state 'PASS' 'Fresh v2 evidence bound to run B must produce PASS.'
+            Assert-Equal ([string]$freshRun.Evidence.runId) ([guid]::ParseExact($runB, 'N').ToString()) 'Fresh run B evidence must retain run B ID.'
+        }
+        finally {
+            $artifactsA.Rsa.Dispose()
+            if ($null -ne $artifactsB) { $artifactsB.Rsa.Dispose() }
+        }
+    }
+
     # Scenario: The v2 evidence bytes are changed after signing, or the caller
     # supplies an expected signer identity different from the evidence.
     # Purpose: Keep byte authentication and signer identity substitution fail-closed at the runner boundary.
@@ -2725,7 +2808,8 @@ catch {
                 -SemanticConsentDecisionPath $signatureArtifacts.DecisionPath `
                 -SemanticEvidencePath $signatureArtifacts.EvidencePath `
                 -SemanticPublicKeyPath $signatureArtifacts.PublicKeyPath `
-                -SemanticPublicKeyId $signatureArtifacts.KeyId
+                -SemanticPublicKeyId $signatureArtifacts.KeyId `
+                -ValidationRunId $signatureArtifacts.RunId
             Assert-True ($badSignature.ExitCode -ne 0) 'A changed v2 signature must fail the runner.'
             Assert-Equal $badSignature.Evidence.state 'BLOCKED' 'A changed v2 signature must produce BLOCKED.'
             Assert-Match ([string]$badSignature.Evidence.failure.message) 'signature|evidence rejected' 'The runner must identify v2 signature rejection.'
@@ -2742,7 +2826,8 @@ catch {
                 -SemanticConsentDecisionPath $identityArtifacts.DecisionPath `
                 -SemanticEvidencePath $identityArtifacts.EvidencePath `
                 -SemanticPublicKeyPath $identityArtifacts.PublicKeyPath `
-                -SemanticPublicKeyId 'substituted-key-id'
+                -SemanticPublicKeyId 'substituted-key-id' `
+                -ValidationRunId $identityArtifacts.RunId
             Assert-True ($wrongIdentity.ExitCode -ne 0) 'A substituted v2 signer identity must fail the runner.'
             Assert-Equal $wrongIdentity.Evidence.state 'BLOCKED' 'A substituted v2 signer identity must produce BLOCKED.'
             Assert-Match ([string]$wrongIdentity.Evidence.failure.message) 'signer identity|evidence rejected' 'The runner must identify v2 signer identity rejection.'
@@ -2767,7 +2852,8 @@ catch {
                 -SemanticConsentDecisionPath $artifacts.DecisionPath `
                 -SemanticEvidencePath $artifacts.EvidencePath `
                 -SemanticPublicKeyPath $artifacts.PublicKeyPath `
-                -SemanticPublicKeyId $artifacts.KeyId
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
             Assert-True ($result.ExitCode -ne 0) 'Incomplete v2 evidence must fail the runner.'
             Assert-Equal $result.Evidence.state 'BLOCKED' 'Incomplete v2 evidence must produce BLOCKED.'
             Assert-Match ([string]$result.Evidence.failure.message) 'evidence rejected|properties|execution' 'The runner must identify incomplete v2 evidence.'
@@ -2828,7 +2914,8 @@ catch {
                 -SemanticConsentDecisionPath $artifacts.DecisionPath `
                 -SemanticEvidencePath $artifacts.EvidencePath `
                 -SemanticPublicKeyPath $artifacts.PublicKeyPath `
-                -SemanticPublicKeyId $artifacts.KeyId
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
             Assert-True ($result.ExitCode -ne 0) 'Non-canonical consent bytes must fail the runner.'
             Assert-Equal $result.Evidence.state 'BLOCKED' 'Non-canonical consent bytes must produce BLOCKED.'
             Assert-Match ([string]$result.Evidence.failure.message) 'canonical UTF-8 JSON' 'The runner must identify non-canonical consent bytes.'
@@ -2858,7 +2945,8 @@ catch {
                 -SemanticConsentDecisionPath $artifacts.DecisionPath `
                 -SemanticEvidencePath $artifacts.EvidencePath `
                 -SemanticPublicKeyPath $artifacts.PublicKeyPath `
-                -SemanticPublicKeyId $artifacts.KeyId
+                -SemanticPublicKeyId $artifacts.KeyId `
+                -ValidationRunId $artifacts.RunId
             Assert-True ($result.ExitCode -ne 0) 'A provider inventory with substituted source bytes must fail the runner.'
             Assert-Equal $result.Evidence.state 'BLOCKED' 'A provider inventory with substituted source bytes must produce BLOCKED.'
             Assert-Match ([string]$result.Evidence.failure.message) 'provider text|sourceSha256|digest|scope' 'The runner must identify provider source binding rejection.'

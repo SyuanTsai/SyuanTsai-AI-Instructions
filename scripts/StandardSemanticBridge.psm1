@@ -2076,6 +2076,11 @@ function Assert-StandardSemanticBridgeExecutionLedger {
     $normalizedRoute = Assert-StandardSemanticBridgeProviderRoute -ProviderRoute $ProviderRoute -Context 'evidence execution route'
     $normalizedAnalyzers = Assert-StandardSemanticBridgeAnalyzerSet -AnalyzerSet $AnalyzerSet -Context 'evidence execution analyzerSet'
     $expectedAnalyzerIds = @($normalizedAnalyzers.analyzers | ForEach-Object { [string]$_.id })
+    $expectedAnalyzerIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($analyzerId in $expectedAnalyzerIds) { [void]$expectedAnalyzerIdSet.Add([string]$analyzerId) }
+    foreach ($finding in @($Findings)) {
+        if (-not $expectedAnalyzerIdSet.Contains([string]$finding.analyzerId)) { throw 'evidence finding analyzer is not declared in the analyzer set.' }
+    }
     $plannedValue = Get-StandardSemanticBridgeProperty $Execution 'plannedWorkItemCount'
     $successfulValue = Get-StandardSemanticBridgeProperty $Execution 'successfulProviderCallCount'
     if (($plannedValue -isnot [int] -and $plannedValue -isnot [long] -and $plannedValue -isnot [int64]) -or
@@ -2107,8 +2112,8 @@ function Assert-StandardSemanticBridgeExecutionLedger {
         $kind = Assert-StandardSemanticBridgeNonEmptyScalar $record.contentKind 'evidence execution contentKind'
         $byteCountValue = Get-StandardSemanticBridgeProperty $record 'byteCount'
         if (($byteCountValue -isnot [int] -and $byteCountValue -isnot [long] -and $byteCountValue -isnot [int64]) -or [int64]$byteCountValue -le 0) { throw 'evidence execution byteCount is invalid.' }
-        $item = @($normalizedInventory.items | Where-Object { [string]$_.path -ceq $path })[0]
-        if ($null -eq $item -or [string]$item.contentKind -cne $kind -or [int64]$item.byteCount -ne [int64]$byteCountValue -or [string]$item.sha256 -cne [string]$record.textSha256) { throw 'evidence execution provider call is not bound to one inventory item.' }
+        $item = $normalizedInventory.items[$index]
+        if ($null -eq $item -or [string]$item.path -cne $path -or [string]$item.contentKind -cne $kind -or [int64]$item.byteCount -ne [int64]$byteCountValue -or [string]$item.sha256 -cne [string]$record.textSha256) { throw 'evidence execution provider call is not bound to its indexed inventory item.' }
         [void](Assert-StandardSemanticBridgeSha256 $record.textSha256 'evidence execution textSha256')
         [void](Assert-StandardSemanticBridgeSha256 $record.requestSha256 'evidence execution requestSha256')
         [void](Assert-StandardSemanticBridgeSha256 $record.responseSha256 'evidence execution responseSha256')
@@ -2212,6 +2217,8 @@ function Invoke-StandardSemanticBridge {
         $inventoryDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $inventory
         $analyzerDigest = Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalizedAnalyzers
         $expectedAnalyzerIds = @($normalizedAnalyzers.analyzers | ForEach-Object { [string]$_.id })
+        $expectedAnalyzerIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($analyzerId in $expectedAnalyzerIds) { [void]$expectedAnalyzerIdSet.Add([string]$analyzerId) }
         $allFindings = New-Object System.Collections.Generic.List[object]
         $coverage = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         $successfulRecords = New-Object System.Collections.Generic.List[object]
@@ -2303,7 +2310,7 @@ function Invoke-StandardSemanticBridge {
                     throw 'provider-response-analyzer-coverage-incomplete-for-work-item'
                 }
                 foreach ($finding in @($responseFindings)) {
-                    if ($expectedAnalyzerIds -notcontains [string]$finding.analyzerId) { throw 'provider-response-finding-analyzer-invalid' }
+                    if (-not $expectedAnalyzerIdSet.Contains([string]$finding.analyzerId)) { throw 'provider-response-finding-analyzer-invalid' }
                     if ([string]$finding.path -cne $path -or [string]$finding.path -notin @($inventory.items | ForEach-Object { [string]$_.path })) { throw 'provider-response-finding-path-not-bound-to-work-item' }
                     [void]$allFindings.Add($finding)
                 }

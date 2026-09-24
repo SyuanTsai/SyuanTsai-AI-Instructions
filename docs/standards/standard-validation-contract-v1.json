@@ -93,6 +93,8 @@
     "artifactClassification": "local-semantic-bridge-v2",
     "artifactTypes": ["semantic-consent-request-v2", "semantic-consent-decision-v2", "semantic-evidence-v2"],
     "mode": "development-harness-local-simulation-only",
+    "callbackTrust": "caller-trusted-local-code",
+    "filesystemIsolation": false,
     "callerSupplied": {
       "providerRoute": true,
       "verificationKey": true,

@@ -5009,6 +5009,7 @@ function Assert-StandardValidationSemanticBridgeV2Evidence {
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness,
+        [Parameter(Mandatory = $true)][guid] $CurrentRunId,
         [hashtable] $ReplayLedger = $null,
         [string] $Context = 'semantic v2 evidence'
     )
@@ -5080,6 +5081,23 @@ function Assert-StandardValidationSemanticBridgeV2Evidence {
         }
         if ([string](Get-StandardValidationProperty -Object $candidateBinding -Name 'inputInventorySha256') -cne $ExpectedCandidateContentSha256) {
             throw 'BLOCKED|Semantic bridge v2 candidate input inventory does not match the current candidate inventory.'
+        }
+        if ($CurrentRunId -eq [guid]::Empty) {
+            throw 'BLOCKED|Semantic bridge v2 requires a non-empty current validation run ID.'
+        }
+        $decisionLaunchBinding = Get-StandardValidationProperty -Object $decisionBindings -Name 'launch'
+        $decisionLaunchRunIdValue = if ($null -eq $decisionLaunchBinding) {
+            $null
+        }
+        else {
+            Get-StandardValidationProperty -Object $decisionLaunchBinding -Name 'resolutionRunId'
+        }
+        $decisionLaunchRunId = [guid]::Empty
+        if ($decisionLaunchRunIdValue -isnot [string] -or
+            -not [guid]::TryParse([string]$decisionLaunchRunIdValue, [ref]$decisionLaunchRunId) -or
+            $decisionLaunchRunId -eq [guid]::Empty -or
+            $decisionLaunchRunId -ne $CurrentRunId) {
+            throw 'BLOCKED|Semantic bridge v2 launch binding does not match the current validation run.'
         }
 
         $modulePath = Join-Path $script:StandardValidationRepositoryRoot 'scripts/StandardSemanticBridge.psm1'
@@ -5957,6 +5975,7 @@ function Invoke-StandardValidationRun {
                 -CandidateRoot $originalCandidateRoot `
                 -ArtifactsRoot $artifactRootFull `
                 -DevelopmentHarness $DevelopmentHarness `
+                -CurrentRunId $runId `
                 -ReplayLedger $semanticReplayLedger `
                 -Context 'semantic v2 evidence'
             $semantic = $semanticBridgeResult.evidence
