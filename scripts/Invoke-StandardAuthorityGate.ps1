@@ -2881,7 +2881,8 @@ function Invoke-AuthorityLinuxIsolatedPester {
         $goRoot = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $GoCommandPath)))
         $protectedToolRoots = @(
             [IO.Path]::GetFullPath($InstallRoot),
-            [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath))
+            [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath)),
+            $goRoot
         ) | Select-Object -Unique
         foreach ($toolRoot in $protectedToolRoots) {
             if (-not (Test-Path -LiteralPath $toolRoot -PathType Container)) {
