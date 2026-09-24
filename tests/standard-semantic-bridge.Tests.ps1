@@ -1969,10 +1969,33 @@ ready_path="$2"
 mountinfo_path="$3"
 host_path="$4"
 encoded_launcher="$5"
+secret_name="$6"
+python_path="$7"
 mkdir -p "$alias_path"
 mount --make-rprivate /
-mount --bind /proc "$alias_path"
+mount -t proc proc "$alias_path"
 cat /proc/self/mountinfo > "$mountinfo_path"
+if ! "$python_path" - "$alias_path/1/environ" "$secret_name" <<'PY'
+import os
+import sys
+
+try:
+    with open(sys.argv[1], 'rb') as source:
+        parent_environment = source.read().split(b'\0')
+    secret_name = sys.argv[2]
+    secret_value = os.environ.get(secret_name)
+    if secret_value is None:
+        sys.exit(41)
+    expected = os.fsencode(secret_name) + b'=' + os.fsencode(secret_value)
+    if expected not in parent_environment:
+        sys.exit(42)
+except OSError:
+    sys.exit(43)
+PY
+then
+    echo 'The new outer procfs alias did not expose the harmless injected parent sentinel.' >&2
+    exit 44
+fi
 printf ready > "$ready_path"
 exec "$host_path" -NoLogo -NoProfile -NonInteractive -EncodedCommand "$encoded_launcher"
 '@
@@ -1983,7 +2006,7 @@ exec "$host_path" -NoLogo -NoProfile -NonInteractive -EncodedCommand "$encoded_l
         $aliasLauncherInfo.CreateNoWindow = $true
         $aliasLauncherInfo.RedirectStandardOutput = $true
         $aliasLauncherInfo.RedirectStandardError = $true
-        foreach ($item in @('--user', '--map-root-user', '--mount', '--', '/bin/sh', $aliasWrapperScriptPath, $aliasMountPath, $aliasReadyPath, $aliasMountInfoPath, [string]$hostPath, $encodedAliasLauncher)) {
+        foreach ($item in @('--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--mount-proc', '--', '/bin/sh', $aliasWrapperScriptPath, $aliasMountPath, $aliasReadyPath, $aliasMountInfoPath, [string]$hostPath, $encodedAliasLauncher, [string]$secretName, [string]$pythonPath)) {
             $aliasLauncherInfo.ArgumentList.Add([string]$item)
         }
         $aliasLauncherInfo.Environment[$secretName] = $secretValue
