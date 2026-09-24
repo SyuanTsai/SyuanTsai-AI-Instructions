@@ -2767,6 +2767,438 @@ function Get-AuthorityCandidateCommit {
     return $candidateCommit
 }
 
+function Get-AuthorityNativeApplicationPath {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    $application = Get-Command -Name $Name -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $pathValue = if ($null -ne $application.PSObject.Properties['Path']) {
+        [string]$application.Path
+    }
+    else { [string]$application.Source }
+    if ([string]::IsNullOrWhiteSpace($pathValue) -or -not [IO.Path]::IsPathRooted($pathValue)) {
+        throw "Authority isolation could not resolve '$Name' to an absolute native application."
+    }
+    $path = [IO.Path]::GetFullPath($pathValue)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Authority isolation native application is missing: $path"
+    }
+    return $path
+}
+
+function Invoke-AuthorityLinuxNativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Command,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $output = @(& $Command @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $outputText = @($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    if ($exitCode -ne 0) {
+        throw "$Context failed with exit code $exitCode. $outputText"
+    }
+    return $outputText.Trim()
+}
+
+function Invoke-AuthorityLinuxIsolatedPester {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateCommit,
+        [Parameter(Mandatory = $true)][string[]] $AuthorityTestRelativePaths,
+        [Parameter(Mandatory = $true)][string] $PesterModulePath,
+        [Parameter(Mandatory = $true)][string] $PesterVersion,
+        [Parameter(Mandatory = $true)][string] $ApprovedPythonPath,
+        [Parameter(Mandatory = $true)][string] $SkillspectorVersion,
+        [Parameter(Mandatory = $true)][string] $GoCommandPath,
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][string] $RunId,
+        [Parameter(Mandatory = $true)][int] $MinimumTotalCount,
+        [Parameter(Mandatory = $true)][int] $PesterMajorVersion
+    )
+
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+        throw 'Hosted authority Pester isolation is supported only on Linux.'
+    }
+    if ($CandidateCommit -cnotmatch '^[0-9a-f]{40}$' -or $RunId -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'Hosted authority Pester isolation requires a full candidate commit and run ID.'
+    }
+
+    $gitPath = Get-AuthorityNativeApplicationPath -Name 'git'
+    $sudoPath = Get-AuthorityNativeApplicationPath -Name 'sudo'
+    $envPath = Get-AuthorityNativeApplicationPath -Name 'env'
+    $chmodPath = Get-AuthorityNativeApplicationPath -Name 'chmod'
+    $chownPath = Get-AuthorityNativeApplicationPath -Name 'chown'
+    $idPath = Get-AuthorityNativeApplicationPath -Name 'id'
+    $getentPath = Get-AuthorityNativeApplicationPath -Name 'getent'
+    $truePath = Get-AuthorityNativeApplicationPath -Name 'true'
+    $pwshPath = Get-AuthorityNativeApplicationPath -Name 'pwsh'
+
+    $repositoryFullPath = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $isolationRoot = [IO.Path]::GetFullPath((Join-Path $tempRoot "standard-authority-isolated-$RunId"))
+    if ($isolationRoot.StartsWith($repositoryFullPath, [StringComparison]::Ordinal)) {
+        throw 'Hosted authority Pester isolation root must be outside the original checkout.'
+    }
+    if (Test-Path -LiteralPath $isolationRoot) {
+        throw "Hosted authority Pester isolation root already exists: $isolationRoot"
+    }
+
+    $snapshotRoot = Join-Path $isolationRoot 'candidate'
+    $scratchRoot = Join-Path $isolationRoot 'scratch'
+    $childScriptPath = Join-Path $isolationRoot 'Invoke-IsolatedAuthorityPester.ps1'
+    $childConfigPath = Join-Path $isolationRoot 'isolated-authority-pester-config.json'
+    $resultPath = Join-Path $scratchRoot 'pester-result.json'
+    $stdoutPath = Join-Path $RunRoot 'authority-pester-child.stdout.txt'
+    $stderrPath = Join-Path $RunRoot 'authority-pester-child.stderr.txt'
+    $worktreeAdded = $false
+    $completed = $false
+    $result = $null
+    $cleanupError = $null
+
+    try {
+        [void](New-Item -ItemType Directory -Path $isolationRoot -ErrorAction Stop)
+        [void](New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop)
+        $runnerGroupId = (Invoke-AuthorityLinuxNativeCommand -Command $idPath -Arguments @('-g') -Context 'Runner group lookup')
+        if ($runnerGroupId -notmatch '^[0-9]+$') { throw 'Runner primary group ID is malformed.' }
+        $nobodyRecord = Invoke-AuthorityLinuxNativeCommand -Command $getentPath -Arguments @('passwd', 'nobody') -Context 'nobody account lookup'
+        $nobodyFields = @($nobodyRecord -split ':')
+        if ($nobodyFields.Count -lt 4 -or $nobodyFields[2] -notmatch '^[0-9]+$' -or $nobodyFields[3] -notmatch '^[0-9]+$') {
+            throw 'The hosted Linux nobody account has a malformed passwd record.'
+        }
+        $nobodyUid = [string]$nobodyFields[2]
+
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $RepositoryRoot, 'worktree', 'add', '--detach', $snapshotRoot, $CandidateCommit) -Context 'Exact-candidate detached worktree creation')
+        $worktreeAdded = $true
+        $snapshotCommit = Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $snapshotRoot, 'rev-parse', '--verify', 'HEAD^{commit}') -Context 'Snapshot candidate identity check'
+        if ($snapshotCommit -cne $CandidateCommit) { throw 'Detached authority snapshot does not match the exact candidate commit.' }
+        $snapshotGitDirectory = Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $snapshotRoot, 'rev-parse', '--absolute-git-dir') -Context 'Snapshot Git directory lookup'
+
+        $goRoot = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $GoCommandPath)))
+        $protectedToolRoots = @(
+            [IO.Path]::GetFullPath($InstallRoot),
+            [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath))
+        ) | Select-Object -Unique
+        foreach ($toolRoot in $protectedToolRoots) {
+            if (-not (Test-Path -LiteralPath $toolRoot -PathType Container)) {
+                throw "A trusted authority tool closure is missing: $toolRoot"
+            }
+            [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('-R', 'u+rwX,go-w', '--', $toolRoot) -Context "Protect trusted tool closure '$toolRoot'")
+        }
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('-R', 'u+rwX,go-w', '--', $snapshotRoot) -Context 'Protect exact-candidate snapshot')
+        $runnerOwnedProtectedDirectories = @($ArtifactsRoot, $RunRoot)
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+            $runnerOwnedProtectedDirectories += [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+        }
+        foreach ($protectedRoot in @($runnerOwnedProtectedDirectories | Select-Object -Unique)) {
+            [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('u+rwx,go-w', '--', [IO.Path]::GetFullPath([string]$protectedRoot)) -Context "Protect runner-owned authority output directory '$protectedRoot'")
+        }
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('755', '--', $isolationRoot) -Context 'Expose isolated wrapper and candidate snapshot read-only')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chownPath -Arguments @("nobody:$runnerGroupId", $scratchRoot) -Context 'Assign isolated scratch ownership')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('2770', '--', $scratchRoot) -Context 'Set isolated scratch permissions')
+
+        $requiredAuthorityTestPaths = @(
+            'tests/skill-repository-standard.Tests.ps1',
+            'tests/skill-repository-workflows.Tests.ps1',
+            'tests/standard-validation-resolver-hardening.Tests.ps1',
+            'tests/standard-validation-runner.Tests.ps1',
+            'tests/standard-semantic-bridge.Tests.ps1',
+            'tests/standard-semantic-inventory-probe.Tests.ps1',
+            'tests/standard-semantic-preflight.Tests.ps1',
+            'tests/standard-semantic-raw-graph.Tests.ps1'
+        )
+        $normalizedTestPaths = @($AuthorityTestRelativePaths | ForEach-Object { ([string]$_).Replace('\', '/') })
+        foreach ($requiredRelativePath in $requiredAuthorityTestPaths) {
+            if ($normalizedTestPaths -cnotcontains $requiredRelativePath) {
+                throw "Hosted authority Pester path list dropped required suite '$requiredRelativePath'."
+            }
+        }
+        if (@($normalizedTestPaths | Select-Object -Unique).Count -ne $normalizedTestPaths.Count) {
+            throw 'Hosted authority Pester path list contains duplicates.'
+        }
+        $testPaths = @($normalizedTestPaths | ForEach-Object {
+            if ($_ -notmatch '^tests/[A-Za-z0-9._-]+\.Tests\.ps1$') { throw "Authority Pester path is not an approved test path: $_" }
+            Join-Path $snapshotRoot $_
+        })
+        if ($testPaths.Count -lt $requiredAuthorityTestPaths.Count) { throw 'Hosted authority Pester isolation must retain all required authority suites.' }
+
+        $protectedFiles = @(
+            (Join-Path $RepositoryRoot 'scripts/StandardSemanticBridge.psm1'),
+            (Join-Path $RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'),
+            (Join-Path $RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'),
+            (Join-Path $snapshotRoot 'scripts/StandardSemanticBridge.psm1'),
+            (Join-Path $snapshotRoot 'scripts/Invoke-StandardValidation.ps1'),
+            (Join-Path $snapshotRoot 'scripts/Invoke-StandardAuthorityGate.ps1')
+        ) + @($AuthorityTestRelativePaths | ForEach-Object { Join-Path $RepositoryRoot ([string]$_) }) + $testPaths + @(
+            [IO.Path]::GetFullPath($PesterModulePath),
+            [IO.Path]::GetFullPath($ApprovedPythonPath),
+            [IO.Path]::GetFullPath($GoCommandPath),
+            [IO.Path]::GetFullPath($gitPath),
+            [IO.Path]::GetFullPath($pwshPath)
+        )
+        $protectedDirectories = @(
+            $snapshotRoot,
+            (Join-Path $snapshotRoot 'scripts'),
+            (Join-Path $snapshotRoot 'tests'),
+            $repositoryRoot,
+            (Join-Path $RepositoryRoot 'scripts'),
+            (Join-Path $RepositoryRoot 'tests'),
+            (Join-Path $RepositoryRoot '.git'),
+            $snapshotGitDirectory,
+            [IO.Path]::GetFullPath($InstallRoot),
+            [IO.Path]::GetFullPath((Split-Path -Parent $PesterModulePath)),
+            $goRoot,
+            [IO.Path]::GetFullPath($PSHOME),
+            [IO.Path]::GetFullPath($ArtifactsRoot),
+            [IO.Path]::GetFullPath($RunRoot)
+        )
+        $protectedToolClosureRoots = @($goRoot)
+        if (-not [string]::IsNullOrWhiteSpace([string]$env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+            $protectedDirectories += [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+        }
+        $protectedDirectories = @($protectedDirectories | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -Unique)
+        foreach ($protectedFile in $protectedFiles) {
+            if (-not (Test-Path -LiteralPath $protectedFile -PathType Leaf)) { throw "A protected source/tool file is missing: $protectedFile" }
+        }
+
+        $pathEntries = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($entry in @('/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin', $PSHOME,
+                (Split-Path -Parent $GoCommandPath), (Split-Path -Parent $ApprovedPythonPath), (Split-Path -Parent $gitPath))) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry) -and (Test-Path -LiteralPath $entry -PathType Container) -and
+                -not $pathEntries.Contains([IO.Path]::GetFullPath([string]$entry))) {
+                [void]$pathEntries.Add([IO.Path]::GetFullPath([string]$entry))
+            }
+        }
+        foreach ($entry in ([string]$env:PATH -split [IO.Path]::PathSeparator)) {
+            if ([string]::IsNullOrWhiteSpace($entry) -or -not [IO.Path]::IsPathRooted($entry)) { continue }
+            $fullEntry = [IO.Path]::GetFullPath($entry)
+            $unsafeRoots = @($repositoryRoot, $isolationRoot, $ArtifactsRoot, $RunRoot, $InstallRoot, $env:RUNNER_TEMP, $env:HOME) |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+            $underUnsafeRoot = $false
+            foreach ($unsafeRoot in $unsafeRoots) {
+                $unsafeFull = [IO.Path]::GetFullPath([string]$unsafeRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+                if ($fullEntry.StartsWith($unsafeFull, [StringComparison]::Ordinal)) { $underUnsafeRoot = $true; break }
+            }
+            if (-not $underUnsafeRoot -and (Test-Path -LiteralPath $fullEntry -PathType Container) -and -not $pathEntries.Contains($fullEntry)) {
+                [void]$pathEntries.Add($fullEntry)
+            }
+        }
+        $protectedDirectories += @($pathEntries.ToArray())
+        $protectedDirectories = @($protectedDirectories | Select-Object -Unique)
+
+        $config = [ordered]@{
+            schemaVersion = 1
+            candidateCommit = $CandidateCommit
+            snapshotRoot = $snapshotRoot
+            testPaths = $testPaths
+            pesterModulePath = [IO.Path]::GetFullPath($PesterModulePath)
+            pesterVersion = $PesterVersion
+            approvedPythonPath = [IO.Path]::GetFullPath($ApprovedPythonPath)
+            skillspectorVersion = $SkillspectorVersion
+            nobodyUid = $nobodyUid
+            scratchRoot = $scratchRoot
+            resultPath = $resultPath
+            sudoPath = $sudoPath
+            truePath = $truePath
+            idPath = $idPath
+            protectedFiles = @($protectedFiles | Select-Object -Unique)
+            protectedDirectories = $protectedDirectories
+            protectedToolClosureRoots = $protectedToolClosureRoots
+            minimumTotalCount = $MinimumTotalCount
+            pesterMajorVersion = $PesterMajorVersion
+            path = ($pathEntries.ToArray() -join [IO.Path]::PathSeparator)
+            psModulePath = [IO.Path]::GetFullPath((Join-Path $PSHOME 'Modules'))
+            psHome = [IO.Path]::GetFullPath($PSHOME)
+            gitSafeDirectory = $snapshotRoot
+        }
+        [IO.File]::WriteAllText($childConfigPath, ($config | ConvertTo-Json -Depth 8) + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+
+        $childScript = @'
+param([Parameter(Mandatory = $true)][string] $ConfigPath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$config = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigPath | ConvertFrom-Json
+if ($config.schemaVersion -ne 1) { throw 'Isolated authority Pester configuration schema is unsupported.' }
+Set-Location -LiteralPath $config.scratchRoot
+$scratchPrefix = [IO.Path]::GetFullPath([string]$config.scratchRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+foreach ($name in @('HOME','TMPDIR','TEMP','TMP')) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ([string]::IsNullOrWhiteSpace($value) -or -not [IO.Path]::GetFullPath($value).StartsWith($scratchPrefix, [StringComparison]::Ordinal)) {
+        throw "Authority Pester child $name is not isolated under per-run scratch."
+    }
+}
+$actualUid = (& $config.idPath -u).Trim()
+if ($LASTEXITCODE -ne 0 -or $actualUid -cne [string]$config.nobodyUid -or $actualUid -ceq '0') {
+    throw "Authority Pester child UID mismatch. Expected nobody UID $($config.nobodyUid), got '$actualUid'."
+}
+foreach ($name in @('GITHUB_TOKEN', 'GH_TOKEN', 'RUNNER_TEMP', 'GITHUB_WORKSPACE')) {
+    if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) {
+        throw "Authority Pester child unexpectedly inherited $name."
+    }
+}
+function Assert-AuthorityChildPathNotWritable {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][bool] $IsDirectory)
+    if ($IsDirectory) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Protected authority directory is missing: $Path" }
+        $probe = Join-Path $Path ('.authority-child-write-probe-' + [guid]::NewGuid().ToString('N'))
+        try {
+            [IO.File]::WriteAllText($probe, 'probe')
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            throw "Authority Pester child can create files in protected directory '$Path'."
+        }
+        catch [UnauthorizedAccessException] { }
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Protected authority file is missing: $Path" }
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+            throw "Authority Pester child can open protected file '$Path' for writing."
+        }
+        catch [UnauthorizedAccessException] { }
+        finally { if ($null -ne $stream) { $stream.Dispose() } }
+    }
+}
+foreach ($path in @($config.protectedFiles)) { Assert-AuthorityChildPathNotWritable -Path ([string]$path) -IsDirectory $false }
+foreach ($path in @($config.protectedDirectories)) { Assert-AuthorityChildPathNotWritable -Path ([string]$path) -IsDirectory $true }
+foreach ($root in @($config.protectedToolClosureRoots)) {
+    foreach ($item in @(Get-ChildItem -Force -LiteralPath ([string]$root) -Recurse -ErrorAction Stop)) {
+        if ($item.PSIsContainer) {
+            Assert-AuthorityChildPathNotWritable -Path ([string]$item.FullName) -IsDirectory $true
+        }
+        else {
+            Assert-AuthorityChildPathNotWritable -Path ([string]$item.FullName) -IsDirectory $false
+        }
+    }
+}
+$scratchProbe = Join-Path $config.scratchRoot ('.authority-child-scratch-probe-' + [guid]::NewGuid().ToString('N'))
+[IO.File]::WriteAllText($scratchProbe, 'scratch-writable')
+Remove-Item -LiteralPath $scratchProbe -Force
+$sudoOutput = @(& $config.sudoPath -n -u root -- $config.truePath 2>&1)
+$sudoExitCode = $LASTEXITCODE
+if ($sudoExitCode -eq 0) { throw 'Authority Pester child retained sudo capability.' }
+
+$priorAuthorityPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
+$priorAuthoritySkillSpectorVersion = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')
+try {
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]$config.skillspectorVersion,'Process')
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',[string]$config.approvedPythonPath,'Process')
+    Import-Module $config.pesterModulePath -Force -ErrorAction Stop
+    $loadedPester = Get-Module Pester | Where-Object {
+        [string]::Equals([IO.Path]::GetFullPath([string]$_.ModuleBase), [IO.Path]::GetFullPath((Split-Path -Parent $config.pesterModulePath)), [StringComparison]::Ordinal)
+    } | Select-Object -First 1
+    if ($null -eq $loadedPester -or [string]$loadedPester.Version -cne [string]$config.pesterVersion) {
+        throw 'The exact frozen Pester module was not imported in the isolated child.'
+    }
+    $authorityTestPaths = @($config.testPaths | ForEach-Object { [string]$_ })
+    $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
+}
+finally {
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
+    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',$priorAuthoritySkillSpectorVersion,'Process')
+}
+if ($null -eq $authorityResult) { throw 'Isolated Pester did not return a result object.' }
+$resultShape = [ordered]@{}
+foreach ($name in @('TotalCount','PassedCount','FailedCount','Result','FailedBlocksCount','FailedContainersCount','SkippedCount','NotRunCount','PendingCount','InconclusiveCount','Errors')) {
+    $property = $authorityResult.PSObject.Properties[$name]
+    if ($null -eq $property) { continue }
+    if ($name -ceq 'Errors') { $resultShape[$name] = @($property.Value | ForEach-Object { [string]$_ }) }
+    elseif ($name -ceq 'Result') { $resultShape[$name] = [string]$property.Value }
+    else { $resultShape[$name] = [int64]$property.Value }
+}
+$report = [ordered]@{ schemaVersion = 1; candidateCommit = [string]$config.candidateCommit; pesterVersion = [string]$config.pesterVersion; result = $resultShape }
+$json = $report | ConvertTo-Json -Depth 8
+[IO.File]::WriteAllText([string]$config.resultPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+'@
+        [IO.File]::WriteAllText($childScriptPath, $childScript + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('644', '--', $childScriptPath, $childConfigPath) -Context 'Protect isolated child program and configuration')
+
+        $childEnvironment = @(
+            "HOME=$scratchRoot/home",
+            "TMPDIR=$scratchRoot/tmp",
+            "TEMP=$scratchRoot/tmp",
+            "TMP=$scratchRoot/tmp",
+            "PATH=$($pathEntries.ToArray() -join [IO.Path]::PathSeparator)",
+            "PSModulePath=$([IO.Path]::GetFullPath((Join-Path $PSHOME 'Modules')))",
+            "PSHOME=$([IO.Path]::GetFullPath($PSHOME))",
+            'LANG=C.UTF-8',
+            'LC_ALL=C.UTF-8',
+            'GIT_CONFIG_COUNT=2',
+            'GIT_CONFIG_KEY_0=safe.directory',
+            "GIT_CONFIG_VALUE_0=$snapshotRoot",
+            'GIT_CONFIG_KEY_1=core.pager',
+            'GIT_CONFIG_VALUE_1=cat',
+            'GIT_TERMINAL_PROMPT=0'
+        )
+        # Create and assign HOME/TMPDIR subdirectories before dropping privileges.
+        foreach ($scratchChild in @((Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp'))) {
+            if (-not (Test-Path -LiteralPath $scratchChild -PathType Container)) { [void](New-Item -ItemType Directory -Path $scratchChild -ErrorAction Stop) }
+        }
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chownPath -Arguments @("nobody:$runnerGroupId", (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Assign scratch child directory ownership')
+        [void](Invoke-AuthorityLinuxNativeCommand -Command $chmodPath -Arguments @('2770', '--', (Join-Path $scratchRoot 'home'), (Join-Path $scratchRoot 'tmp')) -Context 'Set scratch child directory permissions')
+
+        $originalRunLocation = Get-Location
+        try {
+            Set-Location -LiteralPath $snapshotRoot
+            $childOutput = @(& $sudoPath -n -u nobody -- $envPath -i @childEnvironment $pwshPath -NoLogo -NoProfile -NonInteractive -File $childScriptPath $childConfigPath 1> $stdoutPath 2> $stderrPath)
+            $childExitCode = $LASTEXITCODE
+        }
+        finally { Set-Location -LiteralPath $originalRunLocation.Path }
+        if ($childExitCode -ne 0) {
+            $stdoutText = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -Raw -Encoding UTF8 -LiteralPath $stdoutPath } else { '' }
+            $stderrText = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -Raw -Encoding UTF8 -LiteralPath $stderrPath } else { '' }
+            throw "Isolated authority Pester child failed with exit code $childExitCode. stdout: $stdoutText stderr: $stderrText"
+        }
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw 'Isolated authority Pester child did not produce its required result report.' }
+        $reportItem = Get-Item -Force -LiteralPath $resultPath -ErrorAction Stop
+        if (($reportItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Isolated authority Pester result report must not be a reparse point.' }
+        $report = Get-Content -Raw -Encoding UTF8 -LiteralPath $resultPath | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $report -or $report.schemaVersion -ne 1 -or
+            [string]$report.candidateCommit -cne $CandidateCommit -or
+            [string]$report.pesterVersion -cne $PesterVersion -or $null -eq $report.result) {
+            throw 'Isolated authority Pester result report is malformed or bound to a different candidate/tool version.'
+        }
+        $snapshotCommitAfter = Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $snapshotRoot, 'rev-parse', '--verify', 'HEAD^{commit}') -Context 'Post-test snapshot candidate identity check'
+        $snapshotStatusAfter = Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $snapshotRoot, 'status', '--porcelain', '--untracked-files=all') -Context 'Post-test snapshot worktree integrity check'
+        $originalCommitAfter = Get-AuthorityCandidateCommit -RepositoryRoot $RepositoryRoot -ExpectedCommit $CandidateCommit
+        if ($snapshotCommitAfter -cne $CandidateCommit -or $originalCommitAfter -cne $CandidateCommit -or
+            -not [string]::IsNullOrWhiteSpace($snapshotStatusAfter)) {
+            throw 'Authority checkout or immutable test snapshot changed identity or filesystem state during Pester execution.'
+        }
+        $result = $report.result
+        $completed = $true
+    }
+    finally {
+        if ($worktreeAdded -and (Test-Path -LiteralPath $snapshotRoot -PathType Container)) {
+            try {
+                [void](Invoke-AuthorityLinuxNativeCommand -Command $gitPath -Arguments @('-C', $RepositoryRoot, 'worktree', 'remove', '--force', $snapshotRoot) -Context 'Detached authority worktree cleanup')
+            }
+            catch { $cleanupError = $_.Exception.Message }
+        }
+        if (Test-Path -LiteralPath $isolationRoot -PathType Container) {
+            try { Remove-Item -LiteralPath $isolationRoot -Recurse -Force -ErrorAction Stop }
+            catch {
+                if ($null -eq $cleanupError) { $cleanupError = $_.Exception.Message }
+                else { $cleanupError += "; scratch cleanup: $($_.Exception.Message)" }
+            }
+    }
+    if ($null -ne $cleanupError) { throw "Authority isolation cleanup failed: $cleanupError" }
+    }
+    if (-not $completed) { throw 'Isolated authority Pester execution did not complete.' }
+    if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+        $stdoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath $stdoutPath
+        if (-not [string]::IsNullOrWhiteSpace($stdoutText)) { Write-Host $stdoutText.TrimEnd() }
+    }
+    if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+        $stderrText = Get-Content -Raw -Encoding UTF8 -LiteralPath $stderrPath
+        if (-not [string]::IsNullOrWhiteSpace($stderrText)) { Write-Warning $stderrText.TrimEnd() }
+    }
+    return $result
+}
+
 function Assert-AuthorityFixtureContract {
     param(
         [Parameter(Mandatory = $true)][string] $FixtureRoot,
@@ -3404,14 +3836,42 @@ if ($null -eq $approvedPythonItem -or $approvedPythonItem.PSIsContainer -or
 }
 $priorAuthorityPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
 $priorAuthoritySkillSpectorVersion = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')
-try {
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]$skillSpectorReceipt.resolvedVersion,'Process')
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$approvedSemanticPython,'Process')
-    $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
+$candidateCommitBeforeAuthorityTests = Get-AuthorityCandidateCommit -RepositoryRoot $repositoryRoot
+$hostedGithubActions = [string]::Equals([string]$env:GITHUB_ACTIONS, 'true', [StringComparison]::OrdinalIgnoreCase)
+if ($hostedGithubActions) {
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+        throw 'Hosted authority Pester isolation is required in CI and is supported only on Linux.'
+    }
+    $authorityTestRelativePaths = @($authorityTestPaths | ForEach-Object {
+        [IO.Path]::GetRelativePath($repositoryRoot, [IO.Path]::GetFullPath($_)).Replace('\', '/')
+    })
+    $authorityResult = Invoke-AuthorityLinuxIsolatedPester `
+        -RepositoryRoot $repositoryRoot `
+        -CandidateCommit $candidateCommitBeforeAuthorityTests `
+        -AuthorityTestRelativePaths $authorityTestRelativePaths `
+        -PesterModulePath $pesterModulePath `
+        -PesterVersion ([string]$pesterReceipt.resolvedVersion) `
+        -ApprovedPythonPath $approvedSemanticPython `
+        -SkillspectorVersion ([string]$skillSpectorReceipt.resolvedVersion) `
+        -GoCommandPath $goCommandPath `
+        -InstallRoot $installRoot `
+        -ArtifactsRoot $artifactsRootPath `
+        -RunRoot $runRoot `
+        -RunId $runId `
+        -MinimumTotalCount 55 `
+        -PesterMajorVersion ([version]$pesterReceipt.resolvedVersion).Major
 }
-finally {
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',$priorAuthoritySkillSpectorVersion,'Process')
+else {
+    Write-Warning 'Non-CI authority Pester execution is diagnostic only; hosted Linux isolation evidence is required for an authority receipt.'
+    try {
+        [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]$skillSpectorReceipt.resolvedVersion,'Process')
+        [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$approvedSemanticPython,'Process')
+        $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
+        [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',$priorAuthoritySkillSpectorVersion,'Process')
+    }
 }
 Assert-AuthorityPesterResult `
     -Result $authorityResult `
@@ -3419,11 +3879,15 @@ Assert-AuthorityPesterResult `
     -PesterMajorVersion ([version]$pesterReceipt.resolvedVersion).Major
 
 $candidateCommit = Get-AuthorityCandidateCommit -RepositoryRoot $repositoryRoot
+if ($candidateCommit -cne $candidateCommitBeforeAuthorityTests) {
+    throw 'Authority checkout HEAD changed during repository test execution.'
+}
 
 $summary = [ordered]@{
     schemaVersion = 1
     runId = $runId
     candidateCommit = $candidateCommit
+    authorityTestExecution = if ($hostedGithubActions) { 'linux-nobody-detached-read-only-snapshot' } else { 'local-diagnostic-in-process' }
     goRuntimeVersion = $expectedGoRuntimeVersion
     canonicalGate = [ordered]@{
         policy = [string]$validationSecurityGate.policy
@@ -3461,7 +3925,7 @@ $summary = [ordered]@{
         },
         [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm-bundled-skill'; report='skillspector-report.json' },
         [ordered]@{
-            name='repository-tests'; result='passed'; exitCode=0; mode='authority-pester'
+            name='repository-tests'; result='passed'; exitCode=0; mode=if ($hostedGithubActions) { 'authority-pester-nobody-detached-snapshot' } else { 'diagnostic-in-process-pester' }
             reports=@(); total=[int]$authorityResult.TotalCount
             passed=[int]$authorityResult.PassedCount; failed=[int]$authorityResult.FailedCount
         }
@@ -3470,5 +3934,10 @@ $summary = [ordered]@{
 $summaryPath = Join-Path $runRoot 'authority-gate-summary.json'
 $summaryJson = $summary | ConvertTo-Json -Depth 20
 [System.IO.File]::WriteAllText($summaryPath, $summaryJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-Write-Host "Standard authority gate passed. Evidence: $summaryPath"
+if ($hostedGithubActions) {
+    Write-Host "Hosted Standard authority gate passed. Evidence: $summaryPath"
+}
+else {
+    Write-Host "Local diagnostic gate completed; this evidence is not a hosted authority receipt. Summary: $summaryPath"
+}
 $summaryJson
