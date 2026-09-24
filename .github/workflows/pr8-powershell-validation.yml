@@ -103,13 +103,17 @@ jobs:
             exit 1
           fi
           echo "unshare absolute path: $unshare_path"
-          echo "exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'"
+          echo "exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo'"
           set +e
-          probe_namespace="$($unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid')"
+          probe_output="$($unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo')"
           probe_exit=$?
           set -e
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mountpoints="$(printf '%s\n' "$probe_output" | awk 'NR == 1 { next } { for (i = 7; i <= NF; i++) if ($i == "-") { if ($(i + 1) == "proc") print $5; break } }')"
           echo "namespace probe exit: $probe_exit"
           echo "namespace probe result: $probe_namespace"
+          echo 'child procfs mountpoints (fstype=proc):'
+          if [[ -z "$probe_proc_mountpoints" ]]; then echo '<none>'; else printf '%s\n' "$probe_proc_mountpoints"; fi
           if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" ]]; then
             echo 'Linux PID namespace containment is unavailable; refusing to start callback tests.' >&2
             exit 1
@@ -140,13 +144,13 @@ jobs:
           $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback containment boundary' -PassThru -Show All
           if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback containment boundary.' }
           Write-Host "UnixCallbackContainment - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount) Pending: $($result.PendingCount) Inconclusive: $($result.InconclusiveCount)"
-          if ([int64]$result.TotalCount -ne 5 -or
-              [int]$result.PassedCount -ne 5 -or
+          if ([int64]$result.TotalCount -ne 6 -or
+              [int]$result.PassedCount -ne 6 -or
               [int]$result.FailedCount -ne 0 -or
               [int]$result.SkippedCount -ne 0 -or
               [int]$result.PendingCount -ne 0 -or
               [int]$result.InconclusiveCount -ne 0) {
-            throw 'Unix callback containment boundary did not produce exactly five passing tests.'
+            throw 'Unix callback containment boundary did not produce exactly six passing tests.'
           }
 
   windows-powershell-51:
@@ -203,8 +207,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 572
-            ExpectedSkippedCount = 12
+            ExpectedTotalCount = 573
+            ExpectedSkippedCount = 13
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -266,8 +270,8 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 572
-            ExpectedSkippedCount = 11
+            ExpectedTotalCount = 573
+            ExpectedSkippedCount = 12
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP

@@ -115,14 +115,14 @@ if ($null -ne $result.PSObject.Properties['Result'] -and [string]$result.Result 
 Write-Host "UnixCallbackContainment - Pester $resolvedPesterVersion Selected: $selectedCount Total: $($counts.TotalCount) NotRun: $($counts.NotRunCount) Passed: $($counts.PassedCount) Failed: $($counts.FailedCount) Skipped: $($counts.SkippedCount) Pending: $($counts.PendingCount) Inconclusive: $($counts.InconclusiveCount)"
 Write-Host "Pester resolver receipt: $receiptPath"
 
-if ([int64]$selectedCountFromDiscovery -ne 5 -or
-    [int64]$selectedCount -ne 5 -or
-    [int64]$counts.PassedCount -ne 5 -or
+if ([int64]$selectedCountFromDiscovery -ne 6 -or
+    [int64]$selectedCount -ne 6 -or
+    [int64]$counts.PassedCount -ne 6 -or
     [int64]$counts.FailedCount -ne 0 -or
     [int64]$counts.SkippedCount -ne 0 -or
     [int64]$counts.PendingCount -ne 0 -or
     [int64]$counts.InconclusiveCount -ne 0) {
-    throw 'Linux callback containment did not produce exactly five passing selected tests.'
+    throw 'Linux callback containment did not produce exactly six passing selected tests.'
 }
 
 foreach ($diagnosticName in @('FailedBlocksCount', 'FailedContainersCount')) {

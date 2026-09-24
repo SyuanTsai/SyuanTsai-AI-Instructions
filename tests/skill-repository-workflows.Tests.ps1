@@ -99,7 +99,7 @@ jobs:
     }
 
     # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
-    # Purpose: Isolate the five-case Linux boundary suite from a fresh authority checkout and preserve one required summary status.
+    # Purpose: Isolate the six-case Linux boundary suite from a fresh authority checkout and preserve one required summary status.
     It 'UnitT15_runs_linux_callback_containment_before_full_suites_and_authority_gate' {
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
@@ -124,9 +124,9 @@ jobs:
             $semanticTests.Substring($describeStart)
         }
         $focusedItMatches = [regex]::Matches($focusedTests, "(?m)^\s*It\s+'([^']+)'")
-        Assert-Equal $focusedItMatches.Count 5 'The focused containment Describe must contain exactly five independent It cases.'
+        Assert-Equal $focusedItMatches.Count 6 'The focused containment Describe must contain exactly six independent It cases.'
         $focusedItNames = ($focusedItMatches | ForEach-Object { $_.Groups[1].Value }) -join "`n"
-        foreach ($caseMarker in @('normal', 'timeout', 'setsid', 'late', 'secret')) {
+        foreach ($caseMarker in @('normal', 'timeout', 'setsid', 'late', 'secret', 'procfs')) {
             Assert-Match $focusedItNames $caseMarker "The focused containment It names must include the '$caseMarker' case."
         }
         foreach ($workflow in @($required, $standards)) {
@@ -144,9 +144,13 @@ jobs:
             Assert-Match $workflow 'userns_clone_before"\s*==\s*''0''' 'Hosted setup may enable userns_clone only when its recorded value is zero.'
             Assert-Match $workflow ([regex]::Escape('apparmor_after="$(sysctl -n "$apparmor_key")"')) 'Hosted setup must reread the AppArmor gate after any conditional change.'
             Assert-Match $workflow ([regex]::Escape('userns_clone_after="$(sysctl -n "$userns_clone_key")"')) 'Hosted setup must reread userns_clone after any conditional change.'
-            Assert-Match $workflow 'exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL' 'The exact namespace preflight must remain after hosted setup.'
+            Assert-Match $workflow 'exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' 'The exact private-procfs namespace preflight must remain after hosted setup.'
             Assert-Match $workflow 'Probe Linux PID namespace containment capability' 'Every Linux focused workflow must probe PID namespace support before callback tests.'
-            Assert-Match $workflow ([regex]::Escape("unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'")) 'Every Linux focused workflow must run the exact PID namespace capability probe.'
+            Assert-Match $workflow ([regex]::Escape("unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo'")) 'Every Linux focused workflow must run the exact PID namespace and private-procfs capability probe.'
+            Assert-Match $workflow 'child procfs mountpoints \(fstype=proc\)' 'The namespace probe must list only child procfs mountpoint metadata from mountinfo.'
+            Assert-Match $workflow 'cat /proc/self/mountinfo' 'The namespace probe must inspect the child procfs mount table without exposing environment contents.'
+            Assert-True $workflow.Contains('probe_namespace="${probe_output%%$''\n''*}"') 'The namespace preflight must consume captured output without a head pipeline that can trigger SIGPIPE under pipefail.'
+            Assert-NotMatch $workflow 'probe_namespace=.*\|\s*head\s+-n\s+1' 'The namespace preflight must not close its mountinfo producer early.'
             Assert-Match $workflow 'uname -a' 'The Linux capability probe must record kernel/runtime identity.'
             Assert-Match $workflow '/proc/self/ns/pid' 'The Linux capability probe must record the parent PID namespace identity.'
             Assert-Match $workflow 'namespace probe exit' 'The Linux capability probe must record its exit status.'
@@ -162,14 +166,21 @@ jobs:
         Assert-Match $focusedHelper '\$modulePath\s*=\s*\[IO\.Path\]::GetFullPath\(\[string\]\$receipt\.modulePath\)' 'The focused helper must use the module path identified by the resolver receipt.'
         Assert-Match $focusedHelper 'Import-Module\s+-Name\s+\$modulePath' 'The focused helper must import the Pester module identified by the resolver receipt.'
         Assert-Match $focusedHelper 'Invoke-Pester -Path \$testPath -TagFilter ''LinuxContainment'' -PassThru' 'The focused helper must select the tagged containment cases only.'
-        Assert-Match $focusedHelper '\[int64\]\$selectedCount\s*-ne\s*5' 'The Pester 6 focused gate must require exactly five selected test results.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.PassedCount\s*-ne\s*5' 'The Pester 6 focused gate must require five passed tests.'
+        Assert-Match $focusedHelper '\[int64\]\$selectedCountFromDiscovery\s*-ne\s*6' 'The Pester 6 focused gate must require exactly six discovered selected tests.'
+        Assert-Match $focusedHelper '\[int64\]\$selectedCount\s*-ne\s*6' 'The Pester 6 focused gate must require exactly six selected test results.'
+        Assert-Match $focusedHelper '\[int64\]\$counts\.PassedCount\s*-ne\s*6' 'The Pester 6 focused gate must require six passed tests.'
         Assert-Match $focusedHelper '\[int64\]\$counts\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed tests.'
         Assert-Match $focusedHelper '\[int64\]\$counts\.SkippedCount\s*-ne\s*0' 'The focused boundary gate must reject skipped tests.'
         Assert-Match $focusedHelper '\[int64\]\$counts\.PendingCount\s*-ne\s*0' 'The focused boundary gate must reject pending tests.'
         Assert-Match $focusedHelper '\[int64\]\$counts\.InconclusiveCount\s*-ne\s*0' 'The focused boundary gate must reject inconclusive tests.'
         Assert-Match $focusedHelper 'NotRunCount' 'The focused gate must account for Pester results where TotalCount includes unselected tests.'
         Assert-Match $focusedHelper '\$selectedCountFromDiscovery\s*=\s*\[int64\]\$counts\.TotalCount\s*-\s*\[int64\]\$counts\.NotRunCount' 'The focused gate must subtract Pester 6 NotRun cases from TotalCount to determine the selected count.'
+
+        Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
+        Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*573').Count) 2 'Both full-suite shard jobs must expect 573 total Pester cases after the procfs regression was added.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*13').Count) 1 'Windows PowerShell 5.1 must account for the additional skipped Linux procfs case.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*12').Count) 1 'Windows PowerShell 7 must account for the additional skipped Linux procfs case.'
 
         $standardsJobsMatch = [regex]::Match($standards, '(?ms)^jobs:\r?\n(?<block>.*)\z')
         Assert-True $standardsJobsMatch.Success 'Standards Conformance must define its workflow jobs block.'

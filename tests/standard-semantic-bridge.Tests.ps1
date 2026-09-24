@@ -1572,4 +1572,133 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
         }
         finally { [Environment]::SetEnvironmentVariable($secretName, $null, [EnvironmentVariableTarget]::Process) }
     }
+
+    # Scenario: A controlled outer PowerShell host starts with a harmless secret in its initial environment.
+    # Purpose: A PID namespace must use a private procfs view so a callback cannot inspect its host parent's /proc/<pid>/environ.
+    It 'InterT165_callback_cannot_read_host_parent_procfs_or_initial_environment_secret' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
+        $unsharePath = @('/usr/bin/unshare', '/bin/unshare') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).Target
+        if ([string]::IsNullOrWhiteSpace($parentNamespace)) { $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).LinkTarget }
+        $probeNamespace = $null
+        $probeExit = 127
+        if (-not [string]::IsNullOrWhiteSpace([string]$unsharePath)) {
+            $probeOutput = @(& $unsharePath --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid' 2>&1)
+            $probeExit = $LASTEXITCODE
+            if ($probeOutput.Count -gt 0) { $probeNamespace = [string]$probeOutput[-1] }
+        }
+        $namespaceCapabilityAvailable = ($probeExit -eq 0 -and
+            -not [string]::IsNullOrWhiteSpace([string]$probeNamespace) -and
+            [string]$probeNamespace -cne $parentNamespace)
+        $secretName = 'STANDARD_SEMANTIC_BRIDGE_INITIAL_SECRET_' + ([Guid]::NewGuid().ToString('N'))
+        $secretValue = 'harmless-initial-secret-' + ([Guid]::NewGuid().ToString('N'))
+        $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1'))
+        $markerPath = Join-Path $TestDrive 'unix-containment-parent-procfs-observation.json'
+        $launcherResultPath = Join-Path $TestDrive 'unix-containment-parent-procfs-launcher-result.txt'
+        $markerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$markerPath))
+        $moduleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$modulePath))
+        $secretNameBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$secretName))
+        $launcherResultBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$launcherResultPath))
+        $launcherScript = @"
+`$ErrorActionPreference = 'Stop'
+`$modulePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$moduleBase64'))
+`$secretName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$secretNameBase64'))
+`$markerPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$markerBase64'))
+`$launcherResultPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$launcherResultBase64'))
+`$initialSecret = [Environment]::GetEnvironmentVariable(`$secretName, [EnvironmentVariableTarget]::Process)
+if ([string]::IsNullOrWhiteSpace(`$initialSecret)) { throw 'The controlled callback host did not receive its initial environment secret.' }
+`$parentHostPid = [Diagnostics.Process]::GetCurrentProcess().Id
+Import-Module -Name `$modulePath -Force -ErrorAction Stop
+`$bridgeModule = Get-Module StandardSemanticBridge | Select-Object -First 1
+`$callback = {
+    param(`$argument, `$context)
+    `$parentProcPath = '/proc/' + [string]`$context.parentHostPid + '/environ'
+    `$parentProcVisible = Test-Path -LiteralPath `$parentProcPath -PathType Leaf
+    `$parentSecretVisible = `$false
+    `$parentProcReadSucceeded = `$false
+    if (`$parentProcVisible) {
+        try {
+            `$parentEnvironment = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(`$parentProcPath))
+            `$parentProcReadSucceeded = `$true
+            `$secretPrefix = [string]`$context.secretName + '='
+            foreach (`$entry in `$parentEnvironment.Split([char]0)) {
+                if (`$entry.StartsWith(`$secretPrefix, [StringComparison]::Ordinal) -and `$entry.Length -gt `$secretPrefix.Length) {
+                    `$parentSecretVisible = `$true
+                    break
+                }
+            }
+        }
+        catch { `$parentProcReadSucceeded = `$false }
+    }
+    `$observation = [pscustomobject][ordered]@{
+        parentHostProcPathVisible = [bool]`$parentProcVisible
+        parentEnvironmentReadable = [bool]`$parentProcReadSucceeded
+        parentInitialSecretVisible = [bool]`$parentSecretVisible
+    }
+    [IO.File]::WriteAllText([string]`$context.markerPath, (ConvertTo-Json -InputObject `$observation -Compress))
+    return 'callback-complete'
+}
+try {
+    & `$bridgeModule {
+        param(`$callback, `$callbackContext)
+        Invoke-StandardSemanticBridgeCallbackWithTimeout `
+            -Callback `$callback `
+            -Argument ([pscustomobject]@{}) `
+            -CallbackContext `$callbackContext `
+            -TimeoutMilliseconds 5000 `
+            -Context 'host parent procfs isolation regression'
+    } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath }) | Out-Null
+    [IO.File]::WriteAllText(`$launcherResultPath, 'callback-completed')
+}
+catch {
+    [IO.File]::WriteAllText(`$launcherResultPath, ('callback-failed: ' + [string]`$_.Exception.Message))
+    exit 11
+}
+"@
+        $encodedLauncher = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launcherScript))
+        $launcherInfo = New-Object Diagnostics.ProcessStartInfo
+        $launcherInfo.FileName = [string]$hostPath
+        $launcherInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedLauncher
+        $launcherInfo.UseShellExecute = $false
+        $launcherInfo.CreateNoWindow = $true
+        $launcherInfo.RedirectStandardOutput = $true
+        $launcherInfo.RedirectStandardError = $true
+        $launcherInfo.Environment[$secretName] = $secretValue
+        $launcher = New-Object Diagnostics.Process
+        $launcher.StartInfo = $launcherInfo
+        try {
+            if (-not $launcher.Start()) { throw 'The controlled outer PowerShell host did not start.' }
+            if (-not $launcher.WaitForExit(20000)) {
+                try { $launcher.Kill() } catch { }
+                throw 'The controlled outer PowerShell host did not exit within its 20-second test bound.'
+            }
+            $launcherExitCode = $launcher.ExitCode
+            $launcherError = $launcher.StandardError.ReadToEnd()
+        }
+        finally { $launcher.Dispose() }
+        if (-not $namespaceCapabilityAvailable) {
+            if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+                throw 'The callback ran even though Linux PID namespace capability was unavailable.'
+            }
+            $unavailableResult = if (Test-Path -LiteralPath $launcherResultPath -PathType Leaf) { [IO.File]::ReadAllText($launcherResultPath) } else { '' }
+            if ($launcherExitCode -eq 0 -or [string]::IsNullOrWhiteSpace($unavailableResult) -or $unavailableResult -notmatch '(?i)namespace|unshare|containment|boundary') {
+                throw "Unavailable Linux PID namespace capability did not make callback startup fail closed: $launcherError"
+            }
+            return
+        }
+        if ($launcherExitCode -ne 0 -or -not (Test-Path -LiteralPath $launcherResultPath -PathType Leaf)) {
+            $failure = if (Test-Path -LiteralPath $launcherResultPath -PathType Leaf) { [IO.File]::ReadAllText($launcherResultPath) } else { $launcherError }
+            throw "The controlled callback host failed despite available PID namespace capability: $failure"
+        }
+        if ([IO.File]::ReadAllText($launcherResultPath) -cne 'callback-completed' -or -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            throw 'The private callback did not complete and record its procfs observation.'
+        }
+        $observation = [IO.File]::ReadAllText($markerPath) | ConvertFrom-Json
+        if ([bool]$observation.parentHostProcPathVisible) {
+            throw 'The callback could see the host parent PID in procfs; PID namespace launch did not mount a private procfs.'
+        }
+        if ([bool]$observation.parentInitialSecretVisible) {
+            throw 'The callback read the host parent initial environment secret through procfs.'
+        }
+    }
 }

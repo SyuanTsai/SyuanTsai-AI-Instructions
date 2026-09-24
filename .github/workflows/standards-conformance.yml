@@ -134,13 +134,17 @@ jobs:
             exit 1
           fi
           echo "unshare absolute path: $unshare_path"
-          echo "exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'"
+          echo "exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo'"
           set +e
-          probe_namespace="$($unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid')"
+          probe_output="$($unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo')"
           probe_exit=$?
           set -e
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mountpoints="$(printf '%s\n' "$probe_output" | awk 'NR == 1 { next } { for (i = 7; i <= NF; i++) if ($i == "-") { if ($(i + 1) == "proc") print $5; break } }')"
           echo "namespace probe exit: $probe_exit"
           echo "namespace probe result: $probe_namespace"
+          echo 'child procfs mountpoints (fstype=proc):'
+          if [[ -z "$probe_proc_mountpoints" ]]; then echo '<none>'; else printf '%s\n' "$probe_proc_mountpoints"; fi
           if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" ]]; then
             echo 'Linux PID namespace containment is unavailable; refusing to start callback tests.' >&2
             exit 1
