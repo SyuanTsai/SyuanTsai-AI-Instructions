@@ -128,6 +128,21 @@ jobs:
             Assert-Match $focusedItNames $caseMarker "The focused containment It names must include the '$caseMarker' case."
         }
         foreach ($workflow in @($required, $standards)) {
+            $setupMarker = 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu'
+            $setupIndex = $workflow.IndexOf($setupMarker)
+            $probeIndex = $workflow.IndexOf('Probe Linux PID namespace containment capability')
+            Assert-True ($setupIndex -ge 0) 'Every Linux focused workflow must configure user namespace sysctls on hosted Ubuntu.'
+            Assert-True ($setupIndex -lt $probeIndex) 'Hosted user namespace setup must run before the exact PID namespace capability probe.'
+            Assert-Match $workflow 'RUNNER_ENVIRONMENT.*github-hosted' 'User namespace sysctl setup must be limited to GitHub-hosted runners.'
+            Assert-Match $workflow 'kernel\.apparmor_restrict_unprivileged_userns' 'Hosted setup must inspect and verify the AppArmor user namespace gate when available.'
+            Assert-Match $workflow 'sudo -n sysctl -w "\$apparmor_key=0"' 'Hosted setup may clear the AppArmor gate only through non-interactive sudo.'
+            Assert-Match $workflow 'apparmor_before"\s*==\s*''1''' 'Hosted setup may clear the AppArmor gate only when its recorded value is one.'
+            Assert-Match $workflow 'kernel\.unprivileged_userns_clone' 'Hosted setup must inspect and verify userns_clone when available.'
+            Assert-Match $workflow 'sudo -n sysctl -w "\$userns_clone_key=1"' 'Hosted setup may enable userns_clone only through non-interactive sudo.'
+            Assert-Match $workflow 'userns_clone_before"\s*==\s*''0''' 'Hosted setup may enable userns_clone only when its recorded value is zero.'
+            Assert-Match $workflow ([regex]::Escape('apparmor_after="$(sysctl -n "$apparmor_key")"')) 'Hosted setup must reread the AppArmor gate after any conditional change.'
+            Assert-Match $workflow ([regex]::Escape('userns_clone_after="$(sysctl -n "$userns_clone_key")"')) 'Hosted setup must reread userns_clone after any conditional change.'
+            Assert-Match $workflow 'exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL' 'The exact namespace preflight must remain after hosted setup.'
             Assert-Match $workflow 'Probe Linux PID namespace containment capability' 'Every Linux focused workflow must probe PID namespace support before callback tests.'
             Assert-Match $workflow ([regex]::Escape("unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- sh -c 'readlink /proc/self/ns/pid'")) 'Every Linux focused workflow must run the exact PID namespace capability probe.'
             Assert-Match $workflow 'uname -a' 'The Linux capability probe must record kernel/runtime identity.'

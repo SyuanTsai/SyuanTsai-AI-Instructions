@@ -57,6 +57,51 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            echo 'User namespace sysctl setup is restricted to GitHub-hosted runners.' >&2
+            exit 1
+          fi
+          apparmor_key='kernel.apparmor_restrict_unprivileged_userns'
+          if apparmor_before="$(sysctl -n "$apparmor_key" 2>/dev/null)"; then
+            echo "$apparmor_key before setup: $apparmor_before"
+            if [[ "$apparmor_before" == '1' ]]; then
+              sudo -n sysctl -w "$apparmor_key=0"
+              apparmor_expected='0'
+            else
+              apparmor_expected="$apparmor_before"
+            fi
+            apparmor_after="$(sysctl -n "$apparmor_key")"
+            echo "$apparmor_key after setup: $apparmor_after"
+            if [[ "$apparmor_after" != "$apparmor_expected" ]]; then
+              echo "$apparmor_key changed unexpectedly: expected $apparmor_expected, got $apparmor_after" >&2
+              exit 1
+            fi
+          else
+            echo "$apparmor_key is unavailable; leaving it unchanged."
+          fi
+          userns_clone_key='kernel.unprivileged_userns_clone'
+          if userns_clone_before="$(sysctl -n "$userns_clone_key" 2>/dev/null)"; then
+            echo "$userns_clone_key before setup: $userns_clone_before"
+            if [[ "$userns_clone_before" == '0' ]]; then
+              sudo -n sysctl -w "$userns_clone_key=1"
+              userns_clone_expected='1'
+            else
+              userns_clone_expected="$userns_clone_before"
+            fi
+            userns_clone_after="$(sysctl -n "$userns_clone_key")"
+            echo "$userns_clone_key after setup: $userns_clone_after"
+            if [[ "$userns_clone_after" != "$userns_clone_expected" ]]; then
+              echo "$userns_clone_key changed unexpectedly: expected $userns_clone_expected, got $userns_clone_after" >&2
+              exit 1
+            fi
+          else
+            echo "$userns_clone_key is unavailable; leaving it unchanged."
+          fi
+
       - name: Probe Linux PID namespace containment capability
         shell: bash
         run: |
