@@ -1641,12 +1641,7 @@ Import-Module -Name `$modulePath -Force -ErrorAction Stop
 try {
     & `$bridgeModule {
         param(`$callback, `$callbackContext)
-        Invoke-StandardSemanticBridgeCallbackWithTimeout `
-            -Callback `$callback `
-            -Argument ([pscustomobject]@{}) `
-            -CallbackContext `$callbackContext `
-            -TimeoutMilliseconds 5000 `
-            -Context 'host parent procfs isolation regression'
+        Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback `$callback -Argument ([pscustomobject]@{}) -CallbackContext `$callbackContext -TimeoutMilliseconds 5000 -Context 'host parent procfs isolation regression'
     } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath }) | Out-Null
     [IO.File]::WriteAllText(`$launcherResultPath, 'callback-completed')
 }
