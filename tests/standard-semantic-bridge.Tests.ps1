@@ -1577,6 +1577,10 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
     # Purpose: A PID namespace must use a private procfs view so a callback cannot inspect its host parent's /proc/<pid>/environ.
     It 'InterT165_callback_cannot_read_host_parent_procfs_or_initial_environment_secret' -Skip:($script:UnixContainmentIsLinuxAtDiscovery -eq $false) {
         $unsharePath = @('/usr/bin/unshare', '/bin/unshare') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        $umountPath = @('/usr/bin/umount', '/bin/umount') | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string]$unsharePath) -or [string]::IsNullOrWhiteSpace([string]$umountPath)) {
+            throw 'Linux unshare and umount executables are required for this regression.'
+        }
         $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).Target
         if ([string]::IsNullOrWhiteSpace($parentNamespace)) { $parentNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop).LinkTarget }
         $probeNamespace = $null
@@ -1595,16 +1599,33 @@ Describe 'Unix callback containment boundary' -Tags LinuxContainment {
         $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\scripts\StandardSemanticBridge.psm1'))
         $markerPath = Join-Path $TestDrive 'unix-containment-parent-procfs-observation.json'
         $launcherResultPath = Join-Path $TestDrive 'unix-containment-parent-procfs-launcher-result.txt'
+        $nestedUmountProbePath = Join-Path $TestDrive 'unix-containment-nested-umount-probe.sh'
+        $nestedNamespaceObservationPath = Join-Path $TestDrive 'unix-containment-nested-namespace.txt'
+        $nestedUmountProbeScript = @'
+#!/bin/sh
+printf '%s\n%s\n' "$(readlink /proc/self/ns/user)" "$(readlink /proc/self/ns/mnt)" > "$1"
+if "$2" -n /proc >/dev/null 2>&1; then exit 42; fi
+exit 0
+'@
+        [IO.File]::WriteAllText($nestedUmountProbePath, $nestedUmountProbeScript)
         $markerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$markerPath))
         $moduleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$modulePath))
         $secretNameBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$secretName))
         $launcherResultBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$launcherResultPath))
+        $nestedUmountProbeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$nestedUmountProbePath))
+        $nestedNamespaceObservationBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$nestedNamespaceObservationPath))
+        $unsharePathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$unsharePath))
+        $umountPathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$umountPath))
         $launcherScript = @"
 `$ErrorActionPreference = 'Stop'
 `$modulePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$moduleBase64'))
 `$secretName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$secretNameBase64'))
 `$markerPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$markerBase64'))
 `$launcherResultPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$launcherResultBase64'))
+`$nestedUmountProbePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nestedUmountProbeBase64'))
+`$nestedNamespaceObservationPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$nestedNamespaceObservationBase64'))
+`$unsharePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$unsharePathBase64'))
+`$umountPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$umountPathBase64'))
 `$initialSecret = [Environment]::GetEnvironmentVariable(`$secretName, [EnvironmentVariableTarget]::Process)
 if ([string]::IsNullOrWhiteSpace(`$initialSecret)) { throw 'The controlled callback host did not receive its initial environment secret.' }
 `$parentHostPid = [Diagnostics.Process]::GetCurrentProcess().Id
@@ -1630,10 +1651,73 @@ Import-Module -Name `$modulePath -Force -ErrorAction Stop
         }
         catch { `$parentProcReadSucceeded = `$false }
     }
+    `$statusValues = @{}
+    foreach (`$line in [IO.File]::ReadAllLines('/proc/self/status')) {
+        `$match = [regex]::Match([string]`$line, '^([^:]+):\s*(.*?)\s*`$')
+        if (`$match.Success) { `$statusValues[`$match.Groups[1].Value] = `$match.Groups[2].Value }
+    }
+    `$capabilityZeros = @{}
+    foreach (`$name in @('CapEff', 'CapPrm', 'CapBnd')) {
+        `$capabilityZeros[`$name] = (`$statusValues.ContainsKey(`$name) -and [string]`$statusValues[`$name] -match '^0+`$')
+    }
+    `$noNewPrivilegesEnabled = (`$statusValues.ContainsKey('NoNewPrivs') -and [string]`$statusValues.NoNewPrivs -ceq '1')
+    `$selfPidOne = (`$statusValues.ContainsKey('Pid') -and [string]`$statusValues.Pid -ceq '1' -and
+        `$statusValues.ContainsKey('NSpid') -and @(([string]`$statusValues.NSpid -split '\s+') | Where-Object { `$_ -match '\S' }).Count -eq 1 -and
+        [string](@(([string]`$statusValues.NSpid -split '\s+') | Where-Object { `$_ -match '\S' })[0]) -ceq '1')
+    `$directUmountInfo = New-Object Diagnostics.ProcessStartInfo
+    `$directUmountInfo.FileName = [string]`$context.umountPath
+    `$directUmountInfo.UseShellExecute = `$false
+    `$directUmountInfo.CreateNoWindow = `$true
+    `$directUmountInfo.ArgumentList.Add('-n')
+    `$directUmountInfo.ArgumentList.Add('/proc')
+    `$directUmountProcess = [Diagnostics.Process]::Start(`$directUmountInfo)
+    if (-not `$directUmountProcess.WaitForExit(3000)) {
+        try { `$directUmountProcess.Kill() } catch { }
+        throw 'Direct procfs unmount probe did not exit within its 3-second bound.'
+    }
+    `$directUmountExitCode = [int]`$directUmountProcess.ExitCode
+    `$directUmountProcess.Dispose()
+    `$nestedUnshareInfo = New-Object Diagnostics.ProcessStartInfo
+    `$nestedUnshareInfo.FileName = [string]`$context.unsharePath
+    `$nestedUnshareInfo.UseShellExecute = `$false
+    `$nestedUnshareInfo.CreateNoWindow = `$true
+    `$nestedUnshareInfo.ArgumentList.Add('--user')
+    `$nestedUnshareInfo.ArgumentList.Add('--map-root-user')
+    `$nestedUnshareInfo.ArgumentList.Add('--mount')
+    `$nestedUnshareInfo.ArgumentList.Add('--fork')
+    `$nestedUnshareInfo.ArgumentList.Add('--')
+    `$nestedUnshareInfo.ArgumentList.Add('/bin/sh')
+    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.nestedUmountProbePath)
+    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.nestedNamespaceObservationPath)
+    `$nestedUnshareInfo.ArgumentList.Add([string]`$context.umountPath)
+    `$nestedUnshareProcess = [Diagnostics.Process]::Start(`$nestedUnshareInfo)
+    if (-not `$nestedUnshareProcess.WaitForExit(5000)) {
+        try { `$nestedUnshareProcess.Kill() } catch { }
+        throw 'Nested user and mount namespace umount probe did not exit within its 5-second bound.'
+    }
+    `$nestedUmountExitCode = [int]`$nestedUnshareProcess.ExitCode
+    `$nestedUnshareProcess.Dispose()
+    `$nestedNamespaceLines = if ([IO.File]::Exists([string]`$context.nestedNamespaceObservationPath)) { [IO.File]::ReadAllLines([string]`$context.nestedNamespaceObservationPath) } else { @() }
+    `$parentUserNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/user' -ErrorAction Stop).Target
+    `$parentMountNamespace = [string](Get-Item -LiteralPath '/proc/self/ns/mnt' -ErrorAction Stop).Target
+    `$nestedNamespaceSetupSucceeded = (`$nestedNamespaceLines.Count -ge 2 -and
+        -not [string]::IsNullOrWhiteSpace([string]`$nestedNamespaceLines[0]) -and
+        -not [string]::IsNullOrWhiteSpace([string]`$nestedNamespaceLines[1]) -and
+        [string]`$nestedNamespaceLines[0] -cne `$parentUserNamespace -and
+        [string]`$nestedNamespaceLines[1] -cne `$parentMountNamespace)
     `$observation = [pscustomobject][ordered]@{
         parentHostProcPathVisible = [bool]`$parentProcVisible
         parentEnvironmentReadable = [bool]`$parentProcReadSucceeded
         parentInitialSecretVisible = [bool]`$parentSecretVisible
+        capEffZero = [bool]`$capabilityZeros.CapEff
+        capPrmZero = [bool]`$capabilityZeros.CapPrm
+        capBndZero = [bool]`$capabilityZeros.CapBnd
+        noNewPrivilegesEnabled = [bool]`$noNewPrivilegesEnabled
+        selfPidOne = [bool]`$selfPidOne
+        directProcUmountDenied = (`$directUmountExitCode -ne 0)
+        nestedUserMountNamespaceUmountDenied = (`$nestedUmountExitCode -eq 0)
+        nestedNamespaceSetupSucceeded = [bool]`$nestedNamespaceSetupSucceeded
+        nestedUserMountNamespaceProbeExitCode = `$nestedUmountExitCode
     }
     [IO.File]::WriteAllText([string]`$context.markerPath, (ConvertTo-Json -InputObject `$observation -Compress))
     return 'callback-complete'
@@ -1642,7 +1726,7 @@ try {
     & `$bridgeModule {
         param(`$callback, `$callbackContext)
         Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback `$callback -Argument ([pscustomobject]@{}) -CallbackContext `$callbackContext -TimeoutMilliseconds 5000 -Context 'host parent procfs isolation regression'
-    } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath }) | Out-Null
+        } `$callback ([pscustomobject]@{ parentHostPid = `$parentHostPid; secretName = `$secretName; markerPath = `$markerPath; unsharePath = `$unsharePath; umountPath = `$umountPath; nestedUmountProbePath = `$nestedUmountProbePath; nestedNamespaceObservationPath = `$nestedNamespaceObservationPath }) | Out-Null
     [IO.File]::WriteAllText(`$launcherResultPath, 'callback-completed')
 }
 catch {
@@ -1694,6 +1778,84 @@ catch {
         }
         if ([bool]$observation.parentInitialSecretVisible) {
             throw 'The callback read the host parent initial environment secret through procfs.'
+        }
+        foreach ($field in @('capEffZero', 'capPrmZero', 'capBndZero', 'noNewPrivilegesEnabled', 'selfPidOne', 'directProcUmountDenied', 'nestedNamespaceSetupSucceeded', 'nestedUserMountNamespaceUmountDenied')) {
+            $property = $observation.PSObject.Properties[$field]
+            if ($null -eq $property -or -not [bool]$property.Value) { throw "The callback security boundary assertion failed: $field." }
+        }
+
+        # Establish an inherited procfs alias before starting a second controlled
+        # host. The callback boundary must detect it in mountinfo and fail before
+        # the callback payload is released.
+        $aliasMarkerPath = Join-Path $TestDrive 'unix-containment-procfs-alias-callback.json'
+        $aliasLauncherResultPath = Join-Path $TestDrive 'unix-containment-procfs-alias-launcher-result.txt'
+        $aliasMountPath = Join-Path $TestDrive 'unix-containment-procfs-alias'
+        $aliasReadyPath = Join-Path $TestDrive 'unix-containment-procfs-alias-ready.txt'
+        $aliasMountInfoPath = Join-Path $TestDrive 'unix-containment-procfs-alias-mountinfo.txt'
+        $aliasMarkerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$aliasMarkerPath))
+        $aliasLauncherResultBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$aliasLauncherResultPath))
+        $aliasLauncherScript = $launcherScript.Replace([string]$markerBase64, [string]$aliasMarkerBase64).Replace([string]$launcherResultBase64, [string]$aliasLauncherResultBase64)
+        $encodedAliasLauncher = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($aliasLauncherScript))
+        $aliasWrapperScriptPath = Join-Path $TestDrive 'unix-containment-procfs-alias-launcher.sh'
+        $aliasWrapperScript = @'
+set -eu
+alias_path="$1"
+ready_path="$2"
+mountinfo_path="$3"
+host_path="$4"
+encoded_launcher="$5"
+mkdir -p "$alias_path"
+mount --make-rprivate /
+mount --bind /proc "$alias_path"
+cat /proc/self/mountinfo > "$mountinfo_path"
+printf ready > "$ready_path"
+exec "$host_path" -NoLogo -NoProfile -NonInteractive -EncodedCommand "$encoded_launcher"
+'@
+        [IO.File]::WriteAllText($aliasWrapperScriptPath, $aliasWrapperScript)
+        $aliasLauncherInfo = New-Object Diagnostics.ProcessStartInfo
+        $aliasLauncherInfo.FileName = [string]$unsharePath
+        $aliasLauncherInfo.UseShellExecute = $false
+        $aliasLauncherInfo.CreateNoWindow = $true
+        $aliasLauncherInfo.RedirectStandardOutput = $true
+        $aliasLauncherInfo.RedirectStandardError = $true
+        foreach ($item in @('--user', '--map-root-user', '--mount', '--', '/bin/sh', $aliasWrapperScriptPath, $aliasMountPath, $aliasReadyPath, $aliasMountInfoPath, [string]$hostPath, $encodedAliasLauncher)) {
+            $aliasLauncherInfo.ArgumentList.Add([string]$item)
+        }
+        $aliasLauncherInfo.Environment[$secretName] = $secretValue
+        $aliasLauncher = New-Object Diagnostics.Process
+        $aliasLauncher.StartInfo = $aliasLauncherInfo
+        try {
+            if (-not $aliasLauncher.Start()) { throw 'The controlled procfs-alias outer host did not start.' }
+            if (-not $aliasLauncher.WaitForExit(20000)) {
+                try { $aliasLauncher.Kill() } catch { }
+                throw 'The controlled procfs-alias outer host did not exit within its 20-second test bound.'
+            }
+            $aliasLauncherExitCode = $aliasLauncher.ExitCode
+            $aliasLauncherError = $aliasLauncher.StandardError.ReadToEnd()
+        }
+        finally { $aliasLauncher.Dispose() }
+        if (-not (Test-Path -LiteralPath $aliasReadyPath -PathType Leaf) -or [IO.File]::ReadAllText($aliasReadyPath) -cne 'ready') {
+            throw "The adversarial inherited procfs alias could not be established: $aliasLauncherError"
+        }
+        $aliasMountObserved = $false
+        foreach ($mountInfoLine in [IO.File]::ReadAllLines($aliasMountInfoPath)) {
+            $separatorIndex = $mountInfoLine.IndexOf(' - ', [StringComparison]::Ordinal)
+            if ($separatorIndex -le 0) { continue }
+            $leftFields = @($mountInfoLine.Substring(0, $separatorIndex).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+            $rightFields = @($mountInfoLine.Substring($separatorIndex + 3).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+            if ($leftFields.Count -ge 6 -and $rightFields.Count -ge 1 -and
+                [string]$leftFields[4] -ceq [string]$aliasMountPath -and [string]$rightFields[0] -ceq 'proc') {
+                $aliasMountObserved = $true
+                break
+            }
+        }
+        if (-not $aliasMountObserved) { throw 'The inherited procfs alias precondition was not visible in outer mountinfo.' }
+        if (Test-Path -LiteralPath $aliasMarkerPath -PathType Leaf) {
+            throw 'The callback executed despite an inherited procfs alias outside /proc.'
+        }
+        $aliasResult = if (Test-Path -LiteralPath $aliasLauncherResultPath -PathType Leaf) { [IO.File]::ReadAllText($aliasLauncherResultPath) } else { '' }
+        if ($aliasLauncherExitCode -eq 0 -or $aliasResult -notmatch '^callback-failed:.*(namespace|procfs|containment|boundary)' ) {
+            throw "An inherited procfs alias did not fail closed before callback execution: $aliasResult $aliasLauncherError"
         }
     }
 }

@@ -144,13 +144,16 @@ jobs:
             Assert-Match $workflow 'userns_clone_before"\s*==\s*''0''' 'Hosted setup may enable userns_clone only when its recorded value is zero.'
             Assert-Match $workflow ([regex]::Escape('apparmor_after="$(sysctl -n "$apparmor_key")"')) 'Hosted setup must reread the AppArmor gate after any conditional change.'
             Assert-Match $workflow ([regex]::Escape('userns_clone_after="$(sysctl -n "$userns_clone_key")"')) 'Hosted setup must reread userns_clone after any conditional change.'
-            Assert-Match $workflow 'exact probe arguments: unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' 'The exact private-procfs namespace preflight must remain after hosted setup.'
+            Assert-Match $workflow 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' 'The exact private-procfs namespace preflight must remain after hosted setup.'
             Assert-Match $workflow 'Probe Linux PID namespace containment capability' 'Every Linux focused workflow must probe PID namespace support before callback tests.'
-            Assert-Match $workflow ([regex]::Escape("unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c 'readlink /proc/self/ns/pid; cat /proc/self/mountinfo'")) 'Every Linux focused workflow must run the exact PID namespace and private-procfs capability probe.'
-            Assert-Match $workflow 'child procfs mountpoints \(fstype=proc\)' 'The namespace probe must list only child procfs mountpoint metadata from mountinfo.'
-            Assert-Match $workflow 'cat /proc/self/mountinfo' 'The namespace probe must inspect the child procfs mount table without exposing environment contents.'
+            Assert-Match $workflow 'exact probe command: \$unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c' 'Every Linux preflight must log the exact command used to create the PID namespace and mount a private procfs.'
+            Assert-Match $workflow 'exec 9</proc/self/mountinfo' 'The namespace probe must open the visible procfs mount before reading its mount identity.'
+            Assert-Match $workflow '/proc/self/fdinfo/9' 'The namespace probe must use the opened procfs descriptor identity instead of choosing a stacked mountinfo row.'
+            Assert-Match $workflow 'parent procfs mount ID' 'The namespace probe must record the parent visible procfs mount identity.'
+            Assert-Match $workflow 'private procfs mount ID' 'The namespace probe must record the child visible procfs mount identity.'
+            Assert-Match $workflow 'probe_proc_mount_id.*parent_proc_mount_id' 'The namespace probe must reject a child whose visible procfs mount is not private.'
             Assert-True $workflow.Contains('probe_namespace="${probe_output%%$''\n''*}"') 'The namespace preflight must consume captured output without a head pipeline that can trigger SIGPIPE under pipefail.'
-            Assert-NotMatch $workflow 'probe_namespace=.*\|\s*head\s+-n\s+1' 'The namespace preflight must not close its mountinfo producer early.'
+            Assert-NotMatch $workflow 'awk .*\$5 == "/proc".*print \$1' 'The namespace preflight must not select the first /proc row when mountinfo contains stacked procfs mounts.'
             Assert-Match $workflow 'uname -a' 'The Linux capability probe must record kernel/runtime identity.'
             Assert-Match $workflow '/proc/self/ns/pid' 'The Linux capability probe must record the parent PID namespace identity.'
             Assert-Match $workflow 'namespace probe exit' 'The Linux capability probe must record its exit status.'
@@ -194,12 +197,30 @@ jobs:
         $focusedJobMatch = [regex]::Match($standards, '(?ms)^  linux-callback-focused:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
         $authorityJobMatch = [regex]::Match($standards, '(?ms)^  authority-gate:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
         $summaryJobMatch = [regex]::Match($standards, '(?ms)^  latest-stable-authority-regression:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $compositionJobMatch = [regex]::Match($required, '(?ms)^  powershell-7-unix-composition:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
         Assert-True $focusedJobMatch.Success 'Standards Conformance must define an isolated focused containment job.'
         Assert-True $authorityJobMatch.Success 'Standards Conformance must define an independent canonical authority job.'
         Assert-True $summaryJobMatch.Success 'Standards Conformance must preserve its required summary job.'
+        Assert-True $compositionJobMatch.Success 'PowerShell Regression must define an independent Linux composition job.'
         $focusedJob = $focusedJobMatch.Groups['block'].Value
         $authorityJob = $authorityJobMatch.Groups['block'].Value
         $summaryJob = $summaryJobMatch.Groups['block'].Value
+        $compositionJob = $compositionJobMatch.Groups['block'].Value
+        $stackedProcMountInfoFixture = @'
+70 43 0:123 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+80 70 0:123 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+'@
+        $oldFirstProcMountId = [string](($stackedProcMountInfoFixture -split '\r?\n')[0] -split '\s+')[0]
+        $visibleProcMountFdInfoFixture = @'
+pos: 0
+flags: 0100000
+mnt_id: 80
+ino: 1
+'@
+        $visibleProcMountId = [regex]::Match($visibleProcMountFdInfoFixture, '(?m)^mnt_id:\s*(?<id>[0-9]+)$').Groups['id'].Value
+        Assert-Equal $oldFirstProcMountId '70' 'The previous first-row mountinfo probe selects the underlying procfs in a stacked mount fixture.'
+        Assert-Equal $visibleProcMountId '80' 'fdinfo for a descriptor opened on /proc/mountinfo identifies the visible top procfs mount in a stacked fixture.'
+        Assert-False ($oldFirstProcMountId -eq $visibleProcMountId) 'The stacked procfs fixture must distinguish the old first-entry probe from the visible-mount probe.'
         foreach ($job in @(@{ Name = 'focused'; Block = $focusedJob }, @{ Name = 'authority'; Block = $authorityJob })) {
             Assert-Equal ([regex]::Matches($job.Block, '(?m)^\s+uses:\s*actions/checkout@[0-9a-f]{40}\b')).Count 1 "The $($job.Name) job must perform its own pinned checkout."
             Assert-Match $job.Block 'persist-credentials:\s*false' "The $($job.Name) job checkout must not persist Git credentials."
@@ -215,8 +236,46 @@ jobs:
         Assert-Match $authorityJob 'Set up approved Go runtime' 'The authority job must set up the approved Go runtime after its fresh checkout.'
         Assert-Match $authorityJob 'Run canonical Standard v1 authority gate' 'The authority job must execute the canonical authority gate.'
         Assert-Match $authorityJob 'Check whitespace in the event range' 'The authority job must retain the event-range whitespace check.'
-        Assert-NotMatch $authorityJob 'Invoke-FocusedLinuxContainment\.ps1|Probe Linux PID namespace containment capability|Enable unprivileged user namespaces' 'The authority job must not run PR-controlled focused tests or namespace setup.'
+        Assert-NotMatch $authorityJob 'Invoke-FocusedLinuxContainment\.ps1' 'The authority job must not run PR-controlled focused tests in its fresh authority checkout.'
         Assert-Match $authorityJob '(?m)^\s+needs:\s*linux-callback-focused\s*$' 'The authority job must wait for the focused job while using its own runner and checkout.'
+        foreach ($job in @(
+            @{ Name = 'authority'; Block = $authorityJob; Suite = 'Run canonical Standard v1 authority gate' },
+            @{ Name = 'composition'; Block = $compositionJob; Suite = 'Run required Standard v1 authority gate' }
+        )) {
+            $setupMarker = 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu'
+            $probeMarker = 'Probe Linux PID namespace containment capability'
+            $setupIndex = $job.Block.IndexOf($setupMarker)
+            $probeIndex = $job.Block.IndexOf($probeMarker)
+            $checkoutIndex = $job.Block.IndexOf('name: Checkout')
+            $suiteIndex = $job.Block.IndexOf($job.Suite)
+            Assert-True ($setupIndex -ge 0) "The fresh $($job.Name) Linux runner must configure user namespaces locally."
+            Assert-True ($probeIndex -gt $setupIndex) "The fresh $($job.Name) Linux runner must probe after its local namespace setup."
+            Assert-True ($checkoutIndex -gt $probeIndex) "The $($job.Name) namespace preflight must run before checkout and before any PR-controlled repository code."
+            Assert-True ($suiteIndex -gt $checkoutIndex) "The $($job.Name) complete suite must run only after its own runner preflight and checkout."
+            $preCheckout = $job.Block.Substring(0, $checkoutIndex)
+            Assert-NotMatch $preCheckout '\./scripts/|Invoke-StandardAuthorityGate\.ps1|Invoke-Pester|tests/' "The $($job.Name) preflight must not execute PR-controlled repository code before checkout."
+            Assert-Match $job.Block 'RUNNER_ENVIRONMENT.*github-hosted' "The $($job.Name) user namespace setup must be restricted to hosted runners."
+            Assert-Match $job.Block 'kernel\.apparmor_restrict_unprivileged_userns' "The $($job.Name) setup must inspect and verify the AppArmor user namespace gate."
+            Assert-Match $job.Block 'sudo -n sysctl -w "\$apparmor_key=0"' "The $($job.Name) setup may clear the AppArmor gate only with non-interactive sudo."
+            Assert-Match $job.Block 'apparmor_after="\$\(sysctl -n "\$apparmor_key"\)"' "The $($job.Name) setup must reread the AppArmor gate after a conditional change."
+            Assert-Match $job.Block 'kernel\.unprivileged_userns_clone' "The $($job.Name) setup must inspect and verify userns_clone when available."
+            Assert-Match $job.Block 'sudo -n sysctl -w "\$userns_clone_key=1"' "The $($job.Name) setup may enable userns_clone only with non-interactive sudo."
+            Assert-Match $job.Block 'userns_clone_after="\$\(sysctl -n "\$userns_clone_key"\)"' "The $($job.Name) setup must reread userns_clone after a conditional change."
+            Assert-Match $job.Block 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' "The $($job.Name) runner must probe the reviewed PID namespace and private procfs arguments."
+            Assert-Match $job.Block 'exact probe command: \$unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c' "The $($job.Name) runner must log the exact command used for its PID namespace and private procfs probe."
+            Assert-Match $job.Block '\$probe_command' "The $($job.Name) probe log must identify the actual child command text."
+            Assert-Match $job.Block 'parent procfs mount ID' "The $($job.Name) probe must record the parent's procfs mount identity."
+            Assert-Match $job.Block 'private procfs mount ID' "The $($job.Name) probe must record the child's procfs mount identity."
+            Assert-Match $job.Block 'probe_proc_mount_id.*parent_proc_mount_id' "The $($job.Name) probe must reject a child that did not mount a private procfs."
+            Assert-Match $job.Block 'parent_proc_mount_id="\$\(awk .*mnt_id:.*fdinfo/9\)"' "The $($job.Name) probe must get the parent mount ID from its opened visible procfs descriptor."
+            Assert-Match $job.Block 'probe_command=.*fdinfo/9' "The $($job.Name) probe must get the child mount ID from its opened visible procfs descriptor."
+            Assert-Match $job.Block '/proc/self/fdinfo/9' "The $($job.Name) probe must resolve the visible procfs mount from its opened mountinfo descriptor."
+            Assert-NotMatch $job.Block 'awk .*\$5 == "/proc".*print \$1' "The $($job.Name) probe must not select the first stacked /proc row."
+            Assert-Match $job.Block 'namespace probe stderr' "The $($job.Name) probe must retain stderr when namespace creation fails."
+            Assert-Match $job.Block 'namespace probe exit' "The $($job.Name) probe must record its exit status."
+            Assert-Match $job.Block 'namespace probe result' "The $($job.Name) probe must record its child PID namespace identity."
+        }
+        Assert-Match $compositionJob '(?m)^\s+needs:\s*linux-callback-focused\s*$' 'The Linux composition job must preserve its focused-job dependency and run on a fresh, separately provisioned runner.'
         Assert-Match $summaryJob '(?m)^\s+name:\s*Standard v1 \(latest stable tooling\)\s*$' 'The required status job must keep its established display name.'
         Assert-Match $summaryJob '(?m)^\s+needs:\s*\r?\n\s+- linux-callback-focused\s*\r?\n\s+- authority-gate\s*$' 'The required status job must wait for both independent jobs.'
         Assert-Match $summaryJob '(?m)^\s+if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$' 'The required status job must run even when a dependency fails or is skipped.'

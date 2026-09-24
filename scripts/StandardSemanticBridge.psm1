@@ -1370,11 +1370,76 @@ try {
         if ([string]::IsNullOrWhiteSpace($handshakePath)) {
             throw 'Unix callback host did not receive its private PID namespace handshake path.'
         }
+        $expectedParentNamespaceTarget = [Environment]::GetEnvironmentVariable('STANDARD_SEMANTIC_BRIDGE_PARENT_PID_NAMESPACE')
+        if ([string]::IsNullOrWhiteSpace($expectedParentNamespaceTarget)) {
+            throw 'Unix callback host did not receive the expected parent PID namespace identity.'
+        }
         $namespaceItem = Get-Item -LiteralPath '/proc/self/ns/pid' -ErrorAction Stop
         $namespaceTarget = [string]$namespaceItem.Target
         if ([string]::IsNullOrWhiteSpace($namespaceTarget)) { $namespaceTarget = [string]$namespaceItem.LinkTarget }
         if ([string]::IsNullOrWhiteSpace($namespaceTarget)) {
             throw 'Unix callback host could not identify its PID namespace.'
+        }
+        if ([string]::Equals($namespaceTarget.Trim(), $expectedParentNamespaceTarget.Trim(), [StringComparison]::Ordinal)) {
+            throw 'Unix callback host is still in the parent PID namespace.'
+        }
+
+        # This bootstrap runs only after setpriv has dropped every capability.
+        # Fail before the parent releases the callback payload if that boundary
+        # did not survive execve or if the expected private mount view is absent.
+        $statusText = [IO.File]::ReadAllText('/proc/self/status')
+        $statusValues = @{}
+        foreach ($statusLine in @($statusText -split "`n")) {
+            $statusMatch = [regex]::Match([string]$statusLine, '^([^:]+):\s*(.*?)\s*$')
+            if ($statusMatch.Success) { $statusValues[$statusMatch.Groups[1].Value] = $statusMatch.Groups[2].Value }
+        }
+        foreach ($capabilityName in @('CapEff', 'CapPrm', 'CapBnd')) {
+            if (-not $statusValues.ContainsKey($capabilityName) -or [string]$statusValues[$capabilityName] -notmatch '^0+$') {
+                throw "Unix callback host retained $capabilityName after capability drop."
+            }
+        }
+        if (-not $statusValues.ContainsKey('NoNewPrivs') -or [string]$statusValues.NoNewPrivs -cne '1') {
+            throw 'Unix callback host did not retain the no_new_privs boundary.'
+        }
+        if (-not $statusValues.ContainsKey('Pid') -or [string]$statusValues.Pid -cne '1' -or
+            -not $statusValues.ContainsKey('NSpid') -or @(([string]$statusValues.NSpid -split '\s+') | Where-Object { $_ -match '\S' }).Count -ne 1 -or
+            [string](@(([string]$statusValues.NSpid -split '\s+') | Where-Object { $_ -match '\S' })[0]) -cne '1') {
+            throw 'Unix callback host does not have the private procfs PID 1 view.'
+        }
+
+        $mountInfoLines = @([IO.File]::ReadAllLines('/proc/self/mountinfo'))
+        if ($mountInfoLines.Count -eq 0) { throw 'Unix callback host mountinfo is empty.' }
+        $mountRows = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($mountInfoLine in $mountInfoLines) {
+            $separatorIndex = ([string]$mountInfoLine).IndexOf(' - ', [StringComparison]::Ordinal)
+            if ($separatorIndex -le 0) { throw 'Unix callback host mountinfo contains a malformed record.' }
+            $leftFields = @(([string]$mountInfoLine).Substring(0, $separatorIndex).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+            $rightFields = @(([string]$mountInfoLine).Substring($separatorIndex + 3).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
+            $mountId = 0L
+            $parentMountId = 0L
+            if ($leftFields.Count -lt 6 -or $rightFields.Count -lt 3 -or
+                -not [long]::TryParse([string]$leftFields[0], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$mountId) -or
+                -not [long]::TryParse([string]$leftFields[1], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$parentMountId) -or
+                $mountId -le 0 -or $parentMountId -le 0) {
+                throw 'Unix callback host mountinfo contains an incomplete record.'
+            }
+            [void]$mountRows.Add([pscustomobject][ordered]@{
+                    MountId = $mountId
+                    ParentMountId = $parentMountId
+                    MountPoint = [string]$leftFields[4]
+                    FileSystemType = [string]$rightFields[0]
+                })
+        }
+        $procMountRows = @($mountRows | Where-Object { [string]$_.FileSystemType -ceq 'proc' })
+        if ($procMountRows.Count -eq 0 -or @($procMountRows | Where-Object { [string]$_.MountPoint -cne '/proc' }).Count -gt 0) {
+            throw 'Unix callback host has an inherited procfs alias outside canonical /proc.'
+        }
+        $procMountStack = @($mountRows | Where-Object { [string]$_.MountPoint -ceq '/proc' })
+        if ($procMountStack.Count -eq 0) { throw 'Unix callback host has no canonical /proc mount stack.' }
+        $parentMountIdsAtProc = @($procMountStack | ForEach-Object { [long]$_.ParentMountId })
+        $topProcMounts = @($procMountStack | Where-Object { $parentMountIdsAtProc -notcontains [long]$_.MountId })
+        if ($topProcMounts.Count -ne 1 -or [string]$topProcMounts[0].FileSystemType -cne 'proc') {
+            throw 'Unix callback host canonical /proc top mount is not one verified procfs instance.'
         }
         $handshakeTemporaryPath = "$handshakePath.tmp"
         [IO.File]::WriteAllText($handshakeTemporaryPath, "$PID`n$namespaceTarget")
@@ -1447,17 +1512,32 @@ catch {
     $launchFileName = $hostExecutable
     $launchArguments = "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedBootstrap"
     $namespaceLaunchRequested = $false
+    $parentPidNamespaceIdentity = $null
+    $setprivPath = $null
     $pidNamespaceHandshakeDirectory = $null
     $pidNamespaceHandshakePath = $null
     $pidNamespaceHandshakeTemporaryPath = $null
     if ($isLinuxHost) {
+        $parentPidNamespaceIdentity = Get-StandardSemanticBridgeLinuxNamespaceIdentity -ProcessId $PID
+        foreach ($candidateSetprivPath in @('/usr/bin/setpriv', '/bin/setpriv')) {
+            $candidateInfo = $null
+            try { $candidateInfo = Get-Item -LiteralPath $candidateSetprivPath -Force -ErrorAction Stop } catch { }
+            if ($null -ne $candidateInfo -and -not $candidateInfo.PSIsContainer -and (($candidateInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
+                $setprivPath = $candidateSetprivPath
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$setprivPath)) {
+            throw [InvalidOperationException]::new("$Context cannot establish a trusted Linux callback boundary because no absolute setpriv executable is available.")
+        }
         foreach ($candidateUnsharePath in @('/usr/bin/unshare', '/bin/unshare')) {
             $candidateInfo = $null
             try { $candidateInfo = Get-Item -LiteralPath $candidateUnsharePath -Force -ErrorAction Stop } catch { }
             if ($null -ne $candidateInfo -and -not $candidateInfo.PSIsContainer -and (($candidateInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
                 $launchFileName = $candidateUnsharePath
                 $quotedHostExecutable = '"' + $hostExecutable.Replace('"', '\"') + '"'
-                $launchArguments = "--user --map-root-user --pid --fork --kill-child=SIGKILL -- $quotedHostExecutable -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedBootstrap"
+                $quotedSetprivPath = '"' + $setprivPath.Replace('"', '\"') + '"'
+                $launchArguments = "--user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- $quotedSetprivPath --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- $quotedHostExecutable -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedBootstrap"
                 $namespaceLaunchRequested = $true
                 break
             }
@@ -1501,6 +1581,7 @@ catch {
     }
     if ($namespaceLaunchRequested) {
         $environment['STANDARD_SEMANTIC_BRIDGE_PID_NAMESPACE_HANDSHAKE'] = [string]$pidNamespaceHandshakePath
+        $environment['STANDARD_SEMANTIC_BRIDGE_PARENT_PID_NAMESPACE'] = [string]$parentPidNamespaceIdentity
     }
     $process = $null
     $started = $false
