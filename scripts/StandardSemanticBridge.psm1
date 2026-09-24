@@ -286,6 +286,32 @@ function Assert-StandardSemanticBridgeExactProperties {
     }
 }
 
+function Test-StandardSemanticBridgeNumericSchemaVersion {
+    param(
+        [AllowNull()] $Value,
+        [Parameter(Mandatory = $true)][int] $Expected
+    )
+
+    if ($null -eq $Value) { return $false }
+    $typeCode = [Type]::GetTypeCode($Value.GetType())
+    if ($typeCode -notin @(
+        [TypeCode]::Byte, [TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::UInt16,
+        [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
+        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal
+    )) {
+        return $false
+    }
+
+    try {
+        # JSON Schema's integer type includes mathematically integral JSON
+        # numbers such as 2.0. Convert only recognized CLR numeric types so
+        # strings and booleans cannot become valid through PowerShell casts.
+        $numericValue = [Convert]::ToDecimal($Value, [Globalization.CultureInfo]::InvariantCulture)
+        return $numericValue -eq [decimal]$Expected
+    }
+    catch { return $false }
+}
+
 function Assert-StandardSemanticBridgeNonEmptyScalar {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -791,7 +817,7 @@ function New-StandardSemanticBridgeConsentDecision {
     )
 
     Assert-StandardSemanticBridgeExactProperties -Object $Request -Expected @('schemaVersion', 'artifactType', 'artifactClassification', 'requestId', 'requestedAt', 'expiresAt', 'bindings', 'providerRoute', 'purpose', 'scope', 'providerTextInventory', 'analyzerSet', 'consentPayloadSha256') -Context 'consent request'
-    if ([int]$Request.schemaVersion -ne 2 -or [string]$Request.artifactType -cne 'semantic-consent-request-v2' -or [string]$Request.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent request is not a v2 local bridge artifact.' }
+    if (-not (Test-StandardSemanticBridgeNumericSchemaVersion -Value $Request.schemaVersion -Expected $script:StandardSemanticBridgeSchemaVersion) -or [string]$Request.artifactType -cne 'semantic-consent-request-v2' -or [string]$Request.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent request is not a v2 local bridge artifact.' }
     $payload = [ordered]@{}
     foreach ($property in @($Request.PSObject.Properties | Where-Object { $_.Name -ne 'consentPayloadSha256' })) { $payload[$property.Name] = $property.Value }
     if ([string]$Request.consentPayloadSha256 -cne (Get-StandardSemanticBridgeArtifactSha256 -Artifact ([pscustomobject]$payload))) { throw 'consent request payload digest is invalid.' }
@@ -847,8 +873,8 @@ function Test-StandardSemanticBridgeConsent {
     try {
         Assert-StandardSemanticBridgeExactProperties -Object $ConsentRequest -Expected @('schemaVersion', 'artifactType', 'artifactClassification', 'requestId', 'requestedAt', 'expiresAt', 'bindings', 'providerRoute', 'purpose', 'scope', 'providerTextInventory', 'analyzerSet', 'consentPayloadSha256') -Context 'consent request'
         Assert-StandardSemanticBridgeExactProperties -Object $ConsentDecision -Expected @('schemaVersion', 'artifactType', 'artifactClassification', 'decisionId', 'requestId', 'consentRequestSha256', 'bindings', 'providerRoute', 'purpose', 'scope', 'providerTextInventory', 'analyzerSet', 'authorizer', 'authorizedAt', 'expiresAt', 'consentGranted', 'consentDecisionPayloadSha256') -Context 'consent decision'
-        if ([int]$ConsentRequest.schemaVersion -ne 2 -or [string]$ConsentRequest.artifactType -cne 'semantic-consent-request-v2' -or [string]$ConsentRequest.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent request schema mismatch.' }
-        if ([int]$ConsentDecision.schemaVersion -ne 2 -or [string]$ConsentDecision.artifactType -cne 'semantic-consent-decision-v2' -or [string]$ConsentDecision.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent decision schema mismatch.' }
+        if (-not (Test-StandardSemanticBridgeNumericSchemaVersion -Value $ConsentRequest.schemaVersion -Expected $script:StandardSemanticBridgeSchemaVersion) -or [string]$ConsentRequest.artifactType -cne 'semantic-consent-request-v2' -or [string]$ConsentRequest.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent request schema mismatch.' }
+        if (-not (Test-StandardSemanticBridgeNumericSchemaVersion -Value $ConsentDecision.schemaVersion -Expected $script:StandardSemanticBridgeSchemaVersion) -or [string]$ConsentDecision.artifactType -cne 'semantic-consent-decision-v2' -or [string]$ConsentDecision.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification) { throw 'consent decision schema mismatch.' }
         $requestId = Assert-StandardSemanticBridgeUuid -Value (Get-StandardSemanticBridgeProperty $ConsentRequest 'requestId') -Context 'consent request requestId'
         $decisionId = Assert-StandardSemanticBridgeUuid -Value (Get-StandardSemanticBridgeProperty $ConsentDecision 'decisionId') -Context 'consent decision decisionId'
         $decisionRequestId = Assert-StandardSemanticBridgeUuid -Value (Get-StandardSemanticBridgeProperty $ConsentDecision 'requestId') -Context 'consent decision requestId'
@@ -2226,13 +2252,27 @@ function Invoke-StandardSemanticBridge {
         $rawFindingRecords = New-Object System.Collections.Generic.List[object]
         $failureRecords = New-Object System.Collections.Generic.List[object]
         $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $sourceTextItemsByCanonicalPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        foreach ($sourceTextItem in @($TextItems)) {
+            $sourcePath = Assert-StandardSemanticBridgeSafePath `
+                -Value (Get-StandardSemanticBridgeProperty $sourceTextItem 'path') `
+                -Context 'provider text item path'
+            if ($sourceTextItemsByCanonicalPath.ContainsKey($sourcePath)) {
+                throw 'provider text inventory contains a duplicate normalized source path.'
+            }
+            $sourceTextItemsByCanonicalPath.Add($sourcePath, $sourceTextItem)
+        }
+        if ($sourceTextItemsByCanonicalPath.Count -ne @($inventory.items).Count) {
+            throw 'provider text inventory changed before egress.'
+        }
         $workIndex = 0
-        # Inventory order is the work-plan order.  The original input is used
-        # only to recover the verified text/bytes for each sorted inventory row.
+        # Inventory order is the work-plan order. Resolve each row through a
+        # single ordinal canonical-path map so safe source aliases such as
+        # Windows separators match the normalized inventory identity.
         foreach ($inventoryItem in @($inventory.items)) {
             $path = Assert-StandardSemanticBridgeSafePath -Value $inventoryItem.path -Context 'text item path'
-            $textItem = @($TextItems | Where-Object { [string](Get-StandardSemanticBridgeProperty $_ 'path') -ceq $path })[0]
-            if ($null -eq $textItem) { throw 'provider text inventory changed before egress.' }
+            if (-not $sourceTextItemsByCanonicalPath.ContainsKey($path)) { throw 'provider text inventory changed before egress.' }
+            $textItem = $sourceTextItemsByCanonicalPath[$path]
             $kind = Assert-StandardSemanticBridgeNonEmptyScalar (Get-StandardSemanticBridgeProperty $textItem 'contentKind') 'text item contentKind'
             $hasText = Test-StandardSemanticBridgeHasProperty -Object $textItem -Name 'text'
             $itemBytes = $null
@@ -2580,7 +2620,7 @@ function Test-StandardSemanticBridgeEvidence {
         $canonicalEvidenceBytes = $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
         if (-not (Test-StandardSemanticBridgeByteSequenceEqual -Left $EvidenceBytes -Right $canonicalEvidenceBytes)) { throw 'evidence bytes are not canonical UTF-8 JSON.' }
         Assert-StandardSemanticBridgeExactProperties -Object $evidence -Expected @('schemaVersion', 'artifactType', 'artifactClassification', 'evidenceId', 'generatedAt', 'status', 'decision', 'bindings', 'providerRoute', 'purpose', 'scope', 'providerTextInventory', 'analyzerSet', 'analyzerCoverage', 'analyzerCompleteness', 'consent', 'execution', 'findings', 'attestation') -Context 'evidence'
-        if ([int]$evidence.schemaVersion -ne 2 -or [string]$evidence.artifactType -cne 'semantic-evidence-v2' -or [string]$evidence.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification -or [string]$evidence.status -cne 'passed' -or [string]$evidence.decision -cne 'PASS') { throw 'evidence is not a valid v2 PASS artifact.' }
+        if (-not (Test-StandardSemanticBridgeNumericSchemaVersion -Value $evidence.schemaVersion -Expected $script:StandardSemanticBridgeSchemaVersion) -or [string]$evidence.artifactType -cne 'semantic-evidence-v2' -or [string]$evidence.artifactClassification -cne $script:StandardSemanticBridgeArtifactClassification -or [string]$evidence.status -cne 'passed' -or [string]$evidence.decision -cne 'PASS') { throw 'evidence is not a valid v2 PASS artifact.' }
         $evidenceId = Assert-StandardSemanticBridgeUuid -Value $evidence.evidenceId -Context 'evidenceId'
         $normalizedInventory = Assert-StandardSemanticBridgeProviderTextInventory -Inventory $ExpectedProviderTextInventory
         $normalizedBindings = Assert-StandardSemanticBridgeBindings -Bindings $ExpectedBindings

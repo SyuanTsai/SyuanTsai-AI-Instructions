@@ -1199,6 +1199,103 @@ function Update-TestConsentDigests {
         Assert-TestCondition ([string]$result.reason -match 'canonical UTF-8 JSON') 'Duplicate JSON rejection did not identify canonical byte failure.'
     }
 
+    # Scenario: Signed artifacts replace numeric schemaVersion 2 with a string or boolean while every dependent digest and signature is recomputed.
+    # Purpose: Consent and evidence schema versions must have the JSON numeric type required by the published schema.
+    It 'UnitT91_schema_version_requires_native_numeric_two' {
+        $fixture = New-TestSemanticFixture
+        $run = Invoke-TestSemanticBridge -Fixture $fixture
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "The baseline schema-version evidence fixture did not pass: $($run.reason)"
+
+        $baselineVerification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $run.evidenceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition ([bool]$baselineVerification.valid) 'Native numeric schemaVersion 2 was rejected.'
+
+        foreach ($invalidSchemaVersion in @('2', $true)) {
+            $schemaVersionForMutation = $invalidSchemaVersion
+            $mutation = {
+                param($evidence)
+                $evidence.schemaVersion = $schemaVersionForMutation
+            }.GetNewClosure()
+            $invalidEvidenceBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation $mutation
+            $invalidVerification = Test-StandardSemanticBridgeEvidence `
+                -EvidenceBytes $invalidEvidenceBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+                -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+                -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+                -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+            Assert-TestCondition (-not [bool]$invalidVerification.valid) "Re-signed evidence with schemaVersion '$invalidSchemaVersion' was accepted."
+        }
+        foreach ($invalidSurface in @('request-string', 'request-boolean', 'decision-string', 'decision-boolean')) {
+            $request = ConvertFrom-Json -InputObject (Get-StandardSemanticBridgeCanonicalJson -Value $fixture.Request)
+            $decision = ConvertFrom-Json -InputObject (Get-StandardSemanticBridgeCanonicalJson -Value $fixture.Decision)
+            $invalidSchemaVersion = if ($invalidSurface.EndsWith('string', [StringComparison]::Ordinal)) { '2' } else { $true }
+            if ($invalidSurface.StartsWith('request-', [StringComparison]::Ordinal)) { $request.schemaVersion = $invalidSchemaVersion }
+            else { $decision.schemaVersion = $invalidSchemaVersion }
+            Update-TestConsentDigests -Request $request -Decision $decision
+
+            $invalidConsentRun = Invoke-TestSemanticBridge -Fixture $fixture -Request $request -Decision $decision
+            Assert-TestCondition ([string]$invalidConsentRun.status -ceq 'BLOCKED') "$invalidSurface schemaVersion did not block consent."
+            Assert-TestCondition ([int]$invalidConsentRun.providerCallCount -eq 0) "$invalidSurface schemaVersion reached the provider."
+        }
+
+        $numericEquivalentBytes = Get-TestResignedEvidenceBytes -EvidenceBytes $run.evidenceBytes -Fixture $fixture -Mutation {
+            param($evidence)
+            $evidence.schemaVersion = [double]2.0
+        }
+        $numericEquivalentVerification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $numericEquivalentBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition ([bool]$numericEquivalentVerification.valid) 'Numeric schemaVersion 2.0 was rejected although it is schema-equivalent to integer 2.'
+    }
+
+    # Scenario: The caller supplies a safe Windows-style path that inventory construction canonicalizes to forward slashes.
+    # Purpose: Execution must recover the exact source item by its canonical inventory path, while rejecting normalized aliases.
+    It 'InterT178_windows_style_source_path_resolves_by_canonical_inventory_path' {
+        $fixture = New-TestSemanticFixture
+        $items = @([pscustomobject][ordered]@{
+            path = 'skills\example\SKILL.md'
+            contentKind = 'skill-instructions'
+            text = 'synthetic semantic bridge text from a Windows-style source path'
+        })
+        $inventory = New-StandardSemanticBridgeProviderTextInventory -TextItems $items
+        $scope = [pscustomobject][ordered]@{
+            description = 'Synthetic test-only semantic scope.'
+            paths = @('skills/example/SKILL.md')
+            contentKinds = @('skill-instructions')
+        }
+        $request = New-StandardSemanticBridgeConsentRequest `
+            -Bindings $fixture.Bindings -ProviderRoute $fixture.Route -Purpose 'Synthetic test-only semantic review.' `
+            -Scope $scope -ProviderTextInventory $inventory -AnalyzerSet $fixture.AnalyzerSet `
+            -RequestId '11111111-1111-4111-8111-111111111118' -RequestedAt $fixture.Now -ExpiresAt $fixture.Now.AddHours(1)
+        $decision = New-StandardSemanticBridgeConsentDecision `
+            -Request $request -Authorizer $fixture.Authorizer `
+            -DecisionId '11111111-1111-4111-8111-111111111119' -AuthorizedAt $fixture.Now.AddMinutes(1)
+
+        $run = Invoke-TestSemanticBridge -Fixture $fixture -Items $items -Request $request -Decision $decision -Scope $scope
+        Assert-TestCondition ([string]$run.status -ceq 'PASS') "A consented Windows-style source path failed before evidence generation: $($run.reason)"
+        Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The Windows-style source item was not sent to the provider exactly once.'
+        Assert-TestCondition (@($run.providerCalls).Count -eq 1) 'Successful evidence does not contain exactly one provider call.'
+        Assert-TestCondition ([string]$run.providerCalls[0].path -ceq 'skills/example/SKILL.md') 'The provider call did not use the canonical inventory path.'
+
+        $verification = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $run.evidenceBytes -ConsentRequest $request -ConsentDecision $decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $scope -ExpectedProviderTextInventory $inventory -Now ([DateTime]::UtcNow)
+        Assert-TestCondition ([bool]$verification.valid) "The canonical-path provider evidence did not verify: $($verification.reason)"
+
+        $duplicateAliases = @(
+            [pscustomobject][ordered]@{ path = 'skills\example\SKILL.md'; contentKind = 'skill-instructions'; text = 'first' }
+            [pscustomobject][ordered]@{ path = 'skills/example/SKILL.md'; contentKind = 'skill-instructions'; text = 'second' }
+        )
+        $duplicateError = Get-TestErrorMessage { New-StandardSemanticBridgeProviderTextInventory -TextItems $duplicateAliases }
+        Assert-TestCondition ($duplicateError -match 'duplicate path') 'Distinct raw path aliases that normalize to one inventory path were accepted.'
+    }
+
     # Scenario: Two planned work items return a global union while one item omits an analyzer.
     # Purpose: Coverage must be checked against each work item, and a finding from another path must not be attributed to the current item.
     It 'InterT100_each_work_item_requires_complete_analyzer_coverage_and_bound_finding_path' {
