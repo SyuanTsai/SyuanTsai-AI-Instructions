@@ -214,6 +214,32 @@ function Get-TestEvidenceBytesWithSignatureWhitespace {
     return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
 }
 
+function Get-TestNonCanonicalBase64PadBits {
+    param([Parameter(Mandatory = $true)][string] $Text)
+    if (-not $Text.EndsWith('==', [StringComparison]::Ordinal)) { throw 'The test signature did not use == padding.' }
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    $chars = $Text.ToCharArray()
+    $lastDataSextet = $alphabet.IndexOf($chars[$chars.Length - 3])
+    if ($lastDataSextet -lt 0 -or ($lastDataSextet % 16) -ne 0 -or $lastDataSextet -ge 64) {
+        throw "The test signature did not have canonical pad bits: $lastDataSextet"
+    }
+    $chars[$chars.Length - 3] = $alphabet[$lastDataSextet + 1]
+    $mutated = -join $chars
+    $decoded = [Convert]::FromBase64String($mutated)
+    if ([Convert]::ToBase64String($decoded) -cne $Text -or [Convert]::ToBase64String($decoded) -ceq $mutated) {
+        throw 'The test signature pad-bit mutation did not preserve decoded bytes while changing canonical encoding.'
+    }
+    return $mutated
+}
+
+function Get-TestEvidenceBytesWithSignatureNonCanonicalPadBits {
+    param([Parameter(Mandatory = $true)] $EvidenceBytes)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $evidence = ConvertFrom-Json -InputObject $utf8.GetString([byte[]]$EvidenceBytes)
+    $evidence.attestation.signature = Get-TestNonCanonicalBase64PadBits -Text ([string]$evidence.attestation.signature)
+    return $utf8.GetBytes((Get-StandardSemanticBridgeCanonicalJson -Value $evidence))
+}
+
 function Update-TestConsentDigests {
     param(
         [Parameter(Mandatory = $true)] $Request,
@@ -385,6 +411,45 @@ function Update-TestConsentDigests {
             -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
             -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
         Assert-TestCondition (-not [bool]$badWhitespace.valid) 'Evidence with whitespace in signature base64 was accepted.'
+
+        $nonCanonicalSigner = {
+            param($signerRequest, $callbackContext)
+            $signingKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+            try {
+                $signingKey.FromXmlString([string]$callbackContext.privateKeyXml)
+                $signatureBytes = $signingKey.SignData([byte[]]$signerRequest.payloadBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+                $signatureText = [Convert]::ToBase64String($signatureBytes)
+                if (-not $signatureText.EndsWith('==', [StringComparison]::Ordinal)) { throw 'The test signer did not produce == padding.' }
+                $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+                $chars = $signatureText.ToCharArray()
+                $lastDataSextet = $alphabet.IndexOf($chars[$chars.Length - 3])
+                if ($lastDataSextet -lt 0 -or ($lastDataSextet % 16) -ne 0 -or $lastDataSextet -ge 64) {
+                    throw "The test signer did not have canonical pad bits: $lastDataSextet"
+                }
+                $chars[$chars.Length - 3] = $alphabet[$lastDataSextet + 1]
+                $signatureText = -join $chars
+                if ([Convert]::ToBase64String([Convert]::FromBase64String($signatureText)) -ceq $signatureText) {
+                    throw 'The test signer pad-bit mutation remained canonical.'
+                }
+                return [pscustomobject][ordered]@{
+                    keyId = 'fixture-key'
+                    algorithm = 'RSASSA-PKCS1-v1_5-SHA-256'
+                    signature = $signatureText
+                }
+            }
+            finally { $signingKey.Dispose() }
+        }
+        $badPadBitsSigner = Invoke-TestSemanticBridge -Fixture $fixture -Signer $nonCanonicalSigner
+        Assert-TestCondition ([string]$badPadBitsSigner.status -ceq 'FAILED') 'A signer response with non-canonical base64 pad bits was accepted.'
+        Assert-TestCondition ($null -eq $badPadBitsSigner.evidenceBytes) 'A signer response with non-canonical base64 pad bits emitted evidence.'
+
+        $nonCanonicalPadBitsBytes = Get-TestEvidenceBytesWithSignatureNonCanonicalPadBits -EvidenceBytes $run.evidenceBytes
+        $badNonCanonicalPadBits = Test-StandardSemanticBridgeEvidence `
+            -EvidenceBytes $nonCanonicalPadBitsBytes -ConsentRequest $fixture.Request -ConsentDecision $fixture.Decision `
+            -PublicKey $fixture.PublicRsa -ExpectedKeyId 'fixture-key' -ExpectedBindings $fixture.Bindings `
+            -ExpectedProviderRoute $fixture.Route -ExpectedPurpose 'Synthetic test-only semantic review.' `
+            -ExpectedScope $fixture.Scope -ExpectedProviderTextInventory $fixture.Inventory -Now $fixture.Now.AddMinutes(2)
+        Assert-TestCondition (-not [bool]$badNonCanonicalPadBits.valid) 'Evidence with non-canonical base64 pad bits was accepted.'
 
         $mutatedBytes = Get-TestEvidenceBytesWithSignatureMutation -EvidenceBytes $run.evidenceBytes
         $badSignature = Test-StandardSemanticBridgeEvidence `
