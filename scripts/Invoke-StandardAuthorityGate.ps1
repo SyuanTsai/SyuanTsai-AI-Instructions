@@ -3042,8 +3042,11 @@ foreach ($name in @('GITHUB_TOKEN', 'GH_TOKEN', 'RUNNER_TEMP', 'GITHUB_WORKSPACE
 }
 function Assert-AuthorityChildPathNotWritable {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][bool] $IsDirectory)
+    # The parent verified existence before privilege drop. An inaccessible path is protected,
+    # while a missing path still raises from GetAttributes and fails the child.
+    try { [void][IO.File]::GetAttributes($Path) }
+    catch [UnauthorizedAccessException] { return }
     if ($IsDirectory) {
-        if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Protected authority directory is missing: $Path" }
         $probe = Join-Path $Path ('.authority-child-write-probe-' + [guid]::NewGuid().ToString('N'))
         try {
             [IO.File]::WriteAllText($probe, 'probe')
@@ -3053,7 +3056,6 @@ function Assert-AuthorityChildPathNotWritable {
         catch [UnauthorizedAccessException] { }
     }
     else {
-        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Protected authority file is missing: $Path" }
         $stream = $null
         try {
             $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
