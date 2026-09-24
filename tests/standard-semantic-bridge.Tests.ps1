@@ -1091,13 +1091,18 @@ Describe 'Unix callback containment boundary' {
             } $callback ([pscustomobject]@{ startedMarker = $startedMarker; childStartedMarker = $childStartedMarker; lateMarker = $lateMarker }) | Out-Null
         }
         catch { $errorMessage = [string]$_.Exception.Message }
-        if ([string]::IsNullOrWhiteSpace($errorMessage) -or $errorMessage -notmatch 'deadline|timeout') {
+        if ([string]::IsNullOrWhiteSpace($errorMessage) -or
+            $errorMessage -notmatch '(?i)deadline was exceeded\.$' -or
+            $errorMessage -match '(?i)(could not terminate|did not terminate|cleanup)') {
             throw 'The timeout callback did not fail with a deadline diagnostic.'
         }
         if (-not (Test-Path -LiteralPath $startedMarker -PathType Leaf) -or -not (Test-Path -LiteralPath $childStartedMarker -PathType Leaf)) {
             throw 'The timeout regression did not prove that the callback child started before cleanup.'
         }
-        Start-Sleep -Milliseconds 500
+        # The child intentionally sleeps 3000 ms before its late write.  Wait
+        # past that deadline so a surviving descendant cannot write after this
+        # assertion has already passed.
+        Start-Sleep -Milliseconds 2200
         if (Test-Path -LiteralPath $lateMarker) { throw 'A timed-out callback produced a late side effect.' }
     }
 
