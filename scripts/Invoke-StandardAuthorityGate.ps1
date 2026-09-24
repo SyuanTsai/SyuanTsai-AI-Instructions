@@ -2862,8 +2862,9 @@ function Invoke-AuthorityLinuxIsolatedPester {
     try {
         [void](New-Item -ItemType Directory -Path $isolationRoot -ErrorAction Stop)
         [void](New-Item -ItemType Directory -Path $scratchRoot -ErrorAction Stop)
+        $runnerUserId = (Invoke-AuthorityLinuxNativeCommand -Command $idPath -Arguments @('-u') -Context 'Runner user lookup')
         $runnerGroupId = (Invoke-AuthorityLinuxNativeCommand -Command $idPath -Arguments @('-g') -Context 'Runner group lookup')
-        if ($runnerGroupId -notmatch '^[0-9]+$') { throw 'Runner primary group ID is malformed.' }
+        if ($runnerUserId -notmatch '^[0-9]+$' -or $runnerGroupId -notmatch '^[0-9]+$') { throw 'Runner user or primary group ID is malformed.' }
         $nobodyRecord = Invoke-AuthorityLinuxNativeCommand -Command $getentPath -Arguments @('passwd', 'nobody') -Context 'nobody account lookup'
         $nobodyFields = @($nobodyRecord -split ':')
         if ($nobodyFields.Count -lt 4 -or $nobodyFields[2] -notmatch '^[0-9]+$' -or $nobodyFields[3] -notmatch '^[0-9]+$') {
@@ -3179,7 +3180,13 @@ $json = $report | ConvertTo-Json -Depth 8
             catch { $cleanupError = $_.Exception.Message }
         }
         if (Test-Path -LiteralPath $isolationRoot -PathType Container) {
-            try { Remove-Item -LiteralPath $isolationRoot -Recurse -Force -ErrorAction Stop }
+            try {
+                if (Test-Path -LiteralPath $scratchRoot -PathType Container) {
+                    [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chownPath, '-hR', "${runnerUserId}:$runnerGroupId", '--', $scratchRoot) -Context 'Return isolated scratch ownership to runner')
+                    [void](Invoke-AuthorityLinuxNativeCommand -Command $sudoPath -Arguments @('-n', '--', $chmodPath, '-R', 'u+rwX', '--', $scratchRoot) -Context 'Restore isolated scratch traversal for cleanup')
+                }
+                Remove-Item -LiteralPath $isolationRoot -Recurse -Force -ErrorAction Stop
+            }
             catch {
                 if ($null -eq $cleanupError) { $cleanupError = $_.Exception.Message }
                 else { $cleanupError += "; scratch cleanup: $($_.Exception.Message)" }
