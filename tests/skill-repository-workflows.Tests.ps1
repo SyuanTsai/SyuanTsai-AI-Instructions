@@ -9,6 +9,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/pr8-powershell-validation.yml' = 3
             '.github/workflows/standards-conformance.yml' = 1
+            '.github/workflows/stage5-shadow.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
         }
@@ -20,6 +21,7 @@ Describe 'Agent Skill authority workflow contract' {
         )
         $script:AuthorityWorkflowDependencies = @(
             'pr8-powershell-validation.yml'
+            'stage5-shadow.yml'
             'syp101-production-smoke.yml'
             'syp86-production-lock.yml'
         )
@@ -136,6 +138,34 @@ jobs:
         Assert-Match $gate '-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion' 'The shared authority gate must pass the resolved runtime into the resolver.'
         Assert-Match $gate '-GoCommandPath \$goCommandPath' 'The shared authority gate must pass the run-resolved Go executable path into the resolver.'
         Assert-Match $gate 'skill-validator receipt Go runtime.*does not match the setup-go run-resolved latest stable runtime' 'The shared authority gate must bind the resolver receipt to setup-go evidence.'
+    }
+
+    # Scenario: A candidate modifies its own workflow or result report while the protected shadow inspects PR52.
+    # Purpose: Keep the shadow on base-owned code, bind the exact PR head, and avoid executing candidate code in pull_request_target.
+    It 'UnitT25_keeps_stage5_shadow_read_only_and_fail_closed' {
+        $shadowPath = Join-Path $script:RepositoryRoot '.github/workflows/stage5-shadow.yml'
+        $probePath = Join-Path $script:RepositoryRoot 'tests/inspect-stage5-shadow-source.ps1'
+        $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
+        $shadow = Get-Content -Raw -Encoding UTF8 -LiteralPath $shadowPath
+        $probe = Get-Content -Raw -Encoding UTF8 -LiteralPath $probePath
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+
+        Assert-Match $shadow 'pull_request_target:' 'Shadow workflow must use protected base workflow definitions.'
+        Assert-Match $shadow 'contents: read' 'Shadow workflow must use read-only repository access.'
+        Assert-Match $shadow 'github\.workflow_sha' 'Shadow must checkout the exact protected workflow revision.'
+        Assert-Match $shadow "base\.ref == 'main'" 'Shadow must reject PRs retargeted away from main.'
+        Assert-Match $shadow 'branches:\s*\r?\n\s*- main' 'Shadow trigger must target main only.'
+        Assert-Match $shadow 'github\.workflow_ref' 'Shadow must bind the protected main workflow identity.'
+        Assert-Match $shadow 'github\.event\.pull_request\.head\.sha' 'Shadow must checkout the exact PR head.'
+        Assert-Match $shadow 'inspect-stage5-shadow-source\.ps1' 'Shadow must use the protected static inspector.'
+        Assert-NotMatch $shadow 'secrets\.|GITHUB_TOKEN|GH_TOKEN|actions/cache' 'Shadow must not expose credentials or cross-run cache to candidate data.'
+        Assert-NotMatch $shadow 'Invoke-Pester|Invoke-StandardAuthorityGate\.ps1' 'Shadow must not run candidate authority code.'
+        Assert-Match $probe 'Parser\]::ParseFile' 'Inspector must parse candidate code without executing it.'
+        Assert-Match $probe 'candidateCodeExecuted = \$false' 'Inspector must explicitly state that candidate code was not executed.'
+        Assert-Match $probe 'authorityPass = \$false' 'Inspector must never issue an authority PASS.'
+        Assert-Match $probe 'Write-Host \(\$evidence \| ConvertTo-Json' 'Inspector must retain the fail-closed evidence in job logs.'
+        Assert-NotMatch $probe 'scriptblock\]::Create|Invoke-Expression|Invoke-Pester' 'Inspector must not execute candidate functions or Pester.'
+        Assert-Equal ([regex]::Matches($standards, [regex]::Escape('tests/inspect-stage5-shadow-source.ps1'))).Count 2 'Both Standards triggers must watch the shadow inspector.'
     }
 
     # Scenario: A main push or pull request is checked against a fixed branch range that can be empty or incomplete.

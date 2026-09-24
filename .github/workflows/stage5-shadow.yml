@@ -1,0 +1,51 @@
+name: Stage 5 protected shadow
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  stage5-shadow:
+    name: Stage 5 provenance shadow (diagnostic)
+    if: ${{ github.event.pull_request.number == 52 && github.event.pull_request.base.ref == 'main' && github.workflow_ref == 'SyuanTsai/SyuanTsai-AI-Instructions/.github/workflows/stage5-shadow.yml@refs/heads/main' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact protected workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Verify protected workflow checkout
+        shell: bash
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C trusted rev-parse --verify HEAD)" = "$EXPECTED_WORKFLOW_SHA"
+          test -z "$(git -C trusted status --porcelain --untracked-files=all)"
+
+      - name: Checkout exact PR head as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Inspect Stage 5 result source without executing candidate code
+        shell: pwsh
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./trusted/tests/inspect-stage5-shadow-source.ps1 `
+            -CandidateRoot ./candidate `
+            -ExpectedHeadSha $env:EXPECTED_HEAD_SHA `
+            -OutputPath "$env:RUNNER_TEMP/stage5-shadow-source.json"

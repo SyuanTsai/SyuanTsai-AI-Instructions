@@ -108,6 +108,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/stage5-shadow.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".github/workflows/standards-conformance.yml",
       "license": "Apache-2.0"
     },
@@ -593,6 +597,10 @@
     },
     {
       "path": "tests/fixtures/skills-catalog-contract/valid-rename-removal.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/inspect-stage5-shadow-source.ps1",
       "license": "Apache-2.0"
     },
     {
