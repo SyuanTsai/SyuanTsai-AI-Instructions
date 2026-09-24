@@ -2242,6 +2242,24 @@ function Get-StandardSemanticBridgeUtcNow {
     return [DateTime]::UtcNow
 }
 
+function New-StandardSemanticBridgePublicKeySnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Security.Cryptography.RSA] $PublicKey)
+
+    $snapshot = $null
+    try {
+        $publicParameters = $PublicKey.ExportParameters($false)
+        $snapshot = [System.Security.Cryptography.RSA]::Create()
+        if ($null -eq $snapshot) { throw 'unable to create an independent RSA public-key snapshot.' }
+        $snapshot.ImportParameters($publicParameters)
+        return $snapshot
+    }
+    catch {
+        if ($null -ne $snapshot) { $snapshot.Dispose() }
+        throw
+    }
+}
+
 function Copy-StandardSemanticBridgeExecutionSnapshotValue {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowNull()] $Value)
@@ -2308,8 +2326,10 @@ function Invoke-StandardSemanticBridge {
     $successfulCalls = 0
     $inventory = $null
     $analyzerSet = $null
+    $publicKeySnapshot = $null
     try {
         if ($null -eq $ExpectedSignerPublicKey) { throw 'a trusted expected signer public key is required.' }
+        $publicKeySnapshot = New-StandardSemanticBridgePublicKeySnapshot -PublicKey $ExpectedSignerPublicKey
         $expectedSignerKeyId = Assert-StandardSemanticBridgeNonEmptyScalar -Value $ExpectedSignerKeyId -Context 'trusted expected signer keyId'
         if ($TimeoutSeconds -le 0) { throw 'timeout must be positive.' }
         if ($TextItems -isnot [array]) { throw 'provider text inventory requires an array.' }
@@ -2645,7 +2665,7 @@ function Invoke-StandardSemanticBridge {
         if ([string](Get-StandardSemanticBridgeProperty $signature 'algorithm') -cne $script:StandardSemanticBridgeAlgorithm) { throw 'signer algorithm is unsupported.' }
         $signatureText = Assert-StandardSemanticBridgeCanonicalBase64 (Get-StandardSemanticBridgeProperty $signature 'signature') 'signer signature'
         $signatureBytes = [Convert]::FromBase64String($signatureText)
-        if (-not $ExpectedSignerPublicKey.VerifyData($unsignedBytes, $signatureBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) {
+        if (-not $publicKeySnapshot.VerifyData($unsignedBytes, $signatureBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) {
             throw 'signer signature verification failed.'
         }
         $evidence = [pscustomobject][ordered]@{}
@@ -2696,6 +2716,9 @@ function Invoke-StandardSemanticBridge {
         }
         return [pscustomobject][ordered]@{ status = 'FAILED'; reason = [string]$_.Exception.Message; providerCallCount = $providerCalls; successfulProviderCallCount = $successfulCalls; providerCalls = @(); failures = @([pscustomobject][ordered]@{ errorCode = 'bridge-failure' }); idempotencyLedger = $IdempotencyLedger; evidence = $null; evidenceBytes = $null }
     }
+    finally {
+        if ($null -ne $publicKeySnapshot) { $publicKeySnapshot.Dispose() }
+    }
 }
 
 function Test-StandardSemanticBridgeEvidence {
@@ -2715,7 +2738,25 @@ function Test-StandardSemanticBridgeEvidence {
         [hashtable] $ReplayLedger = $null
     )
 
+    $publicKeySnapshot = $null
     try {
+        $EvidenceBytes = [byte[]]$EvidenceBytes.Clone()
+        $verifierInputs = Copy-StandardSemanticBridgeExecutionSnapshotValue -Value ([pscustomobject][ordered]@{
+            consentRequest = $ConsentRequest
+            consentDecision = $ConsentDecision
+            expectedBindings = $ExpectedBindings
+            expectedProviderRoute = $ExpectedProviderRoute
+            expectedScope = $ExpectedScope
+            expectedProviderTextInventory = $ExpectedProviderTextInventory
+        })
+        $ConsentRequest = $verifierInputs.consentRequest
+        $ConsentDecision = $verifierInputs.consentDecision
+        $ExpectedBindings = $verifierInputs.expectedBindings
+        $ExpectedProviderRoute = $verifierInputs.expectedProviderRoute
+        $ExpectedScope = $verifierInputs.expectedScope
+        $ExpectedProviderTextInventory = $verifierInputs.expectedProviderTextInventory
+        if ($null -eq $PublicKey) { throw 'a trusted evidence public key is required.' }
+        $publicKeySnapshot = New-StandardSemanticBridgePublicKeySnapshot -PublicKey $PublicKey
         if ($EvidenceBytes.Length -eq 0) { throw 'evidence bytes are empty.' }
         $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
         $json = $utf8.GetString($EvidenceBytes)
@@ -2779,7 +2820,7 @@ function Test-StandardSemanticBridgeEvidence {
         if ([string]$attestation.signedPayloadSha256 -cne $payloadSha) { throw 'evidence signed payload digest is invalid.' }
         $issuedAt = Get-StandardSemanticBridgeTimestamp -Value $attestation.issuedAt -Context 'attestation issuedAt'
         if ($issuedAt -ne $generatedAt -or $issuedAt -gt $nowUtc) { throw 'attestation timestamp is invalid.' }
-        if (-not $PublicKey.VerifyData($unsignedBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'evidence signature verification failed.' }
+        if (-not $publicKeySnapshot.VerifyData($unsignedBytes, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'evidence signature verification failed.' }
         if ($null -ne $ReplayLedger) {
             if ($ReplayLedger.ContainsKey($evidenceId)) { throw 'evidence replay was detected.' }
             $ReplayLedger[$evidenceId] = [pscustomobject][ordered]@{ evidenceSha256 = Get-StandardSemanticBridgeSha256FromBytes -Bytes $EvidenceBytes; status = 'consumed' }
@@ -2788,6 +2829,9 @@ function Test-StandardSemanticBridgeEvidence {
     }
     catch {
         return [pscustomobject][ordered]@{ valid = $false; reason = [string]$_.Exception.Message; evidence = $null; evidenceSha256 = $null }
+    }
+    finally {
+        if ($null -ne $publicKeySnapshot) { $publicKeySnapshot.Dispose() }
     }
 }
 

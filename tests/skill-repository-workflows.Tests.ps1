@@ -181,7 +181,7 @@ jobs:
 
         Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
         Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*583').Count) 2 'Both full-suite shard jobs must expect 583 total Pester cases after the semantic bridge regressions were added.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*592').Count) 2 'Both full-suite shard jobs must expect 592 total Pester cases after the semantic bridge regressions were added.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*13').Count) 1 'Windows PowerShell 5.1 must account for the additional skipped Linux procfs case.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*12').Count) 1 'Windows PowerShell 7 must account for the additional skipped Linux procfs case.'
 
