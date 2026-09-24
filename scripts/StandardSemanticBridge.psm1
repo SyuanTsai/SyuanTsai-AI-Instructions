@@ -1103,10 +1103,27 @@ function Get-StandardSemanticBridgeChildEnvironment {
     # consistently on Windows PowerShell 5.1, PowerShell 7, and Unix.
     $safeInheritedNames = @('TEMP', 'TMP')
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $safeInheritedNames += @('Path', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'WINDIR', 'OS', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH')
+        # Keep the same vetted Windows/.NET startup surface used by the
+        # bounded Pester and authority runners.  These values describe the
+        # host/runtime and user profile locations only; callback/provider
+        # configuration and credential namespaces remain excluded.
+        $safeInheritedNames += @(
+            'Path', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'WINDIR', 'OS',
+            'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
+            'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+            'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)', 'COMMONPROGRAMW6432',
+            'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA'
+        )
+        # Deliberately omit PSExecutionPolicyPreference.  It is a launcher
+        # policy override rather than a callback runtime dependency, so it
+        # should not cross this boundary into callback descendants.
     }
     else {
-        $safeInheritedNames += @('PATH', 'TMPDIR', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE')
+        $safeInheritedNames += @(
+            'PATH', 'TMPDIR', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE',
+            'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
+            'DOTNET_ROOT', 'DOTNET_ROOT_X64', 'XDG_RUNTIME_DIR'
+        )
     }
     $childEnvironment = [ordered]@{}
     foreach ($name in $safeInheritedNames) {
@@ -1201,9 +1218,27 @@ catch {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.EnvironmentVariables.Clear()
+    # Windows PowerShell 5.1 exposes EnvironmentVariables through a private
+    # StringDictionary whose getter first enumerates the inherited block.  A
+    # hosted runner can contain case variants such as PATH/Path, which makes
+    # that getter fail before the allowlist can be applied.  Initialize the
+    # actual backing field when it exists; PowerShell 7 uses the public
+    # Environment dictionary instead.
+    $environmentVariablesField = $startInfo.GetType().GetField('environmentVariables', [Reflection.BindingFlags]::Instance -bor [Reflection.BindingFlags]::NonPublic)
+    if ($null -ne $environmentVariablesField) {
+        $environment = New-Object 'System.Collections.Specialized.StringDictionary'
+        $environmentVariablesField.SetValue($startInfo, $environment)
+    }
+    else {
+        $environmentProperty = $startInfo.GetType().GetProperty('Environment')
+        $environment = if ($null -eq $environmentProperty) { $null } else { $environmentProperty.GetValue($startInfo, $null) }
+    }
+    if ($null -eq $environment) {
+        throw [InvalidOperationException]::new("$Context could not access its child environment dictionary.")
+    }
+    $environment.Clear()
     foreach ($entry in (Get-StandardSemanticBridgeChildEnvironment).GetEnumerator()) {
-        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        $environment[[string]$entry.Key] = [string]$entry.Value
     }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
