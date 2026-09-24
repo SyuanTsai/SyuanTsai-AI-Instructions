@@ -1128,17 +1128,17 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
         [bool] $UnixPidNamespaceActive = $false,
         [int] $UnixPidNamespaceInitProcessId = -1,
         [long] $UnixPidNamespaceInitStartTime = -1,
-        [ref] $FailureReason = $null
+        [object] $FailureReason = $null
     )
 
     if ($UnixPidNamespaceActive) {
         if (-not $Process.HasExited -and -not $Process.WaitForExit($TimeoutMilliseconds)) {
-            if ($null -ne $FailureReason) { $FailureReason.Value = 'owned Linux PID namespace wrapper did not exit before cleanup deadline.' }
+            if ($FailureReason -is [System.Management.Automation.PSReference]) { $FailureReason.Value = 'owned Linux PID namespace wrapper did not exit before cleanup deadline.' }
             return $false
         }
         [void]$Process.WaitForExit(0)
         if ($UnixPidNamespaceInitProcessId -le 0 -or $UnixPidNamespaceInitStartTime -le 0) {
-            if ($null -ne $FailureReason) { $FailureReason.Value = 'Verified Linux PID namespace init identity was unavailable during cleanup.' }
+            if ($FailureReason -is [System.Management.Automation.PSReference]) { $FailureReason.Value = 'Verified Linux PID namespace init identity was unavailable during cleanup.' }
             return $false
         }
         $deadline = [Diagnostics.Stopwatch]::StartNew()
@@ -1167,14 +1167,14 @@ function Wait-StandardSemanticBridgeOwnedCallbackProcess {
                     elseif (($deadline.ElapsedMilliseconds - $stableExitStartedAt) -ge 250) { return $true }
                 }
                 elseif ($null -eq $lastStateError -and $lastState -eq 'Reused') {
-                    if ($null -ne $FailureReason) { $FailureReason.Value = 'Verified Linux PID namespace init PID was reused before cleanup completed.' }
+                    if ($FailureReason -is [System.Management.Automation.PSReference]) { $FailureReason.Value = 'Verified Linux PID namespace init PID was reused before cleanup completed.' }
                     return $false
                 }
                 elseif ($null -eq $lastStateError) {
                     $stableExitStartedAt = $null
                 }
                 if ($deadline.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
-                    if ($null -ne $FailureReason) {
+                    if ($FailureReason -is [System.Management.Automation.PSReference]) {
                         if ($null -ne $lastStateError) {
                             $FailureReason.Value = "Retained Linux PID namespace init state could not be verified: $lastStateError"
                         }
