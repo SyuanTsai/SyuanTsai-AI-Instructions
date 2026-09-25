@@ -144,8 +144,8 @@
             "type": "object",
             "properties": {
               "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
-              "sourceRevision": { "const": "074c47b603ca851f0d9fea93dd22cabd5b73dbd5" },
-              "contentSha256": { "enum": ["f0d1a67a6770a402b3cbce8436019663f8560fdf43d61291606967c2045f8e6e", "b9205271a0abce2977ab83e4a38672eab4b58d9a5562e0948c4aa2c9302e7ead"] }
+              "sourceRevision": { "const": "18a17a96354e9ab71e6bda2b1b1cb15ff330a0f5" },
+              "contentSha256": { "enum": ["4297a407a3d3c2cc466bb9f37a2422110309846f93a1b4856330f53f1fbb924c", "4c3ca7f42bea5c66d3dd26f6f5263eb5fcec0af210004127936fa88ff81e9abc"] }
             }
           },
           "sourceConformance": { "type": "object", "properties": { "status": { "const": "failed" } } },
@@ -178,9 +178,9 @@
         "contract": { "const": "proposed-source-merge-exception-v1" },
         "status": { "oneOf": [{ "const": "eligible-for-policy-review" }, { "const": "rejected" }] },
         "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
-        "sourceRevision": { "const": "074c47b603ca851f0d9fea93dd22cabd5b73dbd5" },
+        "sourceRevision": { "const": "18a17a96354e9ab71e6bda2b1b1cb15ff330a0f5" },
         "candidateId": { "$ref": "#/$defs/sha256" },
-        "contentSha256": { "enum": ["f0d1a67a6770a402b3cbce8436019663f8560fdf43d61291606967c2045f8e6e", "b9205271a0abce2977ab83e4a38672eab4b58d9a5562e0948c4aa2c9302e7ead"] },
+        "contentSha256": { "enum": ["4297a407a3d3c2cc466bb9f37a2422110309846f93a1b4856330f53f1fbb924c", "4c3ca7f42bea5c66d3dd26f6f5263eb5fcec0af210004127936fa88ff81e9abc"] },
         "scannerReportSha256": { "enum": ["cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8", "b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3"] },
         "otherScannerReportSha256": {
           "type": "array", "minItems": 5, "maxItems": 5,
