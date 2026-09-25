@@ -116,6 +116,15 @@
   },
   "evidence": {
     "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256", "authority.semanticBridgeModuleSha256", "authority.semanticBridgeSchemaSha256", "launchBinding.status=verified", "launchBinding.verified=true"],
+    "sourceConformance": {
+      "contract": "standard-source-conformance-v1",
+      "scope": "source-stages-1-5",
+      "binding": ["candidate.sourceRevision", "candidate.candidateId", "candidate.contentSha256", "stage[1..5].identity-order-status", "stage[3..5].candidate-bound-process-events", "stage[3..5].event.cleanedUp=true", "stage[3..5].event.outputPath-within-artifacts.root", "stage[3..5].event.raw-output-file-event-process-outputSha256-binding", "repositoryTests typed record eventId+toolId bound to exactly one Stage 5 event", "repositoryTests typed record role derived from validated central adapter dispatch kind and never trusted from child envelope", "repositoryTests event output, inventory, and typed result bound to raw event envelope", "repositoryTests dispatch IDs may be any adapter-safe ID"],
+      "pesterCounts": "validated central adapter dispatch kind is general or pester; general dispatches omit all numeric counts; every pester dispatch requires complete total/passed/skipped counts with total>0; passed>0; skipped>=0; passed+skipped=total; if failed is present it must equal zero; aggregate all pester dispatches in stable Stage 5 order; each aggregate must fit Int32 so emitted JSON counts remain typed integers",
+      "terminalStates": "canonical PASS requires exitCode=0 and conditional-semantic-scan status=passed or not-applicable; canonical BLOCKED requires exitCode=10, conditional-semantic-scan status=blocked, and releaseEligible=false; source projection never converts a BLOCKED canonical state into PASS",
+      "requiredCheckUse": "current workflow required source checks only; downstream mirrors may consume this result only after binding sourceRevision to the event candidate SHA; same-workflow output is not a protected publisher",
+      "releaseEligibility": "fixed false; source conformance never authorizes production, install, publishing, or release"
+    },
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",

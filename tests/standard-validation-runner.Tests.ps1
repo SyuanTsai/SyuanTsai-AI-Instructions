@@ -81,6 +81,7 @@ $logPath = '__FIXTURE_LOG_PATH__'
 if (-not [string]::IsNullOrWhiteSpace($logPath)) {
     Add-Content -LiteralPath $logPath -Value ("{0}|{1}|{2}" -f $env:STANDARD_VALIDATION_STAGE_ID, $env:STANDARD_VALIDATION_TOOL_ID, $env:STANDARD_VALIDATION_SKILL_ID) -Encoding UTF8
 }
+
 $skills = @()
 if (-not [string]::IsNullOrWhiteSpace($env:STANDARD_VALIDATION_ACTIVE_SKILLS)) {
     $skills = @($env:STANDARD_VALIDATION_ACTIVE_SKILLS -split ';' | Where-Object { $_ })
@@ -153,7 +154,7 @@ if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'skillspector-static') {
 if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
     [IO.File]::WriteAllText('__FIXTURE_SENTINEL_PATH__', 'repository-test-ran', (New-Object Text.UTF8Encoding($false)))
     $result.testInventory = @('fixture-repository-test')
-    $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
+    $result.testResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = 1; passed = 1; skipped = 0 }
     $result.domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS' }
     if ($fixtureBehavior -eq 'repository-artifact-tamper') {
         $artifactRoot = Split-Path -Parent $env:STANDARD_VALIDATION_OUTPUT_PATH
@@ -167,6 +168,9 @@ if ($env:STANDARD_VALIDATION_STAGE_ID -eq 'repository-tests') {
     }
     if ($fixtureBehavior -eq 'repository-zero-tests') {
         $result.testInventory = @()
+        $result.testResult.total = 0
+        $result.testResult.passed = 0
+        $result.testResult.skipped = 0
     }
 }
 if ($fixtureBehavior -eq 'snapshot-mutate' -and $env:STANDARD_VALIDATION_STAGE_ID -eq 'package-validation') {
@@ -205,7 +209,8 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 }
                 repositoryTests = @(
                     [ordered]@{
-                        id = 'fixture-repository-test'
+                        id = 'repository-test-pester'
+                        kind = 'pester'
                         command = $script:PowerShellPath
                         arguments = @('-NoProfile', '-File', $toolScript)
                     }
@@ -1048,6 +1053,12 @@ exit ([int]$LASTEXITCODE)
         Assert-Equal ([string]$contract.execution.inventoryEncoding.line) '<path>\t<raw-file-sha256>\n' 'Canonical inventory hashing must exclude file length and use raw-file hashes.'
         Assert-Match ([string]$contract.execution.installedClosure) 'in-root-unix-symlink-target-identities' 'Installed tool closure must bind approved in-root Unix symlink targets.'
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
+        Assert-Equal ([string]$contract.evidence.sourceConformance.contract) 'standard-source-conformance-v1' 'Source-stage output must use the named normative projection.'
+        Assert-Equal ([string]$contract.evidence.sourceConformance.scope) 'source-stages-1-5' 'Source-stage output must declare its bounded scope.'
+        Assert-Match (($contract.evidence.sourceConformance.binding -join ';')) 'event\.cleanedUp=true.*event\.outputPath-within-artifacts\.root.*raw-output-file-event-process-outputSha256-binding.*role derived from validated central adapter dispatch kind.*IDs may be any adapter-safe ID' 'Source-stage events must bind outputs and derive tool roles from validated dispatch kinds.'
+        Assert-Match ([string]$contract.evidence.sourceConformance.pesterCounts) 'general or pester.*general dispatches omit all numeric counts.*every pester dispatch requires complete.*total>0.*passed>0.*passed\+skipped=total.*aggregate all pester dispatches in stable Stage 5 order' 'Source-stage Pester evidence must require counts for each approved Pester dispatch.'
+        Assert-Match ([string]$contract.evidence.sourceConformance.terminalStates) 'canonical PASS requires exitCode=0 and conditional-semantic-scan status=passed or not-applicable.*canonical BLOCKED requires exitCode=10.*status=blocked' 'Source projection must preserve canonical PASS and BLOCKED consistency.'
+        Assert-Match ([string]$contract.evidence.sourceConformance.releaseEligibility) 'fixed false.*never authorizes' 'Source-stage output must never authorize production or release.'
         $releaseConditions = ($contract.evidence.releaseEligibility.trueOnlyWhen -join ';')
         Assert-Match $releaseConditions 'stages\[1\.\.5\]\.status=passed' 'Release eligibility must bind the first five canonical stages.'
         Assert-Match $releaseConditions 'launchBinding\.status=verified' 'Release eligibility must bind verified launch-binding status.'
@@ -1064,7 +1075,12 @@ exit ([int]$LASTEXITCODE)
         $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-adapter-v1.schema.json') | ConvertFrom-Json
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
+        Assert-True (@($adapterSchema.'$defs'.testSpec.required) -contains 'kind') 'Every repository-test dispatch must declare its validated kind.'
         Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
+        Assert-True (@($evidenceSchema.required) -contains 'sourceConformance') 'The evidence schema must require the source-stage projection.'
+        Assert-Equal ([string]$evidenceSchema.'$defs'.sourceConformance.properties.releaseEligible.const) 'False' 'Source-stage evidence must hard-code releaseEligible=false.'
+        Assert-True (@($evidenceSchema.'$defs'.sourceConformance.properties.pester.required) -contains 'events') 'Pester projection must enumerate count-bearing dispatch evidence.'
+        Assert-True (@($evidenceSchema.'$defs'.sourceConformance.properties.canonicalValidation.allOf).Count -ge 2) 'Nested canonical validation must encode PASS and BLOCKED Stage 6 consistency.'
         Assert-True (@($evidenceSchema.'$defs'.authority.required) -contains 'semanticBridgeModuleSha256') 'Authority evidence must bind the semantic bridge module hash.'
         Assert-True (@($evidenceSchema.'$defs'.authority.required) -contains 'semanticBridgeSchemaSha256') 'Authority evidence must bind the semantic bridge schema hash.'
         Assert-True (@($evidenceSchema.'$defs'.launchBinding.properties.status.enum) -contains 'unverified-production') 'The evidence schema must distinguish rejected production launch bindings from development harness runs.'
@@ -2560,6 +2576,9 @@ catch {
         $result = Invoke-RunnerFixture -Fixture $fixture
         Assert-Equal $result.ExitCode 0 'A complete development validation fixture must pass.'
         Assert-Equal $result.Evidence.state 'PASS' 'The evidence state must report a validation pass.'
+        Assert-Equal $result.Evidence.sourceConformance.status 'passed' 'A complete source-stage projection must pass.'
+        Assert-False ([bool]$result.Evidence.sourceConformance.releaseEligible) 'Source-stage success must never authorize release.'
+        Assert-True ([int]$result.Evidence.sourceConformance.pester.passed -gt 0) 'The source projection must retain a positive Pester pass count.'
         Assert-Equal @($result.Evidence.stages).Count 10 'The final evidence must retain the full stage contract.'
         $events = @(Get-Content -Encoding UTF8 -LiteralPath $fixture.Log)
         Assert-True ($events.Count -ge 6) 'The fixture must emit package and Static events.'
@@ -2642,6 +2661,11 @@ catch {
         $result = Invoke-RunnerFixture -Fixture $fixture -SemanticTriggered
         Assert-True ($result.ExitCode -ne 0) 'Triggered semantic work without consent must be blocked.'
         Assert-Equal $result.Evidence.state 'BLOCKED' 'Missing semantic consent must produce BLOCKED.'
+        Assert-Equal $result.Evidence.exitCode 10 'Source projection must preserve canonical BLOCKED=10.'
+        Assert-False ([bool]$result.Evidence.releaseEligible) 'Missing semantic consent must remain release-ineligible.'
+        Assert-Equal $result.Evidence.sourceConformance.status 'passed' 'Source checks may pass while the canonical Stage 6 consent barrier remains blocked.'
+        Assert-Equal $result.Evidence.sourceConformance.canonicalValidation.stage6Status 'blocked' 'The source projection must report the unchanged semantic consent block.'
+        Assert-False ([bool]$result.Evidence.sourceConformance.releaseEligible) 'A source-only pass must not satisfy the semantic release gate.'
         foreach ($stageId in @('ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')) {
             $stage = @($result.Evidence.stages | Where-Object id -eq $stageId)[0]
             Assert-Equal $stage.status 'not-applicable' "Unperformed '$stageId' must not be reported as passed."
@@ -3620,5 +3644,303 @@ Describe 'Pester shard plan contract' {
         if (@($groupedPlan[3].Paths).Count -ne 1) { throw 'The final configured bulk shard must retain the remainder without padding or omission.' }
         $groupedPartition = @($groupedPlan | ForEach-Object { @($_.Paths) })
         if ((($groupedPartition | Sort-Object) -join "`n") -cne (($allPaths | Sort-Object) -join "`n")) { throw 'A configured shard plan must remain an exact partition.' }
+    }
+}
+
+Describe 'source conformance projection' {
+    BeforeAll {
+        $script:SourceProjectionRepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:SourceProjectionRunnerPath = Join-Path $script:SourceProjectionRepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $script:SourceProjectionArtifactRoot = Join-Path $TestDrive 'source-projection-artifacts'
+        [void](New-Item -ItemType Directory -Path $script:SourceProjectionArtifactRoot -Force)
+        . $script:SourceProjectionRunnerPath `
+            -CandidateRoot $script:SourceProjectionRepositoryRoot `
+            -AdapterPath $script:SourceProjectionRunnerPath `
+            -ArtifactsRoot $script:SourceProjectionRepositoryRoot `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+
+        function Assert-SourceProjectionEqual {
+            param($Actual, $Expected, [string] $Message)
+            if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
+        }
+
+        function Assert-SourceProjectionFailure {
+            param($InputValue, [string] $ExpectedReason)
+            try {
+                $projection = New-StandardValidationSourceConformanceResult `
+                    -Report $InputValue.report `
+                    -ExpectedSourceRevision ('a' * 40) `
+                    -RepositoryTestEvidence $InputValue.tests `
+                    -RepositoryTestDispatches $InputValue.dispatches
+            }
+            catch {
+                throw "Projection threw while testing '$ExpectedReason': $($_.Exception.Message) $($_.ScriptStackTrace)"
+            }
+            Assert-SourceProjectionEqual $projection.status 'failed' "Projection must reject '$ExpectedReason'."
+            if (@($projection.failureReasons) -notcontains $ExpectedReason) { throw "Projection must identify '$ExpectedReason'." }
+            if ([bool]$projection.releaseEligible) { throw 'A failed source projection must remain release-ineligible.' }
+        }
+
+        function New-SourceProjectionEvent {
+            param([string] $StageId, [string] $ToolId, [AllowNull()] $SkillId, [string] $CandidateId)
+            $eventId = [guid]::NewGuid().ToString()
+            $stdout = 'source projection fixture output'
+            $stderr = ''
+            $outputPath = Join-Path (Join-Path $script:SourceProjectionArtifactRoot $StageId) "event-$eventId.json"
+            [void](New-Item -ItemType Directory -Path (Split-Path -Parent $outputPath) -Force)
+            $rawOutput = [ordered]@{
+                schemaVersion = 1
+                eventId = $eventId
+                stageId = $StageId
+                toolId = $ToolId
+                skillId = $SkillId
+                candidateId = $CandidateId
+                process = [ordered]@{ exitCode = 0; status = 'passed'; stdout = $stdout; stderr = $stderr; cleanedUp = $true }
+                stdout = $stdout
+                stderr = $stderr
+            }
+            [IO.File]::WriteAllText($outputPath, ($rawOutput | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
+            return [pscustomobject][ordered]@{
+                eventId = $eventId
+                stageId = $StageId
+                toolId = $ToolId
+                skillId = $SkillId
+                candidateId = $CandidateId
+                commandSha256 = 'e' * 64
+                exitCode = 0
+                status = 'passed'
+                outputSha256 = Get-StandardValidationOutputHash -Stdout $stdout -Stderr $stderr
+                outputPath = $outputPath
+                cleanedUp = $true
+            }
+        }
+
+        function New-SourceProjectionRepositoryTestRecord {
+            param(
+                [Parameter(Mandatory = $true)] $Event,
+                [Parameter(Mandatory = $true)][string] $ToolId,
+                [Parameter(Mandatory = $true)][array] $Inventory,
+                [Parameter(Mandatory = $true)] $TestResult,
+                [ValidateSet('general', 'pester')][string] $Kind = 'pester'
+            )
+            $domainResult = [ordered]@{ status = 'passed'; decision = 'PASS'; result = "fixture:$ToolId" }
+            $envelope = [ordered]@{
+                schemaVersion = 1
+                status = 'passed'
+                decision = 'PASS'
+                candidateIdentity = [string]$Event.candidateId
+                testInventory = @($Inventory)
+                testResult = $TestResult
+                domainAdapterResult = $domainResult
+            }
+            $stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+            $rawOutput = Get-Content -Raw -Encoding UTF8 -LiteralPath $Event.outputPath | ConvertFrom-Json
+            $rawOutput.process.stdout = $stdout
+            $rawOutput.stdout = $stdout
+            [IO.File]::WriteAllText($Event.outputPath, ($rawOutput | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+            $Event.outputSha256 = Get-StandardValidationOutputHash -Stdout $stdout -Stderr ''
+            return [pscustomobject][ordered]@{
+                toolRole = if ($Kind -ceq 'pester') { 'pester' } else { 'domain' }
+                toolId = $ToolId
+                eventId = [string]$Event.eventId
+                candidateId = [string]$Event.candidateId
+                outputSha256 = [string]$Event.outputSha256
+                testInventory = @($Inventory)
+                testResult = $TestResult
+                domainAdapterResult = $domainResult
+            }
+        }
+
+        function New-SourceProjectionInput {
+            $sourceRevision = 'a' * 40
+            $candidateId = 'b' * 64
+            $contentSha256 = 'c' * 64
+            $stageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static', 'repository-tests', 'conditional-semantic-scan', 'ai-review', 'human-approval', 'publish-or-install', 'post-install-verification')
+            $stages = @()
+            for ($index = 0; $index -lt $stageIds.Count; $index++) {
+                $status = if ($index -lt 5) { 'passed' } elseif ($index -eq 5) { 'blocked' } else { 'not-applicable' }
+                $stages += [pscustomobject][ordered]@{ order = $index + 1; id = $stageIds[$index]; condition = 'fixture'; status = $status; startedAt = '2026-09-25T00:00:00Z'; endedAt = '2026-09-25T00:00:01Z'; reason = $null; events = @() }
+            }
+            $stages[2].events = @(
+                (New-SourceProjectionEvent 'package-validation' 'package-adapter' $null $candidateId),
+                (New-SourceProjectionEvent 'package-validation' 'skill-validator' 'alpha' $candidateId),
+                (New-SourceProjectionEvent 'package-validation' 'skill-tools' 'alpha' $candidateId),
+                (New-SourceProjectionEvent 'package-validation' 'skill-validator' 'beta' $candidateId),
+                (New-SourceProjectionEvent 'package-validation' 'skill-tools' 'beta' $candidateId)
+            )
+            $stages[3].events = @((New-SourceProjectionEvent 'skillspector-static' 'staticAnalyzer' $null $candidateId))
+            $generalEvent = New-SourceProjectionEvent 'repository-tests' 'general.dispatch' $null $candidateId
+            $pesterWindowsEvent = New-SourceProjectionEvent 'repository-tests' 'windows-pester' $null $candidateId
+            $pesterLinuxEvent = New-SourceProjectionEvent 'repository-tests' 'linux.pester' $null $candidateId
+            $stages[4].events = @($generalEvent, $pesterWindowsEvent, $pesterLinuxEvent)
+            $report = [pscustomobject][ordered]@{
+                schemaVersion = 1
+                evidence = 'standard-validation-evidence-v1'
+                contract = 'standard-validation-contract-v1'
+                runId = [guid]::NewGuid().ToString()
+                state = 'BLOCKED'
+                exitCode = 10
+                releaseEligible = $false
+                artifacts = [pscustomobject][ordered]@{ root = $script:SourceProjectionArtifactRoot; lockPath = Join-Path $script:SourceProjectionArtifactRoot 'fixture.lock' }
+                candidate = [pscustomobject][ordered]@{ sourceRepository = 'https://example.com/example/skills.git'; sourceRevision = $sourceRevision; baseRevision = 'b' * 40; eventName = 'pull_request'; candidateId = $candidateId; contentSha256 = $contentSha256; activeSkills = @('alpha', 'beta') }
+                stages = $stages
+            }
+            $tests = @(
+                (New-SourceProjectionRepositoryTestRecord -Event $generalEvent -ToolId 'general.dispatch' -Inventory @('tests/general.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' }) -Kind general)
+                (New-SourceProjectionRepositoryTestRecord -Event $pesterWindowsEvent -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 3; passed = 2; skipped = 1 }))
+                (New-SourceProjectionRepositoryTestRecord -Event $pesterLinuxEvent -ToolId 'linux.pester' -Inventory @('tests/linux.alpha.Tests.ps1', 'tests/linux.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 4; passed = 3; skipped = 1 }))
+            )
+            $dispatches = @(
+                [pscustomobject]@{ id = 'general.dispatch'; kind = 'general' },
+                [pscustomobject]@{ id = 'windows-pester'; kind = 'pester' },
+                [pscustomobject]@{ id = 'linux.pester'; kind = 'pester' }
+            )
+            return [pscustomobject][ordered]@{ report = $report; tests = $tests; dispatches = $dispatches }
+        }
+    }
+
+    # Scenario: The canonical report reaches a blocked Stage 6 after complete source checks.
+    # Purpose: Prove the source projection preserves candidate and execution evidence without creating release authority.
+    It 'InterT13_projects_candidate_bound_source_conformance_and_rejects_incomplete_evidence' {
+        $sourceInput = New-SourceProjectionInput
+        $sourceInput.tests = @($sourceInput.tests[2], $sourceInput.tests[0], $sourceInput.tests[1])
+        $projection = New-StandardValidationSourceConformanceResult `
+            -Report $sourceInput.report `
+            -ExpectedSourceRevision ('a' * 40) `
+            -RepositoryTestEvidence $sourceInput.tests `
+            -RepositoryTestDispatches $sourceInput.dispatches
+        if ($projection.status -cne 'passed') {
+            throw "Complete source-stage evidence must pass. failureReasons='$(@($projection.failureReasons) -join ',')'."
+        }
+        Assert-SourceProjectionEqual $projection.status 'passed' 'Complete source-stage evidence must pass.'
+        Assert-SourceProjectionEqual $projection.scope 'source-stages-1-5' 'The projection must declare its bounded scope.'
+        Assert-SourceProjectionEqual $projection.canonicalValidation.state 'BLOCKED' 'Canonical Stage 6 state must remain visible.'
+        Assert-SourceProjectionEqual $projection.canonicalValidation.exitCode 10 'Canonical exit code must remain BLOCKED=10.'
+        Assert-SourceProjectionEqual $projection.canonicalValidation.stage6Status 'blocked' 'Stage 6 must remain blocked.'
+        Assert-SourceProjectionEqual $projection.pester.eventCount 2 'Both count-bearing dispatches must be represented.'
+        Assert-SourceProjectionEqual @($projection.pester.events).Count 2 'The projection must enumerate every count-bearing dispatch.'
+        Assert-SourceProjectionEqual $projection.pester.events[0].toolId 'windows-pester' 'The first custom adapter ID must remain bound in Stage 5 order.'
+        Assert-SourceProjectionEqual $projection.pester.events[1].toolId 'linux.pester' 'The second custom adapter ID must remain bound in Stage 5 order.'
+        Assert-SourceProjectionEqual $projection.pester.total 7 'Pester totals must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.passed 5 'Pester passed counts must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.skipped 2 'Pester skipped counts must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.testInventoryCount 4 'The Pester inventory count must aggregate count-bearing dispatches.'
+        $case = New-SourceProjectionInput; $case.report.state = 'PASS'; $case.report.exitCode = 0
+        Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
+        if ([bool]$projection.releaseEligible -or [bool]$sourceInput.report.releaseEligible) { throw 'Source-only conformance must not authorize release.' }
+        Assert-SourceProjectionEqual $sourceInput.report.state 'BLOCKED' 'Projection must not mutate canonical state.'
+        Assert-SourceProjectionEqual $sourceInput.report.exitCode 10 'Projection must not mutate canonical exit code.'
+
+        $case = New-SourceProjectionInput; $case.report.candidate.candidateId = ('B' + ('b' * 63))
+        Assert-SourceProjectionFailure $case 'candidate-id-invalid'
+        $case = New-SourceProjectionInput; $case.report = $null
+        Assert-SourceProjectionFailure $case 'report-missing'
+        $case = New-SourceProjectionInput; $case.report.stages = @($case.report.stages | Select-Object -Skip 1)
+        Assert-SourceProjectionFailure $case 'canonical-stage-count-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[3].status = 'failed'
+        Assert-SourceProjectionFailure $case 'source-stage-4-not-passed'
+        $case = New-SourceProjectionInput; $case.report.stages[4].status = 'failed'
+        Assert-SourceProjectionFailure $case 'source-stage-5-not-passed'
+        $case = New-SourceProjectionInput; $case.report.stages[2].events = @()
+        Assert-SourceProjectionFailure $case 'package-validation-events-missing'
+        $case = New-SourceProjectionInput; $case.report.stages[4].events[1].candidateId = 'f' * 64
+        Assert-SourceProjectionFailure $case 'repository-tests-event-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[4].events[1].cleanedUp = $false
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput; [void]$case.report.stages[4].events[1].PSObject.Properties.Remove('cleanedUp')
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput; [void]$case.report.stages[4].events[1].PSObject.Properties.Remove('outputPath')
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[4].events[1].outputPath = Join-Path $script:SourceProjectionArtifactRoot 'missing-event.json'
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[4].events[1].outputPath = Join-Path ([IO.Path]::GetTempPath()) 'outside-source-event.json'
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput
+        $rawOutput = Get-Content -Raw -Encoding UTF8 -LiteralPath $case.report.stages[4].events[1].outputPath | ConvertFrom-Json
+        $rawOutput.stdout = 'tampered source event output'
+        [IO.File]::WriteAllText($case.report.stages[4].events[1].outputPath, ($rawOutput | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
+        Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[5].status = 'not-applicable'
+        Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
+        $case = New-SourceProjectionInput; $case.report.exitCode = [uint64]::MaxValue
+        Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
+        $case = New-SourceProjectionInput; $case.report.schemaVersion = [uint64]::MaxValue
+        Assert-SourceProjectionFailure $case 'report-envelope-invalid'
+        $case = New-SourceProjectionInput; $case.report.stages[0].order = [uint64]::MaxValue
+        Assert-SourceProjectionFailure $case 'source-stage-1-identity-invalid'
+        $case = New-SourceProjectionInput; $case.report.candidate.sourceRevision = 'f' * 40
+        Assert-SourceProjectionFailure $case 'candidate-revision-mismatch'
+        $case = New-SourceProjectionInput; $case.tests = @()
+        Assert-SourceProjectionFailure $case 'pester-evidence-missing-or-ambiguous'
+        # Scenario: A general dispatch reports counts while an actual Pester dispatch reports none.
+        # Purpose: A different dispatch must not conceal an unexecuted Pester suite.
+        $case = New-SourceProjectionInput
+        $case.tests[0] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[0] -ToolId 'general.dispatch' -Inventory @('tests/general.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 1; passed = 1; skipped = 0 }) -Kind general
+        $case.tests[1] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[1] -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' })
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput
+        $case.tests[1] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[1] -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' })
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.dispatches[1].kind = 'unknown'
+        Assert-SourceProjectionFailure $case 'repository-test-dispatch-kind-invalid'
+        $case = New-SourceProjectionInput; $case.dispatches[1].kind = 'general'
+        Assert-SourceProjectionFailure $case 'repository-test-role-or-id-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 0; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 0
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = [uint64]::MaxValue
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 3; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 3
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.Remove('passed')
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 4
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput
+        foreach ($recordIndex in @(1, 2)) {
+            $case.tests[$recordIndex].testResult.total = [int]::MaxValue
+            $case.tests[$recordIndex].testResult.passed = [int]::MaxValue
+            $case.tests[$recordIndex].testResult.skipped = 0
+        }
+        Assert-SourceProjectionFailure $case 'pester-aggregate-counts-out-of-range'
+        $case = New-SourceProjectionInput; $case.tests[1].testInventory = @()
+        Assert-SourceProjectionFailure $case 'pester-test-inventory-or-raw-event-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].outputSha256 = 'f' * 64
+        Assert-SourceProjectionFailure $case 'pester-event-binding-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].toolRole = 'untrusted-role'
+        Assert-SourceProjectionFailure $case 'repository-test-role-or-id-invalid'
+        $case = New-SourceProjectionInput; $case.report.releaseEligible = $true
+        Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
+
+        $earlyFailedReportPath = Join-Path $script:SourceProjectionArtifactRoot ('early-failed-' + [guid]::NewGuid().ToString('N') + '.json')
+        $earlyFailedEvidence = New-StandardValidationCandidateEvidence `
+            -RunId ([guid]::NewGuid()) `
+            -State 'FAILED' `
+            -ExitCode 20 `
+            -ReleaseEligible $false `
+            -Candidate $null `
+            -Adapter $null `
+            -Authority $null `
+            -Stages (New-StandardValidationStages) `
+            -FailureState 'FAILED' `
+            -FailureMessage 'Synthetic early failure before candidate evidence was available.' `
+            -ArtifactRoot $script:SourceProjectionArtifactRoot `
+            -LockPath 'fixture.lock' `
+            -DevelopmentHarness $true `
+            -LaunchBinding $null
+        $earlyFailedSource = New-StandardValidationSourceConformanceResult `
+            -Report $earlyFailedEvidence `
+            -ExpectedSourceRevision ('a' * 40) `
+            -RepositoryTestEvidence @()
+        $earlyFailedEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $earlyFailedSource -Force
+        [void](Write-StandardValidationJsonCreate -Path $earlyFailedReportPath -Value $earlyFailedEvidence -Context 'early failed finalization fixture')
+        $persistedEarlyFailedEvidence = Get-StandardValidationJson -Path $earlyFailedReportPath -Context 'early failed finalization fixture'
+        Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.state 'FAILED' 'Source projection must not prevent canonical FAILED report writing when candidate evidence is unavailable.'
+        Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.exitCode 20 'An early FAILED report must retain its canonical exit code.'
+        Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.status 'failed' 'Missing candidate evidence must fail only the source projection.'
+        Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.releaseEligible $false 'Early FAILED output must remain release-ineligible.'
     }
 }
