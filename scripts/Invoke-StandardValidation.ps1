@@ -6789,7 +6789,7 @@ function Invoke-StandardValidationRun {
             -Report $finalEvidence `
             -ExpectedSourceRevision $SourceRevision `
             -RepositoryTestEvidence $repositoryTestEvidence `
-            -RepositoryTestDispatches $adapterResult.repositoryTests
+            -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
         $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
@@ -6829,7 +6829,7 @@ function Invoke-StandardValidationRun {
                     -Report $finalEvidence `
                     -ExpectedSourceRevision $SourceRevision `
                     -RepositoryTestEvidence $repositoryTestEvidence `
-                    -RepositoryTestDispatches $adapterResult.repositoryTests
+                    -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
                 $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
                 try {
                     $outputReservationStream.Dispose()
@@ -6884,7 +6884,7 @@ function Invoke-StandardValidationRun {
                         -Report $finalEvidence `
                         -ExpectedSourceRevision $SourceRevision `
                         -RepositoryTestEvidence $repositoryTestEvidence `
-                        -RepositoryTestDispatches $adapterResult.repositoryTests
+                        -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
                     $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
                 }
             }
