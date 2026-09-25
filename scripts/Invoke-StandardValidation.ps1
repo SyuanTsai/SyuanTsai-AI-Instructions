@@ -4735,9 +4735,10 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $scopeModuleSha256 = '423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7'
     $scopeModuleSha256Lf = '0aa936024e2c3fe7e169390e87e7edc0df88b2a13036ecdc20512c8095ba7c22'
     $scopeScannerSha256 = 'e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc'
-    $scopeSourceRevision = '1adba1e5fb5885d963e1e829f7044d814665ba73'
-    $scopeContentSha256 = 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14'
-    $scopeContentSha256Lf = 'c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e'
+    $scopeSourceRevision = '270bea92da0e3fe39d705064565583e2c7247555'
+    $scopeContentSha256 = 'e745c4864b864d8cd1ad87a5c247aa361fb6c263c15119227a6004c9ed4335e0'
+    $scopeContentSha256Lf = '6070c8635db0568b1c74ea2ff5f12db37298675fc57679511130e72e6291ff39'
+    $scopeScannerReportSourceRevision = '1adba1e5fb5885d963e1e829f7044d814665ba73'
     $scopeScannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8'
     $scopeScannerReportSha256Lf = 'b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3'
     $scopeActiveSkills = @('investigate-datadog-logs', 'manage-notion-ai-memory', 'manage-task-handoff',
@@ -4763,6 +4764,7 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $expectedModuleSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'moduleSha256Lf')
     $expectedScannerSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerExecutableSha256')
     $policySourceRevision = [string](Get-StandardValidationProperty -Object $Policy -Name 'sourceRevision')
+    $policyScannerReportSourceRevision = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSourceRevision')
     $policyContentSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256')
     $policyContentSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256Lf')
     $policyScannerReportSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSha256')
@@ -4772,6 +4774,7 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         $policyScannerReportSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         (-not $TestOnlyFixtureScope -and ($expectedModuleSha256 -cne $scopeModuleSha256 -or $expectedModuleSha256Lf -cne $scopeModuleSha256Lf -or
             $expectedScannerSha256 -cne $scopeScannerSha256 -or $policySourceRevision -cne $scopeSourceRevision -or
+            $policyScannerReportSourceRevision -cne $scopeScannerReportSourceRevision -or
             $policyContentSha256 -cne $scopeContentSha256 -or $policyContentSha256Lf -cne $scopeContentSha256Lf -or
             $policyScannerReportSha256 -cne $scopeScannerReportSha256 -or
             $policyScannerReportSha256Lf -cne $scopeScannerReportSha256Lf))) {
@@ -7232,10 +7235,10 @@ function Invoke-StandardValidationRun {
         if ($SourceMergeExceptionReview) {
             $reviewScopeMatches = $DevelopmentHarness -and
                 $SourceRepository -ceq 'https://github.com/SyuanTsai/Skill-General.git' -and
-                $SourceRevision -ceq '1adba1e5fb5885d963e1e829f7044d814665ba73' -and
+                $SourceRevision -ceq '270bea92da0e3fe39d705064565583e2c7247555' -and
                 $expectedCandidateContentSha256 -cin @(
-                    'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14',
-                    'c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e') -and
+                    'e745c4864b864d8cd1ad87a5c247aa361fb6c263c15119227a6004c9ed4335e0',
+                    '6070c8635db0568b1c74ea2ff5f12db37298675fc57679511130e72e6291ff39') -and
                 $failureState -ceq 'FAILED' -and
                 $failureMessage -ceq "skillspector-static/staticAnalyzer process status was 'failed'." -and
                 $stages[2].status -ceq 'passed' -and $stages[3].status -ceq 'failed' -and
