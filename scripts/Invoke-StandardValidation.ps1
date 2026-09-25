@@ -7317,6 +7317,7 @@ function Invoke-StandardValidationRun {
                     -ObservedSupervisorExecution:$supplementalReviewObserved
             }
             catch {
+                Write-Warning "PR12 review proposal evaluation failed: $($_.Exception.Message)"
                 $proposal = [ordered]@{
                     schemaVersion = 1; contract = 'proposed-source-merge-exception-v1'; status = 'rejected'
                     sourceRepository = [string]$candidateEvidence.sourceRepository
