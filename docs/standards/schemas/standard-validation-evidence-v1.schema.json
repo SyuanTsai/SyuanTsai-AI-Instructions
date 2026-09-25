@@ -16,7 +16,8 @@
     "authority",
     "launchBinding",
     "stages",
-    "releaseEligible"
+    "releaseEligible",
+    "sourceConformance"
   ],
   "properties": {
     "schemaVersion": { "const": 1 },
@@ -26,6 +27,7 @@
     "state": { "enum": ["PASS", "BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
     "exitCode": { "type": "integer", "enum": [0, 10, 20, 30, 40] },
     "releaseEligible": { "type": "boolean" },
+    "sourceConformance": { "$ref": "#/$defs/sourceConformance" },
     "candidate": { "$ref": "#/$defs/candidate" },
     "adapter": { "$ref": "#/$defs/adapter" },
     "authority": { "$ref": "#/$defs/authority" },
@@ -130,6 +132,63 @@
     }
   ],
   "$defs": {
+    "sourceConformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "contract", "status", "scope", "sourceRevision", "candidateId", "contentSha256", "checkedStages", "pester", "canonicalValidation", "releaseEligible", "failureReasons"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "contract": { "const": "standard-source-conformance-v1" },
+        "status": { "enum": ["passed", "failed"] },
+        "scope": { "const": "source-stages-1-5" },
+        "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "checkedStages": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["order", "id", "status"],
+            "properties": {
+              "order": { "type": "integer", "minimum": 1, "maximum": 5 },
+              "id": { "type": "string", "minLength": 1 },
+              "status": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "pester": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eventId", "outputSha256", "testInventoryCount", "testInventorySha256", "total", "passed", "skipped", "failed"],
+          "properties": {
+            "eventId": { "type": ["string", "null"], "format": "uuid" },
+            "outputSha256": { "$ref": "#/$defs/sha256" },
+            "testInventoryCount": { "type": "integer", "minimum": 0 },
+            "testInventorySha256": { "$ref": "#/$defs/sha256" },
+            "total": { "type": ["integer", "null"], "minimum": 0 },
+            "passed": { "type": ["integer", "null"], "minimum": 0 },
+            "skipped": { "type": ["integer", "null"], "minimum": 0 },
+            "failed": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "canonicalValidation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "exitCode", "stage6Status", "releaseEligible"],
+          "properties": {
+            "state": { "type": ["string", "null"] },
+            "exitCode": { "type": ["integer", "null"] },
+            "stage6Status": { "type": ["string", "null"] },
+            "releaseEligible": { "type": "boolean" }
+          }
+        },
+        "releaseEligible": { "const": false },
+        "failureReasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
     "safeRelativePath": {
       "type": "string",
       "minLength": 1,

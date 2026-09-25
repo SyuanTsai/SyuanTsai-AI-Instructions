@@ -116,6 +116,15 @@
   },
   "evidence": {
     "requiredBinding": ["sourceRepository", "sourceRevision", "baseRevision", "eventName", "candidateId", "contentSha256", "candidate.acquisition.archiveSha256", "authority.binding.repository", "authority.binding.revision", "authority.binding.archiveSha256", "authority.binding.snapshotInventorySha256", "adapter.sha256", "authority.runnerSha256", "authority.contractSha256", "authority.policySha256", "authority.authorityGateSha256", "authority.resolverSha256", "authority.semanticBridgeModuleSha256", "authority.semanticBridgeSchemaSha256", "launchBinding.status=verified", "launchBinding.verified=true"],
+    "sourceConformance": {
+      "contract": "standard-source-conformance-v1",
+      "scope": "source-stages-1-5",
+      "binding": ["candidate.sourceRevision", "candidate.candidateId", "candidate.contentSha256", "stage[1..5].identity-order-status", "stage[3..5].candidate-bound-process-events", "stage[3..5].event.cleanedUp=true", "stage[3..5].event.outputPath-within-artifacts.root", "stage[3..5].event.raw-output-file-event-process-outputSha256-binding", "repository-test-pester.eventId", "repository-test-pester.outputSha256", "repository-test-pester.testInventory", "repository-test-pester.testInventorySha256", "repository-test-pester.total", "repository-test-pester.passed", "repository-test-pester.skipped"],
+      "pesterCounts": "total>0; passed>0; skipped>=0; passed+skipped=total; if failed is present it must equal zero",
+      "terminalStates": "PASS=0 or BLOCKED=10 with conditional-semantic-scan status=blocked and releaseEligible=false; blocked Stage 6 never becomes a canonical PASS",
+      "requiredCheckUse": "current workflow required source checks only; downstream mirrors may consume this result only after binding sourceRevision to the event candidate SHA; same-workflow output is not a protected publisher",
+      "releaseEligibility": "fixed false; source conformance never authorizes production, install, publishing, or release"
+    },
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",
