@@ -6,6 +6,7 @@
   "pullRequest": 12,
   "sourceRevision": "1adba1e5fb5885d963e1e829f7044d814665ba73",
   "contentSha256": "c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14",
+  "contentSha256Lf": "c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e",
   "skillId": "manage-task-handoff",
   "activeSkills": [
     "investigate-datadog-logs",
@@ -18,6 +19,7 @@
   "expectedInventoryCount": 11,
   "modulePath": "skills/manage-task-handoff/scripts/GitRefHandoffAdapter.psm1",
   "moduleSha256": "423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7",
+  "moduleSha256Lf": "0aa936024e2c3fe7e169390e87e7edc0df88b2a13036ecdc20512c8095ba7c22",
   "scannerSource": "NVIDIA/SkillSpector",
   "scannerVersion": "2.12.0",
   "scannerExecutableSha256": "e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc",

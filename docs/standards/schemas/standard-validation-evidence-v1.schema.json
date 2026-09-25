@@ -145,7 +145,7 @@
             "properties": {
               "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
               "sourceRevision": { "const": "1adba1e5fb5885d963e1e829f7044d814665ba73" },
-              "contentSha256": { "const": "c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14" }
+              "contentSha256": { "enum": ["c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14", "c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e"] }
             }
           },
           "sourceConformance": { "type": "object", "properties": { "status": { "const": "failed" } } },
@@ -180,7 +180,7 @@
         "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
         "sourceRevision": { "const": "1adba1e5fb5885d963e1e829f7044d814665ba73" },
         "candidateId": { "$ref": "#/$defs/sha256" },
-        "contentSha256": { "const": "c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14" },
+        "contentSha256": { "enum": ["c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14", "c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e"] },
         "scannerReportSha256": { "const": "cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8" },
         "otherScannerReportSha256": {
           "type": "array", "minItems": 5, "maxItems": 5,

@@ -4732,9 +4732,11 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $scopeSkillId = 'manage-task-handoff'
     $scopeModulePath = 'skills/manage-task-handoff/scripts/GitRefHandoffAdapter.psm1'
     $scopeModuleSha256 = '423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7'
+    $scopeModuleSha256Lf = '0aa936024e2c3fe7e169390e87e7edc0df88b2a13036ecdc20512c8095ba7c22'
     $scopeScannerSha256 = 'e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc'
     $scopeSourceRevision = '1adba1e5fb5885d963e1e829f7044d814665ba73'
     $scopeContentSha256 = 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14'
+    $scopeContentSha256Lf = 'c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e'
     $scopeScannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8'
     $scopeActiveSkills = @('investigate-datadog-logs', 'manage-notion-ai-memory', 'manage-task-handoff',
         'plan-production-change', 'review-agent-skills', 'verify-data-access-performance')
@@ -4756,22 +4758,26 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         [void]$reasons.Add('exception-scope-invalid')
     }
     $expectedModuleSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'moduleSha256')
+    $expectedModuleSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'moduleSha256Lf')
     $expectedScannerSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerExecutableSha256')
     $policySourceRevision = [string](Get-StandardValidationProperty -Object $Policy -Name 'sourceRevision')
     $policyContentSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256')
+    $policyContentSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256Lf')
     $policyScannerReportSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSha256')
     if ($expectedModuleSha256 -cnotmatch '^[0-9a-f]{64}$' -or $expectedScannerSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $policySourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $policyContentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $policyScannerReportSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-        (-not $TestOnlyFixtureScope -and ($expectedModuleSha256 -cne $scopeModuleSha256 -or $expectedScannerSha256 -cne $scopeScannerSha256 -or
-            $policySourceRevision -cne $scopeSourceRevision -or $policyContentSha256 -cne $scopeContentSha256 -or
+        (-not $TestOnlyFixtureScope -and ($expectedModuleSha256 -cne $scopeModuleSha256 -or $expectedModuleSha256Lf -cne $scopeModuleSha256Lf -or
+            $expectedScannerSha256 -cne $scopeScannerSha256 -or $policySourceRevision -cne $scopeSourceRevision -or
+            $policyContentSha256 -cne $scopeContentSha256 -or $policyContentSha256Lf -cne $scopeContentSha256Lf -or
             $policyScannerReportSha256 -cne $scopeScannerReportSha256))) {
         [void]$reasons.Add('exception-fixed-digest-invalid')
     }
     if ($sourceRepository -cne $scopeRepository -or $PullRequestNumber -ne 12 -or
         $sourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $sourceRevision -cne $ExpectedSourceRevision -or $sourceRevision -cne $policySourceRevision -or
         $candidateId -cnotmatch '^[0-9a-f]{64}$' -or $contentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-        $contentSha256 -cne $policyContentSha256 -or
+        ($TestOnlyFixtureScope -and $contentSha256 -cne $policyContentSha256) -or
+        (-not $TestOnlyFixtureScope -and $contentSha256 -cnotin @($policyContentSha256, $policyContentSha256Lf)) -or
         (@($activeSkills) -join "`n") -cne ($scopeActiveSkills -join "`n") -or
         ((Get-StandardValidationProperty -Object $Policy -Name 'activeSkills') -join "`n") -cne ($scopeActiveSkills -join "`n")) {
         [void]$reasons.Add('exception-candidate-identity-invalid')
@@ -4811,7 +4817,10 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
             [void]$reasons.Add('exception-candidate-content-drift')
         }
         $moduleFull = Join-Path $CandidateRoot $scopeModulePath
-        if ((Get-StandardValidationFileSha256 -Path $moduleFull -Context 'proposed source merge exception module') -cne $expectedModuleSha256) {
+        $moduleSha256ForCandidate = if (-not $TestOnlyFixtureScope -and $contentSha256 -ceq $policyContentSha256Lf) {
+            $expectedModuleSha256Lf
+        } else { $expectedModuleSha256 }
+        if ((Get-StandardValidationFileSha256 -Path $moduleFull -Context 'proposed source merge exception module') -cne $moduleSha256ForCandidate) {
             [void]$reasons.Add('exception-module-digest-mismatch')
         }
         $skillInventory = Get-StandardValidationInventory -Root $skillRoot -Context 'proposed source merge exception Skill'
@@ -7213,7 +7222,9 @@ function Invoke-StandardValidationRun {
             $reviewScopeMatches = $DevelopmentHarness -and
                 $SourceRepository -ceq 'https://github.com/SyuanTsai/Skill-General.git' -and
                 $SourceRevision -ceq '1adba1e5fb5885d963e1e829f7044d814665ba73' -and
-                $expectedCandidateContentSha256 -ceq 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14' -and
+                $expectedCandidateContentSha256 -cin @(
+                    'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14',
+                    'c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e') -and
                 $failureState -ceq 'FAILED' -and
                 $failureMessage -ceq "skillspector-static/staticAnalyzer process status was 'failed'." -and
                 $stages[2].status -ceq 'passed' -and $stages[3].status -ceq 'failed' -and
