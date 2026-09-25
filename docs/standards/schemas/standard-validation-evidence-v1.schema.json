@@ -181,15 +181,15 @@
         "sourceRevision": { "const": "1adba1e5fb5885d963e1e829f7044d814665ba73" },
         "candidateId": { "$ref": "#/$defs/sha256" },
         "contentSha256": { "enum": ["c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14", "c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e"] },
-        "scannerReportSha256": { "const": "cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8" },
+        "scannerReportSha256": { "enum": ["cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8", "b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3"] },
         "otherScannerReportSha256": {
           "type": "array", "minItems": 5, "maxItems": 5,
           "prefixItems": [
-            { "const": "70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3" },
-            { "const": "32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e" },
-            { "const": "194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9" },
-            { "const": "b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f" },
-            { "const": "3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed" }
+            { "enum": ["70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3", "517dcceaea3afcdd47db6f4aa412ffde13257822727b477b61b6cdb929f07aba"] },
+            { "enum": ["32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e", "bcece762c5398660f5a236562a63c427af83f2a50c5246696f6a906c51dc75e0"] },
+            { "enum": ["194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9", "8a1e9c86ff5bdb935622c5d89ead18999865724b3739f3879ad5570d6c1c993d"] },
+            { "enum": ["b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f", "1d96022a060b427d46257bed11c5555d72350e0be51117209ce9609b57b7311e"] },
+            { "enum": ["3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed", "e2bb948d6fd2cfacef03c973c0144b50bec67595a26ee953f93416ddf073f5ac"] }
           ],
           "items": false
         },

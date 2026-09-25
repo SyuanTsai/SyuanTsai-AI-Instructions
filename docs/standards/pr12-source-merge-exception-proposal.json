@@ -26,12 +26,13 @@
   "scannerReleaseCommit": "c7958a3268d9498644b22edb75d0f051bbc8cbfc",
   "scannerReleaseAssetSha256": "62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4",
   "scannerReportSha256": "cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8",
+  "scannerReportSha256Lf": "b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3",
   "otherSkillReports": [
-    { "skillId": "investigate-datadog-logs", "componentCount": 2, "sha256": "70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3" },
-    { "skillId": "manage-notion-ai-memory", "componentCount": 4, "sha256": "32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e" },
-    { "skillId": "plan-production-change", "componentCount": 2, "sha256": "194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9" },
-    { "skillId": "review-agent-skills", "componentCount": 4, "sha256": "b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f" },
-    { "skillId": "verify-data-access-performance", "componentCount": 2, "sha256": "3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed" }
+    { "skillId": "investigate-datadog-logs", "componentCount": 2, "sha256": "70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3", "sha256Lf": "517dcceaea3afcdd47db6f4aa412ffde13257822727b477b61b6cdb929f07aba" },
+    { "skillId": "manage-notion-ai-memory", "componentCount": 4, "sha256": "32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e", "sha256Lf": "bcece762c5398660f5a236562a63c427af83f2a50c5246696f6a906c51dc75e0" },
+    { "skillId": "plan-production-change", "componentCount": 2, "sha256": "194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9", "sha256Lf": "8a1e9c86ff5bdb935622c5d89ead18999865724b3739f3879ad5570d6c1c993d" },
+    { "skillId": "review-agent-skills", "componentCount": 4, "sha256": "b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f", "sha256Lf": "1d96022a060b427d46257bed11c5555d72350e0be51117209ce9609b57b7311e" },
+    { "skillId": "verify-data-access-performance", "componentCount": 2, "sha256": "3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed", "sha256Lf": "e2bb948d6fd2cfacef03c973c0144b50bec67595a26ee953f93416ddf073f5ac" }
   ],
   "incompleteAnalyzer": "static_patterns_tool_misuse",
   "reasonCode": "static_parse_limit",

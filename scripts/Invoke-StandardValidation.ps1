@@ -4739,14 +4739,15 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $scopeContentSha256 = 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14'
     $scopeContentSha256Lf = 'c23bae16a52550acd1f3cef6a984e2a5b76ec48590493b7223dd064ec7c89f4e'
     $scopeScannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8'
+    $scopeScannerReportSha256Lf = 'b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3'
     $scopeActiveSkills = @('investigate-datadog-logs', 'manage-notion-ai-memory', 'manage-task-handoff',
         'plan-production-change', 'review-agent-skills', 'verify-data-access-performance')
     $scopeOtherReports = @(
-        [pscustomobject]@{ skillId = 'investigate-datadog-logs'; componentCount = 2; sha256 = '70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3' },
-        [pscustomobject]@{ skillId = 'manage-notion-ai-memory'; componentCount = 4; sha256 = '32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e' },
-        [pscustomobject]@{ skillId = 'plan-production-change'; componentCount = 2; sha256 = '194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9' },
-        [pscustomobject]@{ skillId = 'review-agent-skills'; componentCount = 4; sha256 = 'b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f' },
-        [pscustomobject]@{ skillId = 'verify-data-access-performance'; componentCount = 2; sha256 = '3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed' }
+        [pscustomobject]@{ skillId = 'investigate-datadog-logs'; componentCount = 2; sha256 = '70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3'; sha256Lf = '517dcceaea3afcdd47db6f4aa412ffde13257822727b477b61b6cdb929f07aba' },
+        [pscustomobject]@{ skillId = 'manage-notion-ai-memory'; componentCount = 4; sha256 = '32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e'; sha256Lf = 'bcece762c5398660f5a236562a63c427af83f2a50c5246696f6a906c51dc75e0' },
+        [pscustomobject]@{ skillId = 'plan-production-change'; componentCount = 2; sha256 = '194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9'; sha256Lf = '8a1e9c86ff5bdb935622c5d89ead18999865724b3739f3879ad5570d6c1c993d' },
+        [pscustomobject]@{ skillId = 'review-agent-skills'; componentCount = 4; sha256 = 'b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f'; sha256Lf = '1d96022a060b427d46257bed11c5555d72350e0be51117209ce9609b57b7311e' },
+        [pscustomobject]@{ skillId = 'verify-data-access-performance'; componentCount = 2; sha256 = '3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed'; sha256Lf = 'e2bb948d6fd2cfacef03c973c0144b50bec67595a26ee953f93416ddf073f5ac' }
     )
 
     if ($TestOnlyFixtureScope -and -not $DevelopmentHarness) { [void]$reasons.Add('test-fixture-without-development-harness') }
@@ -4765,13 +4766,15 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $policyContentSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256')
     $policyContentSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256Lf')
     $policyScannerReportSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSha256')
+    $policyScannerReportSha256Lf = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSha256Lf')
     if ($expectedModuleSha256 -cnotmatch '^[0-9a-f]{64}$' -or $expectedScannerSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $policySourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $policyContentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $policyScannerReportSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         (-not $TestOnlyFixtureScope -and ($expectedModuleSha256 -cne $scopeModuleSha256 -or $expectedModuleSha256Lf -cne $scopeModuleSha256Lf -or
             $expectedScannerSha256 -cne $scopeScannerSha256 -or $policySourceRevision -cne $scopeSourceRevision -or
             $policyContentSha256 -cne $scopeContentSha256 -or $policyContentSha256Lf -cne $scopeContentSha256Lf -or
-            $policyScannerReportSha256 -cne $scopeScannerReportSha256))) {
+            $policyScannerReportSha256 -cne $scopeScannerReportSha256 -or
+            $policyScannerReportSha256Lf -cne $scopeScannerReportSha256Lf))) {
         [void]$reasons.Add('exception-fixed-digest-invalid')
     }
     if ($sourceRepository -cne $scopeRepository -or $PullRequestNumber -ne 12 -or
@@ -4831,7 +4834,10 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         }
         $scannerSnapshot = Get-StandardValidationJsonSnapshot -Path $ScannerReportPath -Context 'proposed source merge exception scanner report'
         $scannerReportSha256 = [string]$scannerSnapshot.sha256
-        if ($scannerReportSha256 -cne $ExpectedScannerReportSha256 -or $scannerReportSha256 -cne $policyScannerReportSha256) {
+        $allowedScannerReportSha256 = if ($TestOnlyFixtureScope) { @($ExpectedScannerReportSha256) }
+            else { @($policyScannerReportSha256, $policyScannerReportSha256Lf) }
+        if ($ExpectedScannerReportSha256 -cne $policyScannerReportSha256 -or
+            $scannerReportSha256 -cnotin $allowedScannerReportSha256) {
             [void]$reasons.Add('exception-scanner-report-drift')
         }
         $scanner = $scannerSnapshot.value
@@ -4869,6 +4875,7 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
             $expectedOther = $scopeOtherReports[$index]
             $otherPolicy = $otherPolicyReports[$index]
             $expectedDigest = [string](Get-StandardValidationProperty -Object $otherPolicy -Name 'sha256')
+            $expectedDigestLf = [string](Get-StandardValidationProperty -Object $otherPolicy -Name 'sha256Lf')
             $expectedCount = Get-StandardValidationProperty -Object $otherPolicy -Name 'componentCount'
             $expectedSkillId = [string](Get-StandardValidationProperty -Object $otherPolicy -Name 'skillId')
             if ($TestOnlyFixtureScope) {
@@ -4879,6 +4886,7 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
                 }
             }
             elseif ($expectedSkillId -cne $expectedOther.skillId -or $expectedDigest -cne $expectedOther.sha256 -or
+                $expectedDigestLf -cne $expectedOther.sha256Lf -or
                 -not (Test-StandardValidationIntegerRange -Value $expectedCount -Minimum $expectedOther.componentCount -Maximum $expectedOther.componentCount)) {
                 [void]$reasons.Add('exception-other-skill-policy-invalid')
                 continue
@@ -4906,7 +4914,9 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
                 else {
                     $otherSource.Replace('\', '/').EndsWith("/pr12-1ad-archive-candidate/candidate/skills/$expectedSkillId", [StringComparison]::Ordinal)
                 }
-                if ([string]$otherSnapshot.sha256 -cne $expectedDigest -or
+                $allowedOtherDigest = if ($TestOnlyFixtureScope) { @($expectedDigest) }
+                    else { @($expectedDigest, $expectedDigestLf) }
+                if ([string]$otherSnapshot.sha256 -cnotin $allowedOtherDigest -or
                     [string](Get-StandardValidationProperty -Object $otherSkill -Name 'name') -cne $expectedSkillId -or
                     -not $otherSourceMatches -or
                     $otherInventory.Count -ne [int]$expectedCount -or $otherComponents.Count -ne [int]$expectedCount -or
