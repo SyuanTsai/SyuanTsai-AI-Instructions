@@ -40,6 +40,7 @@ param(
     [string] $PublishInstallEvidencePath,
     [string] $PostInstallEvidencePath,
     [switch] $CompleteLifecycle,
+    [switch] $SourceMergeExceptionReview,
     [switch] $DefineFunctionsOnly
 )
 
@@ -4621,6 +4622,62 @@ function New-StandardValidationSourceConformanceResult {
     }
 }
 
+function Get-StandardValidationPr12ReviewScannerReceipt {
+    param([Parameter(Mandatory = $true)] $StaticCommand)
+
+    $arguments = @($StaticCommand.arguments)
+    $toolchainIndexes = @(for ($index = 0; $index -lt $arguments.Count; $index++) {
+        if ([string]$arguments[$index] -ceq '-ToolchainPath') { $index }
+    })
+    $hashIndexes = @(for ($index = 0; $index -lt $arguments.Count; $index++) {
+        if ([string]$arguments[$index] -ceq '-ToolchainSha256') { $index }
+    })
+    if ($toolchainIndexes.Count -ne 1 -or $hashIndexes.Count -ne 1 -or
+        $toolchainIndexes[0] + 1 -ge $arguments.Count -or $hashIndexes[0] + 1 -ge $arguments.Count) {
+        throw 'Review Static command did not bind one toolchain path and digest.'
+    }
+    $toolchainPath = [string]$arguments[$toolchainIndexes[0] + 1]
+    $expectedToolchainSha256 = [string]$arguments[$hashIndexes[0] + 1]
+    Assert-StandardValidationSha256 -Value $expectedToolchainSha256 -Context 'review toolchain'
+    $snapshot = Get-StandardValidationJsonSnapshot -Path $toolchainPath -Context 'review toolchain'
+    if ([string]$snapshot.sha256 -cne $expectedToolchainSha256) {
+        throw 'Review toolchain changed after adapter resolution.'
+    }
+    $scannerPath = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorPath')
+    $scannerSha256 = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorSha256')
+    Assert-StandardValidationSha256 -Value $scannerSha256 -Context 'review scanner executable'
+    if ((Get-StandardValidationFileSha256 -Path $scannerPath -Context 'review scanner executable') -cne $scannerSha256) {
+        throw 'Review scanner executable changed after toolchain resolution.'
+    }
+    return [pscustomobject][ordered]@{
+        source = 'NVIDIA/SkillSpector'
+        version = '2.12.0'
+        executableSha256 = $scannerSha256
+    }
+}
+
+function Test-StandardValidationPr12IncompleteStaticEvent {
+    param([Parameter(Mandatory = $true)] $Stage)
+    try {
+        $events = @($Stage.events)
+        if ($events.Count -ne 1) { return $false }
+        $event = $events[0]
+        if ([string]$event.stageId -cne 'skillspector-static' -or
+            [string]$event.toolId -cne 'staticAnalyzer' -or
+            [string]$event.status -cne 'failed' -or [int]$event.exitCode -ne 1 -or
+            -not [bool]$event.cleanedUp) { return $false }
+        $raw = Get-StandardValidationJson -Path ([string]$event.outputPath) -Context 'review Static raw event'
+        $process = Get-StandardValidationProperty -Object $raw -Name 'process'
+        return [string](Get-StandardValidationProperty -Object $raw -Name 'eventId') -ceq [string]$event.eventId -and
+            [string](Get-StandardValidationProperty -Object $raw -Name 'candidateId') -ceq [string]$event.candidateId -and
+            [string](Get-StandardValidationProperty -Object $process -Name 'status') -ceq 'failed' -and
+            [bool](Get-StandardValidationProperty -Object $process -Name 'cleanedUp') -and
+            ([string](Get-StandardValidationProperty -Object $process -Name 'stderr')).Trim() -ceq
+                "SkillSpector did not prove complete static analysis for 'manage-task-handoff'."
+    }
+    catch { return $false }
+}
+
 function New-StandardValidationProposedSourceMergeExceptionDecision {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -4634,13 +4691,16 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         [Parameter(Mandatory = $true)] $ScannerReceipt,
         [Parameter(Mandatory = $true)] $SupplementalEvidence,
         [switch] $DevelopmentHarness,
+        [switch] $ObservedSupervisorExecution,
         [switch] $TestOnlyFixtureScope
     )
 
     # This draft only establishes technical eligibility for a later human policy review.
     # It is deliberately not called by the canonical runner or any required-status route.
     $reasons = New-Object 'System.Collections.Generic.List[string]'
-    if (-not $TestOnlyFixtureScope) { [void]$reasons.Add('exception-supplemental-execution-not-supervised') }
+    if (-not $TestOnlyFixtureScope -and -not ($DevelopmentHarness -and $ObservedSupervisorExecution)) {
+        [void]$reasons.Add('exception-supplemental-execution-not-supervised')
+    }
     $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
     $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
     $candidateId = [string](Get-StandardValidationProperty -Object $candidate -Name 'candidateId')
@@ -4745,9 +4805,19 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         }
         $scanner = $scannerSnapshot.value
         $scannerSkill = Get-StandardValidationProperty -Object $scanner -Name 'skill'
+        $scannerSource = [string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')
+        $scannerSourceMatches = if ($TestOnlyFixtureScope) {
+            (Test-StandardValidationPathWithin -Path $scannerSource -Root $skillRoot -IncludeRoot) -and
+            (Test-StandardValidationPathWithin -Path $skillRoot -Root $scannerSource -IncludeRoot)
+        }
+        else {
+            # The fixed, digest-pinned report was produced from the exact PR12
+            # archive on Windows. Its absolute scan path is historical evidence,
+            # not the current runner's platform-specific candidate location.
+            $scannerSource.Replace('\', '/').EndsWith('/pr12-1ad-archive-candidate/candidate/skills/manage-task-handoff', [StringComparison]::Ordinal)
+        }
         if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $scopeSkillId -or
-            -not (Test-StandardValidationPathWithin -Path ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')) -Root $skillRoot -IncludeRoot) -or
-            -not (Test-StandardValidationPathWithin -Path $skillRoot -Root ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')) -IncludeRoot)) {
+            -not $scannerSourceMatches) {
             [void]$reasons.Add('exception-scanner-skill-identity-invalid')
         }
         $components = Get-StandardValidationProperty -Object $scanner -Name 'components'
@@ -4797,10 +4867,17 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
                 $otherIssues = Get-StandardValidationProperty -Object $otherReport -Name 'issues'
                 $otherPaths = @($otherComponents | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'path') } | Sort-Object)
                 $otherInventoryPaths = @($otherInventory | ForEach-Object { [string]$_.path } | Sort-Object)
+                $otherSource = [string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')
+                $otherSourceMatches = if ($TestOnlyFixtureScope) {
+                    (Test-StandardValidationPathWithin -Path $otherSource -Root $otherRoot -IncludeRoot) -and
+                    (Test-StandardValidationPathWithin -Path $otherRoot -Root $otherSource -IncludeRoot)
+                }
+                else {
+                    $otherSource.Replace('\', '/').EndsWith("/pr12-1ad-archive-candidate/candidate/skills/$expectedSkillId", [StringComparison]::Ordinal)
+                }
                 if ([string]$otherSnapshot.sha256 -cne $expectedDigest -or
                     [string](Get-StandardValidationProperty -Object $otherSkill -Name 'name') -cne $expectedSkillId -or
-                    -not (Test-StandardValidationPathWithin -Path ([string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')) -Root $otherRoot -IncludeRoot) -or
-                    -not (Test-StandardValidationPathWithin -Path $otherRoot -Root ([string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')) -IncludeRoot) -or
+                    -not $otherSourceMatches -or
                     $otherInventory.Count -ne [int]$expectedCount -or $otherComponents.Count -ne [int]$expectedCount -or
                     ($otherPaths -join "`n") -cne ($otherInventoryPaths -join "`n") -or
                     [string](Get-StandardValidationProperty -Object $otherCompleteness -Name 'status') -cne 'complete' -or
@@ -6409,7 +6486,8 @@ function Invoke-StandardValidationRun {
         [string] $HumanApprovalEvidencePath,
         [string] $PublishInstallEvidencePath,
         [string] $PostInstallEvidencePath,
-        [bool] $CompleteLifecycle = $false
+        [bool] $CompleteLifecycle = $false,
+        [bool] $SourceMergeExceptionReview = $false
     )
 
     $script:StandardValidationAuthorityEvidence = $null
@@ -6451,11 +6529,17 @@ function Invoke-StandardValidationRun {
     $semanticRequiredSources = New-Object 'System.Collections.Generic.List[string]'
     $semanticReplayLedger = @{}
     $repositoryTestEvidence = @()
+    $supplementalReviewEvidence = @()
+    $supplementalReviewObserved = $false
+    $supplementalReviewFailure = $null
     $authorityBinding = $null
     $launchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 
     try {
+        if ($SourceMergeExceptionReview -and -not $DevelopmentHarness) {
+            throw 'INVALID|Source merge exception review is limited to the non-release development harness.'
+        }
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
         Assert-StandardValidationSourceRepository -Value $SourceRepository
         Assert-StandardValidationRevision -Value $SourceRevision -Context 'SourceRevision'
@@ -7095,6 +7179,63 @@ function Invoke-StandardValidationRun {
                 Complete-StandardValidationStage -Stage $remainingStage -Status 'not-applicable' -Reason 'A prior required consent, approval, or barrier was blocked.'
             }
         }
+        # Review-only supplemental execution is deliberately outside the ten
+        # canonical stages. It reuses the resolved adapter commands, process
+        # containment, candidate snapshot, receipt, raw event, and cleanup
+        # checks. A different Static failure never dispatches candidate tests.
+        if ($SourceMergeExceptionReview) {
+            $reviewScopeMatches = $DevelopmentHarness -and
+                $SourceRepository -ceq 'https://github.com/SyuanTsai/Skill-General.git' -and
+                $SourceRevision -ceq '1adba1e5fb5885d963e1e829f7044d814665ba73' -and
+                $expectedCandidateContentSha256 -ceq 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14' -and
+                $failureState -ceq 'FAILED' -and
+                $failureMessage -ceq "skillspector-static/staticAnalyzer process status was 'failed'." -and
+                $stages[2].status -ceq 'passed' -and $stages[3].status -ceq 'failed' -and
+                (Test-StandardValidationPr12IncompleteStaticEvent -Stage $stages[3]) -and
+                $stages[4].status -ceq 'not-run' -and
+                @($adapterResult.repositoryTests).Count -eq 2 -and
+                $adapterResult.repositoryTests[0].id -ceq 'repository-test-general' -and
+                $adapterResult.repositoryTests[0].kind -ceq 'general' -and
+                $adapterResult.repositoryTests[1].id -ceq 'repository-test-pester' -and
+                $adapterResult.repositoryTests[1].kind -ceq 'pester'
+            if (-not $reviewScopeMatches) {
+                $supplementalReviewFailure = 'exception-review-scope-or-static-failure-invalid'
+            }
+            else {
+                try {
+                    foreach ($test in @($adapterResult.repositoryTests)) {
+                        $invocation = Invoke-StandardValidationCommandAndRecord `
+                            -CommandSpec $test.command -RunRoot $runRoot -ChildWorkingRoot $childWorkingRoot `
+                            -StageId 'supplemental-repository-tests' -ToolId $test.id -CandidateId $candidateId `
+                            -SnapshotRoot $snapshotRoot -ExpectedSnapshotContentSha256 $expectedCandidateContentSha256 `
+                            -SkillsRoot $snapshotSkillsRoot -ActiveSkillsText $activeSkillsText `
+                            -OriginalCandidateRoot $originalCandidateRoot -ExpectedCandidateContentSha256 $expectedCandidateContentSha256 `
+                            -CandidateArchivePath $candidateArchivePathForChildren -ExpectedCandidateArchiveSha256 $candidateArchiveSha256ForChildren `
+                            -CandidateAcquisitionEvidencePath $candidateAcquisitionEvidencePathForChildren `
+                            -ExpectedCandidateAcquisitionEvidenceSha256 $candidateAcquisitionEvidenceSha256ForChildren `
+                            -AdapterPath $adapterFull -ExpectedAdapterSha256 $expectedAdapterSha256 `
+                            -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath `
+                            -OutputReservationStream $outputReservationStream -OutputReservationPath $outputFull `
+                            -OutputReservationToken $outputReservationToken
+                        $typed = Assert-StandardValidationRepositoryTestEnvelope -Envelope $invocation.envelope -Context "supplemental test '$($test.id)'"
+                        $record = [pscustomobject][ordered]@{
+                            toolRole = if ($test.kind -ceq 'pester') { 'pester' } else { 'domain' }
+                            toolId = [string]$test.id; eventId = [string]$invocation.event.eventId
+                            candidateId = [string]$candidateId; outputSha256 = [string]$invocation.event.outputSha256
+                            testInventory = @($typed.testInventory); testResult = $typed.testResult
+                            domainAdapterResult = $typed.domainAdapterResult
+                        }
+                        $supplementalReviewEvidence += [pscustomobject][ordered]@{
+                            kind = [string]$test.kind; event = $invocation.event; record = $record
+                        }
+                    }
+                    $supplementalReviewObserved = $true
+                }
+                catch {
+                    $supplementalReviewFailure = "exception-supplemental-execution-failed: $($_.Exception.Message)"
+                }
+            }
+        }
     }
     finally {
         try {
@@ -7128,6 +7269,54 @@ function Invoke-StandardValidationRun {
             -RepositoryTestEvidence $repositoryTestEvidence `
             -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
         $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
+        if ($SourceMergeExceptionReview -and $null -ne $candidateEvidence) {
+            $policy = $null
+            try {
+                $reviewEvidenceRoot = Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/evidence/pr12-1adba1e'
+                $policy = Get-StandardValidationJson -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/pr12-source-merge-exception-proposal.json') -Context 'PR12 review policy'
+                $scannerReceipt = Get-StandardValidationPr12ReviewScannerReceipt -StaticCommand $adapterResult.commands.staticAnalyzer
+                $otherReportPaths = @(
+                    'investigate-datadog-logs', 'manage-notion-ai-memory', 'plan-production-change',
+                    'review-agent-skills', 'verify-data-access-performance' | ForEach-Object {
+                        Join-Path $reviewEvidenceRoot "PR12-1adba1e-archive-official-$_.json"
+                    }
+                )
+                $proposal = New-StandardValidationProposedSourceMergeExceptionDecision `
+                    -Report $finalEvidence -Policy $policy -CandidateRoot $originalCandidateRoot `
+                    -ExpectedSourceRevision $SourceRevision -PullRequestNumber 12 `
+                    -ScannerReportPath (Join-Path $reviewEvidenceRoot 'PR12-1adba1e-archive-official-scan-for-policy.json') `
+                    -ExpectedScannerReportSha256 ([string]$policy.scannerReportSha256) `
+                    -OtherScannerReportPaths $otherReportPaths -ScannerReceipt $scannerReceipt `
+                    -SupplementalEvidence $supplementalReviewEvidence -DevelopmentHarness `
+                    -ObservedSupervisorExecution:$supplementalReviewObserved
+            }
+            catch {
+                $proposal = [ordered]@{
+                    schemaVersion = 1; contract = 'proposed-source-merge-exception-v1'; status = 'rejected'
+                    sourceRepository = [string]$candidateEvidence.sourceRepository
+                    sourceRevision = [string]$candidateEvidence.sourceRevision
+                    candidateId = [string]$candidateEvidence.candidateId
+                    contentSha256 = [string]$candidateEvidence.contentSha256
+                    scannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8'
+                    otherScannerReportSha256 = @(
+                        '70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3',
+                        '32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e',
+                        '194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9',
+                        'b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f',
+                        '3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed'
+                    )
+                    canonicalState = [string]$finalEvidence.state; canonicalExitCode = [int]$finalEvidence.exitCode
+                    sourceConformanceStatus = [string]$sourceConformance.status
+                    supplementalStage = 'supplemental-repository-tests'; releaseEligible = $false
+                    testFixtureOnly = $false; failureReasons = @('exception-review-decision-error')
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($supplementalReviewFailure)) {
+                $proposal.status = 'rejected'
+                $proposal.failureReasons = @($proposal.failureReasons) + @($supplementalReviewFailure)
+            }
+            $finalEvidence | Add-Member -NotePropertyName sourceMergeExceptionProposal -NotePropertyValue $proposal -Force
+        }
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
                 Assert-StandardValidationOutputReservation `
@@ -7271,6 +7460,7 @@ $result = Invoke-StandardValidationRun `
     -HumanApprovalEvidencePath $HumanApprovalEvidencePath `
     -PublishInstallEvidencePath $PublishInstallEvidencePath `
     -PostInstallEvidencePath $PostInstallEvidencePath `
-    -CompleteLifecycle ([bool]$CompleteLifecycle)
+    -CompleteLifecycle ([bool]$CompleteLifecycle) `
+    -SourceMergeExceptionReview ([bool]$SourceMergeExceptionReview)
 $result | ConvertTo-Json -Depth 100
 exit ([int]$result.exitCode)

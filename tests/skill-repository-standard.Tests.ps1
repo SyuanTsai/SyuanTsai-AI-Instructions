@@ -3085,7 +3085,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $released = Copy-TestJsonObject -Value $proposalDecision
         $released.releaseEligible = $true
         Assert-False (Test-AuthorityJsonSchemaValue -Value $released -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposed source exception cannot authorize release.'
-        Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 1 'The technical proposal helper must not be called by the canonical runner.'
+        Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 2 'The review-only runner must use the technical proposal helper exactly once.'
+        Assert-Match $runner 'if \(\$SourceMergeExceptionReview -and \$null -ne \$candidateEvidence\)' 'The proposal must be absent from ordinary canonical validation.'
         . $runnerPath `
             -CandidateRoot (Join-Path $TestDrive 'schema-candidate') `
             -AdapterPath (Join-Path $TestDrive 'schema-adapter.json') `

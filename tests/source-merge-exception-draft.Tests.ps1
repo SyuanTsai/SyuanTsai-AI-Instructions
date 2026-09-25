@@ -244,4 +244,61 @@ Describe 'Proposed PR12 source merge exception' {
         $fixture.Report.stages[8].status = 'passed'
         Assert-Draft ((Invoke-DraftDecision -Fixture $fixture).status -ceq 'rejected') 'Publish/install cannot be marked passed after Static failed.'
     }
+
+    # A caller cannot turn review observation into production authorization.
+    It 'UnitT60_rejects_unsupervised_production_even_with_observation_claim' {
+        $fixture = New-DraftFixture -Root (Join-Path $TestDrive 'observation-claim')
+        $result = New-StandardValidationProposedSourceMergeExceptionDecision -Report $fixture.Report `
+            -Policy $fixture.Policy -CandidateRoot $fixture.CandidateRoot -ExpectedSourceRevision $fixture.SourceRevision `
+            -PullRequestNumber 12 -ScannerReportPath $fixture.ScannerReportPath `
+            -ExpectedScannerReportSha256 $fixture.ScannerReportSha256 `
+            -OtherScannerReportPaths $fixture.OtherScannerReportPaths -ScannerReceipt $fixture.Receipt `
+            -SupplementalEvidence $fixture.Supplemental -ObservedSupervisorExecution
+        Assert-Draft ($result.status -ceq 'rejected' -and
+            @($result.failureReasons) -contains 'exception-supplemental-execution-not-supervised') `
+            'A claimed observation cannot authorize a production exception.'
+    }
+
+    # The review runner must derive scanner identity from the frozen toolchain
+    # and the executable bytes, not a caller-supplied receipt string.
+    It 'UnitT70_binds_review_scanner_to_frozen_toolchain_and_executable' {
+        $root = Join-Path $TestDrive 'toolchain'
+        [void](New-Item -ItemType Directory -Path $root -Force)
+        $scannerPath = Join-Path $root 'scanner.bin'
+        [IO.File]::WriteAllText($scannerPath, 'official-fixture', [Text.UTF8Encoding]::new($false))
+        $scannerSha256 = Get-StandardValidationFileSha256 -Path $scannerPath -Context 'fixture scanner'
+        $toolchainPath = Join-Path $root 'toolchain.json'
+        $toolchain = [ordered]@{ skillSpectorPath = $scannerPath; skillSpectorSha256 = $scannerSha256 }
+        [IO.File]::WriteAllText($toolchainPath, ($toolchain | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        $toolchainSha256 = Get-StandardValidationFileSha256 -Path $toolchainPath -Context 'fixture toolchain'
+        $command = [ordered]@{ arguments = @('-ToolchainPath', $toolchainPath, '-ToolchainSha256', $toolchainSha256) }
+        $receipt = Get-StandardValidationPr12ReviewScannerReceipt -StaticCommand $command
+        Assert-Draft ($receipt.executableSha256 -ceq $scannerSha256) 'Review scanner hash was not bound to actual bytes.'
+        [IO.File]::WriteAllText($scannerPath, 'changed-fixture', [Text.UTF8Encoding]::new($false))
+        $rejected = $false
+        try { [void](Get-StandardValidationPr12ReviewScannerReceipt -StaticCommand $command) }
+        catch { $rejected = $true }
+        Assert-Draft $rejected 'Changed scanner bytes must reject the review receipt.'
+    }
+
+    It 'UnitT80_dispatches_review_only_for_the_exact_incomplete_static_event' {
+        $path = Join-Path $TestDrive 'static-raw.json'
+        $eventId = [guid]::NewGuid().ToString()
+        $candidateId = 'a' * 64
+        $raw = [ordered]@{
+            eventId = $eventId; candidateId = $candidateId
+            process = [ordered]@{
+                status = 'failed'; cleanedUp = $true
+                stderr = "SkillSpector did not prove complete static analysis for 'manage-task-handoff'.`n"
+            }
+        }
+        [IO.File]::WriteAllText($path, ($raw | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        $event = [ordered]@{ eventId = $eventId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer'
+            candidateId = $candidateId; status = 'failed'; exitCode = 1; cleanedUp = $true; outputPath = $path }
+        $stage = [ordered]@{ events = @($event) }
+        Assert-Draft (Test-StandardValidationPr12IncompleteStaticEvent -Stage $stage) 'The exact incomplete event should be reviewable.'
+        $raw.process.stderr = 'A different scanner failure.'
+        [IO.File]::WriteAllText($path, ($raw | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        Assert-Draft (-not (Test-StandardValidationPr12IncompleteStaticEvent -Stage $stage)) 'Other Static failures must not dispatch supplemental tests.'
+    }
 }
