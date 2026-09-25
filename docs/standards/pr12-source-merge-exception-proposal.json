@@ -21,6 +21,8 @@
   "scannerSource": "NVIDIA/SkillSpector",
   "scannerVersion": "2.12.0",
   "scannerExecutableSha256": "e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc",
+  "scannerReleaseCommit": "c7958a3268d9498644b22edb75d0f051bbc8cbfc",
+  "scannerReleaseAssetSha256": "62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4",
   "scannerReportSha256": "cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8",
   "otherSkillReports": [
     { "skillId": "investigate-datadog-logs", "componentCount": 2, "sha256": "70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3" },

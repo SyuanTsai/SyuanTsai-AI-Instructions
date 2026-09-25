@@ -4645,14 +4645,35 @@ function Get-StandardValidationPr12ReviewScannerReceipt {
     }
     $scannerPath = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorPath')
     $scannerSha256 = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorSha256')
+    $receiptPath = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorReceiptPath')
+    $receiptSha256 = [string](Get-StandardValidationProperty -Object $snapshot.value -Name 'skillSpectorReceiptSha256')
     Assert-StandardValidationSha256 -Value $scannerSha256 -Context 'review scanner executable'
+    Assert-StandardValidationSha256 -Value $receiptSha256 -Context 'review scanner resolver receipt'
     if ((Get-StandardValidationFileSha256 -Path $scannerPath -Context 'review scanner executable') -cne $scannerSha256) {
         throw 'Review scanner executable changed after toolchain resolution.'
     }
+    $receiptSnapshot = Get-StandardValidationJsonSnapshot -Path $receiptPath -Context 'review scanner resolver receipt'
+    if ([string]$receiptSnapshot.sha256 -cne $receiptSha256) {
+        throw 'Review scanner resolver receipt changed after toolchain resolution.'
+    }
+    $receipt = $receiptSnapshot.value
+    $identity = [string](Get-StandardValidationProperty -Object $receipt -Name 'resolvedIdentity')
+    if ([string](Get-StandardValidationProperty -Object $receipt -Name 'toolName') -cne 'skillspector' -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'source') -cne 'NVIDIA/SkillSpector' -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'resolvedVersion') -cne '2.12.0' -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'status') -cne 'verified' -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'channel') -cne 'latest-stable' -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'executablePath') -cne $scannerPath -or
+        [string](Get-StandardValidationProperty -Object $receipt -Name 'executableSha256') -cne $scannerSha256 -or
+        $identity -cnotmatch '^github:NVIDIA/SkillSpector@v2\.12\.0#commit=c7958a3268d9498644b22edb75d0f051bbc8cbfc#asset=sha256:62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4#' -or
+        -not $identity.Contains("#executableSha256=$scannerSha256#")) {
+        throw 'Review scanner receipt does not bind the official release and current executable.'
+    }
     return [pscustomobject][ordered]@{
-        source = 'NVIDIA/SkillSpector'
-        version = '2.12.0'
+        source = [string]$receipt.source
+        version = [string]$receipt.resolvedVersion
         executableSha256 = $scannerSha256
+        resolvedIdentity = $identity
     }
 }
 
@@ -4899,7 +4920,12 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerVersion') -cne '2.12.0' -or
         [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'source') -cne 'NVIDIA/SkillSpector' -or
         [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'version') -cne '2.12.0' -or
-        [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'executableSha256') -cne $expectedScannerSha256) {
+        ($TestOnlyFixtureScope -and [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'executableSha256') -cne $expectedScannerSha256) -or
+        (-not $TestOnlyFixtureScope -and (
+            [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReleaseCommit') -cne 'c7958a3268d9498644b22edb75d0f051bbc8cbfc' -or
+            [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReleaseAssetSha256') -cne '62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4' -or
+            [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'resolvedIdentity') -cnotmatch '^github:NVIDIA/SkillSpector@v2\.12\.0#commit=c7958a3268d9498644b22edb75d0f051bbc8cbfc#asset=sha256:62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4#' -or
+            [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'executableSha256') -cnotmatch '^[0-9a-f]{64}$'))) {
         [void]$reasons.Add('exception-scanner-provenance-invalid')
     }
     if ($null -ne $scanner) {
