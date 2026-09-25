@@ -3338,6 +3338,14 @@ jobs:
     # Scenario: A signed v2 artifact supplies numeric purpose/keyId values that stringify to the caller's expected strings.
     # Purpose: Keep JSON Schema native-string requirements enforced before comparison in both the verifier and runner.
     It 'InterT192_rejects_numeric_v2_purpose_and_key_id_in_verifier_and_runner' {
+        $readJsonPreservingTimestampStrings = {
+            param([string] $Path)
+            $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+            if ((Get-Command -Name ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+                return ConvertFrom-Json -InputObject $text -DateKind String
+            }
+            return ConvertFrom-Json -InputObject $text
+        }
         $signEvidence = {
             param($Evidence, $Rsa)
             $unsigned = [ordered]@{}
@@ -3364,9 +3372,9 @@ jobs:
             $fixture = New-RunnerFixture -Root (Join-Path $TestDrive "semantic-v2-numeric-$case")
             $artifacts = New-TestRunnerSemanticV2Artifacts -Fixture $fixture
             try {
-                $request = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.RequestPath)
-                $decision = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.DecisionPath)
-                $evidence = ConvertFrom-Json -InputObject (Get-Content -Raw -Encoding UTF8 -LiteralPath $artifacts.EvidencePath)
+                $request = & $readJsonPreservingTimestampStrings $artifacts.RequestPath
+                $decision = & $readJsonPreservingTimestampStrings $artifacts.DecisionPath
+                $evidence = & $readJsonPreservingTimestampStrings $artifacts.EvidencePath
                 $expectedKeyId = $artifacts.KeyId
                 $expectedPurpose = [string]$request.purpose
 
