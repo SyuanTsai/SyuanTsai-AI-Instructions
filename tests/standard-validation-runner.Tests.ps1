@@ -210,6 +210,7 @@ $result | ConvertTo-Json -Depth 10 -Compress
                 repositoryTests = @(
                     [ordered]@{
                         id = 'repository-test-pester'
+                        kind = 'pester'
                         command = $script:PowerShellPath
                         arguments = @('-NoProfile', '-File', $toolScript)
                     }
@@ -1054,8 +1055,9 @@ exit ([int]$LASTEXITCODE)
         Assert-Match (($contract.evidence.semanticEvidence.required -join ';') ) 'findingsSha256' 'Semantic evidence must include a complete findings digest.'
         Assert-Equal ([string]$contract.evidence.sourceConformance.contract) 'standard-source-conformance-v1' 'Source-stage output must use the named normative projection.'
         Assert-Equal ([string]$contract.evidence.sourceConformance.scope) 'source-stages-1-5' 'Source-stage output must declare its bounded scope.'
-        Assert-Match (($contract.evidence.sourceConformance.binding -join ';')) 'event\.cleanedUp=true.*event\.outputPath-within-artifacts\.root.*raw-output-file-event-process-outputSha256-binding' 'Source-stage events must be bound to cleaned-up raw output files under the artifact root.'
-        Assert-Match ([string]$contract.evidence.sourceConformance.pesterCounts) 'total>0.*passed>0.*passed\+skipped=total' 'Source-stage Pester evidence must reject zero or all-skipped runs.'
+        Assert-Match (($contract.evidence.sourceConformance.binding -join ';')) 'event\.cleanedUp=true.*event\.outputPath-within-artifacts\.root.*raw-output-file-event-process-outputSha256-binding.*role derived from validated central adapter dispatch kind.*IDs may be any adapter-safe ID' 'Source-stage events must bind outputs and derive tool roles from validated dispatch kinds.'
+        Assert-Match ([string]$contract.evidence.sourceConformance.pesterCounts) 'general or pester.*general dispatches omit all numeric counts.*every pester dispatch requires complete.*total>0.*passed>0.*passed\+skipped=total.*aggregate all pester dispatches in stable Stage 5 order' 'Source-stage Pester evidence must require counts for each approved Pester dispatch.'
+        Assert-Match ([string]$contract.evidence.sourceConformance.terminalStates) 'canonical PASS requires exitCode=0 and conditional-semantic-scan status=passed or not-applicable.*canonical BLOCKED requires exitCode=10.*status=blocked' 'Source projection must preserve canonical PASS and BLOCKED consistency.'
         Assert-Match ([string]$contract.evidence.sourceConformance.releaseEligibility) 'fixed false.*never authorizes' 'Source-stage output must never authorize production or release.'
         $releaseConditions = ($contract.evidence.releaseEligibility.trueOnlyWhen -join ';')
         Assert-Match $releaseConditions 'stages\[1\.\.5\]\.status=passed' 'Release eligibility must bind the first five canonical stages.'
@@ -1073,9 +1075,12 @@ exit ([int]$LASTEXITCODE)
         $adapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-adapter-v1.schema.json') | ConvertFrom-Json
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         Assert-True (@($adapterSchema.required) -contains 'canonicalValidatorPath') 'The adapter schema must require the canonical validator path.'
+        Assert-True (@($adapterSchema.'$defs'.testSpec.required) -contains 'kind') 'Every repository-test dispatch must declare its validated kind.'
         Assert-True (@($evidenceSchema.'$defs'.adapter.required) -contains 'canonicalValidatorPath') 'The evidence schema must require the canonical validator path in adapter evidence.'
         Assert-True (@($evidenceSchema.required) -contains 'sourceConformance') 'The evidence schema must require the source-stage projection.'
         Assert-Equal ([string]$evidenceSchema.'$defs'.sourceConformance.properties.releaseEligible.const) 'False' 'Source-stage evidence must hard-code releaseEligible=false.'
+        Assert-True (@($evidenceSchema.'$defs'.sourceConformance.properties.pester.required) -contains 'events') 'Pester projection must enumerate count-bearing dispatch evidence.'
+        Assert-True (@($evidenceSchema.'$defs'.sourceConformance.properties.canonicalValidation.allOf).Count -ge 2) 'Nested canonical validation must encode PASS and BLOCKED Stage 6 consistency.'
         Assert-True (@($evidenceSchema.'$defs'.authority.required) -contains 'semanticBridgeModuleSha256') 'Authority evidence must bind the semantic bridge module hash.'
         Assert-True (@($evidenceSchema.'$defs'.authority.required) -contains 'semanticBridgeSchemaSha256') 'Authority evidence must bind the semantic bridge schema hash.'
         Assert-True (@($evidenceSchema.'$defs'.launchBinding.properties.status.enum) -contains 'unverified-production') 'The evidence schema must distinguish rejected production launch bindings from development harness runs.'
@@ -3665,10 +3670,16 @@ Describe 'source conformance projection' {
 
         function Assert-SourceProjectionFailure {
             param($InputValue, [string] $ExpectedReason)
-            $projection = New-StandardValidationSourceConformanceResult `
-                -Report $InputValue.report `
-                -ExpectedSourceRevision ('a' * 40) `
-                -RepositoryTestEvidence $InputValue.tests
+            try {
+                $projection = New-StandardValidationSourceConformanceResult `
+                    -Report $InputValue.report `
+                    -ExpectedSourceRevision ('a' * 40) `
+                    -RepositoryTestEvidence $InputValue.tests `
+                    -RepositoryTestDispatches $InputValue.dispatches
+            }
+            catch {
+                throw "Projection threw while testing '$ExpectedReason': $($_.Exception.Message) $($_.ScriptStackTrace)"
+            }
             Assert-SourceProjectionEqual $projection.status 'failed' "Projection must reject '$ExpectedReason'."
             if (@($projection.failureReasons) -notcontains $ExpectedReason) { throw "Projection must identify '$ExpectedReason'." }
             if ([bool]$projection.releaseEligible) { throw 'A failed source projection must remain release-ineligible.' }
@@ -3708,6 +3719,42 @@ Describe 'source conformance projection' {
             }
         }
 
+        function New-SourceProjectionRepositoryTestRecord {
+            param(
+                [Parameter(Mandatory = $true)] $Event,
+                [Parameter(Mandatory = $true)][string] $ToolId,
+                [Parameter(Mandatory = $true)][array] $Inventory,
+                [Parameter(Mandatory = $true)] $TestResult,
+                [ValidateSet('general', 'pester')][string] $Kind = 'pester'
+            )
+            $domainResult = [ordered]@{ status = 'passed'; decision = 'PASS'; result = "fixture:$ToolId" }
+            $envelope = [ordered]@{
+                schemaVersion = 1
+                status = 'passed'
+                decision = 'PASS'
+                candidateIdentity = [string]$Event.candidateId
+                testInventory = @($Inventory)
+                testResult = $TestResult
+                domainAdapterResult = $domainResult
+            }
+            $stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+            $rawOutput = Get-Content -Raw -Encoding UTF8 -LiteralPath $Event.outputPath | ConvertFrom-Json
+            $rawOutput.process.stdout = $stdout
+            $rawOutput.stdout = $stdout
+            [IO.File]::WriteAllText($Event.outputPath, ($rawOutput | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+            $Event.outputSha256 = Get-StandardValidationOutputHash -Stdout $stdout -Stderr ''
+            return [pscustomobject][ordered]@{
+                toolRole = if ($Kind -ceq 'pester') { 'pester' } else { 'domain' }
+                toolId = $ToolId
+                eventId = [string]$Event.eventId
+                candidateId = [string]$Event.candidateId
+                outputSha256 = [string]$Event.outputSha256
+                testInventory = @($Inventory)
+                testResult = $TestResult
+                domainAdapterResult = $domainResult
+            }
+        }
+
         function New-SourceProjectionInput {
             $sourceRevision = 'a' * 40
             $candidateId = 'b' * 64
@@ -3726,10 +3773,10 @@ Describe 'source conformance projection' {
                 (New-SourceProjectionEvent 'package-validation' 'skill-tools' 'beta' $candidateId)
             )
             $stages[3].events = @((New-SourceProjectionEvent 'skillspector-static' 'staticAnalyzer' $null $candidateId))
-            $generalEvent = New-SourceProjectionEvent 'repository-tests' 'repository-test-general' $null $candidateId
-            $pesterEvent = New-SourceProjectionEvent 'repository-tests' 'repository-test-pester' $null $candidateId
-            $outputSha256 = [string]$pesterEvent.outputSha256
-            $stages[4].events = @($generalEvent, $pesterEvent)
+            $generalEvent = New-SourceProjectionEvent 'repository-tests' 'general.dispatch' $null $candidateId
+            $pesterWindowsEvent = New-SourceProjectionEvent 'repository-tests' 'windows-pester' $null $candidateId
+            $pesterLinuxEvent = New-SourceProjectionEvent 'repository-tests' 'linux.pester' $null $candidateId
+            $stages[4].events = @($generalEvent, $pesterWindowsEvent, $pesterLinuxEvent)
             $report = [pscustomobject][ordered]@{
                 schemaVersion = 1
                 evidence = 'standard-validation-evidence-v1'
@@ -3742,16 +3789,17 @@ Describe 'source conformance projection' {
                 candidate = [pscustomobject][ordered]@{ sourceRepository = 'https://example.com/example/skills.git'; sourceRevision = $sourceRevision; baseRevision = 'b' * 40; eventName = 'pull_request'; candidateId = $candidateId; contentSha256 = $contentSha256; activeSkills = @('alpha', 'beta') }
                 stages = $stages
             }
-            $tests = @([pscustomobject][ordered]@{
-                toolId = 'repository-test-pester'
-                eventId = $pesterEvent.eventId
-                candidateId = $candidateId
-                outputSha256 = $outputSha256
-                testInventory = @('tests/alpha.Tests.ps1', 'tests/beta.Tests.ps1')
-                testResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = 3; passed = 2; skipped = 1 }
-                domainAdapterResult = [ordered]@{ status = 'passed'; decision = 'PASS'; result = 'Pester' }
-            })
-            return [pscustomobject][ordered]@{ report = $report; tests = $tests }
+            $tests = @(
+                (New-SourceProjectionRepositoryTestRecord -Event $generalEvent -ToolId 'general.dispatch' -Inventory @('tests/general.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' }) -Kind general)
+                (New-SourceProjectionRepositoryTestRecord -Event $pesterWindowsEvent -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 3; passed = 2; skipped = 1 }))
+                (New-SourceProjectionRepositoryTestRecord -Event $pesterLinuxEvent -ToolId 'linux.pester' -Inventory @('tests/linux.alpha.Tests.ps1', 'tests/linux.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 4; passed = 3; skipped = 1 }))
+            )
+            $dispatches = @(
+                [pscustomobject]@{ id = 'general.dispatch'; kind = 'general' },
+                [pscustomobject]@{ id = 'windows-pester'; kind = 'pester' },
+                [pscustomobject]@{ id = 'linux.pester'; kind = 'pester' }
+            )
+            return [pscustomobject][ordered]@{ report = $report; tests = $tests; dispatches = $dispatches }
         }
     }
 
@@ -3759,19 +3807,30 @@ Describe 'source conformance projection' {
     # Purpose: Prove the source projection preserves candidate and execution evidence without creating release authority.
     It 'InterT13_projects_candidate_bound_source_conformance_and_rejects_incomplete_evidence' {
         $sourceInput = New-SourceProjectionInput
+        $sourceInput.tests = @($sourceInput.tests[2], $sourceInput.tests[0], $sourceInput.tests[1])
         $projection = New-StandardValidationSourceConformanceResult `
             -Report $sourceInput.report `
             -ExpectedSourceRevision ('a' * 40) `
-            -RepositoryTestEvidence $sourceInput.tests
-        if ($projection.status -cne 'passed') { throw "Complete source-stage evidence must pass. failureReasons='$(@($projection.failureReasons) -join ',')'." }
+            -RepositoryTestEvidence $sourceInput.tests `
+            -RepositoryTestDispatches $sourceInput.dispatches
+        if ($projection.status -cne 'passed') {
+            throw "Complete source-stage evidence must pass. failureReasons='$(@($projection.failureReasons) -join ',')'."
+        }
         Assert-SourceProjectionEqual $projection.status 'passed' 'Complete source-stage evidence must pass.'
         Assert-SourceProjectionEqual $projection.scope 'source-stages-1-5' 'The projection must declare its bounded scope.'
         Assert-SourceProjectionEqual $projection.canonicalValidation.state 'BLOCKED' 'Canonical Stage 6 state must remain visible.'
         Assert-SourceProjectionEqual $projection.canonicalValidation.exitCode 10 'Canonical exit code must remain BLOCKED=10.'
         Assert-SourceProjectionEqual $projection.canonicalValidation.stage6Status 'blocked' 'Stage 6 must remain blocked.'
-        Assert-SourceProjectionEqual $projection.pester.total 3 'Pester total count must be carried into the projection.'
-        Assert-SourceProjectionEqual $projection.pester.passed 2 'Pester passed count must be carried into the projection.'
-        Assert-SourceProjectionEqual $projection.pester.testInventoryCount 2 'Pester inventory count must be carried into the projection.'
+        Assert-SourceProjectionEqual $projection.pester.eventCount 2 'Both count-bearing dispatches must be represented.'
+        Assert-SourceProjectionEqual @($projection.pester.events).Count 2 'The projection must enumerate every count-bearing dispatch.'
+        Assert-SourceProjectionEqual $projection.pester.events[0].toolId 'windows-pester' 'The first custom adapter ID must remain bound in Stage 5 order.'
+        Assert-SourceProjectionEqual $projection.pester.events[1].toolId 'linux.pester' 'The second custom adapter ID must remain bound in Stage 5 order.'
+        Assert-SourceProjectionEqual $projection.pester.total 7 'Pester totals must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.passed 5 'Pester passed counts must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.skipped 2 'Pester skipped counts must aggregate all count-bearing dispatches.'
+        Assert-SourceProjectionEqual $projection.pester.testInventoryCount 4 'The Pester inventory count must aggregate count-bearing dispatches.'
+        $case = New-SourceProjectionInput; $case.report.state = 'PASS'; $case.report.exitCode = 0
+        Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
         if ([bool]$projection.releaseEligible -or [bool]$sourceInput.report.releaseEligible) { throw 'Source-only conformance must not authorize release.' }
         Assert-SourceProjectionEqual $sourceInput.report.state 'BLOCKED' 'Projection must not mutate canonical state.'
         Assert-SourceProjectionEqual $sourceInput.report.exitCode 10 'Projection must not mutate canonical exit code.'
@@ -3817,20 +3876,42 @@ Describe 'source conformance projection' {
         Assert-SourceProjectionFailure $case 'candidate-revision-mismatch'
         $case = New-SourceProjectionInput; $case.tests = @()
         Assert-SourceProjectionFailure $case 'pester-evidence-missing-or-ambiguous'
-        $case = New-SourceProjectionInput; $case.tests[0].testResult.total = 0; $case.tests[0].testResult.passed = 0; $case.tests[0].testResult.skipped = 0
+        # Scenario: A general dispatch reports counts while an actual Pester dispatch reports none.
+        # Purpose: A different dispatch must not conceal an unexecuted Pester suite.
+        $case = New-SourceProjectionInput
+        $case.tests[0] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[0] -ToolId 'general.dispatch' -Inventory @('tests/general.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS'; total = 1; passed = 1; skipped = 0 }) -Kind general
+        $case.tests[1] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[1] -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' })
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].testResult.total = [ulong]::MaxValue
+        $case = New-SourceProjectionInput
+        $case.tests[1] = New-SourceProjectionRepositoryTestRecord -Event $case.report.stages[4].events[1] -ToolId 'windows-pester' -Inventory @('tests/windows.alpha.Tests.ps1', 'tests/windows.beta.Tests.ps1') -TestResult ([ordered]@{ status = 'passed'; decision = 'PASS' })
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].testResult.total = 3; $case.tests[0].testResult.passed = 0; $case.tests[0].testResult.skipped = 3
+        $case = New-SourceProjectionInput; $case.dispatches[1].kind = 'unknown'
+        Assert-SourceProjectionFailure $case 'repository-test-dispatch-kind-invalid'
+        $case = New-SourceProjectionInput; $case.dispatches[1].kind = 'general'
+        Assert-SourceProjectionFailure $case 'repository-test-role-or-id-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 0; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 0
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].testResult.Remove('passed')
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = [ulong]::MaxValue
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].testResult.total = 4
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 3; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 3
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].testInventory = @()
-        Assert-SourceProjectionFailure $case 'pester-test-inventory-invalid'
-        $case = New-SourceProjectionInput; $case.tests[0].outputSha256 = 'f' * 64
-        Assert-SourceProjectionFailure $case 'pester-output-binding-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.Remove('passed')
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 4
+        Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
+        $case = New-SourceProjectionInput
+        foreach ($recordIndex in @(1, 2)) {
+            $case.tests[$recordIndex].testResult.total = [int]::MaxValue
+            $case.tests[$recordIndex].testResult.passed = [int]::MaxValue
+            $case.tests[$recordIndex].testResult.skipped = 0
+        }
+        Assert-SourceProjectionFailure $case 'pester-aggregate-counts-out-of-range'
+        $case = New-SourceProjectionInput; $case.tests[1].testInventory = @()
+        Assert-SourceProjectionFailure $case 'pester-test-inventory-or-raw-event-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].outputSha256 = 'f' * 64
+        Assert-SourceProjectionFailure $case 'pester-event-binding-invalid'
+        $case = New-SourceProjectionInput; $case.tests[1].toolRole = 'untrusted-role'
+        Assert-SourceProjectionFailure $case 'repository-test-role-or-id-invalid'
         $case = New-SourceProjectionInput; $case.report.releaseEligible = $true
         Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
 

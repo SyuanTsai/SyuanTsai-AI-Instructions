@@ -3059,6 +3059,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-False ([bool]$contract.execution.candidateCodeBeforeStatic) 'Candidate code must not execute before Static.'
         Assert-Match $runner 'Invoke-StandardValidationProcess' 'Central runner must record actual child process execution.'
         Assert-Match $runner 'Assert-StandardValidationToolEnvelope' 'Central runner must validate actual tool output envelopes.'
+        Assert-Match $runner 'toolRole\s*=\s*if \(\$test\.kind -ceq ''pester''\)' 'Repository-test typed records must derive role from the validated adapter dispatch kind.'
         Assert-Match $runner 'SemanticConsent' 'Central runner must expose explicit semantic consent.'
         Assert-Match $runner 'CompleteLifecycle' 'Central runner must keep release lifecycle evidence separate from validation-only runs.'
 
@@ -3116,9 +3117,13 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             -ArtifactRoot 'unavailable' `
             -LockPath 'unavailable' `
             -DevelopmentHarness $false `
-            -LaunchBinding $schemaBinding |
-            ConvertTo-Json -Depth 50 |
-            ConvertFrom-Json
+            -LaunchBinding $schemaBinding
+        $schemaEvidenceSourceConformance = New-StandardValidationSourceConformanceResult `
+            -Report $schemaEvidence `
+            -ExpectedSourceRevision ('a' * 40) `
+            -RepositoryTestEvidence @()
+        $schemaEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $schemaEvidenceSourceConformance -Force
+        $schemaEvidence = $schemaEvidence | ConvertTo-Json -Depth 50 | ConvertFrom-Json
         Assert-Equal $schemaEvidence.launchBinding.resolutionRunId $schemaRunId.ToString() 'Evidence must serialize the authenticated launch-binding run ID in canonical UUID format.'
         Assert-False ([string]$schemaEvidence.launchBinding.resolutionRunId -match '^[0-9a-f]{32}$') 'Evidence must not expose the internal N-format launch-binding run ID.'
         Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
@@ -3133,6 +3138,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $consistent.state = $terminal.state
             $consistent.exitCode = $terminal.exitCode
             $consistent.releaseEligible = $terminal.releaseEligible
+            $consistent.sourceConformance.canonicalValidation.state = $terminal.state
+            $consistent.sourceConformance.canonicalValidation.exitCode = $terminal.exitCode
+            $consistent.sourceConformance.canonicalValidation.releaseEligible = $terminal.releaseEligible
+            $consistent.sourceConformance.canonicalValidation.stage6Status = if ($terminal.state -ceq 'BLOCKED') { 'blocked' } else { 'not-applicable' }
             if ($terminal.releaseEligible) {
                 $consistent.adapter.mode = 'production'
                 $consistent.candidate.acquisition.status = 'verified'
@@ -3164,6 +3173,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             $contradictory.releaseEligible = $contradiction.releaseEligible
             Assert-AuthoritySchemaInstance -Value $contradictory -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $false -Message "Contradictory '$($contradiction.Name)' validation evidence must fail schema validation."
         }
+        $sourceStage6Contradiction = Copy-TestJsonObject -Value $schemaEvidence
+        $sourceStage6Contradiction.sourceConformance.canonicalValidation.stage6Status = 'blocked'
+        Assert-AuthoritySchemaInstance -Value $sourceStage6Contradiction -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $false -Message 'A canonical PASS projection with a blocked Stage 6 must fail schema validation.'
+        $sourcePesterFailureCount = Copy-TestJsonObject -Value $schemaEvidence
+        $sourcePesterFailureCount.sourceConformance.status = 'passed'
+        $sourcePesterFailureCount.sourceConformance.sourceRevision = 'a' * 40
+        $sourcePesterFailureCount.sourceConformance.candidateId = 'b' * 64
+        $sourcePesterFailureCount.sourceConformance.contentSha256 = 'c' * 64
+        $sourcePesterFailureCount.sourceConformance.canonicalValidation.state = 'PASS'
+        $sourcePesterFailureCount.sourceConformance.canonicalValidation.exitCode = 0
+        $sourcePesterFailureCount.sourceConformance.canonicalValidation.stage6Status = 'not-applicable'
+        $sourcePesterFailureCount.sourceConformance.pester.eventCount = 1
+        $sourcePesterFailureCount.sourceConformance.pester.events = @([pscustomobject][ordered]@{
+                eventId = $schemaRunId.ToString()
+                toolId = 'custom-repository-test'
+                outputSha256 = 'd' * 64
+                testInventoryCount = 1
+                testInventorySha256 = 'e' * 64
+                total = 1
+                passed = 1
+                skipped = 0
+                failed = 0
+            })
+        $sourcePesterFailureCount.sourceConformance.pester.outputSha256 = 'f' * 64
+        $sourcePesterFailureCount.sourceConformance.pester.testInventoryCount = 1
+        $sourcePesterFailureCount.sourceConformance.pester.testInventorySha256 = '1' * 64
+        $sourcePesterFailureCount.sourceConformance.pester.total = 1
+        $sourcePesterFailureCount.sourceConformance.pester.passed = 1
+        $sourcePesterFailureCount.sourceConformance.pester.skipped = 0
+        $sourcePesterFailureCount.sourceConformance.pester.failed = 1
+        Assert-AuthoritySchemaInstance -Value $sourcePesterFailureCount -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $false -Message 'A passed source projection with a nonzero aggregate failed count must fail schema validation.'
     }
 
     # Scenario: A consumer adds a renamed workflow, hook, or public command that runs a component validator directly.

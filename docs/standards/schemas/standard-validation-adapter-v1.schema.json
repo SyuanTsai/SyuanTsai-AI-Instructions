@@ -111,12 +111,13 @@
     "testSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "command", "arguments"],
+      "required": ["id", "kind", "command", "arguments"],
       "properties": {
         "id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
+        "kind": { "enum": ["general", "pester"] },
         "command": {
           "type": "string",
           "minLength": 1

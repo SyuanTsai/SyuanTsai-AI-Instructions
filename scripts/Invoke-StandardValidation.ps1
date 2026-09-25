@@ -354,6 +354,17 @@ function Get-StandardValidationProperty {
     return ,$property.Value
 }
 
+function Test-StandardValidationHasProperty {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()] $Object,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    if ($null -eq $Object) { return $false }
+    if ($Object -is [System.Collections.IDictionary]) { return [bool]$Object.Contains($Name) }
+    return ($null -ne $Object.PSObject -and $null -ne $Object.PSObject.Properties[$Name])
+}
+
 function Get-StandardValidationRequiredProperty {
     param(
         [Parameter(Mandatory = $true)] $Object,
@@ -2553,11 +2564,15 @@ function Assert-StandardValidationAdapter {
     $testIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $testCommands = @()
     foreach ($test in @($repositoryTests)) {
-        $expectedTestProperties = if ($DevelopmentHarness) { @('id', 'command', 'arguments') } else { @('id', 'command', 'arguments', 'provenance') }
+        $expectedTestProperties = if ($DevelopmentHarness) { @('id', 'kind', 'command', 'arguments') } else { @('id', 'kind', 'command', 'arguments', 'provenance') }
         Assert-StandardValidationExactPropertySet -Object $test -Expected $expectedTestProperties -Context 'adapter repository test'
         $testId = Get-StandardValidationRequiredProperty -Object $test -Name 'id' -Context 'adapter repository test'
+        $testKind = Get-StandardValidationRequiredProperty -Object $test -Name 'kind' -Context 'adapter repository test'
         if ($testId -isnot [string] -or [string]$testId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or -not $testIds.Add([string]$testId)) {
             throw 'INVALID|adapter repository test IDs must be unique safe values.'
+        }
+        if ($testKind -isnot [string] -or $testKind -cnotin @('general', 'pester')) {
+            throw 'INVALID|adapter repository test kind must be general or pester.'
         }
         $testSpec = if ($DevelopmentHarness) {
             [pscustomobject][ordered]@{ command = $test.command; arguments = $test.arguments }
@@ -2576,7 +2591,7 @@ function Assert-StandardValidationAdapter {
             -RunId $RunId `
             -ExpectedToolName $expectedToolName `
             -DevelopmentHarness $DevelopmentHarness
-        $testCommands += [pscustomobject][ordered]@{ id = [string]$testId; command = $testCommand }
+        $testCommands += [pscustomobject][ordered]@{ id = [string]$testId; kind = [string]$testKind; command = $testCommand }
     }
     return [pscustomobject][ordered]@{
         mode = [string]$mode
@@ -4063,6 +4078,40 @@ function Test-StandardValidationIntegerRange {
     catch { return $false }
 }
 
+function Get-StandardValidationSourceTestInventoryIdentities {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()] $Inventory,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($Inventory -isnot [array] -or @($Inventory).Count -eq 0) {
+        throw "FAILED|$Context testInventory must be a non-empty array."
+    }
+    $identities = New-Object 'System.Collections.Generic.List[string]'
+    $uniqueIdentities = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($test in @($Inventory)) {
+        $identity = $null
+        if ($test -is [string]) { $identity = [string]$test }
+        elseif ($null -ne $test -and $test -isnot [array]) {
+            foreach ($identityProperty in @('id', 'name', 'path')) {
+                $candidateIdentity = Get-StandardValidationProperty -Object $test -Name $identityProperty
+                if ($candidateIdentity -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$candidateIdentity)) {
+                    $identity = [string]$candidateIdentity
+                    break
+                }
+            }
+        }
+        if ($null -eq $identity -or [string]::IsNullOrWhiteSpace([string]$identity) -or
+            [string]$identity -match '[\x00-\x1F\x7F]' -or -not $uniqueIdentities.Add([string]$identity)) {
+            throw "FAILED|$Context testInventory contains an empty, unsafe, or duplicate test identity."
+        }
+        [void]$identities.Add([string]$identity)
+    }
+    $sortedIdentities = [string[]]$identities.ToArray()
+    [Array]::Sort($sortedIdentities, [StringComparer]::Ordinal)
+    return ,$sortedIdentities
+}
+
 function Test-StandardValidationSourceEventOutputBinding {
     param(
         [Parameter(Mandatory = $true)] $Event,
@@ -4130,7 +4179,8 @@ function New-StandardValidationSourceConformanceResult {
     param(
         [AllowNull()] $Report,
         [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
-        [AllowNull()] $RepositoryTestEvidence
+        [AllowNull()] $RepositoryTestEvidence,
+        [AllowNull()] $RepositoryTestDispatches
     )
 
     $reasons = New-Object 'System.Collections.Generic.List[string]'
@@ -4143,7 +4193,7 @@ function New-StandardValidationSourceConformanceResult {
     $canonicalExitCode = $null
     $canonicalReleaseEligible = $false
     $stageSixStatus = $null
-    $pesterEventId = $null
+    $pesterProjectionEvents = @()
     $inventoryCount = 0
     $pesterTotal = $null
     $pesterPassed = $null
@@ -4203,7 +4253,9 @@ function New-StandardValidationSourceConformanceResult {
         }
         if (($canonicalState -ceq 'BLOCKED' -and
                 (-not (Test-StandardValidationIntegerRange -Value $canonicalExitCode -Minimum 10 -Maximum 10) -or $stageSixStatus -cne 'blocked' -or $canonicalReleaseEligible)) -or
-            ($canonicalState -ceq 'PASS' -and -not (Test-StandardValidationIntegerRange -Value $canonicalExitCode -Minimum 0 -Maximum 0)) -or
+            ($canonicalState -ceq 'PASS' -and
+                (-not (Test-StandardValidationIntegerRange -Value $canonicalExitCode -Minimum 0 -Maximum 0) -or
+                    $stageSixStatus -cnotin @('passed', 'not-applicable'))) -or
             $canonicalState -cnotin @('BLOCKED', 'PASS')) {
             [void]$reasons.Add('canonical-terminal-state-invalid')
         }
@@ -4271,76 +4323,260 @@ function New-StandardValidationSourceConformanceResult {
         }
     }
 
-    $testRecords = @($RepositoryTestEvidence)
-    $pesterRecords = @($testRecords | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'toolId') -ceq 'repository-test-pester' })
+    $testRecords = @()
+    if ($null -ne $RepositoryTestEvidence) { $testRecords = @($RepositoryTestEvidence) }
     $stageFive = if ($stages.Count -ge 5) { $stages[4] } else { $null }
-    $stageFiveEvents = if ($null -ne $stageFive) { Get-StandardValidationProperty -Object $stageFive -Name 'events' } else { @() }
-    $pesterEvents = @($stageFiveEvents | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'toolId') -ceq 'repository-test-pester' })
-    if ($pesterRecords.Count -ne 1 -or $pesterEvents.Count -ne 1) {
+    $stageFiveEvents = @()
+    if ($null -ne $stageFive) {
+        $stageFiveEventValue = Get-StandardValidationProperty -Object $stageFive -Name 'events'
+        if ($null -ne $stageFiveEventValue) { $stageFiveEvents = $stageFiveEventValue }
+    }
+    $orderedTestRecordIndexes = New-Object 'System.Collections.Generic.List[int]'
+    $usedTestRecordIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($stageEvent in $stageFiveEvents) {
+        $stageEventId = [string](Get-StandardValidationProperty -Object $stageEvent -Name 'eventId')
+        $stageEventToolId = [string](Get-StandardValidationProperty -Object $stageEvent -Name 'toolId')
+        for ($recordIndex = 0; $recordIndex -lt $testRecords.Count; $recordIndex++) {
+            $candidateRecord = $testRecords[$recordIndex]
+            if ([string](Get-StandardValidationProperty -Object $candidateRecord -Name 'eventId') -ceq $stageEventId -and
+                [string](Get-StandardValidationProperty -Object $candidateRecord -Name 'toolId') -ceq $stageEventToolId) {
+                [void]$orderedTestRecordIndexes.Add($recordIndex)
+                [void]$usedTestRecordIndexes.Add($recordIndex)
+            }
+        }
+    }
+    for ($recordIndex = 0; $recordIndex -lt $testRecords.Count; $recordIndex++) {
+        if (-not $usedTestRecordIndexes.Contains($recordIndex)) { [void]$orderedTestRecordIndexes.Add($recordIndex) }
+    }
+    $orderedTestRecords = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($recordIndex in $orderedTestRecordIndexes) { [void]$orderedTestRecords.Add($testRecords[$recordIndex]) }
+    $testRecords = $orderedTestRecords.ToArray()
+    $recordEventBindings = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $dispatchKinds = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($dispatch in @($RepositoryTestDispatches)) {
+        $dispatchId = [string](Get-StandardValidationProperty -Object $dispatch -Name 'id')
+        $dispatchKind = [string](Get-StandardValidationProperty -Object $dispatch -Name 'kind')
+        if ($dispatchId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or
+            $dispatchKind -cnotin @('general', 'pester') -or
+            $dispatchKinds.ContainsKey($dispatchId)) {
+            [void]$reasons.Add('repository-test-dispatch-kind-invalid')
+            continue
+        }
+        $dispatchKinds.Add($dispatchId, $dispatchKind)
+    }
+    if ($dispatchKinds.Count -ne $stageFiveEvents.Count) {
+        [void]$reasons.Add('repository-test-dispatch-kind-invalid')
+    }
+    $pesterProjectionEvents = @()
+    $pesterInventoryBindings = New-Object 'System.Collections.Generic.List[string]'
+    $pesterOutputBindings = New-Object 'System.Collections.Generic.List[string]'
+    $pesterTotalAggregate = [decimal]0
+    $pesterPassedAggregate = [decimal]0
+    $pesterSkippedAggregate = [decimal]0
+    $pesterFailedAggregate = [decimal]0
+    $pesterFailedFieldPresent = $false
+
+    if ($testRecords.Count -eq 0 -or $stageFiveEvents.Count -eq 0) {
         [void]$reasons.Add('pester-evidence-missing-or-ambiguous')
     }
-    else {
-        $record = $pesterRecords[0]
-        $pesterEvent = $pesterEvents[0]
+    if ($testRecords.Count -ne $stageFiveEvents.Count) {
+        [void]$reasons.Add('repository-test-record-event-count-mismatch')
+    }
+
+    foreach ($record in $testRecords) {
+        $recordToolId = [string](Get-StandardValidationProperty -Object $record -Name 'toolId')
+        $recordToolRole = [string](Get-StandardValidationProperty -Object $record -Name 'toolRole')
         $recordEventId = [string](Get-StandardValidationProperty -Object $record -Name 'eventId')
         $recordCandidateId = [string](Get-StandardValidationProperty -Object $record -Name 'candidateId')
-        $pesterEventId = [string](Get-StandardValidationProperty -Object $pesterEvent -Name 'eventId')
-        $pesterEventCandidateId = [string](Get-StandardValidationProperty -Object $pesterEvent -Name 'candidateId')
-        $testInventory = Get-StandardValidationProperty -Object $record -Name 'testInventory'
-        $testResult = Get-StandardValidationProperty -Object $record -Name 'testResult'
-        $domainAdapterResult = Get-StandardValidationProperty -Object $record -Name 'domainAdapterResult'
         $recordOutputSha256 = [string](Get-StandardValidationProperty -Object $record -Name 'outputSha256')
+        $dispatchKind = $null
+        if (-not $dispatchKinds.TryGetValue($recordToolId, [ref]$dispatchKind)) {
+            [void]$reasons.Add('repository-test-dispatch-kind-invalid')
+            continue
+        }
+        $expectedRole = if ($dispatchKind -ceq 'pester') { 'pester' } else { 'domain' }
+        if ($recordToolRole -cne $expectedRole -or $recordToolId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+            [void]$reasons.Add('repository-test-role-or-id-invalid')
+        }
+        $matchingEvents = @($stageFiveEvents | Where-Object {
+                [string](Get-StandardValidationProperty -Object $_ -Name 'eventId') -ceq $recordEventId -and
+                [string](Get-StandardValidationProperty -Object $_ -Name 'toolId') -ceq $recordToolId
+            })
+        if ($matchingEvents.Count -ne 1) {
+            [void]$reasons.Add('repository-test-record-event-binding-invalid')
+            continue
+        }
+        if (-not $recordEventBindings.Add($recordEventId)) {
+            [void]$reasons.Add('repository-test-record-event-duplicate')
+            continue
+        }
+        $pesterEvent = $matchingEvents[0]
+        $eventCandidateId = [string](Get-StandardValidationProperty -Object $pesterEvent -Name 'candidateId')
         $eventOutputSha256 = [string](Get-StandardValidationProperty -Object $pesterEvent -Name 'outputSha256')
-        if ($eventOutputSha256 -cmatch '^[0-9a-f]{64}$') { $pesterOutputSha256 = $eventOutputSha256 }
-        $inventoryCount = $testInventory.Count
-        $pesterTotal = Get-StandardValidationProperty -Object $testResult -Name 'total'
-        $pesterPassed = Get-StandardValidationProperty -Object $testResult -Name 'passed'
-        $pesterSkipped = Get-StandardValidationProperty -Object $testResult -Name 'skipped'
-        $pesterFailed = Get-StandardValidationProperty -Object $testResult -Name 'failed'
-        if ($recordEventId -cne $pesterEventId -or $recordCandidateId -cne $candidateId -or $pesterEventCandidateId -cne $candidateId) {
+        if ($recordCandidateId -cne $candidateId -or $eventCandidateId -cne $candidateId -or
+            $recordOutputSha256 -cnotmatch '^[0-9a-f]{64}$' -or $recordOutputSha256 -cne $eventOutputSha256) {
             [void]$reasons.Add('pester-event-binding-invalid')
         }
-        $inventoryIdentities = @()
-        foreach ($test in $testInventory) {
-            $identity = $null
-            if ($test -is [string]) { $identity = [string]$test }
-            else {
-                foreach ($identityProperty in @('id', 'name', 'path')) {
-                    $candidateIdentity = Get-StandardValidationProperty -Object $test -Name $identityProperty
-                    if ($candidateIdentity -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$candidateIdentity)) {
-                        $identity = [string]$candidateIdentity
-                        break
-                    }
+        if (-not (Test-StandardValidationSourceEventOutputBinding -Event $pesterEvent -Report $Report)) {
+            [void]$reasons.Add('pester-event-output-invalid')
+            continue
+        }
+
+        $recordInventory = Get-StandardValidationProperty -Object $record -Name 'testInventory'
+        $recordTestResult = Get-StandardValidationProperty -Object $record -Name 'testResult'
+        $recordDomainResult = Get-StandardValidationProperty -Object $record -Name 'domainAdapterResult'
+        $recordInventoryIdentities = $null
+        $rawInventoryIdentities = $null
+        $rawEnvelope = $null
+        try {
+            $rawEvent = Get-StandardValidationJson `
+                -Path ([string](Get-StandardValidationProperty -Object $pesterEvent -Name 'outputPath')) `
+                -Context 'repository-test raw event'
+            $rawProcess = Get-StandardValidationProperty -Object $rawEvent -Name 'process'
+            $rawStdout = Get-StandardValidationProperty -Object $rawProcess -Name 'stdout'
+            if ($rawStdout -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$rawStdout)) {
+                throw 'Repository-test event stdout is missing its typed tool envelope.'
+            }
+            $rawEnvelope = ([string]$rawStdout).Trim() | ConvertFrom-Json -ErrorAction Stop
+            if ($null -eq $rawEnvelope -or $rawEnvelope -is [array]) {
+                throw 'Repository-test event stdout must contain one typed tool envelope.'
+            }
+            $recordInventoryIdentities = Get-StandardValidationSourceTestInventoryIdentities `
+                -Inventory $recordInventory `
+                -Context 'repository-test typed record'
+            $rawInventoryIdentities = Get-StandardValidationSourceTestInventoryIdentities `
+                -Inventory (Get-StandardValidationProperty -Object $rawEnvelope -Name 'testInventory') `
+                -Context 'repository-test raw event envelope'
+        }
+        catch {
+            [void]$reasons.Add('pester-test-inventory-or-raw-event-invalid')
+            continue
+        }
+        if (($recordInventoryIdentities -join "`n") -cne ($rawInventoryIdentities -join "`n")) {
+            [void]$reasons.Add('pester-record-raw-inventory-mismatch')
+        }
+        if ([string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'candidateIdentity') -cne $candidateId) {
+            [void]$reasons.Add('pester-event-binding-invalid')
+        }
+
+        $rawTestResult = Get-StandardValidationProperty -Object $rawEnvelope -Name 'testResult'
+        $rawDomainResult = Get-StandardValidationProperty -Object $rawEnvelope -Name 'domainAdapterResult'
+        foreach ($binding in @(
+                [pscustomobject]@{ name = 'testResult'; raw = $rawTestResult; typed = $recordTestResult },
+                [pscustomobject]@{ name = 'domainAdapterResult'; raw = $rawDomainResult; typed = $recordDomainResult }
+            )) {
+            foreach ($propertyName in @('status', 'decision')) {
+                $rawValue = Get-StandardValidationProperty -Object $binding.raw -Name $propertyName
+                $typedValue = Get-StandardValidationProperty -Object $binding.typed -Name $propertyName
+                if ($rawValue -isnot [string] -or $typedValue -isnot [string] -or $rawValue -cne $typedValue) {
+                    [void]$reasons.Add('pester-record-raw-result-mismatch')
                 }
             }
-            if ($null -eq $identity -or [string]::IsNullOrWhiteSpace([string]$identity) -or $identity -match '[\x00-\x1F\x7F]') {
-                [void]$reasons.Add('pester-test-inventory-invalid')
+        }
+        foreach ($countName in @('total', 'passed', 'skipped', 'failed')) {
+            $rawHasCount = Test-StandardValidationHasProperty -Object $rawTestResult -Name $countName
+            $typedHasCount = Test-StandardValidationHasProperty -Object $recordTestResult -Name $countName
+            $rawCount = Get-StandardValidationProperty -Object $rawTestResult -Name $countName
+            $typedCount = Get-StandardValidationProperty -Object $recordTestResult -Name $countName
+            if ($rawHasCount -ne $typedHasCount -or ($rawHasCount -and $rawCount -cne $typedCount)) {
+                [void]$reasons.Add('pester-record-raw-count-mismatch')
             }
-            else { $inventoryIdentities += $identity }
         }
-        $sortedInventoryIdentities = [string[]]$inventoryIdentities
-        [Array]::Sort($sortedInventoryIdentities, [StringComparer]::Ordinal)
-        if ($testInventory.Count -eq 0 -or $inventoryIdentities.Count -ne $testInventory.Count -or
-            @($sortedInventoryIdentities | Select-Object -Unique).Count -ne $sortedInventoryIdentities.Count) {
-            [void]$reasons.Add('pester-test-inventory-invalid')
+        foreach ($resultName in @('status', 'decision', 'result')) {
+            $rawHasResult = Test-StandardValidationHasProperty -Object $rawDomainResult -Name $resultName
+            $typedHasResult = Test-StandardValidationHasProperty -Object $recordDomainResult -Name $resultName
+            $rawValue = Get-StandardValidationProperty -Object $rawDomainResult -Name $resultName
+            $typedValue = Get-StandardValidationProperty -Object $recordDomainResult -Name $resultName
+            if ($rawHasResult -ne $typedHasResult -or ($rawHasResult -and $rawValue -cne $typedValue)) {
+                [void]$reasons.Add('pester-record-raw-result-mismatch')
+            }
         }
-        $pesterInventorySha256 = Get-StandardValidationTextSha256 -Value ($sortedInventoryIdentities -join "`n")
-        if ($recordOutputSha256 -cnotmatch '^[0-9a-f]{64}$' -or $recordOutputSha256 -cne $eventOutputSha256) {
-            [void]$reasons.Add('pester-output-binding-invalid')
-        }
-        if ([string](Get-StandardValidationProperty -Object $testResult -Name 'status') -cne 'passed' -or
-            [string](Get-StandardValidationProperty -Object $testResult -Name 'decision') -cne 'PASS' -or
-            [string](Get-StandardValidationProperty -Object $domainAdapterResult -Name 'status') -cne 'passed' -or
-            [string](Get-StandardValidationProperty -Object $domainAdapterResult -Name 'decision') -cne 'PASS') {
+        if ([string](Get-StandardValidationProperty -Object $recordTestResult -Name 'status') -cne 'passed' -or
+            [string](Get-StandardValidationProperty -Object $recordTestResult -Name 'decision') -cne 'PASS' -or
+            [string](Get-StandardValidationProperty -Object $recordDomainResult -Name 'status') -cne 'passed' -or
+            [string](Get-StandardValidationProperty -Object $recordDomainResult -Name 'decision') -cne 'PASS') {
             [void]$reasons.Add('pester-result-not-passed')
         }
-        if (-not (Test-StandardValidationIntegerRange -Value $pesterTotal -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
-            -not (Test-StandardValidationIntegerRange -Value $pesterPassed -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
-            -not (Test-StandardValidationIntegerRange -Value $pesterSkipped -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
-            ([int64]$pesterPassed + [int64]$pesterSkipped) -ne [int64]$pesterTotal -or
-            ($null -ne $pesterFailed -and -not (Test-StandardValidationIntegerRange -Value $pesterFailed -Minimum 0 -Maximum 0))) {
-            [void]$reasons.Add('pester-execution-counts-invalid')
+
+        $countNames = @('total', 'passed', 'skipped', 'failed')
+        $presentCountNames = @($countNames | Where-Object { Test-StandardValidationHasProperty -Object $recordTestResult -Name $_ })
+        if ($dispatchKind -ceq 'general') {
+            if ($presentCountNames.Count -ne 0) { [void]$reasons.Add('repository-test-dispatch-counts-invalid') }
+            continue
         }
+        if ($presentCountNames.Count -eq 0) {
+            [void]$reasons.Add('pester-execution-counts-invalid')
+            continue
+        }
+
+        $pesterTotalValue = Get-StandardValidationProperty -Object $recordTestResult -Name 'total'
+        $pesterPassedValue = Get-StandardValidationProperty -Object $recordTestResult -Name 'passed'
+        $pesterSkippedValue = Get-StandardValidationProperty -Object $recordTestResult -Name 'skipped'
+        $pesterFailedPresent = Test-StandardValidationHasProperty -Object $recordTestResult -Name 'failed'
+        $pesterFailedValue = Get-StandardValidationProperty -Object $recordTestResult -Name 'failed'
+        if (-not (Test-StandardValidationIntegerRange -Value $pesterTotalValue -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value $pesterPassedValue -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value $pesterSkippedValue -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+            [decimal]$pesterPassedValue + [decimal]$pesterSkippedValue -ne [decimal]$pesterTotalValue -or
+            ($pesterFailedPresent -and -not (Test-StandardValidationIntegerRange -Value $pesterFailedValue -Minimum 0 -Maximum 0))) {
+            [void]$reasons.Add('pester-execution-counts-invalid')
+            continue
+        }
+        if ($recordInventoryIdentities.Count -eq 0) {
+            [void]$reasons.Add('pester-test-inventory-invalid')
+            continue
+        }
+
+        $nextTotal = $pesterTotalAggregate + [decimal]$pesterTotalValue
+        $nextPassed = $pesterPassedAggregate + [decimal]$pesterPassedValue
+        $nextSkipped = $pesterSkippedAggregate + [decimal]$pesterSkippedValue
+        $failedCountForDispatch = [decimal]0
+        if ($pesterFailedPresent) { $failedCountForDispatch = [decimal]$pesterFailedValue }
+        $nextFailed = $pesterFailedAggregate + $failedCountForDispatch
+        if ($nextTotal -gt [decimal][int]::MaxValue -or $nextPassed -gt [decimal][int]::MaxValue -or
+            $nextSkipped -gt [decimal][int]::MaxValue -or $nextFailed -gt [decimal][int]::MaxValue) {
+            [void]$reasons.Add('pester-aggregate-counts-out-of-range')
+            continue
+        }
+        $pesterTotalAggregate = $nextTotal
+        $pesterPassedAggregate = $nextPassed
+        $pesterSkippedAggregate = $nextSkipped
+        $pesterFailedAggregate = $nextFailed
+        if ($pesterFailedPresent) { $pesterFailedFieldPresent = $true }
+
+        $perEventInventorySha256 = Get-StandardValidationTextSha256 -Value ($recordInventoryIdentities -join "`n")
+        $pesterProjectionEvents += [pscustomobject][ordered]@{
+            eventId = $recordEventId
+            toolId = $recordToolId
+            outputSha256 = $recordOutputSha256
+            testInventoryCount = $recordInventoryIdentities.Count
+            testInventorySha256 = $perEventInventorySha256
+            total = [long]$pesterTotalValue
+            passed = [long]$pesterPassedValue
+            skipped = [long]$pesterSkippedValue
+            failed = if ($pesterFailedPresent) { [long]$pesterFailedValue } else { $null }
+        }
+        foreach ($identity in $recordInventoryIdentities) {
+            [void]$pesterInventoryBindings.Add("$recordToolId`t$identity")
+        }
+        [void]$pesterOutputBindings.Add("$recordEventId`t$recordToolId`t$recordOutputSha256")
+        $inventoryCount += $recordInventoryIdentities.Count
+    }
+    if ($recordEventBindings.Count -ne $stageFiveEvents.Count) {
+        [void]$reasons.Add('repository-test-record-event-binding-invalid')
+    }
+    if ($pesterProjectionEvents.Count -eq 0) {
+        [void]$reasons.Add('pester-evidence-missing-or-ambiguous')
+    }
+    if ($pesterProjectionEvents.Count -gt 0) {
+        $pesterTotal = [long]$pesterTotalAggregate
+        $pesterPassed = [long]$pesterPassedAggregate
+        $pesterSkipped = [long]$pesterSkippedAggregate
+        $pesterFailed = if ($pesterFailedFieldPresent) { [long]$pesterFailedAggregate } else { $null }
+        $sortedPesterInventoryBindings = [string[]]$pesterInventoryBindings.ToArray()
+        [Array]::Sort($sortedPesterInventoryBindings, [StringComparer]::Ordinal)
+        $pesterInventorySha256 = Get-StandardValidationTextSha256 -Value ($sortedPesterInventoryBindings -join "`n")
+        $pesterOutputSha256 = Get-StandardValidationTextSha256 -Value ($pesterOutputBindings.ToArray() -join "`n")
     }
 
     $checkedStages = @()
@@ -4364,7 +4600,8 @@ function New-StandardValidationSourceConformanceResult {
         contentSha256 = $contentSha256
         checkedStages = $checkedStages
         pester = [ordered]@{
-            eventId = $pesterEventId
+            eventCount = @($pesterProjectionEvents).Count
+            events = @($pesterProjectionEvents)
             outputSha256 = $pesterOutputSha256
             testInventoryCount = $inventoryCount
             testInventorySha256 = $pesterInventorySha256
@@ -6296,6 +6533,7 @@ function Invoke-StandardValidationRun {
                 -Envelope $invocation.envelope `
                 -Context "repository test '$($test.id)'"
             $repositoryTestEvidence += [pscustomobject][ordered]@{
+                toolRole = if ($test.kind -ceq 'pester') { 'pester' } else { 'domain' }
                 toolId = [string]$test.id
                 eventId = [string]$invocation.event.eventId
                 candidateId = [string]$candidateId
@@ -6550,7 +6788,8 @@ function Invoke-StandardValidationRun {
         $sourceConformance = New-StandardValidationSourceConformanceResult `
             -Report $finalEvidence `
             -ExpectedSourceRevision $SourceRevision `
-            -RepositoryTestEvidence $repositoryTestEvidence
+            -RepositoryTestEvidence $repositoryTestEvidence `
+            -RepositoryTestDispatches $adapterResult.repositoryTests
         $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
@@ -6589,7 +6828,8 @@ function Invoke-StandardValidationRun {
                 $sourceConformance = New-StandardValidationSourceConformanceResult `
                     -Report $finalEvidence `
                     -ExpectedSourceRevision $SourceRevision `
-                    -RepositoryTestEvidence $repositoryTestEvidence
+                    -RepositoryTestEvidence $repositoryTestEvidence `
+                    -RepositoryTestDispatches $adapterResult.repositoryTests
                 $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
                 try {
                     $outputReservationStream.Dispose()
@@ -6643,7 +6883,8 @@ function Invoke-StandardValidationRun {
                     $sourceConformance = New-StandardValidationSourceConformanceResult `
                         -Report $finalEvidence `
                         -ExpectedSourceRevision $SourceRevision `
-                        -RepositoryTestEvidence $repositoryTestEvidence
+                        -RepositoryTestEvidence $repositoryTestEvidence `
+                        -RepositoryTestDispatches $adapterResult.repositoryTests
                     $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
                 }
             }
