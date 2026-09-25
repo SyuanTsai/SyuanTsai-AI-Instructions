@@ -328,6 +328,8 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 
 Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source 或 endpoint 偏離 trust anchor，即使 package name 與 channel 不變，整個 canonical validation **MUST** fail closed。
 
+對 Pester，resolver **MUST** 每次從核准的 PowerShell Gallery endpoint 解析 latest stable；中央 authority policy **MUST** 另記錄經審查的該版本 immutable payload SHA-256。若最新穩定版尚無相符核准 identity，validation **MUST** fail closed，不得退回較舊版本。`Save-Module` 取得 run-owned 產物後，resolver **MUST** 在任何 `Test-ModuleManifest`、`Import-Module` 或其他可能初始化下載程式碼的操作前，驗證完整 regular/non-reparse payload 路徑及 bytes 與該 approved identity 相符；canonical hash 只排除 PowerShellGet 每次產生的單一 `PSGetModuleInfo.xml`，不得忽略其他套件檔案。Manifest version、root module、export 與 initialization-hook metadata **MUST** 以 data-only 解析，並在比對前後確認完整 installed closure 未漂移；resolver host **MUST NOT** 載入下載的 Pester。Receipt **MUST** 綁定 approved payload 及 run-owned installed closure；需要實際執行 Pester 的既有 Stage 5／authority test 邊界仍須核對 frozen receipt 與其完整 closure 後按 exact path 載入。任何 payload、metadata、manifest 或 closure 不符都須拒絕並清理 run-owned 安裝根目錄。
+
 Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials；workflow 的 path trigger 與 merge-blocking bridge **MUST** 覆蓋所有 authority policy、resolver、workflow 與 authority-regression 檔案，且 whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 `main` push 上退化成空 range。
 
 對 `SkillSpector`，resolver **MUST**：
