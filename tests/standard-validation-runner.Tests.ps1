@@ -3866,11 +3866,11 @@ Describe 'source conformance projection' {
         Assert-SourceProjectionFailure $case 'repository-tests-event-output-invalid'
         $case = New-SourceProjectionInput; $case.report.stages[5].status = 'not-applicable'
         Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
-        $case = New-SourceProjectionInput; $case.report.exitCode = [ulong]::MaxValue
+        $case = New-SourceProjectionInput; $case.report.exitCode = [uint64]::MaxValue
         Assert-SourceProjectionFailure $case 'canonical-terminal-state-invalid'
-        $case = New-SourceProjectionInput; $case.report.schemaVersion = [ulong]::MaxValue
+        $case = New-SourceProjectionInput; $case.report.schemaVersion = [uint64]::MaxValue
         Assert-SourceProjectionFailure $case 'report-envelope-invalid'
-        $case = New-SourceProjectionInput; $case.report.stages[0].order = [ulong]::MaxValue
+        $case = New-SourceProjectionInput; $case.report.stages[0].order = [uint64]::MaxValue
         Assert-SourceProjectionFailure $case 'source-stage-1-identity-invalid'
         $case = New-SourceProjectionInput; $case.report.candidate.sourceRevision = 'f' * 40
         Assert-SourceProjectionFailure $case 'candidate-revision-mismatch'
@@ -3891,7 +3891,7 @@ Describe 'source conformance projection' {
         Assert-SourceProjectionFailure $case 'repository-test-role-or-id-invalid'
         $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 0; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 0
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
-        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = [ulong]::MaxValue
+        $case = New-SourceProjectionInput; $case.tests[1].testResult.total = [uint64]::MaxValue
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
         $case = New-SourceProjectionInput; $case.tests[1].testResult.total = 3; $case.tests[1].testResult.passed = 0; $case.tests[1].testResult.skipped = 3
         Assert-SourceProjectionFailure $case 'pester-execution-counts-invalid'
