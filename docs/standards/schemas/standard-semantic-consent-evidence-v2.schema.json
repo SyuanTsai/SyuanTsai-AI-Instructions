@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:syuan-tsai-ai-instructions:standard-semantic-consent-evidence:v2",
+  "title": "Standard local semantic consent and evidence v2",
+  "description": "Normative provider-agnostic local bridge contract. It defines deterministic bindings and verifier inputs; it does not select a production provider, account, model, endpoint, signer, secret, environment, ruleset, or protected supervisor.",
+  "oneOf": [
+    { "$ref": "#/$defs/consentRequest" },
+    { "$ref": "#/$defs/consentDecision" },
+    { "$ref": "#/$defs/semanticEvidence" }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "nonEmptyScalar": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "candidateBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "sourceRepository", "sourceRevision", "baseRevision", "sourceTree", "inputInventorySha256"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "sourceRepository": { "type": "string", "format": "uri" },
+        "sourceRevision": { "$ref": "#/$defs/gitObjectId" },
+        "baseRevision": { "$ref": "#/$defs/gitObjectId" },
+        "sourceTree": { "$ref": "#/$defs/gitObjectId" },
+        "inputInventorySha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "authorityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "tree", "snapshotInventorySha256"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "revision": { "$ref": "#/$defs/gitObjectId" },
+        "tree": { "$ref": "#/$defs/gitObjectId" },
+        "snapshotInventorySha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "toolBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolId", "version", "packageSha256", "resolverReceiptSha256"],
+      "properties": {
+        "toolId": { "$ref": "#/$defs/nonEmptyScalar" },
+        "version": { "$ref": "#/$defs/nonEmptyScalar" },
+        "packageSha256": { "$ref": "#/$defs/sha256" },
+        "resolverReceiptSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "launchBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolutionRunId", "launchReceiptSha256", "consumptionSha256"],
+      "properties": {
+        "resolutionRunId": { "$ref": "#/$defs/uuid" },
+        "launchReceiptSha256": { "$ref": "#/$defs/sha256" },
+        "consumptionSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "authority", "tool", "launch"],
+      "properties": {
+        "candidate": { "$ref": "#/$defs/candidateBinding" },
+        "authority": { "$ref": "#/$defs/authorityBinding" },
+        "tool": { "$ref": "#/$defs/toolBinding" },
+        "launch": { "$ref": "#/$defs/launchBinding" }
+      }
+    },
+    "providerRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "adapter", "accountOrTenant", "model", "endpoint", "dataRegion", "retentionPolicy", "trainingPolicy"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/nonEmptyScalar" },
+        "adapter": { "$ref": "#/$defs/nonEmptyScalar" },
+        "accountOrTenant": { "$ref": "#/$defs/nonEmptyScalar" },
+        "model": { "$ref": "#/$defs/nonEmptyScalar" },
+        "endpoint": { "type": "string", "format": "uri" },
+        "dataRegion": { "$ref": "#/$defs/nonEmptyScalar" },
+        "retentionPolicy": { "$ref": "#/$defs/nonEmptyScalar" },
+        "trainingPolicy": { "$ref": "#/$defs/nonEmptyScalar" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "paths", "contentKinds"],
+      "properties": {
+        "description": { "$ref": "#/$defs/nonEmptyScalar" },
+        "paths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyScalar" } },
+        "contentKinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyScalar" } }
+      }
+    },
+    "providerTextItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "contentKind", "byteCount", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyScalar" },
+        "contentKind": { "$ref": "#/$defs/nonEmptyScalar" },
+        "byteCount": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "providerTextInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "sha256", "fileCount", "byteCount"],
+      "properties": {
+        "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/providerTextItem" } },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "fileCount": { "type": "integer", "minimum": 1 },
+        "byteCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "analyzerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sourceSha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyScalar" },
+        "version": { "$ref": "#/$defs/nonEmptyScalar" },
+        "sourceSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "analyzerSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalization", "analyzers", "analyzerSetIdentity"],
+      "properties": {
+        "canonicalization": { "const": "semantic-analyzer-set-v1" },
+        "analyzers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/analyzerEntry" } },
+        "analyzerSetIdentity": { "type": "string", "pattern": "^semantic-analyzer-set-v1:[0-9a-f]{64}$" }
+      },
+      "description": "The verifier rejects duplicate IDs and requires exact ordinal id@version order. The identity is the lowercase SHA-256 of the UTF-8 compact JSON array of exact, sorted id@version strings prefixed with semantic-analyzer-set-v1:."
+    },
+    "authorizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "authorityScope", "authenticationContext"],
+      "properties": {
+        "subject": { "$ref": "#/$defs/nonEmptyScalar" },
+        "authorityScope": { "$ref": "#/$defs/nonEmptyScalar" },
+        "authenticationContext": { "$ref": "#/$defs/nonEmptyScalar" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "fingerprint", "ruleId", "message", "path", "analyzerId"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low", "informational"] },
+        "fingerprint": { "$ref": "#/$defs/nonEmptyScalar" },
+        "ruleId": { "$ref": "#/$defs/nonEmptyScalar" },
+        "message": { "$ref": "#/$defs/nonEmptyScalar" },
+        "path": { "$ref": "#/$defs/nonEmptyScalar" },
+        "analyzerId": { "$ref": "#/$defs/nonEmptyScalar" }
+      }
+    },
+    "consentBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consentRequestSha256", "consentArtifactSha256", "authorizer", "authorizedAt", "expiresAt", "consentGranted"],
+      "properties": {
+        "consentRequestSha256": { "$ref": "#/$defs/sha256" },
+        "consentArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "authorizer": { "$ref": "#/$defs/authorizer" },
+        "authorizedAt": { "$ref": "#/$defs/utcDateTime" },
+        "expiresAt": { "$ref": "#/$defs/utcDateTime" },
+        "consentGranted": { "const": true }
+      }
+    },
+    "providerCallEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workItemId", "index", "idempotencyKey", "path", "contentKind", "textSha256", "byteCount", "analyzerSetIdentity", "plannedAnalyzerIds", "analyzerCoverage", "requestSha256", "responseSha256", "findingsSha256", "status"],
+      "properties": {
+        "workItemId": { "type": "string", "pattern": "^semantic-work-item-[0-9]{4,}$" },
+        "index": { "type": "integer", "minimum": 0 },
+        "idempotencyKey": { "type": "string", "pattern": "^semantic-work-item-v2:[0-9a-f]{64}$" },
+        "path": { "$ref": "#/$defs/nonEmptyScalar" },
+        "contentKind": { "$ref": "#/$defs/nonEmptyScalar" },
+        "textSha256": { "$ref": "#/$defs/sha256" },
+        "byteCount": { "type": "integer", "minimum": 1 },
+        "analyzerSetIdentity": { "type": "string", "pattern": "^semantic-analyzer-set-v1:[0-9a-f]{64}$" },
+        "plannedAnalyzerIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyScalar" } },
+        "analyzerCoverage": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyScalar" } },
+        "requestSha256": { "$ref": "#/$defs/sha256" },
+        "responseSha256": { "$ref": "#/$defs/sha256" },
+        "findingsSha256": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "succeeded" }
+      }
+    },
+    "executionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plannedWorkItemCount", "successfulProviderCallCount", "providerCalls", "providerCallLedgerSha256", "rawGraphLedgerSha256", "rawFindingsLedgerSha256", "findingsSha256"],
+      "properties": {
+        "plannedWorkItemCount": { "type": "integer", "minimum": 1 },
+        "successfulProviderCallCount": { "type": "integer", "minimum": 1 },
+        "providerCalls": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/providerCallEvidence" } },
+        "providerCallLedgerSha256": { "$ref": "#/$defs/sha256" },
+        "rawGraphLedgerSha256": { "$ref": "#/$defs/sha256" },
+        "rawFindingsLedgerSha256": { "$ref": "#/$defs/sha256" },
+        "findingsSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attestationType", "keyId", "algorithm", "signedPayloadSha256", "issuedAt", "signature"],
+      "properties": {
+        "attestationType": { "const": "local-semantic-bridge-v2" },
+        "keyId": { "$ref": "#/$defs/nonEmptyScalar" },
+        "algorithm": { "const": "RSASSA-PKCS1-v1_5-SHA-256" },
+        "signedPayloadSha256": { "$ref": "#/$defs/sha256" },
+        "issuedAt": { "$ref": "#/$defs/utcDateTime" },
+        "signature": { "type": "string", "minLength": 4, "pattern": "^[A-Za-z0-9+/]+={0,2}$" }
+      }
+    },
+    "consentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "artifactType", "artifactClassification", "requestId", "requestedAt", "expiresAt", "bindings", "providerRoute", "purpose", "scope", "providerTextInventory", "analyzerSet", "consentPayloadSha256"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "artifactType": { "const": "semantic-consent-request-v2" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "requestId": { "$ref": "#/$defs/uuid" },
+        "requestedAt": { "$ref": "#/$defs/utcDateTime" },
+        "expiresAt": { "$ref": "#/$defs/utcDateTime" },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "providerRoute": { "$ref": "#/$defs/providerRoute" },
+        "purpose": { "$ref": "#/$defs/nonEmptyScalar" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "providerTextInventory": { "$ref": "#/$defs/providerTextInventory" },
+        "analyzerSet": { "$ref": "#/$defs/analyzerSet" },
+        "consentPayloadSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "consentDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "artifactType", "artifactClassification", "decisionId", "requestId", "consentRequestSha256", "bindings", "providerRoute", "purpose", "scope", "providerTextInventory", "analyzerSet", "authorizer", "authorizedAt", "expiresAt", "consentGranted", "consentDecisionPayloadSha256"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "artifactType": { "const": "semantic-consent-decision-v2" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "decisionId": { "$ref": "#/$defs/uuid" },
+        "requestId": { "$ref": "#/$defs/uuid" },
+        "consentRequestSha256": { "$ref": "#/$defs/sha256" },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "providerRoute": { "$ref": "#/$defs/providerRoute" },
+        "purpose": { "$ref": "#/$defs/nonEmptyScalar" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "providerTextInventory": { "$ref": "#/$defs/providerTextInventory" },
+        "analyzerSet": { "$ref": "#/$defs/analyzerSet" },
+        "authorizer": { "$ref": "#/$defs/authorizer" },
+        "authorizedAt": { "$ref": "#/$defs/utcDateTime" },
+        "expiresAt": { "$ref": "#/$defs/utcDateTime" },
+        "consentGranted": { "const": true },
+        "consentDecisionPayloadSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "semanticEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "artifactType", "artifactClassification", "evidenceId", "generatedAt", "status", "decision", "bindings", "providerRoute", "purpose", "scope", "providerTextInventory", "analyzerSet", "analyzerCoverage", "analyzerCompleteness", "consent", "execution", "findings", "attestation"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "artifactType": { "const": "semantic-evidence-v2" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "evidenceId": { "$ref": "#/$defs/uuid" },
+        "generatedAt": { "$ref": "#/$defs/utcDateTime" },
+        "status": { "const": "passed" },
+        "decision": { "const": "PASS" },
+        "bindings": { "$ref": "#/$defs/bindings" },
+        "providerRoute": { "$ref": "#/$defs/providerRoute" },
+        "purpose": { "$ref": "#/$defs/nonEmptyScalar" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "providerTextInventory": { "$ref": "#/$defs/providerTextInventory" },
+        "analyzerSet": { "$ref": "#/$defs/analyzerSet" },
+        "analyzerCoverage": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyScalar" } },
+        "analyzerCompleteness": { "const": "complete" },
+        "consent": { "$ref": "#/$defs/consentBinding" },
+        "execution": { "$ref": "#/$defs/executionEvidence" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "attestation": { "$ref": "#/$defs/attestation" }
+      }
+    }
+  }
+}

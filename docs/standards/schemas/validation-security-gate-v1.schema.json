@@ -170,6 +170,7 @@
         "semanticTrigger",
         "semanticEvidence",
         "semanticPreflight",
+        "semanticBridgeV2",
         "aiReview",
         "trustAnchors"
       ],
@@ -221,6 +222,9 @@
         },
         "semanticPreflight": {
           "$ref": "#/$defs/semanticPreflight"
+        },
+        "semanticBridgeV2": {
+          "$ref": "#/$defs/semanticBridgeV2"
         },
         "aiReview": {
           "$ref": "#/$defs/aiReview"
@@ -284,6 +288,68 @@
         "requiredFields": { "const": ["candidateId", "inputInventorySha256", "providerTextInventorySha256", "scanOutputSha256", "provider", "purpose", "scope", "activeSkills", "analyzerIdentity", "analyzerCompleteness", "analyzerInventoryVerified", "findings", "findingsSha256", "severityGate", "consentStatus", "signed", "releaseEligible"] },
         "fixedState": { "const": ["analyzerInventoryVerified=false", "consentStatus=pending", "signed=false", "releaseEligible=false"] },
         "nonAuthority": { "const": ["cannot-satisfy-semantic-evidence", "cannot-authorize-release"] }
+      }
+    },
+    "semanticBridgeV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "schemaPath",
+        "artifactClassification",
+        "artifactTypes",
+        "mode",
+        "callbackTrust",
+        "filesystemIsolation",
+        "callerSupplied",
+        "nonSelected",
+        "production",
+        "v1Compatibility"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "schemaPath": { "const": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json" },
+        "artifactClassification": { "const": "local-semantic-bridge-v2" },
+        "artifactTypes": { "const": ["semantic-consent-request-v2", "semantic-consent-decision-v2", "semantic-evidence-v2"] },
+        "mode": { "const": "development-harness-local-simulation-only" },
+        "callbackTrust": { "const": "caller-trusted-local-code" },
+        "filesystemIsolation": { "const": false },
+        "callerSupplied": { "$ref": "#/$defs/semanticBridgeCallerSupplied" },
+        "nonSelected": { "const": ["provider", "accountOrTenant", "model", "endpoint", "signer"] },
+        "production": { "$ref": "#/$defs/semanticBridgeProductionBoundary" },
+        "v1Compatibility": { "$ref": "#/$defs/semanticBridgeV1Compatibility" }
+      }
+    },
+    "semanticBridgeCallerSupplied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerRoute", "verificationKey", "providerCallback", "signerCallback"],
+      "properties": {
+        "providerRoute": { "const": true },
+        "verificationKey": { "const": true },
+        "providerCallback": { "const": true },
+        "signerCallback": { "const": true }
+      }
+    },
+    "semanticBridgeProductionBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "releaseEligible", "failureAction", "pending"],
+      "properties": {
+        "active": { "const": false },
+        "releaseEligible": { "const": false },
+        "failureAction": { "const": "BLOCK" },
+        "pending": { "const": ["protected-trust-anchor", "trusted-supervisor-authorization"] }
+      }
+    },
+    "semanticBridgeV1Compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalAuthentication", "preserved", "v2SatisfiesV1"],
+      "properties": {
+        "canonicalAuthentication": { "const": "trusted-supervisor-signed-semantic-v1" },
+        "preserved": { "const": true },
+        "v2SatisfiesV1": { "const": false }
       }
     },
     "aiReview": {

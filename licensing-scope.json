@@ -320,6 +320,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/standard-validation-adapter-v1.schema.json",
       "license": "Apache-2.0"
     },
@@ -392,15 +396,19 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-FocusedLinuxContainment.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-PesterShardProcess.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
       "license": "Apache-2.0"
     },
     {
       "path": "scripts/Invoke-StandardValidation.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "scripts/Invoke-PesterShardProcess.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -417,6 +425,10 @@
     },
     {
       "path": "scripts/Resolve-StandardValidationTool.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/StandardSemanticBridge.psm1",
       "license": "Apache-2.0"
     },
     {
@@ -665,6 +677,10 @@
     },
     {
       "path": "tests/standard-semantic-assertions.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-semantic-bridge.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

@@ -9,12 +9,15 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-FocusedLinuxContainment.ps1'
       - 'scripts/Invoke-StandardValidation.ps1'
+      - 'scripts/StandardSemanticBridge.psm1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - 'tests/standard-validation-runner.Tests.ps1'
+      - 'tests/standard-semantic-bridge.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -27,12 +30,15 @@ on:
       - 'scripts/Resolve-StandardValidationTool.ps1'
       - 'scripts/Resolve-PythonWheelClosure.py'
       - 'scripts/Invoke-StandardAuthorityGate.ps1'
+      - 'scripts/Invoke-FocusedLinuxContainment.ps1'
       - 'scripts/Invoke-StandardValidation.ps1'
+      - 'scripts/StandardSemanticBridge.psm1'
       - 'scripts/Validate-UpstreamAdapter.ps1'
       - 'tests/skill-repository-standard.Tests.ps1'
       - 'tests/skill-repository-workflows.Tests.ps1'
       - 'tests/standard-validation-resolver-hardening.Tests.ps1'
       - 'tests/standard-validation-runner.Tests.ps1'
+      - 'tests/standard-semantic-bridge.Tests.ps1'
       - '.github/workflows/standards-conformance.yml'
       - '.github/workflows/pr8-powershell-validation.yml'
       - '.github/workflows/syp101-production-smoke.yml'
@@ -43,10 +49,245 @@ permissions:
   contents: read
 
 jobs:
-  latest-stable-authority-regression:
-    name: Standard v1 (latest stable tooling)
+  linux-callback-focused:
+    name: Linux callback containment
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            echo 'User namespace sysctl setup is restricted to GitHub-hosted runners.' >&2
+            exit 1
+          fi
+          echo "runner environment: $RUNNER_ENVIRONMENT"
+          apparmor_key='kernel.apparmor_restrict_unprivileged_userns'
+          if apparmor_before="$(sysctl -n "$apparmor_key" 2>/dev/null)"; then
+            echo "$apparmor_key before setup: $apparmor_before"
+            if [[ "$apparmor_before" == '1' ]]; then
+              sudo -n sysctl -w "$apparmor_key=0"
+              apparmor_expected='0'
+            else
+              apparmor_expected="$apparmor_before"
+            fi
+            apparmor_after="$(sysctl -n "$apparmor_key")"
+            echo "$apparmor_key after setup: $apparmor_after"
+            if [[ "$apparmor_after" != "$apparmor_expected" ]]; then
+              echo "$apparmor_key changed unexpectedly: expected $apparmor_expected, got $apparmor_after" >&2
+              exit 1
+            fi
+          else
+            echo "$apparmor_key is unavailable; leaving it unchanged."
+          fi
+          userns_clone_key='kernel.unprivileged_userns_clone'
+          if userns_clone_before="$(sysctl -n "$userns_clone_key" 2>/dev/null)"; then
+            echo "$userns_clone_key before setup: $userns_clone_before"
+            if [[ "$userns_clone_before" == '0' ]]; then
+              sudo -n sysctl -w "$userns_clone_key=1"
+              userns_clone_expected='1'
+            else
+              userns_clone_expected="$userns_clone_before"
+            fi
+            userns_clone_after="$(sysctl -n "$userns_clone_key")"
+            echo "$userns_clone_key after setup: $userns_clone_after"
+            if [[ "$userns_clone_after" != "$userns_clone_expected" ]]; then
+              echo "$userns_clone_key changed unexpectedly: expected $userns_clone_expected, got $userns_clone_after" >&2
+              exit 1
+            fi
+          else
+            echo "$userns_clone_key is unavailable; leaving it unchanged."
+          fi
+
+      - name: Probe Linux PID namespace containment capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'uname:'
+          uname -a
+          if [[ ! -e /proc/self/ns/pid ]]; then
+            echo '/proc/self/ns/pid is unavailable.' >&2
+            exit 1
+          fi
+          parent_namespace="$(readlink /proc/self/ns/pid)"
+          exec 9</proc/self/mountinfo
+          parent_proc_mount_id="$(awk '/^mnt_id:/ { print $2; exit }' /proc/self/fdinfo/9)"
+          exec 9<&-
+          echo "/proc/self/ns/pid: $parent_namespace"
+          echo "parent procfs mount ID: $parent_proc_mount_id"
+          if [[ -z "$parent_namespace" || -z "$parent_proc_mount_id" ]]; then
+            echo 'Could not identify the parent PID namespace and procfs mount.' >&2
+            exit 1
+          fi
+          unshare_path=''
+          for candidate in /usr/bin/unshare /bin/unshare; do
+            if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+              unshare_path="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$unshare_path" ]]; then
+            echo 'No trusted absolute unshare executable is available.' >&2
+            exit 1
+          fi
+          echo "unshare absolute path: $unshare_path"
+          echo 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc'
+          probe_command="readlink /proc/self/ns/pid; exec 9</proc/self/mountinfo; awk '/^mnt_id:/ { print \$2; exit }' /proc/self/fdinfo/9; exec 9<&-"
+          echo "exact probe command: $unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c '$probe_command'"
+          probe_stderr_path="$(mktemp)"
+          trap 'rm -f "$probe_stderr_path"' EXIT
+          set +e
+          probe_output="$("$unshare_path" --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c "$probe_command" 2>"$probe_stderr_path")"
+          probe_exit=$?
+          set -e
+          probe_stderr="$(cat "$probe_stderr_path")"
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mount_id="$(printf '%s\n' "$probe_output" | awk 'NR == 2 { print; exit }')"
+          echo "namespace probe exit: $probe_exit"
+          echo "namespace probe result: $probe_namespace"
+          echo "private procfs mount ID: $probe_proc_mount_id"
+          echo "namespace probe stderr: ${probe_stderr:-<empty>}"
+          if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" || ! "$probe_proc_mount_id" =~ ^[0-9]+$ ]]; then
+            echo 'Linux PID namespace with private procfs is unavailable; refusing to start callback tests.' >&2
+            exit 1
+          fi
+          if [[ "$probe_namespace" == "$parent_namespace" ]]; then
+            echo 'unshare did not create a distinct PID namespace.' >&2
+            exit 1
+          fi
+          if [[ "$probe_proc_mount_id" == "$parent_proc_mount_id" ]]; then
+            echo 'unshare did not create a private procfs mount.' >&2
+            exit 1
+          fi
+
+      - name: Run required Unix callback containment boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Invoke-FocusedLinuxContainment.ps1
+
+  authority-gate:
+    name: Standard v1 authority gate
+    needs: linux-callback-focused
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            echo 'User namespace sysctl setup is restricted to GitHub-hosted runners.' >&2
+            exit 1
+          fi
+          echo "runner environment: $RUNNER_ENVIRONMENT"
+          apparmor_key='kernel.apparmor_restrict_unprivileged_userns'
+          if apparmor_before="$(sysctl -n "$apparmor_key" 2>/dev/null)"; then
+            echo "$apparmor_key before setup: $apparmor_before"
+            if [[ "$apparmor_before" == '1' ]]; then
+              sudo -n sysctl -w "$apparmor_key=0"
+              apparmor_expected='0'
+            else
+              apparmor_expected="$apparmor_before"
+            fi
+            apparmor_after="$(sysctl -n "$apparmor_key")"
+            echo "$apparmor_key after setup: $apparmor_after"
+            if [[ "$apparmor_after" != "$apparmor_expected" ]]; then
+              echo "$apparmor_key changed unexpectedly: expected $apparmor_expected, got $apparmor_after" >&2
+              exit 1
+            fi
+          else
+            echo "$apparmor_key is unavailable; leaving it unchanged."
+          fi
+          userns_clone_key='kernel.unprivileged_userns_clone'
+          if userns_clone_before="$(sysctl -n "$userns_clone_key" 2>/dev/null)"; then
+            echo "$userns_clone_key before setup: $userns_clone_before"
+            if [[ "$userns_clone_before" == '0' ]]; then
+              sudo -n sysctl -w "$userns_clone_key=1"
+              userns_clone_expected='1'
+            else
+              userns_clone_expected="$userns_clone_before"
+            fi
+            userns_clone_after="$(sysctl -n "$userns_clone_key")"
+            echo "$userns_clone_key after setup: $userns_clone_after"
+            if [[ "$userns_clone_after" != "$userns_clone_expected" ]]; then
+              echo "$userns_clone_key changed unexpectedly: expected $userns_clone_expected, got $userns_clone_after" >&2
+              exit 1
+            fi
+          else
+            echo "$userns_clone_key is unavailable; leaving it unchanged."
+          fi
+
+      - name: Probe Linux PID namespace containment capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'uname:'
+          uname -a
+          if [[ ! -e /proc/self/ns/pid ]]; then
+            echo '/proc/self/ns/pid is unavailable.' >&2
+            exit 1
+          fi
+          parent_namespace="$(readlink /proc/self/ns/pid)"
+          exec 9</proc/self/mountinfo
+          parent_proc_mount_id="$(awk '/^mnt_id:/ { print $2; exit }' /proc/self/fdinfo/9)"
+          exec 9<&-
+          echo "/proc/self/ns/pid: $parent_namespace"
+          echo "parent procfs mount ID: $parent_proc_mount_id"
+          if [[ -z "$parent_namespace" || -z "$parent_proc_mount_id" ]]; then
+            echo 'Could not identify the parent PID namespace and procfs mount.' >&2
+            exit 1
+          fi
+          unshare_path=''
+          for candidate in /usr/bin/unshare /bin/unshare; do
+            if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+              unshare_path="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$unshare_path" ]]; then
+            echo 'No trusted absolute unshare executable is available.' >&2
+            exit 1
+          fi
+          echo "unshare absolute path: $unshare_path"
+          probe_stderr_path="$(mktemp)"
+          trap 'rm -f "$probe_stderr_path"' EXIT
+          probe_command="readlink /proc/self/ns/pid; exec 9</proc/self/mountinfo; awk '/^mnt_id:/ { print \$2; exit }' /proc/self/fdinfo/9; exec 9<&-"
+          echo 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc'
+          echo "exact probe command: $unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c '$probe_command'"
+          set +e
+          probe_output="$("$unshare_path" --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c "$probe_command" 2>"$probe_stderr_path")"
+          probe_exit=$?
+          set -e
+          probe_stderr="$(cat "$probe_stderr_path")"
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mount_id="$(printf '%s\n' "$probe_output" | awk 'NR == 2 { print; exit }')"
+          echo "namespace probe exit: $probe_exit"
+          echo "namespace probe result: $probe_namespace"
+          echo "private procfs mount ID: $probe_proc_mount_id"
+          echo "namespace probe stderr: ${probe_stderr:-<empty>}"
+          if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" || ! "$probe_proc_mount_id" =~ ^[0-9]+$ ]]; then
+            echo 'Linux PID namespace with private procfs is unavailable; refusing to start the authority suite.' >&2
+            exit 1
+          fi
+          if [[ "$probe_namespace" == "$parent_namespace" ]]; then
+            echo 'unshare did not create a distinct PID namespace.' >&2
+            exit 1
+          fi
+          if [[ "$probe_proc_mount_id" == "$parent_proc_mount_id" ]]; then
+            echo 'unshare did not create a private procfs mount.' >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -100,3 +341,24 @@ jobs:
           else
             git diff-tree --check --root -r HEAD
           fi
+
+  latest-stable-authority-regression:
+    name: Standard v1 (latest stable tooling)
+    needs:
+      - linux-callback-focused
+      - authority-gate
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require both isolated validation jobs to succeed
+        shell: pwsh
+        env:
+          FOCUSED_RESULT: ${{ needs.linux-callback-focused.result }}
+          AUTHORITY_RESULT: ${{ needs.authority-gate.result }}
+        run: |
+          if ($env:FOCUSED_RESULT -ne 'success' -or $env:AUTHORITY_RESULT -ne 'success') {
+            throw "Standard v1 required check failed: focused=$env:FOCUSED_RESULT authority=$env:AUTHORITY_RESULT"
+          }
+          Write-Host 'Focused Linux containment and Standard v1 authority validation both succeeded.'

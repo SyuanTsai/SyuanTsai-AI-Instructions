@@ -12,15 +12,164 @@ on:
       - syp-86
       - main
     # This required context intentionally has no paths filter, so every PR
-    # runs the shared gate, including scripts/Validate-UpstreamAdapter.ps1.
+    # runs the shared gate, including the Unix callback regression and
+    # scripts/Validate-UpstreamAdapter.ps1.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  linux-callback-focused:
+    name: Focused callback containment (PowerShell 7 on Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            echo 'User namespace sysctl setup is restricted to GitHub-hosted runners.' >&2
+            exit 1
+          fi
+          echo "runner environment: $RUNNER_ENVIRONMENT"
+          apparmor_key='kernel.apparmor_restrict_unprivileged_userns'
+          if apparmor_before="$(sysctl -n "$apparmor_key" 2>/dev/null)"; then
+            echo "$apparmor_key before setup: $apparmor_before"
+            if [[ "$apparmor_before" == '1' ]]; then
+              sudo -n sysctl -w "$apparmor_key=0"
+              apparmor_expected='0'
+            else
+              apparmor_expected="$apparmor_before"
+            fi
+            apparmor_after="$(sysctl -n "$apparmor_key")"
+            echo "$apparmor_key after setup: $apparmor_after"
+            if [[ "$apparmor_after" != "$apparmor_expected" ]]; then
+              echo "$apparmor_key changed unexpectedly: expected $apparmor_expected, got $apparmor_after" >&2
+              exit 1
+            fi
+          else
+            echo "$apparmor_key is unavailable; leaving it unchanged."
+          fi
+          userns_clone_key='kernel.unprivileged_userns_clone'
+          if userns_clone_before="$(sysctl -n "$userns_clone_key" 2>/dev/null)"; then
+            echo "$userns_clone_key before setup: $userns_clone_before"
+            if [[ "$userns_clone_before" == '0' ]]; then
+              sudo -n sysctl -w "$userns_clone_key=1"
+              userns_clone_expected='1'
+            else
+              userns_clone_expected="$userns_clone_before"
+            fi
+            userns_clone_after="$(sysctl -n "$userns_clone_key")"
+            echo "$userns_clone_key after setup: $userns_clone_after"
+            if [[ "$userns_clone_after" != "$userns_clone_expected" ]]; then
+              echo "$userns_clone_key changed unexpectedly: expected $userns_clone_expected, got $userns_clone_after" >&2
+              exit 1
+            fi
+          else
+            echo "$userns_clone_key is unavailable; leaving it unchanged."
+          fi
+
+      - name: Probe Linux PID namespace containment capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'uname:'
+          uname -a
+          if [[ ! -e /proc/self/ns/pid ]]; then
+            echo '/proc/self/ns/pid is unavailable.' >&2
+            exit 1
+          fi
+          parent_namespace="$(readlink /proc/self/ns/pid)"
+          exec 9</proc/self/mountinfo
+          parent_proc_mount_id="$(awk '/^mnt_id:/ { print $2; exit }' /proc/self/fdinfo/9)"
+          exec 9<&-
+          echo "/proc/self/ns/pid: $parent_namespace"
+          echo "parent procfs mount ID: $parent_proc_mount_id"
+          if [[ -z "$parent_namespace" || -z "$parent_proc_mount_id" ]]; then
+            echo 'Could not identify the parent PID namespace and procfs mount.' >&2
+            exit 1
+          fi
+          unshare_path=''
+          for candidate in /usr/bin/unshare /bin/unshare; do
+            if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+              unshare_path="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$unshare_path" ]]; then
+            echo 'No trusted absolute unshare executable is available.' >&2
+            exit 1
+          fi
+          echo "unshare absolute path: $unshare_path"
+          echo 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc'
+          probe_command="readlink /proc/self/ns/pid; exec 9</proc/self/mountinfo; awk '/^mnt_id:/ { print \$2; exit }' /proc/self/fdinfo/9; exec 9<&-"
+          echo "exact probe command: $unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c '$probe_command'"
+          probe_stderr_path="$(mktemp)"
+          trap 'rm -f "$probe_stderr_path"' EXIT
+          set +e
+          probe_output="$("$unshare_path" --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c "$probe_command" 2>"$probe_stderr_path")"
+          probe_exit=$?
+          set -e
+          probe_stderr="$(cat "$probe_stderr_path")"
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mount_id="$(printf '%s\n' "$probe_output" | awk 'NR == 2 { print; exit }')"
+          echo "namespace probe exit: $probe_exit"
+          echo "namespace probe result: $probe_namespace"
+          echo "private procfs mount ID: $probe_proc_mount_id"
+          echo "namespace probe stderr: ${probe_stderr:-<empty>}"
+          if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" || ! "$probe_proc_mount_id" =~ ^[0-9]+$ ]]; then
+            echo 'Linux PID namespace with private procfs is unavailable; refusing to start callback tests.' >&2
+            exit 1
+          fi
+          if [[ "$probe_namespace" == "$parent_namespace" ]]; then
+            echo 'unshare did not create a distinct PID namespace.' >&2
+            exit 1
+          fi
+          if [[ "$probe_proc_mount_id" == "$parent_proc_mount_id" ]]; then
+            echo 'unshare did not create a private procfs mount.' >&2
+            exit 1
+          fi
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+
+      - name: Run required Unix callback containment boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in focused test step.' }
+          Import-Module $pester.Path -Force
+          $result = Invoke-Pester -Script './tests/standard-semantic-bridge.Tests.ps1' -TestName 'Unix callback containment boundary' -PassThru -Show All
+          if ($null -eq $result) { throw 'Pester did not return a result object for the Unix callback containment boundary.' }
+          Write-Host "UnixCallbackContainment - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount) Pending: $($result.PendingCount) Inconclusive: $($result.InconclusiveCount)"
+          if ([int64]$result.TotalCount -ne 6 -or
+              [int]$result.PassedCount -ne 6 -or
+              [int]$result.FailedCount -ne 0 -or
+              [int]$result.SkippedCount -ne 0 -or
+              [int]$result.PendingCount -ne 0 -or
+              [int]$result.InconclusiveCount -ne 0) {
+            throw 'Unix callback containment boundary did not produce exactly six passing tests.'
+          }
+
   windows-powershell-51:
     name: Pester (Windows PowerShell 5.1)
+    needs: linux-callback-focused
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -72,9 +221,9 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 539
-            ExpectedSkippedCount = 7
-            OuterTimeoutSeconds = 1800
+            ExpectedTotalCount = 597
+            ExpectedSkippedCount = 13
+            OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }
@@ -83,6 +232,7 @@ jobs:
 
   powershell-7:
     name: Pester (PowerShell 7)
+    needs: linux-callback-focused
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -134,9 +284,9 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 539
-            ExpectedSkippedCount = 6
-            OuterTimeoutSeconds = 1800
+            ExpectedTotalCount = 597
+            ExpectedSkippedCount = 12
+            OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }
@@ -145,8 +295,116 @@ jobs:
 
   powershell-7-unix-composition:
     name: Composition (PowerShell 7 on Linux)
+    needs: linux-callback-focused
     runs-on: ubuntu-latest
     steps:
+      - name: Enable unprivileged user namespaces on GitHub-hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
+            echo 'User namespace sysctl setup is restricted to GitHub-hosted runners.' >&2
+            exit 1
+          fi
+          echo "runner environment: $RUNNER_ENVIRONMENT"
+          apparmor_key='kernel.apparmor_restrict_unprivileged_userns'
+          if apparmor_before="$(sysctl -n "$apparmor_key" 2>/dev/null)"; then
+            echo "$apparmor_key before setup: $apparmor_before"
+            if [[ "$apparmor_before" == '1' ]]; then
+              sudo -n sysctl -w "$apparmor_key=0"
+              apparmor_expected='0'
+            else
+              apparmor_expected="$apparmor_before"
+            fi
+            apparmor_after="$(sysctl -n "$apparmor_key")"
+            echo "$apparmor_key after setup: $apparmor_after"
+            if [[ "$apparmor_after" != "$apparmor_expected" ]]; then
+              echo "$apparmor_key changed unexpectedly: expected $apparmor_expected, got $apparmor_after" >&2
+              exit 1
+            fi
+          else
+            echo "$apparmor_key is unavailable; leaving it unchanged."
+          fi
+          userns_clone_key='kernel.unprivileged_userns_clone'
+          if userns_clone_before="$(sysctl -n "$userns_clone_key" 2>/dev/null)"; then
+            echo "$userns_clone_key before setup: $userns_clone_before"
+            if [[ "$userns_clone_before" == '0' ]]; then
+              sudo -n sysctl -w "$userns_clone_key=1"
+              userns_clone_expected='1'
+            else
+              userns_clone_expected="$userns_clone_before"
+            fi
+            userns_clone_after="$(sysctl -n "$userns_clone_key")"
+            echo "$userns_clone_key after setup: $userns_clone_after"
+            if [[ "$userns_clone_after" != "$userns_clone_expected" ]]; then
+              echo "$userns_clone_key changed unexpectedly: expected $userns_clone_expected, got $userns_clone_after" >&2
+              exit 1
+            fi
+          else
+            echo "$userns_clone_key is unavailable; leaving it unchanged."
+          fi
+
+      - name: Probe Linux PID namespace containment capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'uname:'
+          uname -a
+          if [[ ! -e /proc/self/ns/pid ]]; then
+            echo '/proc/self/ns/pid is unavailable.' >&2
+            exit 1
+          fi
+          parent_namespace="$(readlink /proc/self/ns/pid)"
+          exec 9</proc/self/mountinfo
+          parent_proc_mount_id="$(awk '/^mnt_id:/ { print $2; exit }' /proc/self/fdinfo/9)"
+          exec 9<&-
+          echo "/proc/self/ns/pid: $parent_namespace"
+          echo "parent procfs mount ID: $parent_proc_mount_id"
+          if [[ -z "$parent_namespace" || -z "$parent_proc_mount_id" ]]; then
+            echo 'Could not identify the parent PID namespace and procfs mount.' >&2
+            exit 1
+          fi
+          unshare_path=''
+          for candidate in /usr/bin/unshare /bin/unshare; do
+            if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+              unshare_path="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$unshare_path" ]]; then
+            echo 'No trusted absolute unshare executable is available.' >&2
+            exit 1
+          fi
+          echo "unshare absolute path: $unshare_path"
+          probe_stderr_path="$(mktemp)"
+          trap 'rm -f "$probe_stderr_path"' EXIT
+          probe_command="readlink /proc/self/ns/pid; exec 9</proc/self/mountinfo; awk '/^mnt_id:/ { print \$2; exit }' /proc/self/fdinfo/9; exec 9<&-"
+          echo 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc'
+          echo "exact probe command: $unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c '$probe_command'"
+          set +e
+          probe_output="$("$unshare_path" --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c "$probe_command" 2>"$probe_stderr_path")"
+          probe_exit=$?
+          set -e
+          probe_stderr="$(cat "$probe_stderr_path")"
+          probe_namespace="${probe_output%%$'\n'*}"
+          probe_proc_mount_id="$(printf '%s\n' "$probe_output" | awk 'NR == 2 { print; exit }')"
+          echo "namespace probe exit: $probe_exit"
+          echo "namespace probe result: $probe_namespace"
+          echo "private procfs mount ID: $probe_proc_mount_id"
+          echo "namespace probe stderr: ${probe_stderr:-<empty>}"
+          if [[ "$probe_exit" -ne 0 || -z "$probe_namespace" || ! "$probe_proc_mount_id" =~ ^[0-9]+$ ]]; then
+            echo 'Linux PID namespace with private procfs is unavailable; refusing to start the composition suite.' >&2
+            exit 1
+          fi
+          if [[ "$probe_namespace" == "$parent_namespace" ]]; then
+            echo 'unshare did not create a distinct PID namespace.' >&2
+            exit 1
+          fi
+          if [[ "$probe_proc_mount_id" == "$parent_proc_mount_id" ]]; then
+            echo 'unshare did not create a private procfs mount.' >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -202,6 +460,7 @@ jobs:
           else
             git diff-tree --check --root -r HEAD
           fi
+          exit 0
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -216,6 +475,7 @@ jobs:
       - name: Run cross-platform composition and acquisition tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
@@ -240,4 +500,3 @@ jobs:
             if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
             if ([int]$result.PassedCount -ne [int]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
           }
-          exit 0

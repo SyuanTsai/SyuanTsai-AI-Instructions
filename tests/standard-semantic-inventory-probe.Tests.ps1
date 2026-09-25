@@ -11,7 +11,7 @@ Describe 'Installed semantic scanner inventory probe' {
         $script:UnitFile = Join-Path $PSScriptRoot 'semantic-inventory-probe-unit.py'
         $script:InstalledProbe = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Inspect-InstalledSemanticScanner.py'
         $script:ResolverPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
-        $script:FrozenSkillSpectorVersion = '2.11.2'
+        $script:FrozenSkillSpectorVersion = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')
     }
 
     # Scenario: The scanner probe's version, registered/wired set and output-boundary unit cases run in an ordinary Python host.
@@ -27,6 +27,9 @@ Describe 'Installed semantic scanner inventory probe' {
     # Purpose: Exercise the installed graph/import boundary and frozen version through the
     # actual probe CLI; a pure unit suite cannot detect changed package exports or startup.
     It 'InterT11_invokes_the_installed_scanner_probe_with_the_frozen_resolver_python' -Skip:([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process'))) {
+        if ([string]::IsNullOrWhiteSpace($script:FrozenSkillSpectorVersion)) {
+            throw 'Frozen SkillSpector version is required for the installed scanner probe.'
+        }
         $outputPath = Join-Path $TestDrive 'installed-semantic-inventory.json'
         $result = @(& $script:ResolverPython -I -B $script:InstalledProbe `
             --expected-version $script:FrozenSkillSpectorVersion `

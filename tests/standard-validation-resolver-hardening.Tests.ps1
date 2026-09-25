@@ -1066,7 +1066,7 @@ catch {
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
         Assert-Equal $policy.security.semanticPreflight.providerInventoryBinding 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Semantic preflight provider-text inventory binding must remain central.'
-        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+        foreach ($semanticSuite in @('standard-semantic-bridge.Tests.ps1','standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
             Assert-Match $gate ([regex]::Escape($semanticSuite)) "Authority resolution must retain semantic behavior suite '$semanticSuite'."
         }
         Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Authority resolution must route semantic regressions through the frozen SkillSpector Python.'
