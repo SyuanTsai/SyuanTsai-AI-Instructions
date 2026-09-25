@@ -4,9 +4,9 @@
   "status": "proposed",
   "sourceRepository": "https://github.com/SyuanTsai/Skill-General.git",
   "pullRequest": 12,
-  "sourceRevision": "270bea92da0e3fe39d705064565583e2c7247555",
-  "contentSha256": "e745c4864b864d8cd1ad87a5c247aa361fb6c263c15119227a6004c9ed4335e0",
-  "contentSha256Lf": "6070c8635db0568b1c74ea2ff5f12db37298675fc57679511130e72e6291ff39",
+  "sourceRevision": "074c47b603ca851f0d9fea93dd22cabd5b73dbd5",
+  "contentSha256": "f0d1a67a6770a402b3cbce8436019663f8560fdf43d61291606967c2045f8e6e",
+  "contentSha256Lf": "b9205271a0abce2977ab83e4a38672eab4b58d9a5562e0948c4aa2c9302e7ead",
   "scannerReportSourceRevision": "1adba1e5fb5885d963e1e829f7044d814665ba73",
   "skillId": "manage-task-handoff",
   "activeSkills": [

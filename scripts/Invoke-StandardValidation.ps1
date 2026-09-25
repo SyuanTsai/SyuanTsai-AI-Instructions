@@ -4735,9 +4735,9 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     $scopeModuleSha256 = '423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7'
     $scopeModuleSha256Lf = '0aa936024e2c3fe7e169390e87e7edc0df88b2a13036ecdc20512c8095ba7c22'
     $scopeScannerSha256 = 'e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc'
-    $scopeSourceRevision = '270bea92da0e3fe39d705064565583e2c7247555'
-    $scopeContentSha256 = 'e745c4864b864d8cd1ad87a5c247aa361fb6c263c15119227a6004c9ed4335e0'
-    $scopeContentSha256Lf = '6070c8635db0568b1c74ea2ff5f12db37298675fc57679511130e72e6291ff39'
+    $scopeSourceRevision = '074c47b603ca851f0d9fea93dd22cabd5b73dbd5'
+    $scopeContentSha256 = 'f0d1a67a6770a402b3cbce8436019663f8560fdf43d61291606967c2045f8e6e'
+    $scopeContentSha256Lf = 'b9205271a0abce2977ab83e4a38672eab4b58d9a5562e0948c4aa2c9302e7ead'
     $scopeScannerReportSourceRevision = '1adba1e5fb5885d963e1e829f7044d814665ba73'
     $scopeScannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8'
     $scopeScannerReportSha256Lf = 'b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3'
@@ -7235,10 +7235,10 @@ function Invoke-StandardValidationRun {
         if ($SourceMergeExceptionReview) {
             $reviewScopeMatches = $DevelopmentHarness -and
                 $SourceRepository -ceq 'https://github.com/SyuanTsai/Skill-General.git' -and
-                $SourceRevision -ceq '270bea92da0e3fe39d705064565583e2c7247555' -and
+                $SourceRevision -ceq '074c47b603ca851f0d9fea93dd22cabd5b73dbd5' -and
                 $expectedCandidateContentSha256 -cin @(
-                    'e745c4864b864d8cd1ad87a5c247aa361fb6c263c15119227a6004c9ed4335e0',
-                    '6070c8635db0568b1c74ea2ff5f12db37298675fc57679511130e72e6291ff39') -and
+                    'f0d1a67a6770a402b3cbce8436019663f8560fdf43d61291606967c2045f8e6e',
+                    'b9205271a0abce2977ab83e4a38672eab4b58d9a5562e0948c4aa2c9302e7ead') -and
                 $failureState -ceq 'FAILED' -and
                 $failureMessage -ceq "skillspector-static/staticAnalyzer process status was 'failed'." -and
                 $stages[2].status -ceq 'passed' -and $stages[3].status -ceq 'failed' -and
