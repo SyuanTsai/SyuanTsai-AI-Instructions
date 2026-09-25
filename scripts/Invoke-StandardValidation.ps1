@@ -4706,11 +4706,14 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
         [void]$reasons.Add('exception-canonical-state-invalid')
     }
     else {
-        $stageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static', 'repository-tests')
-        for ($index = 0; $index -lt 5; $index++) {
+        $stageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static',
+            'repository-tests', 'conditional-semantic-scan', 'ai-review', 'human-approval',
+            'publish-or-install', 'post-install-verification')
+        for ($index = 0; $index -lt 10; $index++) {
             $expectedStatus = if ($index -lt 3) { 'passed' } elseif ($index -eq 3) { 'failed' } else { 'not-run' }
             if ([string](Get-StandardValidationProperty -Object $stages[$index] -Name 'id') -cne $stageIds[$index] -or
-                [string](Get-StandardValidationProperty -Object $stages[$index] -Name 'status') -cne $expectedStatus) {
+                [string](Get-StandardValidationProperty -Object $stages[$index] -Name 'status') -cne $expectedStatus -or
+                -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $stages[$index] -Name 'order') -Minimum ($index + 1) -Maximum ($index + 1))) {
                 [void]$reasons.Add('exception-canonical-stage-invalid')
             }
         }

@@ -156,7 +156,12 @@
               { "type": "object", "properties": { "id": { "const": "integrity-verification" }, "status": { "const": "passed" } } },
               { "type": "object", "properties": { "id": { "const": "package-validation" }, "status": { "const": "passed" } } },
               { "type": "object", "properties": { "id": { "const": "skillspector-static" }, "status": { "const": "failed" } } },
-              { "type": "object", "properties": { "id": { "const": "repository-tests" }, "status": { "const": "not-run" } } }
+              { "type": "object", "properties": { "id": { "const": "repository-tests" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "conditional-semantic-scan" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "ai-review" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "human-approval" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "publish-or-install" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "post-install-verification" }, "status": { "const": "not-run" } } }
             ]
           }
         }

@@ -232,5 +232,8 @@ Describe 'Proposed PR12 source merge exception' {
         $fixture = New-DraftFixture -Root (Join-Path $TestDrive 'self-approval')
         $fixture.Policy.status = 'approved'
         Assert-Draft ((Invoke-DraftDecision -Fixture $fixture).status -ceq 'rejected') 'Self-asserted policy approval must be rejected.'
+        $fixture = New-DraftFixture -Root (Join-Path $TestDrive 'late-stage')
+        $fixture.Report.stages[8].status = 'passed'
+        Assert-Draft ((Invoke-DraftDecision -Fixture $fixture).status -ceq 'rejected') 'Publish/install cannot be marked passed after Static failed.'
     }
 }
