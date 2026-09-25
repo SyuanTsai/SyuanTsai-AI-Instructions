@@ -4060,7 +4060,7 @@ function Assert-StandardValidationRepositoryTestEnvelope {
 function Test-StandardValidationIntegerValue {
     param([AllowNull()] $Value)
 
-    return ($Value -is [int] -or $Value -is [long] -or $Value -is [short] -or $Value -is [byte] -or $Value -is [uint16] -or $Value -is [uint32] -or $Value -is [uint64])
+    return ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte] -or $Value -is [uint16] -or $Value -is [uint32] -or $Value -is [uint64])
 }
 
 function Test-StandardValidationIntegerRange {
