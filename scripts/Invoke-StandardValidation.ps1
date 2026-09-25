@@ -4661,8 +4661,9 @@ function Get-StandardValidationPr12ReviewScannerReceipt {
     if ([string](Get-StandardValidationProperty -Object $receipt -Name 'toolName') -cne 'skillspector' -or
         [string](Get-StandardValidationProperty -Object $receipt -Name 'source') -cne 'NVIDIA/SkillSpector' -or
         [string](Get-StandardValidationProperty -Object $receipt -Name 'resolvedVersion') -cne '2.12.0' -or
-        [string](Get-StandardValidationProperty -Object $receipt -Name 'status') -cne 'verified' -or
         [string](Get-StandardValidationProperty -Object $receipt -Name 'channel') -cne 'latest-stable' -or
+        [bool](Get-StandardValidationProperty -Object $receipt -Name 'frozenForRun') -ne $true -or
+        [bool](Get-StandardValidationProperty -Object $receipt -Name 'offlineResolutionVerified') -ne $true -or
         [string](Get-StandardValidationProperty -Object $receipt -Name 'executablePath') -cne $scannerPath -or
         [string](Get-StandardValidationProperty -Object $receipt -Name 'executableSha256') -cne $scannerSha256 -or
         $identity -cnotmatch '^github:NVIDIA/SkillSpector@v2\.12\.0#commit=c7958a3268d9498644b22edb75d0f051bbc8cbfc#asset=sha256:62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4#' -or

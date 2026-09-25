@@ -270,7 +270,7 @@ Describe 'Proposed PR12 source merge exception' {
         $receiptPath = Join-Path $root 'scanner-receipt.json'
         $identity = "github:NVIDIA/SkillSpector@v2.12.0#commit=c7958a3268d9498644b22edb75d0f051bbc8cbfc#asset=sha256:62973f6254d30c871480246869f88a01e17dff6f12e9d43010962eb0d7e305f4#executableSha256=$scannerSha256#"
         $resolverReceipt = [ordered]@{ toolName = 'skillspector'; source = 'NVIDIA/SkillSpector';
-            resolvedVersion = '2.12.0'; status = 'verified'; channel = 'latest-stable';
+            resolvedVersion = '2.12.0'; frozenForRun = $true; offlineResolutionVerified = $true; channel = 'latest-stable';
             executablePath = $scannerPath; executableSha256 = $scannerSha256; resolvedIdentity = $identity }
         [IO.File]::WriteAllText($receiptPath, ($resolverReceipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
         $receiptSha256 = Get-StandardValidationFileSha256 -Path $receiptPath -Context 'fixture scanner receipt'
