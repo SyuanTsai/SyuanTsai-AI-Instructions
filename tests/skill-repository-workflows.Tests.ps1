@@ -17,6 +17,7 @@ Describe 'Agent Skill authority workflow contract' {
             'skill-repository-workflows.Tests.ps1'
             'standard-validation-resolver-hardening.Tests.ps1'
             'standard-validation-runner.Tests.ps1'
+            'source-merge-exception-draft.Tests.ps1'
         )
         $script:AuthorityWorkflowDependencies = @(
             'pr8-powershell-validation.yml'
@@ -181,7 +182,7 @@ jobs:
 
         Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
         Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*598').Count) 2 'Both full-suite shard jobs must expect 598 total Pester cases after the source-conformance projection regression was added.'
+        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*603').Count) 2 'Both full-suite shard jobs must include the five proposed-exception rejection tests.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*13').Count) 1 'Windows PowerShell 5.1 must account for the additional skipped Linux procfs case.'
         Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*12').Count) 1 'Windows PowerShell 7 must account for the additional skipped Linux procfs case.'
 
@@ -309,6 +310,10 @@ ino: 1
         $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
+
+        foreach ($workflow in @($standards, $required)) {
+            Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal' 'An unapproved proposal must not route a required source check.'
+        }
 
         foreach ($workflow in @($standards, $required)) {
             $setupPattern = "actions/setup-go@$($script:SetupGoSha)\s+# v7\.0\.0"

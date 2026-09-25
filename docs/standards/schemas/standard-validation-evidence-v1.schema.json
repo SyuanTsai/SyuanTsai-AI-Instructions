@@ -40,7 +40,8 @@
     },
     "failure": { "$ref": "#/$defs/failure" },
     "artifacts": { "$ref": "#/$defs/artifacts" },
-    "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" }
+    "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" },
+    "sourceMergeExceptionProposal": { "$ref": "#/$defs/sourceMergeExceptionProposal" }
   },
   "allOf": [
     {
@@ -129,9 +130,79 @@
           }
         }
       }
+    },
+    {
+      "if": { "type": "object", "required": ["sourceMergeExceptionProposal"] },
+      "then": {
+        "type": "object",
+        "required": ["state", "exitCode", "releaseEligible", "sourceConformance", "stages"],
+        "properties": {
+          "state": { "const": "FAILED" },
+          "exitCode": { "const": 20 },
+          "releaseEligible": { "const": false },
+          "candidate": {
+            "type": "object",
+            "properties": {
+              "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
+              "sourceRevision": { "const": "1adba1e5fb5885d963e1e829f7044d814665ba73" },
+              "contentSha256": { "const": "c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14" }
+            }
+          },
+          "sourceConformance": { "type": "object", "properties": { "status": { "const": "failed" } } },
+          "stages": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "object", "properties": { "id": { "const": "controlled-acquisition" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "integrity-verification" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "package-validation" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "skillspector-static" }, "status": { "const": "failed" } } },
+              { "type": "object", "properties": { "id": { "const": "repository-tests" }, "status": { "const": "not-run" } } }
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "sourceMergeExceptionProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "contract", "status", "sourceRepository", "sourceRevision", "candidateId", "contentSha256", "scannerReportSha256", "otherScannerReportSha256", "canonicalState", "canonicalExitCode", "sourceConformanceStatus", "supplementalStage", "releaseEligible", "testFixtureOnly", "failureReasons"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "contract": { "const": "proposed-source-merge-exception-v1" },
+        "status": { "oneOf": [{ "const": "eligible-for-policy-review" }, { "const": "rejected" }] },
+        "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
+        "sourceRevision": { "const": "1adba1e5fb5885d963e1e829f7044d814665ba73" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "const": "c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14" },
+        "scannerReportSha256": { "const": "cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8" },
+        "otherScannerReportSha256": {
+          "type": "array", "minItems": 5, "maxItems": 5,
+          "prefixItems": [
+            { "const": "70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3" },
+            { "const": "32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e" },
+            { "const": "194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9" },
+            { "const": "b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f" },
+            { "const": "3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed" }
+          ],
+          "items": false
+        },
+        "canonicalState": { "const": "FAILED" },
+        "canonicalExitCode": { "const": 20 },
+        "sourceConformanceStatus": { "const": "failed" },
+        "supplementalStage": { "const": "supplemental-repository-tests" },
+        "releaseEligible": { "const": false },
+        "testFixtureOnly": { "const": false },
+        "failureReasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      },
+      "allOf": [
+        { "if": { "type": "object", "properties": { "status": { "const": "eligible-for-policy-review" } }, "required": ["status"] },
+          "then": { "type": "object", "properties": { "failureReasons": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "type": "object", "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
+          "then": { "type": "object", "properties": { "failureReasons": { "type": "array", "minItems": 1 } } } }
+      ]
+    },
     "sourceConformance": {
       "type": "object",
       "additionalProperties": false,

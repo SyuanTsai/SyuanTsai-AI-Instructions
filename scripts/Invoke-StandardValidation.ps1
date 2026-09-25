@@ -4621,6 +4621,339 @@ function New-StandardValidationSourceConformanceResult {
     }
 }
 
+function New-StandardValidationProposedSourceMergeExceptionDecision {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)] $Policy,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
+        [Parameter(Mandatory = $true)][int] $PullRequestNumber,
+        [Parameter(Mandatory = $true)][string] $ScannerReportPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedScannerReportSha256,
+        [Parameter(Mandatory = $true)][string[]] $OtherScannerReportPaths,
+        [Parameter(Mandatory = $true)] $ScannerReceipt,
+        [Parameter(Mandatory = $true)] $SupplementalEvidence,
+        [switch] $DevelopmentHarness,
+        [switch] $TestOnlyFixtureScope
+    )
+
+    # This draft only establishes technical eligibility for a later human policy review.
+    # It is deliberately not called by the canonical runner or any required-status route.
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
+    $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
+    $candidateId = [string](Get-StandardValidationProperty -Object $candidate -Name 'candidateId')
+    $contentSha256 = [string](Get-StandardValidationProperty -Object $candidate -Name 'contentSha256')
+    $sourceRepository = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRepository')
+    $activeSkills = Get-StandardValidationProperty -Object $candidate -Name 'activeSkills'
+    $scopeRepository = 'https://github.com/SyuanTsai/Skill-General.git'
+    $scopeSkillId = 'manage-task-handoff'
+    $scopeModulePath = 'skills/manage-task-handoff/scripts/GitRefHandoffAdapter.psm1'
+    $scopeModuleSha256 = '423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7'
+    $scopeScannerSha256 = 'e2ae868cf1eb1b4e8ee5834867a194575eebfa956f538a7a232b6ea2e3aa36fc'
+    $scopeSourceRevision = '1adba1e5fb5885d963e1e829f7044d814665ba73'
+    $scopeContentSha256 = 'c6ad40571e7ac43697077baf882e73c39b7929972a5564efff022bf867310a14'
+    $scopeScannerReportSha256 = 'cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8'
+    $scopeActiveSkills = @('investigate-datadog-logs', 'manage-notion-ai-memory', 'manage-task-handoff',
+        'plan-production-change', 'review-agent-skills', 'verify-data-access-performance')
+    $scopeOtherReports = @(
+        [pscustomobject]@{ skillId = 'investigate-datadog-logs'; componentCount = 2; sha256 = '70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3' },
+        [pscustomobject]@{ skillId = 'manage-notion-ai-memory'; componentCount = 4; sha256 = '32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e' },
+        [pscustomobject]@{ skillId = 'plan-production-change'; componentCount = 2; sha256 = '194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9' },
+        [pscustomobject]@{ skillId = 'review-agent-skills'; componentCount = 4; sha256 = 'b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f' },
+        [pscustomobject]@{ skillId = 'verify-data-access-performance'; componentCount = 2; sha256 = '3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed' }
+    )
+
+    if ($TestOnlyFixtureScope -and -not $DevelopmentHarness) { [void]$reasons.Add('test-fixture-without-development-harness') }
+    if ([string](Get-StandardValidationProperty -Object $Policy -Name 'status') -cne 'proposed' -or
+        [string](Get-StandardValidationProperty -Object $Policy -Name 'sourceRepository') -cne $scopeRepository -or
+        -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $Policy -Name 'pullRequest') -Minimum 12 -Maximum 12) -or
+        [string](Get-StandardValidationProperty -Object $Policy -Name 'skillId') -cne $scopeSkillId -or
+        [string](Get-StandardValidationProperty -Object $Policy -Name 'modulePath') -cne $scopeModulePath -or
+        -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $Policy -Name 'expectedInventoryCount') -Minimum 11 -Maximum 11)) {
+        [void]$reasons.Add('exception-scope-invalid')
+    }
+    $expectedModuleSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'moduleSha256')
+    $expectedScannerSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerExecutableSha256')
+    $policySourceRevision = [string](Get-StandardValidationProperty -Object $Policy -Name 'sourceRevision')
+    $policyContentSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'contentSha256')
+    $policyScannerReportSha256 = [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerReportSha256')
+    if ($expectedModuleSha256 -cnotmatch '^[0-9a-f]{64}$' -or $expectedScannerSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $policySourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $policyContentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $policyScannerReportSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        (-not $TestOnlyFixtureScope -and ($expectedModuleSha256 -cne $scopeModuleSha256 -or $expectedScannerSha256 -cne $scopeScannerSha256 -or
+            $policySourceRevision -cne $scopeSourceRevision -or $policyContentSha256 -cne $scopeContentSha256 -or
+            $policyScannerReportSha256 -cne $scopeScannerReportSha256))) {
+        [void]$reasons.Add('exception-fixed-digest-invalid')
+    }
+    if ($sourceRepository -cne $scopeRepository -or $PullRequestNumber -ne 12 -or
+        $sourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $sourceRevision -cne $ExpectedSourceRevision -or $sourceRevision -cne $policySourceRevision -or
+        $candidateId -cnotmatch '^[0-9a-f]{64}$' -or $contentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $contentSha256 -cne $policyContentSha256 -or
+        (@($activeSkills) -join "`n") -cne ($scopeActiveSkills -join "`n") -or
+        ((Get-StandardValidationProperty -Object $Policy -Name 'activeSkills') -join "`n") -cne ($scopeActiveSkills -join "`n")) {
+        [void]$reasons.Add('exception-candidate-identity-invalid')
+    }
+    $stages = Get-StandardValidationProperty -Object $Report -Name 'stages'
+    $sourceConformance = Get-StandardValidationProperty -Object $Report -Name 'sourceConformance'
+    if ([string](Get-StandardValidationProperty -Object $Report -Name 'state') -cne 'FAILED' -or
+        -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $Report -Name 'exitCode') -Minimum 20 -Maximum 20) -or
+        (Get-StandardValidationProperty -Object $Report -Name 'releaseEligible') -isnot [bool] -or
+        [bool](Get-StandardValidationProperty -Object $Report -Name 'releaseEligible') -or
+        [string](Get-StandardValidationProperty -Object $sourceConformance -Name 'status') -cne 'failed' -or
+        [bool](Get-StandardValidationProperty -Object $sourceConformance -Name 'releaseEligible') -or
+        $stages.Count -ne 10) {
+        [void]$reasons.Add('exception-canonical-state-invalid')
+    }
+    else {
+        $stageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static', 'repository-tests')
+        for ($index = 0; $index -lt 5; $index++) {
+            $expectedStatus = if ($index -lt 3) { 'passed' } elseif ($index -eq 3) { 'failed' } else { 'not-run' }
+            if ([string](Get-StandardValidationProperty -Object $stages[$index] -Name 'id') -cne $stageIds[$index] -or
+                [string](Get-StandardValidationProperty -Object $stages[$index] -Name 'status') -cne $expectedStatus) {
+                [void]$reasons.Add('exception-canonical-stage-invalid')
+            }
+        }
+    }
+
+    $scannerReportSha256 = $null
+    $otherScannerReportSha256 = @()
+    $scanner = $null
+    $skillRoot = Join-Path $CandidateRoot 'skills/manage-task-handoff'
+    try {
+        $inventory = Get-StandardValidationInventory -Root $CandidateRoot -Context 'proposed source merge exception candidate'
+        if ((Get-StandardValidationInventorySha256 -Inventory $inventory) -cne $contentSha256) {
+            [void]$reasons.Add('exception-candidate-content-drift')
+        }
+        $moduleFull = Join-Path $CandidateRoot $scopeModulePath
+        if ((Get-StandardValidationFileSha256 -Path $moduleFull -Context 'proposed source merge exception module') -cne $expectedModuleSha256) {
+            [void]$reasons.Add('exception-module-digest-mismatch')
+        }
+        $skillInventory = Get-StandardValidationInventory -Root $skillRoot -Context 'proposed source merge exception Skill'
+        if ($skillInventory.Count -ne 11) { [void]$reasons.Add('exception-skill-inventory-invalid') }
+        if ($ExpectedScannerReportSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            [void]$reasons.Add('exception-scanner-report-digest-invalid')
+        }
+        $scannerSnapshot = Get-StandardValidationJsonSnapshot -Path $ScannerReportPath -Context 'proposed source merge exception scanner report'
+        $scannerReportSha256 = [string]$scannerSnapshot.sha256
+        if ($scannerReportSha256 -cne $ExpectedScannerReportSha256 -or $scannerReportSha256 -cne $policyScannerReportSha256) {
+            [void]$reasons.Add('exception-scanner-report-drift')
+        }
+        $scanner = $scannerSnapshot.value
+        $scannerSkill = Get-StandardValidationProperty -Object $scanner -Name 'skill'
+        if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $scopeSkillId -or
+            -not (Test-StandardValidationPathWithin -Path ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')) -Root $skillRoot -IncludeRoot) -or
+            -not (Test-StandardValidationPathWithin -Path $skillRoot -Root ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')) -IncludeRoot)) {
+            [void]$reasons.Add('exception-scanner-skill-identity-invalid')
+        }
+        $components = Get-StandardValidationProperty -Object $scanner -Name 'components'
+        $componentPaths = @($components | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'path') } | Sort-Object)
+        $inventoryPaths = @($skillInventory | ForEach-Object { [string]$_.path } | Sort-Object)
+        if ($components.Count -ne 11 -or ($componentPaths -join "`n") -cne ($inventoryPaths -join "`n")) {
+            [void]$reasons.Add('exception-scanner-component-inventory-invalid')
+        }
+    }
+    catch { [void]$reasons.Add('exception-candidate-or-scanner-report-unavailable') }
+
+    $otherPolicyReports = Get-StandardValidationProperty -Object $Policy -Name 'otherSkillReports'
+    if (@($otherPolicyReports).Count -ne 5 -or @($OtherScannerReportPaths).Count -ne 5) {
+        [void]$reasons.Add('exception-other-skill-report-count-invalid')
+    }
+    else {
+        for ($index = 0; $index -lt 5; $index++) {
+            $expectedOther = $scopeOtherReports[$index]
+            $otherPolicy = $otherPolicyReports[$index]
+            $expectedDigest = [string](Get-StandardValidationProperty -Object $otherPolicy -Name 'sha256')
+            $expectedCount = Get-StandardValidationProperty -Object $otherPolicy -Name 'componentCount'
+            $expectedSkillId = [string](Get-StandardValidationProperty -Object $otherPolicy -Name 'skillId')
+            if ($TestOnlyFixtureScope) {
+                if ($expectedSkillId -cne $expectedOther.skillId -or $expectedDigest -cnotmatch '^[0-9a-f]{64}$' -or
+                    -not (Test-StandardValidationIntegerRange -Value $expectedCount -Minimum 1 -Maximum 100)) {
+                    [void]$reasons.Add('exception-other-skill-policy-invalid')
+                    continue
+                }
+            }
+            elseif ($expectedSkillId -cne $expectedOther.skillId -or $expectedDigest -cne $expectedOther.sha256 -or
+                -not (Test-StandardValidationIntegerRange -Value $expectedCount -Minimum $expectedOther.componentCount -Maximum $expectedOther.componentCount)) {
+                [void]$reasons.Add('exception-other-skill-policy-invalid')
+                continue
+            }
+            try {
+                $otherRoot = Join-Path $CandidateRoot "skills/$expectedSkillId"
+                $otherInventory = Get-StandardValidationInventory -Root $otherRoot -Context "proposed source merge exception $expectedSkillId"
+                $otherSnapshot = Get-StandardValidationJsonSnapshot -Path $OtherScannerReportPaths[$index] -Context "proposed source merge exception $expectedSkillId report"
+                $otherScannerReportSha256 += [string]$otherSnapshot.sha256
+                $otherReport = $otherSnapshot.value
+                $otherSkill = Get-StandardValidationProperty -Object $otherReport -Name 'skill'
+                $otherCompleteness = Get-StandardValidationProperty -Object $otherReport -Name 'analysis_completeness'
+                $otherComponents = Get-StandardValidationProperty -Object $otherReport -Name 'components'
+                $otherExceptions = Get-StandardValidationProperty -Object $otherCompleteness -Name 'ledger_exceptions'
+                $otherExclusions = Get-StandardValidationProperty -Object $otherCompleteness -Name 'scope_exclusions'
+                $otherLimitations = Get-StandardValidationProperty -Object $otherCompleteness -Name 'limitations'
+                $otherIssues = Get-StandardValidationProperty -Object $otherReport -Name 'issues'
+                $otherPaths = @($otherComponents | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'path') } | Sort-Object)
+                $otherInventoryPaths = @($otherInventory | ForEach-Object { [string]$_.path } | Sort-Object)
+                if ([string]$otherSnapshot.sha256 -cne $expectedDigest -or
+                    [string](Get-StandardValidationProperty -Object $otherSkill -Name 'name') -cne $expectedSkillId -or
+                    -not (Test-StandardValidationPathWithin -Path ([string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')) -Root $otherRoot -IncludeRoot) -or
+                    -not (Test-StandardValidationPathWithin -Path $otherRoot -Root ([string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')) -IncludeRoot) -or
+                    $otherInventory.Count -ne [int]$expectedCount -or $otherComponents.Count -ne [int]$expectedCount -or
+                    ($otherPaths -join "`n") -cne ($otherInventoryPaths -join "`n") -or
+                    [string](Get-StandardValidationProperty -Object $otherCompleteness -Name 'status') -cne 'complete' -or
+                    -not [bool](Get-StandardValidationProperty -Object $otherCompleteness -Name 'is_complete') -or
+                    -not [bool](Get-StandardValidationProperty -Object $otherReport -Name 'execution_successful') -or
+                    -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $otherCompleteness -Name 'total_components') -Minimum $expectedCount -Maximum $expectedCount) -or
+                    -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $otherCompleteness -Name 'scanned_components') -Minimum $expectedCount -Maximum $expectedCount) -or
+                    [double](Get-StandardValidationProperty -Object $otherCompleteness -Name 'coverage_percent') -ne 100 -or
+                    @($otherExceptions).Count -ne 0 -or @($otherExclusions).Count -ne 0 -or
+                    @($otherLimitations).Count -ne 0 -or @($otherIssues).Count -ne 0) {
+                    [void]$reasons.Add("exception-other-skill-report-invalid:$expectedSkillId")
+                }
+            }
+            catch { [void]$reasons.Add("exception-other-skill-report-unavailable:$expectedSkillId") }
+        }
+    }
+
+    if ([string](Get-StandardValidationProperty -Object $Policy -Name 'scannerSource') -cne 'NVIDIA/SkillSpector' -or
+        [string](Get-StandardValidationProperty -Object $Policy -Name 'scannerVersion') -cne '2.12.0' -or
+        [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'source') -cne 'NVIDIA/SkillSpector' -or
+        [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'version') -cne '2.12.0' -or
+        [string](Get-StandardValidationProperty -Object $ScannerReceipt -Name 'executableSha256') -cne $expectedScannerSha256) {
+        [void]$reasons.Add('exception-scanner-provenance-invalid')
+    }
+    if ($null -ne $scanner) {
+        $completeness = Get-StandardValidationProperty -Object $scanner -Name 'analysis_completeness'
+        $exceptions = Get-StandardValidationProperty -Object $completeness -Name 'ledger_exceptions'
+        $limitations = Get-StandardValidationProperty -Object $completeness -Name 'limitations'
+        $analyzers = Get-StandardValidationProperty -Object $completeness -Name 'analyzer_statuses'
+        $scopeExclusions = Get-StandardValidationProperty -Object $completeness -Name 'scope_exclusions'
+        $issues = Get-StandardValidationProperty -Object $scanner -Name 'issues'
+        $degraded = @($analyzers | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'status') -ceq 'degraded' })
+        $otherBad = @($analyzers | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'status') -cnotin @('completed','not_applicable','disabled','degraded') })
+        $toolMisuse = if ($degraded.Count -eq 1) { $degraded[0] } else { $null }
+        if ((Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -isnot [bool] -or
+            -not [bool](Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -or
+            [string](Get-StandardValidationProperty -Object $completeness -Name 'status') -cne 'partial' -or
+            [bool](Get-StandardValidationProperty -Object $completeness -Name 'is_complete') -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $completeness -Name 'total_components') -Minimum 11 -Maximum 11) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $completeness -Name 'scanned_components') -Minimum 10 -Maximum 10) -or
+            [double](Get-StandardValidationProperty -Object $completeness -Name 'coverage_percent') -ne 90.9 -or
+            @($scopeExclusions).Count -ne 0 -or
+            @($issues).Count -ne 0 -or
+            $exceptions.Count -ne 1 -or $limitations.Count -ne 1 -or
+            [string]$limitations[0] -cne 'Analyzer static_patterns_tool_misuse status: degraded.' -or
+            $degraded.Count -ne 1 -or $otherBad.Count -ne 0) {
+            [void]$reasons.Add('exception-scanner-coverage-invalid')
+        }
+        if ($exceptions.Count -eq 1) {
+            $exception = $exceptions[0]
+            if ([string](Get-StandardValidationProperty -Object $exception -Name 'path') -cne 'scripts/GitRefHandoffAdapter.psm1' -or
+                [string](Get-StandardValidationProperty -Object $exception -Name 'reason_code') -cne 'static_parse_limit' -or
+                ((Get-StandardValidationProperty -Object $exception -Name 'analyzers') -join ',') -cne 'static_patterns_tool_misuse') {
+                [void]$reasons.Add('exception-parser-limitation-invalid')
+            }
+        }
+        if ($null -eq $toolMisuse -or
+            [string](Get-StandardValidationProperty -Object $toolMisuse -Name 'analyzer_id') -cne 'static_patterns_tool_misuse' -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $toolMisuse -Name 'planned_work') -Minimum 11 -Maximum 11) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $toolMisuse -Name 'completed') -Minimum 10 -Maximum 10) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $toolMisuse -Name 'partial') -Minimum 1 -Maximum 1)) {
+            [void]$reasons.Add('exception-degraded-analyzer-invalid')
+        }
+    }
+
+    $dispatches = @($SupplementalEvidence)
+    if ($dispatches.Count -ne 2) { [void]$reasons.Add('exception-supplemental-dispatch-count-invalid') }
+    foreach ($expected in @(
+            [pscustomobject]@{ id = 'repository-test-general'; kind = 'general'; role = 'domain' },
+            [pscustomobject]@{ id = 'repository-test-pester'; kind = 'pester'; role = 'pester' }
+        )) {
+        $matching = @($dispatches | Where-Object { [string](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $_ -Name 'event') -Name 'toolId') -ceq $expected.id })
+        if ($matching.Count -ne 1) { [void]$reasons.Add('exception-supplemental-dispatch-identity-invalid'); continue }
+        $dispatch = $matching[0]
+        $event = Get-StandardValidationProperty -Object $dispatch -Name 'event'
+        $record = Get-StandardValidationProperty -Object $dispatch -Name 'record'
+        if ([string](Get-StandardValidationProperty -Object $dispatch -Name 'kind') -cne $expected.kind -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'toolRole') -cne $expected.role -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'stageId') -cne 'supplemental-repository-tests' -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'status') -cne 'passed' -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $event -Name 'exitCode') -Minimum 0 -Maximum 0) -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'candidateId') -cne $candidateId -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'candidateId') -cne $candidateId -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'eventId') -cne [string](Get-StandardValidationProperty -Object $event -Name 'eventId') -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'outputSha256') -cne [string](Get-StandardValidationProperty -Object $event -Name 'outputSha256') -or
+            -not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report)) {
+            [void]$reasons.Add('exception-supplemental-event-binding-invalid')
+            continue
+        }
+        try {
+            $rawEvent = Get-StandardValidationJson -Path ([string](Get-StandardValidationProperty -Object $event -Name 'outputPath')) -Context 'supplemental test raw output'
+            $rawProcess = Get-StandardValidationProperty -Object $rawEvent -Name 'process'
+            $rawEnvelope = ([string](Get-StandardValidationProperty -Object $rawProcess -Name 'stdout')) | ConvertFrom-Json -ErrorAction Stop
+            $rawInventory = Get-StandardValidationSourceTestInventoryIdentities -Inventory (Get-StandardValidationProperty -Object $rawEnvelope -Name 'testInventory') -Context 'supplemental raw inventory'
+            $typedInventory = Get-StandardValidationSourceTestInventoryIdentities -Inventory (Get-StandardValidationProperty -Object $record -Name 'testInventory') -Context 'supplemental typed inventory'
+            if ($rawInventory.Count -eq 0 -or ($rawInventory -join "`n") -cne ($typedInventory -join "`n") -or
+                [string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'candidateIdentity') -cne $candidateId) {
+                [void]$reasons.Add('exception-supplemental-inventory-invalid')
+            }
+            $typedResult = Get-StandardValidationProperty -Object $record -Name 'testResult'
+            $rawResult = Get-StandardValidationProperty -Object $rawEnvelope -Name 'testResult'
+            $typedDomain = Get-StandardValidationProperty -Object $record -Name 'domainAdapterResult'
+            $rawDomain = Get-StandardValidationProperty -Object $rawEnvelope -Name 'domainAdapterResult'
+            foreach ($item in @($typedResult, $rawResult, $typedDomain, $rawDomain)) {
+                if ([string](Get-StandardValidationProperty -Object $item -Name 'status') -cne 'passed' -or
+                    [string](Get-StandardValidationProperty -Object $item -Name 'decision') -cne 'PASS') {
+                    [void]$reasons.Add('exception-supplemental-result-invalid')
+                }
+            }
+            foreach ($countName in @('total','passed','skipped','failed')) {
+                $rawHas = Test-StandardValidationHasProperty -Object $rawResult -Name $countName
+                $typedHas = Test-StandardValidationHasProperty -Object $typedResult -Name $countName
+                if ($rawHas -ne $typedHas -or ($rawHas -and (Get-StandardValidationProperty -Object $rawResult -Name $countName) -cne (Get-StandardValidationProperty -Object $typedResult -Name $countName))) {
+                    [void]$reasons.Add('exception-supplemental-raw-count-mismatch')
+                }
+            }
+            if ($expected.kind -ceq 'general') {
+                if (@(@('total','passed','skipped','failed') | Where-Object { Test-StandardValidationHasProperty -Object $typedResult -Name $_ }).Count -ne 0) {
+                    [void]$reasons.Add('exception-general-counts-invalid')
+                }
+            }
+            else {
+                $total = Get-StandardValidationProperty -Object $typedResult -Name 'total'
+                $passed = Get-StandardValidationProperty -Object $typedResult -Name 'passed'
+                $skipped = Get-StandardValidationProperty -Object $typedResult -Name 'skipped'
+                $failed = Get-StandardValidationProperty -Object $typedResult -Name 'failed'
+                if (-not (Test-StandardValidationIntegerRange -Value $total -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+                    -not (Test-StandardValidationIntegerRange -Value $passed -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+                    -not (Test-StandardValidationIntegerRange -Value $skipped -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+                    -not (Test-StandardValidationIntegerRange -Value $failed -Minimum 0 -Maximum 0) -or
+                    [decimal]$passed + [decimal]$skipped -ne [decimal]$total) {
+                    [void]$reasons.Add('exception-pester-counts-invalid')
+                }
+            }
+        }
+        catch { [void]$reasons.Add('exception-supplemental-raw-output-invalid') }
+    }
+    return [ordered]@{
+        schemaVersion = 1
+        contract = 'proposed-source-merge-exception-v1'
+        status = if ($reasons.Count -eq 0) { 'eligible-for-policy-review' } else { 'rejected' }
+        sourceRepository = $sourceRepository
+        sourceRevision = $sourceRevision
+        candidateId = $candidateId
+        contentSha256 = $contentSha256
+        scannerReportSha256 = $scannerReportSha256
+        otherScannerReportSha256 = @($otherScannerReportSha256)
+        canonicalState = [string](Get-StandardValidationProperty -Object $Report -Name 'state')
+        canonicalExitCode = Get-StandardValidationProperty -Object $Report -Name 'exitCode'
+        sourceConformanceStatus = [string](Get-StandardValidationProperty -Object $sourceConformance -Name 'status')
+        supplementalStage = 'supplemental-repository-tests'
+        releaseEligible = $false
+        testFixtureOnly = [bool]$TestOnlyFixtureScope
+        failureReasons = @($reasons.ToArray())
+    }
+}
+
 function Test-StandardValidationCanonicalSeverity {
     param([AllowNull()] $Severity)
 
