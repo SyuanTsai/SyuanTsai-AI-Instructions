@@ -4640,6 +4640,7 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     # This draft only establishes technical eligibility for a later human policy review.
     # It is deliberately not called by the canonical runner or any required-status route.
     $reasons = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $TestOnlyFixtureScope) { [void]$reasons.Add('exception-supplemental-execution-not-supervised') }
     $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
     $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
     $candidateId = [string](Get-StandardValidationProperty -Object $candidate -Name 'candidateId')

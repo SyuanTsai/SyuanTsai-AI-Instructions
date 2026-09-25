@@ -154,6 +154,14 @@ Describe 'Proposed PR12 source merge exception' {
         Assert-Draft ($fixture.Report.stages[3].status -ceq 'failed') 'Canonical Stage 4 must remain failed.'
         Assert-Draft ($fixture.Report.stages[4].status -ceq 'not-run') 'Canonical Stage 5 must remain not-run.'
         Assert-Draft ($fixture.Report.sourceConformance.status -ceq 'failed') 'Source conformance must remain failed.'
+        $productionLike = New-StandardValidationProposedSourceMergeExceptionDecision -Report $fixture.Report `
+            -Policy $fixture.Policy -CandidateRoot $fixture.CandidateRoot -ExpectedSourceRevision $fixture.SourceRevision `
+            -PullRequestNumber 12 -ScannerReportPath $fixture.ScannerReportPath -ExpectedScannerReportSha256 $fixture.ScannerReportSha256 `
+            -OtherScannerReportPaths $fixture.OtherScannerReportPaths -ScannerReceipt $fixture.Receipt `
+            -SupplementalEvidence $fixture.Supplemental
+        Assert-Draft ($productionLike.status -ceq 'rejected' -and
+            @($productionLike.failureReasons) -contains 'exception-supplemental-execution-not-supervised') `
+            'Caller-supplied supplemental records must not become production eligibility.'
     }
 
     # Scenario: the same technical evidence arrives for another repository, candidate, or module.
