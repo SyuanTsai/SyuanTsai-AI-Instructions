@@ -176,13 +176,19 @@ Describe 'Proposed PR12 source merge exception' {
         }
     }
 
-    # Scenario: the machine-readable authority summary names an older source revision.
-    # Purpose: keep the reviewed merge scope bound to the exact source revision in policy.
+    # Scenario: the machine-readable authority summary and policy name the final producer-fix source revision.
+    # Purpose: keep the reviewed merge scope bound to one exact source and both observed checkout byte forms.
     It 'UnitT05_binds_contract_scope_to_exact_policy_revision' {
         $root = Split-Path -Parent $PSScriptRoot
         $contract = Get-Content -LiteralPath (Join-Path $root 'docs/standards/standard-validation-contract-v1.json') -Raw | ConvertFrom-Json
         $policy = Get-Content -LiteralPath (Join-Path $root 'docs/standards/pr12-source-merge-exception-proposal.json') -Raw | ConvertFrom-Json
         $scope = [string]$contract.evidence.sourceMergeExceptionProposal.scope
+        Assert-Draft ([string]$policy.sourceRevision -ceq '66c466540480306c7f5346338d70d036bddb4930') `
+            'The proposal must bind the source revision containing the Pester producer fix.'
+        Assert-Draft ([string]$policy.contentSha256 -ceq '2bf26172a0b114a50464fea49f1f21a899715d0bc588f3e4e0d68a2e6f8e1b35') `
+            'The proposal must bind the fresh Windows checkout inventory.'
+        Assert-Draft ([string]$policy.contentSha256Lf -ceq 'd84e46d1476b8735093d4d8bf5efdeef2066a44ccf743348db4e22adefa5f644') `
+            'The proposal must bind the LF archive inventory.'
         Assert-Draft ($scope -cmatch ('PR12 exact candidate {0};' -f [regex]::Escape([string]$policy.sourceRevision))) `
             'The authority contract scope must name the exact proposed source revision.'
     }

@@ -127,7 +127,7 @@
     },
     "sourceMergeExceptionProposal": {
       "status": "proposed-only; never an approved source check or release result",
-      "scope": "SyuanTsai/Skill-General PR12 exact candidate 8505829a6e985aaf4cf7bb7265e3352ae40df53e; all six active Skills; manage-task-handoff module SHA-256 423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7",
+      "scope": "SyuanTsai/Skill-General PR12 exact candidate 66c466540480306c7f5346338d70d036bddb4930; all six active Skills; manage-task-handoff module SHA-256 423c9cf6f8f9fc386bdcd5581c3c52e226f2b44663c5cd6fa3ea4220cafab4d7",
       "policyPath": "docs/standards/pr12-source-merge-exception-proposal.json",
       "schemaProperty": "sourceMergeExceptionProposal",
       "canonicalState": "FAILED/20, Stage 4 failed, Stage 5 not-run, sourceConformance failed, releaseEligible false",
