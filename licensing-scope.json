@@ -328,6 +328,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/pr12-source-merge-adoption.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/pr12-source-merge-exception-proposal.json",
       "license": "Apache-2.0"
     },
