@@ -3991,11 +3991,13 @@ Describe 'trusted supervisor launch binding construction' {
         $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256')) }
         $binding = New-StandardValidationSupervisorLaunchBinding @inputs
         $document = Get-Content -Raw -LiteralPath $inputs.Path | ConvertFrom-Json
-        $binding.verified | Should -BeTrue
-        $document.sourceRepository | Should -Be $inputs.SourceRepository
-        $document.PSObject.Properties.Name | Should -Not -Contain 'owner'
-        $document.adapterSha256 | Should -Be (Get-StandardValidationFileSha256 -Path $adapter -Context 'test adapter')
-        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+        if (-not [bool]$binding.verified) { throw 'Fixture launch binding must verify.' }
+        if ([string]$document.sourceRepository -cne [string]$inputs.SourceRepository) { throw 'Source repository mismatch.' }
+        if (@($document.PSObject.Properties.Name) -ccontains 'owner') { throw 'Task source Owner must not be required.' }
+        if ([string]$document.adapterSha256 -cne (Get-StandardValidationFileSha256 -Path $adapter -Context 'test adapter')) { throw 'Adapter digest mismatch.' }
+        $rejected = $false
+        try { [void](New-StandardValidationSupervisorLaunchBinding @inputs) } catch { $rejected = $true }
+        if (-not $rejected) { throw 'A launch binding must be create-only.' }
     }
 
     # Scenario: The requested signer returns a signature from another key.
@@ -4004,8 +4006,10 @@ Describe 'trusted supervisor launch binding construction' {
         $otherKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
         try {
             $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($otherKey.SignData($payload, 'SHA256')) }
-            { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
-            Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+            $rejected = $false
+            try { [void](New-StandardValidationSupervisorLaunchBinding @inputs) } catch { $rejected = $true }
+            if (-not $rejected) { throw 'An untrusted signature must fail.' }
+            if (Test-Path -LiteralPath $inputs.Path) { throw 'Untrusted signature wrote a launch binding.' }
         }
         finally { $otherKey.Dispose() }
     }
@@ -4014,8 +4018,10 @@ Describe 'trusted supervisor launch binding construction' {
     # Purpose: Missing signing capability is reported precisely and cannot be mistaken for a missing source Owner.
     It 'UnitT30_blocks_missing_signing_capability' {
         $inputs.SignPayload = { param([byte[]] $payload) $null }
-        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
-        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+        $rejected = $false
+        try { [void](New-StandardValidationSupervisorLaunchBinding @inputs) } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Missing signing capability must fail.' }
+        if (Test-Path -LiteralPath $inputs.Path) { throw 'Missing signer wrote a launch binding.' }
     }
 
     # Scenario: A signer callback changes the adapter after the payload snapshot was hashed.
@@ -4026,8 +4032,10 @@ Describe 'trusted supervisor launch binding construction' {
             [IO.File]::WriteAllText($adapter, '{"schemaVersion":2}', (New-Object Text.UTF8Encoding($false)))
             [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256'))
         }
-        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
-        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+        $rejected = $false
+        try { [void](New-StandardValidationSupervisorLaunchBinding @inputs) } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Adapter drift must fail.' }
+        if (Test-Path -LiteralPath $inputs.Path) { throw 'Adapter drift wrote a launch binding.' }
     }
 
     # Scenario: A local fixture signer is presented to the production producer path.
@@ -4035,8 +4043,10 @@ Describe 'trusted supervisor launch binding construction' {
     It 'UnitT50_rejects_fixture_signing_key_in_production' {
         $inputs.Remove('DevelopmentHarness')
         $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256')) }
-        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
-        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+        $rejected = $false
+        try { [void](New-StandardValidationSupervisorLaunchBinding @inputs) } catch { $rejected = $true }
+        if (-not $rejected) { throw 'A fixture signing key must fail in production.' }
+        if (Test-Path -LiteralPath $inputs.Path) { throw 'Fixture key wrote a production launch binding.' }
     }
 
     AfterEach { $rsa.Dispose() }
