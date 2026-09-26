@@ -313,6 +313,7 @@ ino: 1
 
         foreach ($workflow in @($standards, $required)) {
             Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal' 'An unapproved proposal must not route a required source check.'
+            Assert-NotMatch $workflow 'sourceMergeDecision|pr12-source-merge-adoption' 'The central regression workflows cannot publish General source checks from their own jobs.'
         }
 
         foreach ($workflow in @($standards, $required)) {

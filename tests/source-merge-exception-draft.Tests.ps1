@@ -193,6 +193,36 @@ Describe 'Proposed PR12 source merge exception' {
             'The authority contract scope must name the exact proposed source revision.'
     }
 
+    # Scenario: human risk acceptance is recorded for the exact source while the original proposal remains proposed.
+    # Purpose: keep protected merge authority separate from review eligibility and release approval.
+    It 'UnitT07_requires_a_distinct_exact_source_merge_adoption_record' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $path = Join-Path $root 'docs/standards/pr12-source-merge-adoption.json'
+        Assert-Draft (Test-Path -LiteralPath $path -PathType Leaf) 'Protected source merge adoption record is missing.'
+        $adoption = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Draft ($adoption.contract -ceq 'protected-source-merge-adoption-v1') 'Protected adoption contract changed.'
+        Assert-Draft ($adoption.status -ceq 'adopted') 'Protected adoption record must state its explicit reviewed status.'
+        Assert-Draft ($adoption.sourceRevision -ceq '66c466540480306c7f5346338d70d036bddb4930') 'Protected adoption must bind the exact source.'
+        Assert-Draft ($adoption.scope -ceq 'source-merge-only') 'Protected adoption must remain merge-only.'
+        Assert-Draft ($adoption.affectedSkill -ceq 'manage-task-handoff') 'Protected adoption must name the affected Skill.'
+        Assert-Draft ($adoption.affectedComponent -ceq 'skills/manage-task-handoff/scripts/GitRefHandoffAdapter.psm1') 'Protected adoption must name the exact incomplete component.'
+        Assert-Draft (-not [string]::IsNullOrWhiteSpace([string]$adoption.businessAndTechnicalNecessity)) 'Protected adoption must record why the merge is needed.'
+        Assert-Draft (-not [string]::IsNullOrWhiteSpace([string]$adoption.riskAssessment)) 'Protected adoption must record the remaining scanner risk.'
+        Assert-Draft (@($adoption.compensatingControls).Count -ge 4) 'Protected adoption must retain the reviewed compensating controls.'
+        Assert-Draft (-not [string]::IsNullOrWhiteSpace([string]$adoption.owner)) 'Protected adoption must name a maintainer owner.'
+        Assert-Draft (-not [string]::IsNullOrWhiteSpace([string]$adoption.reviewAndExpiry)) 'Protected adoption must state review and expiry conditions.'
+        Assert-Draft ($adoption.canonicalState -ceq 'FAILED' -and [int]$adoption.canonicalExitCode -eq 20) 'Canonical failure must remain visible.'
+        Assert-Draft (-not [bool]$adoption.releaseEligible) 'Protected adoption cannot authorize release.'
+        Assert-Draft ($adoption.humanReview.decision -ceq 'accepted-limited-risk') 'Human risk decision must remain explicit.'
+        $answerHasher = [Security.Cryptography.SHA256]::Create()
+        try {
+            $answerSha256 = [BitConverter]::ToString($answerHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$adoption.humanReview.answer))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $answerHasher.Dispose() }
+        Assert-Draft ($answerSha256 -ceq '61f6e7cb8b68d89dff29f8d4d02acb6a5bf2c8283557a5722523fe9febe661f9') 'Protected adoption must retain the exact human answer.'
+        Assert-Draft ((Get-Content -LiteralPath (Join-Path $root 'docs/standards/pr12-source-merge-exception-proposal.json') -Raw | ConvertFrom-Json).status -ceq 'proposed') 'The historical technical proposal must remain proposed.'
+    }
+
     # Scenario: a bound scanner limitation and supplemental raw test records are present.
     # Purpose: preserve the failed canonical result while producing only a reviewable technical proposal.
     It 'UnitT10_keeps_exact_exception_eligible_for_review_without_approving_it' {
@@ -441,6 +471,39 @@ Describe 'Proposed PR12 source merge exception' {
             }
             $result = Invoke-BridgeFixture -Bridge $bridge -TestOnlyFixtureScope
             Assert-Draft ($result.fixtureRoute -ceq 'rejected' -and $result.status -ceq 'failed') "Evidence drift '$drift' routed."
+        }
+    }
+
+    # Scenario: a merge-only adoption record is checked against a separately verified technical decision and event SHA.
+    # Purpose: make the human approval boundary explicit without allowing release or a caller approval string to substitute for technical evidence.
+    It 'UnitT130_binds_merge_only_adoption_to_technical_and_human_scope' {
+        $fixture = New-DraftFixture -Root (Join-Path $TestDrive 'adoption-binding')
+        $technical = Invoke-DraftDecision -Fixture $fixture
+        $adoption = [ordered]@{
+            contract = 'protected-source-merge-adoption-v1'; status = 'adopted'; scope = 'source-merge-only'
+            sourceRepository = 'https://github.com/SyuanTsai/Skill-General.git'; pullRequest = 12
+            sourceRevision = $fixture.SourceRevision; canonicalState = 'FAILED'; canonicalExitCode = 20
+            sourceConformanceStatus = 'failed'; releaseEligible = $false
+            humanReview = [ordered]@{ decision = 'accepted-limited-risk'; sourceRevision = $fixture.SourceRevision }
+        }
+        $bound = New-StandardValidationProtectedAdoptionBinding -AuthorityRecord $adoption `
+            -TechnicalDecision $technical -EventSourceRevision $fixture.SourceRevision -TestOnlyFixtureScope
+        Assert-Draft ($bound.status -ceq 'eligible' -and -not $bound.releaseEligible) 'Valid fixture adoption did not bind merge-only evidence.'
+        foreach ($drift in @('event', 'approval', 'status', 'scope', 'release', 'technical')) {
+            $changedAdoption = $adoption | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $changedTechnical = $technical | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $eventRevision = $fixture.SourceRevision
+            switch ($drift) {
+                event { $eventRevision = 'c' * 40 }
+                approval { $changedAdoption.humanReview.decision = 'caller-approved' }
+                status { $changedAdoption.status = 'proposed' }
+                scope { $changedAdoption.scope = 'release' }
+                release { $changedAdoption.releaseEligible = $true }
+                technical { $changedTechnical.status = 'rejected' }
+            }
+            $rejected = New-StandardValidationProtectedAdoptionBinding -AuthorityRecord $changedAdoption `
+                -TechnicalDecision $changedTechnical -EventSourceRevision $eventRevision -TestOnlyFixtureScope
+            Assert-Draft ($rejected.status -ceq 'rejected' -and -not $rejected.releaseEligible) "Adoption drift '$drift' was accepted."
         }
     }
 }

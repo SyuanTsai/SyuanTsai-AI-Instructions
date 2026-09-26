@@ -1068,7 +1068,7 @@ catch {
         Assert-Equal $proposal.scannerSource 'NVIDIA/SkillSpector' 'The proposal must not substitute a private scanner source.'
         Assert-Equal $proposal.scannerVersion '2.12.0' 'The proposal must bind the observed official scanner version.'
         Assert-False ([bool]$proposal.releaseEligible) 'A source proposal cannot authorize release.'
-        Assert-NotMatch $resolver 'pr12-source-merge-exception-proposal|sourceMergeExceptionProposal' 'Tool resolver must not accept a source merge exception as tool provenance.'
+        Assert-NotMatch $resolver 'pr12-source-merge-exception-proposal|sourceMergeExceptionProposal|pr12-source-merge-adoption|sourceMergeDecision' 'Tool resolver must not accept a source merge exception or adoption as tool provenance.'
 
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'

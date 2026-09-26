@@ -137,10 +137,11 @@
       "releaseEligibility": "fixed false; prohibited for release, install, publish and other consumers"
     },
     "protectedSourceMergeBridgeCandidate": {
-      "status": "inactive; no production trust anchor or protected check publisher is installed",
+      "status": "merge-only authority implementation pending protected review and adoption; never a release result",
       "scope": "PR12 source checks only; exact source and GitHub event SHA, central and workflow revision, archive digest, candidate and content identity",
       "technicalEvidence": "recompute the existing proposed exception from official six report bytes, frozen scanner receipt, raw supplemental process events, positive Pester counts, cleanup, and unchanged canonical FAILED/20",
-      "adoption": "test-only trusted-authority fixture may exercise an offline route; caller approval and proposal alone cannot adopt; production always fails closed until separately reviewed protected authority and Human Release/Policy Review exist",
+      "adoption": "a fixed central-bundle pr12-source-merge-adoption.json with accepted-limited-risk human review binds only source merge; caller approval, proposal, and test fixture cannot publish a required check; production requires separately reviewed protected workflow and exact event-source check",
+      "schemaProperty": "sourceMergeDecision; canonical state and sourceConformance remain FAILED/20 and failed",
       "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
       "releaseEligibility": "fixed false; no install, publish, or release authorization"
     },

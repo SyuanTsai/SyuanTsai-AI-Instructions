@@ -41,6 +41,10 @@ param(
     [string] $PostInstallEvidencePath,
     [switch] $CompleteLifecycle,
     [switch] $SourceMergeExceptionReview,
+    [switch] $ProtectedSourceMergeCheck,
+    [string] $ProtectedCentralRevision,
+    [string] $ProtectedWorkflowRevision,
+    [string] $ProtectedAuthorityArchiveSha256,
     [switch] $DefineFunctionsOnly
 )
 
@@ -5084,6 +5088,59 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     }
 }
 
+# The adoption record is authoritative only when read from the verified central
+# bundle by a separately reviewed protected source-check publisher.  This helper
+# validates its merge-only scope; it does not publish a required check.
+function New-StandardValidationProtectedAdoptionBinding {
+    param(
+        [Parameter(Mandatory = $true)] $AuthorityRecord,
+        [Parameter(Mandatory = $true)] $TechnicalDecision,
+        [Parameter(Mandatory = $true)][string] $EventSourceRevision,
+        [switch] $TestOnlyFixtureScope
+    )
+
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    $expectedSourceRevision = if ($TestOnlyFixtureScope) {
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'sourceRevision')
+    }
+    else { '66c466540480306c7f5346338d70d036bddb4930' }
+    $humanReview = Get-StandardValidationProperty -Object $AuthorityRecord -Name 'humanReview'
+    if ([string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'contract') -cne 'protected-source-merge-adoption-v1' -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'status') -cne 'adopted' -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'scope') -cne 'source-merge-only' -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'sourceRepository') -cne 'https://github.com/SyuanTsai/Skill-General.git' -or
+        [int](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'pullRequest') -ne 12 -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'sourceRevision') -cne $expectedSourceRevision -or
+        $EventSourceRevision -cne $expectedSourceRevision -or
+        [string](Get-StandardValidationProperty -Object $humanReview -Name 'decision') -cne 'accepted-limited-risk' -or
+        [string](Get-StandardValidationProperty -Object $humanReview -Name 'sourceRevision') -cne $expectedSourceRevision -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'canonicalState') -cne 'FAILED' -or
+        [int](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'canonicalExitCode') -ne 20 -or
+        [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'sourceConformanceStatus') -cne 'failed' -or
+        [bool](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'releaseEligible')) {
+        [void]$reasons.Add('protected-adoption-scope-invalid')
+    }
+    if ([string](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'status') -cne 'eligible-for-policy-review' -or
+        [string](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'sourceRepository') -cne [string](Get-StandardValidationProperty -Object $AuthorityRecord -Name 'sourceRepository') -or
+        [string](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'sourceRevision') -cne $expectedSourceRevision -or
+        [string](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'canonicalState') -cne 'FAILED' -or
+        [int](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'canonicalExitCode') -ne 20 -or
+        [string](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'sourceConformanceStatus') -cne 'failed' -or
+        [bool](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'releaseEligible') -or
+        [bool](Get-StandardValidationProperty -Object $TechnicalDecision -Name 'testFixtureOnly') -ne [bool]$TestOnlyFixtureScope -or
+        @((Get-StandardValidationProperty -Object $TechnicalDecision -Name 'failureReasons')).Count -ne 0) {
+        [void]$reasons.Add('protected-technical-decision-invalid')
+    }
+    return [ordered]@{
+        contract = 'protected-source-merge-adoption-binding-v1'
+        status = if ($reasons.Count -eq 0) { 'eligible' } else { 'rejected' }
+        sourceRevision = $expectedSourceRevision
+        releaseEligible = $false
+        testFixtureOnly = [bool]$TestOnlyFixtureScope
+        failureReasons = @($reasons.ToArray())
+    }
+}
+
 # Inactive route candidate. A production trust anchor and protected publisher do not
 # exist yet: only an explicitly marked local fixture can exercise the allow branch.
 function New-StandardValidationProtectedSourceMergeDecision {
@@ -5095,13 +5152,34 @@ function New-StandardValidationProtectedSourceMergeDecision {
         [string] $ExpectedWorkflowRevision = '',
         [string] $ExpectedArchiveSha256 = '',
         [bool] $CallerApproval = $false,
-        [switch] $TestOnlyFixtureScope
+        [bool] $ObservedSupervisorExecution = $false,
+        [switch] $TestOnlyFixtureScope,
+        [switch] $ProtectedWorkflowScope
     )
 
     $reasons = New-Object 'System.Collections.Generic.List[string]'
-    if (-not $TestOnlyFixtureScope) { [void]$reasons.Add('protected-authority-unavailable') }
+    if (-not $TestOnlyFixtureScope -and -not $ProtectedWorkflowScope) {
+        [void]$reasons.Add('protected-authority-unavailable')
+    }
+    if ($TestOnlyFixtureScope -and $ProtectedWorkflowScope) {
+        [void]$reasons.Add('fixture-cannot-publish-protected-check')
+    }
     if ($CallerApproval) { [void]$reasons.Add('caller-approval-untrusted') }
-    if ($null -eq $TrustedAuthorityRecord) { [void]$reasons.Add('protected-adoption-missing') }
+    if ($ProtectedWorkflowScope -and $null -ne $TrustedAuthorityRecord) {
+        [void]$reasons.Add('caller-authority-record-untrusted')
+    }
+    if ($ProtectedWorkflowScope -and -not $ObservedSupervisorExecution) {
+        [void]$reasons.Add('protected-supervisor-execution-not-observed')
+    }
+    if ($ProtectedWorkflowScope -and
+        ($ExpectedCentralRevision -cnotmatch '^[0-9a-f]{40}$' -or
+         $ExpectedWorkflowRevision -cnotmatch '^[0-9a-f]{40}$' -or
+         $ExpectedArchiveSha256 -cnotmatch '^[0-9a-f]{64}$')) {
+        [void]$reasons.Add('protected-identity-shape-invalid')
+    }
+    if (-not $ProtectedWorkflowScope -and $null -eq $TrustedAuthorityRecord) {
+        [void]$reasons.Add('protected-adoption-missing')
+    }
 
     $technical = $null
     try {
@@ -5115,6 +5193,13 @@ function New-StandardValidationProtectedSourceMergeDecision {
             $arguments.DevelopmentHarness = $true
             $arguments.TestOnlyFixtureScope = $true
         }
+        elseif ($ProtectedWorkflowScope) {
+            # The caller-visible switch does not prove supervisor execution. The
+            # protected workflow must invoke this only with events just observed
+            # by the central runner and publish the result from reviewed code.
+            $arguments.DevelopmentHarness = $true
+            $arguments.ObservedSupervisorExecution = $ObservedSupervisorExecution
+        }
         $technical = New-StandardValidationProposedSourceMergeExceptionDecision @arguments
         if ([string]$technical.status -cne 'eligible-for-policy-review' -or
             [bool]$technical.releaseEligible -or
@@ -5124,7 +5209,17 @@ function New-StandardValidationProtectedSourceMergeDecision {
     }
     catch { [void]$reasons.Add('technical-evidence-invalid') }
 
-    if ($null -ne $TrustedAuthorityRecord -and $null -ne $technical) {
+    if ($ProtectedWorkflowScope -and $null -ne $technical) {
+        try {
+            $adoptionPath = Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/pr12-source-merge-adoption.json'
+            $adoption = Get-StandardValidationJson -Path $adoptionPath -Context 'protected source merge adoption'
+            $binding = New-StandardValidationProtectedAdoptionBinding -AuthorityRecord $adoption `
+                -TechnicalDecision $technical -EventSourceRevision $EventSourceRevision
+            if ($binding.status -cne 'eligible') { [void]$reasons.Add('protected-adoption-binding-invalid') }
+        }
+        catch { [void]$reasons.Add('protected-adoption-missing-or-invalid') }
+    }
+    elseif ($null -ne $TrustedAuthorityRecord -and $null -ne $technical) {
         $authority = $TrustedAuthorityRecord
         $otherHashes = Get-StandardValidationProperty -Object $authority -Name 'otherScannerReportSha256'
         if ([string](Get-StandardValidationProperty -Object $authority -Name 'contract') -cne 'protected-source-merge-adoption-fixture-v1' -or
@@ -5148,10 +5243,14 @@ function New-StandardValidationProtectedSourceMergeDecision {
     }
 
     return [ordered]@{
-        contract = 'inactive-protected-source-merge-route-v1'
-        status = 'failed'
+        contract = if ($ProtectedWorkflowScope) { 'protected-source-merge-decision-v1' } else { 'inactive-protected-source-merge-route-v1' }
+        status = if ($ProtectedWorkflowScope -and $reasons.Count -eq 0) { 'eligible-for-protected-check' } else { 'failed' }
         fixtureRoute = if ($TestOnlyFixtureScope -and $reasons.Count -eq 0) { 'eligible' } else { 'rejected' }
         requiredContexts = @('repository-contract', 'skill-validator', 'skill-tools')
+        sourceRevision = $EventSourceRevision
+        centralRevision = $ExpectedCentralRevision
+        workflowRevision = $ExpectedWorkflowRevision
+        archiveSha256 = $ExpectedArchiveSha256
         releaseEligible = $false
         failureReasons = @($reasons.ToArray())
         technicalFailureReasons = if ($null -eq $technical) { @() } else { @($technical.failureReasons) }
@@ -6610,7 +6709,11 @@ function Invoke-StandardValidationRun {
         [string] $PublishInstallEvidencePath,
         [string] $PostInstallEvidencePath,
         [bool] $CompleteLifecycle = $false,
-        [bool] $SourceMergeExceptionReview = $false
+        [bool] $SourceMergeExceptionReview = $false,
+        [bool] $ProtectedSourceMergeCheck = $false,
+        [string] $ProtectedCentralRevision = '',
+        [string] $ProtectedWorkflowRevision = '',
+        [string] $ProtectedAuthorityArchiveSha256 = ''
     )
 
     $script:StandardValidationAuthorityEvidence = $null
@@ -6662,6 +6765,9 @@ function Invoke-StandardValidationRun {
     try {
         if ($SourceMergeExceptionReview -and -not $DevelopmentHarness) {
             throw 'INVALID|Source merge exception review is limited to the non-release development harness.'
+        }
+        if ($ProtectedSourceMergeCheck -and -not $SourceMergeExceptionReview) {
+            throw 'INVALID|Protected source merge decision requires observed supplemental review.'
         }
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
         Assert-StandardValidationSourceRepository -Value $SourceRepository
@@ -7442,6 +7548,38 @@ function Invoke-StandardValidationRun {
                 $proposal.failureReasons = @($proposal.failureReasons) + @($supplementalReviewFailure)
             }
             $finalEvidence | Add-Member -NotePropertyName sourceMergeExceptionProposal -NotePropertyValue $proposal -Force
+            if ($ProtectedSourceMergeCheck) {
+                try {
+                    $technicalEvidence = @{
+                        Report = $finalEvidence; Policy = $policy; CandidateRoot = $originalCandidateRoot
+                        ExpectedSourceRevision = $SourceRevision; PullRequestNumber = 12
+                        ScannerReportPath = (Join-Path $reviewEvidenceRoot 'PR12-1adba1e-archive-official-scan-for-policy.json')
+                        ExpectedScannerReportSha256 = [string]$policy.scannerReportSha256
+                        OtherScannerReportPaths = $otherReportPaths; ScannerReceipt = $scannerReceipt
+                        SupplementalEvidence = $supplementalReviewEvidence
+                    }
+                    $protectedDecision = New-StandardValidationProtectedSourceMergeDecision `
+                        -TechnicalEvidence $technicalEvidence -EventSourceRevision $SourceRevision `
+                        -ExpectedCentralRevision $ProtectedCentralRevision `
+                        -ExpectedWorkflowRevision $ProtectedWorkflowRevision `
+                        -ExpectedArchiveSha256 $ProtectedAuthorityArchiveSha256 `
+                        -ObservedSupervisorExecution:$supplementalReviewObserved -ProtectedWorkflowScope
+                }
+                catch {
+                    $protectedDecision = [ordered]@{
+                        contract = 'protected-source-merge-decision-v1'; status = 'failed'
+                        fixtureRoute = 'rejected'
+                        requiredContexts = @('repository-contract', 'skill-validator', 'skill-tools')
+                        sourceRevision = $SourceRevision
+                        centralRevision = $ProtectedCentralRevision
+                        workflowRevision = $ProtectedWorkflowRevision
+                        archiveSha256 = $ProtectedAuthorityArchiveSha256
+                        releaseEligible = $false
+                        failureReasons = @('protected-decision-error')
+                    }
+                }
+                $finalEvidence | Add-Member -NotePropertyName sourceMergeDecision -NotePropertyValue $protectedDecision -Force
+            }
         }
         if ($null -ne $outputReservationStream -and -not $finalWritten) {
             try {
@@ -7587,6 +7725,10 @@ $result = Invoke-StandardValidationRun `
     -PublishInstallEvidencePath $PublishInstallEvidencePath `
     -PostInstallEvidencePath $PostInstallEvidencePath `
     -CompleteLifecycle ([bool]$CompleteLifecycle) `
-    -SourceMergeExceptionReview ([bool]$SourceMergeExceptionReview)
+    -SourceMergeExceptionReview ([bool]$SourceMergeExceptionReview) `
+    -ProtectedSourceMergeCheck ([bool]$ProtectedSourceMergeCheck) `
+    -ProtectedCentralRevision $ProtectedCentralRevision `
+    -ProtectedWorkflowRevision $ProtectedWorkflowRevision `
+    -ProtectedAuthorityArchiveSha256 $ProtectedAuthorityArchiveSha256
 $result | ConvertTo-Json -Depth 100
 exit ([int]$result.exitCode)

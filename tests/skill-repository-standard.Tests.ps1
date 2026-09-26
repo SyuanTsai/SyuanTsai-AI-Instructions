@@ -3088,7 +3088,23 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $released.releaseEligible = $true
         Assert-False (Test-AuthorityJsonSchemaValue -Value $released -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposed source exception cannot authorize release.'
         Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 3 'The review runner and inactive bridge must share the one technical proposal helper.'
-        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'inactive' 'The protected source bridge must remain inactive.'
+        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'pending protected review and adoption' 'The merge-only bridge must remain pending protected review and adoption.'
+        Assert-Equal $contract.evidence.protectedSourceMergeBridgeCandidate.schemaProperty 'sourceMergeDecision; canonical state and sourceConformance remain FAILED/20 and failed' 'The merge-only decision must remain separate from canonical validation.'
+        Assert-True ($null -ne $evidenceSchema.properties.sourceMergeDecision) 'The protected decision must have a separate schema property.'
+        $mergeDecision = [pscustomobject][ordered]@{
+            contract = 'protected-source-merge-decision-v1'; status = 'eligible-for-protected-check'
+            fixtureRoute = 'rejected'; requiredContexts = @('repository-contract', 'skill-validator', 'skill-tools')
+            sourceRevision = $proposalPolicy.sourceRevision; centralRevision = 'a' * 40
+            workflowRevision = 'b' * 40; archiveSha256 = 'c' * 64
+            releaseEligible = $false; failureReasons = @()
+        }
+        Assert-True (Test-AuthorityJsonSchemaValue -Value $mergeDecision -Schema $evidenceSchema.properties.sourceMergeDecision -RootSchema $evidenceSchema) 'An exact merge-only decision must be schema-valid.'
+        $releasedMerge = Copy-TestJsonObject -Value $mergeDecision
+        $releasedMerge.releaseEligible = $true
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $releasedMerge -Schema $evidenceSchema.properties.sourceMergeDecision -RootSchema $evidenceSchema) 'A protected source decision cannot authorize release.'
+        $otherSourceMerge = Copy-TestJsonObject -Value $mergeDecision
+        $otherSourceMerge.sourceRevision = 'd' * 40
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $otherSourceMerge -Schema $evidenceSchema.properties.sourceMergeDecision -RootSchema $evidenceSchema) 'A protected source decision cannot extend to another source revision.'
         Assert-Match $runner 'protected-authority-unavailable' 'The bridge must fail closed without a protected authority.'
         Assert-Equal ($contract.evidence.protectedSourceMergeBridgeCandidate.requiredContexts -join ',') 'repository-contract,skill-validator,skill-tools' 'The bridge scope must name only the source contexts.'
         Assert-Match $runner 'if \(\$SourceMergeExceptionReview -and \$null -ne \$candidateEvidence\)' 'The proposal must be absent from ordinary canonical validation.'
