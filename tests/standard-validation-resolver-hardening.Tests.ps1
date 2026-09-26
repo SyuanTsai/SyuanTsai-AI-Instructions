@@ -1369,4 +1369,20 @@ catch {
         { Resolve-Pester -ShouldInstall $true -RepositoryEndpoint 'https://www.powershellgallery.com/api/v2' -ApprovedPayload $approval -RequestedInstallRoot $TestDrive } | Should -Throw '*no approved immutable payload identity*'
         Should -Invoke Save-Module -Exactly 0
     }
+
+    # Scenario: A normal manifest omits the optional initialization-hook keys.
+    # Purpose: Confirm strict-mode policy inspection accepts absent optional metadata.
+    It 'UnitT74_accepts_manifest_without_optional_initialization_hooks' {
+        $root = Join-Path $TestDrive 'manifest-without-hooks'
+        [void](New-Item -ItemType Directory -Path $root)
+        $manifestPath = Join-Path $root 'Pester.psd1'
+        [IO.File]::WriteAllText($manifestPath, @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    FunctionsToExport = @('Invoke-Pester')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        { Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0' } | Should -Not -Throw
+    }
 }

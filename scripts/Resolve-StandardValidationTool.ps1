@@ -2685,9 +2685,9 @@ function Assert-ApprovedPesterManifest {
         [string]$manifest.ModuleVersion -cne $Version -or
         [string]$manifest.RootModule -cne 'Pester.psm1' -or
         @($manifest.FunctionsToExport | Where-Object { [string]$_ -ceq 'Invoke-Pester' }).Count -ne 1 -or
-        ($null -ne $manifest.ScriptsToProcess -and @($manifest.ScriptsToProcess).Count -gt 0) -or
-        ($null -ne $manifest.NestedModules -and @($manifest.NestedModules).Count -gt 0) -or
-        ($null -ne $manifest.RequiredModules -and @($manifest.RequiredModules).Count -gt 0)) {
+        ($manifest.Contains('ScriptsToProcess') -and @($manifest['ScriptsToProcess']).Count -gt 0) -or
+        ($manifest.Contains('NestedModules') -and @($manifest['NestedModules']).Count -gt 0) -or
+        ($manifest.Contains('RequiredModules') -and @($manifest['RequiredModules']).Count -gt 0)) {
         throw "Saved Pester manifest metadata does not bind Pester@$Version without initialization hooks."
     }
 }
