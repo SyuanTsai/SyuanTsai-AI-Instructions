@@ -316,8 +316,8 @@ jobs:
           }
           Write-Host 'Both PowerShell 5.1 partitions passed their fixed shard, test, and skip counts.'
 
-  powershell-7:
-    name: Pester (PowerShell 7)
+  powershell-7-even:
+    name: Pester (PowerShell 7 even shards)
     needs: linux-callback-focused
     runs-on: windows-latest
     steps:
@@ -356,7 +356,7 @@ jobs:
           if ($failed) { exit 1 }
           exit 0
 
-      - name: Run full Pester suite
+      - name: Run even Pester partition
         shell: pwsh
         run: |
           # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
@@ -370,14 +370,100 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 619
-            ExpectedSkippedCount = 12
+            ExpectedTotalCount = 404
+            ExpectedSkippedCount = 6
+            ShardPartitionCount = 2
+            ShardPartitionIndex = 0
+            ExpectedFullShardCount = 32
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
           }
           & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
           exit 0
+
+  powershell-7-odd:
+    name: Pester (PowerShell 7 odd shards)
+    needs: linux-callback-focused
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
+
+      - name: Parse all PowerShell files
+        shell: pwsh
+        run: |
+          $files = git ls-files '*.ps1' '*.psm1'
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            foreach ($parseError in @($errors)) {
+              $failed = $true
+              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
+            }
+          }
+          if ($failed) { exit 1 }
+          exit 0
+
+      - name: Run odd Pester partition
+        shell: pwsh
+        run: |
+          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'4.10.1' } |
+            Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
+          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
+          $executorArguments = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '4.10.1'
+            ExpectedTotalCount = 215
+            ExpectedSkippedCount = 6
+            ShardPartitionCount = 2
+            ShardPartitionIndex = 1
+            ExpectedFullShardCount = 32
+            OuterTimeoutSeconds = 2400
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
+          }
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
+          exit 0
+
+  powershell-7:
+    name: Pester (PowerShell 7)
+    needs: [powershell-7-even, powershell-7-odd]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both complete PowerShell 7 partitions
+        shell: pwsh
+        env:
+          EVEN_RESULT: ${{ needs['powershell-7-even'].result }}
+          ODD_RESULT: ${{ needs['powershell-7-odd'].result }}
+        run: |
+          if ($env:EVEN_RESULT -cne 'success' -or $env:ODD_RESULT -cne 'success') {
+            throw "PowerShell 7 partition failure: even=$env:EVEN_RESULT odd=$env:ODD_RESULT"
+          }
+          Write-Host 'Both PowerShell 7 partitions passed their fixed shard, test, and skip counts.'
 
   powershell-7-unix-composition:
     name: Composition (PowerShell 7 on Linux)
