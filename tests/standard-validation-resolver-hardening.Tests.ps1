@@ -1385,4 +1385,21 @@ catch {
 '@, [Text.UTF8Encoding]::new($false))
         { Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0' } | Should -Not -Throw
     }
+
+    # Scenario: A manifest names an assembly that Import-Module would load before the root module.
+    # Purpose: Reject every executable import hook, including RequiredAssemblies, during data-only inspection.
+    It 'UnitT75_rejects_required_assemblies_before_module_import' {
+        $root = Join-Path $TestDrive 'manifest-required-assemblies'
+        [void](New-Item -ItemType Directory -Path $root)
+        $manifestPath = Join-Path $root 'Pester.psd1'
+        [IO.File]::WriteAllText($manifestPath, @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    FunctionsToExport = @('Invoke-Pester')
+    RequiredAssemblies = @('unapproved.dll')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        { Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0' } | Should -Throw '*initialization hooks*'
+    }
 }
