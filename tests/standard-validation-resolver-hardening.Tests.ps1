@@ -1246,3 +1246,184 @@ Describe 'Installed closure path identity' {
         Assert-ClosureCondition (-not [string]::Equals((Get-DirectoryClosureIdentity -Path $root).sha256, $identity.sha256, [StringComparison]::Ordinal)) 'Content tampering must change the closure digest.'
     }
 }
+
+Describe 'Pester resolver payload trust boundary' {
+    BeforeAll {
+        $script:PesterResolverPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1'
+        $script:PesterPolicyPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json'
+        . $script:PesterResolverPath -PolicyPath $script:PesterPolicyPath -ValidatePolicyOnly | Out-Null
+
+        function Assert-PesterBoundaryCondition {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+
+        function Assert-PesterBoundaryError {
+            param([scriptblock] $Action, [string] $Pattern, [string] $Message)
+            $actualError = $null
+            try { & $Action | Out-Null }
+            catch { $actualError = $_.Exception.Message }
+            if ([string]::IsNullOrEmpty($actualError) -or $actualError -notmatch $Pattern) {
+                throw "$Message Actual='$actualError'."
+            }
+        }
+    }
+
+    # Scenario: A gallery payload contains module initialization code that reads a fake token and a fake same-user file.
+    # Purpose: Prove an unapproved payload cannot execute in the credential-bearing resolver process.
+    It 'UnitT70_rejects_unapproved_Pester_payload_without_running_module_initialization' {
+        $fixtureRoot = Join-Path $TestDrive 'fake-gallery-payload'
+        $moduleRoot = Join-Path $fixtureRoot 'Pester/6.2.0'
+        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
+        [IO.File]::WriteAllText((Join-Path $moduleRoot 'Pester.psd1'), @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    GUID = 'a699dea5-2c73-4616-a270-1f7abb777e71'
+    FunctionsToExport = @('Invoke-Pester')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $moduleRoot 'Pester.psm1'), @'
+$fakeFileValue = [IO.File]::ReadAllText($env:STANDARD_TEST_FAKE_CREDENTIAL_FILE)
+[IO.File]::WriteAllText($env:STANDARD_TEST_MODULE_MARKER, "$env:JIRA_API_TOKEN|$fakeFileValue")
+function Invoke-Pester {}
+Export-ModuleMember -Function Invoke-Pester
+'@, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $moduleRoot 'PSGetModuleInfo.xml'), '<local-metadata />', [Text.UTF8Encoding]::new($false))
+        $fakeCredentialFile = Join-Path $TestDrive 'fake-credential.txt'
+        [IO.File]::WriteAllText($fakeCredentialFile, 'FAKE_FILE_VALUE', [Text.UTF8Encoding]::new($false))
+        $marker = Join-Path $TestDrive 'module-initialization-ran.txt'
+        $installRoot = Join-Path $TestDrive 'install-root'
+        [void](New-Item -ItemType Directory -Path $installRoot -Force)
+        $childPath = Join-Path $TestDrive 'invoke-fake-resolver.ps1'
+        [IO.File]::WriteAllText($childPath, @'
+param([string] $ResolverPath, [string] $PolicyPath, [string] $FixtureRoot, [string] $InstallRoot, [string] $Marker, [string] $CredentialFile)
+$ErrorActionPreference = 'Stop'
+$env:JIRA_API_TOKEN = 'FAKE_TOKEN_VALUE'
+$env:STANDARD_TEST_FAKE_CREDENTIAL_FILE = $CredentialFile
+$env:STANDARD_TEST_MODULE_MARKER = $Marker
+. $ResolverPath -PolicyPath $PolicyPath -ValidatePolicyOnly | Out-Null
+function Get-PSRepository { [pscustomobject]@{ SourceLocation = 'https://www.powershellgallery.com/api/v2' } }
+function Find-Module { [pscustomobject]@{ Version = '6.2.0' } }
+function Save-Module {
+    param($Name, $Repository, $RequiredVersion, $Path, [switch] $Force, $ErrorAction)
+    Copy-Item -LiteralPath (Join-Path $FixtureRoot 'Pester') -Destination $Path -Recurse -Force
+}
+try {
+    $approval = (Get-Content -LiteralPath $PolicyPath -Raw | ConvertFrom-Json).tools.pester.approvedPayload
+    [void](Resolve-Pester -ShouldInstall $true -RepositoryEndpoint 'https://www.powershellgallery.com/api/v2' -ApprovedPayload $approval -RequestedInstallRoot $InstallRoot)
+    'UNEXPECTED_PASS'
+}
+catch {
+    "EXPECTED_REJECT:$($_.Exception.Message)"
+}
+'@, [Text.UTF8Encoding]::new($false))
+        $hostName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' }
+            elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' }
+            else { 'pwsh' }
+        $hostPath = Join-Path $PSHOME $hostName
+        $output = @(& $hostPath -NoProfile -NonInteractive -File $childPath `
+            -ResolverPath $script:PesterResolverPath -PolicyPath $script:PesterPolicyPath `
+            -FixtureRoot $fixtureRoot -InstallRoot $installRoot -Marker $marker -CredentialFile $fakeCredentialFile)
+        Assert-PesterBoundaryCondition ($LASTEXITCODE -eq 0) 'The fake resolver child process failed.'
+        Assert-PesterBoundaryCondition (-not (Test-Path -LiteralPath $marker)) 'Unapproved module initialization ran.'
+        Assert-PesterBoundaryCondition (($output -join "`n") -match 'EXPECTED_REJECT:.*[Pp]ayload') 'The fake payload was not rejected by identity.'
+        Assert-PesterBoundaryCondition (@(Get-ChildItem -LiteralPath $installRoot -Force).Count -eq 0) 'Rejected package was not cleaned up.'
+    }
+
+    # Scenario: PowerShellGet changes only its generated local metadata, while a package file or extra file changes later.
+    # Purpose: Keep the approved payload identity stable across downloads and sensitive to every executable package byte.
+    It 'UnitT71_hashes_the_complete_Pester_payload_but_not_generated_metadata' {
+        $root = Join-Path $TestDrive 'payload-identity'
+        $moduleRoot = Join-Path $root 'Pester/6.2.0'
+        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
+        $manifestPath = Join-Path $moduleRoot 'Pester.psd1'
+        $modulePath = Join-Path $moduleRoot 'Pester.psm1'
+        $metadataPath = Join-Path $moduleRoot 'PSGetModuleInfo.xml'
+        [IO.File]::WriteAllText($manifestPath, "@{ ModuleVersion = '6.2.0' }", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($modulePath, 'function Invoke-Pester {}', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($metadataPath, '<first />', [Text.UTF8Encoding]::new($false))
+        $closure = Get-DirectoryClosureIdentity -Path $root
+        $actual = Get-ApprovedPesterPayloadSha256 -Closure $closure -Version '6.2.0'
+        $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $moduleHash = (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $canonical = "Pester/6.2.0/Pester.psd1`t$manifestHash`nPester/6.2.0/Pester.psm1`t$moduleHash`n"
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $expected = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        Assert-PesterBoundaryCondition ([string]::Equals($actual, $expected, [StringComparison]::Ordinal)) 'Approved payload canonical hash differed.'
+        [IO.File]::WriteAllText($metadataPath, '<second />', [Text.UTF8Encoding]::new($false))
+        $metadataChangedDigest = Get-ApprovedPesterPayloadSha256 -Closure (Get-DirectoryClosureIdentity -Path $root) -Version '6.2.0'
+        Assert-PesterBoundaryCondition ([string]::Equals($metadataChangedDigest, $expected, [StringComparison]::Ordinal)) 'Generated metadata changed the approved payload identity.'
+        [IO.File]::AppendAllText($modulePath, ' # changed')
+        $changedModuleDigest = Get-ApprovedPesterPayloadSha256 -Closure (Get-DirectoryClosureIdentity -Path $root) -Version '6.2.0'
+        Assert-PesterBoundaryCondition (-not [string]::Equals($changedModuleDigest, $expected, [StringComparison]::Ordinal)) 'Module tampering did not change the approved payload identity.'
+        [IO.File]::WriteAllText((Join-Path $moduleRoot 'unexpected.ps1'), 'extra')
+        $extraFileDigest = Get-ApprovedPesterPayloadSha256 -Closure (Get-DirectoryClosureIdentity -Path $root) -Version '6.2.0'
+        Assert-PesterBoundaryCondition (-not [string]::Equals($extraFileDigest, $expected, [StringComparison]::Ordinal)) 'Extra package file did not change the approved payload identity.'
+        Remove-Item -LiteralPath $metadataPath
+        Assert-PesterBoundaryError { Get-ApprovedPesterPayloadSha256 -Closure (Get-DirectoryClosureIdentity -Path $root) -Version '6.2.0' } 'metadata' 'Missing PowerShellGet metadata was not rejected.'
+    }
+
+    # Scenario: An approved manifest requests a script during module initialization.
+    # Purpose: Read data without executing the hook and reject the unsafe declaration.
+    It 'UnitT72_rejects_manifest_initialization_hooks_without_running_them' {
+        $root = Join-Path $TestDrive 'manifest-hooks'
+        [void](New-Item -ItemType Directory -Path $root)
+        $marker = Join-Path $TestDrive 'hook-ran.txt'
+        [IO.File]::WriteAllText((Join-Path $root 'Pester.psd1'), @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    FunctionsToExport = @('Invoke-Pester')
+    ScriptsToProcess = @('init.ps1')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $root 'init.ps1'), "[IO.File]::WriteAllText('$marker', 'executed')")
+        Assert-PesterBoundaryError { Assert-ApprovedPesterManifest -Path (Join-Path $root 'Pester.psd1') -Version '6.2.0' } 'initialization hooks' 'Manifest script hook was not rejected.'
+        Assert-PesterBoundaryCondition (-not (Test-Path -LiteralPath $marker)) 'Manifest script hook ran.'
+    }
+
+    # Scenario: PSGallery reports a new latest-stable version before authority approves its immutable payload.
+    # Purpose: Stop before download rather than silently falling back to an older approved tool.
+    It 'UnitT73_rejects_unapproved_new_latest_stable_version_before_download' {
+        Mock Get-PSRepository { [pscustomobject]@{ SourceLocation = 'https://www.powershellgallery.com/api/v2' } }
+        Mock Find-Module { [pscustomobject]@{ Version = '6.2.1' } }
+        Mock Save-Module { throw 'download must not start' }
+        $approval = [pscustomobject]@{ version = '6.2.0'; sha256 = 'a' * 64 }
+        Assert-PesterBoundaryError { Resolve-Pester -ShouldInstall $true -RepositoryEndpoint 'https://www.powershellgallery.com/api/v2' -ApprovedPayload $approval -RequestedInstallRoot $TestDrive } 'no approved immutable payload identity' 'Unapproved latest stable Pester was not rejected before download.'
+    }
+
+    # Scenario: A normal manifest omits the optional initialization-hook keys.
+    # Purpose: Confirm strict-mode policy inspection accepts absent optional metadata.
+    It 'UnitT74_accepts_manifest_without_optional_initialization_hooks' {
+        $root = Join-Path $TestDrive 'manifest-without-hooks'
+        [void](New-Item -ItemType Directory -Path $root)
+        $manifestPath = Join-Path $root 'Pester.psd1'
+        [IO.File]::WriteAllText($manifestPath, @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    FunctionsToExport = @('Invoke-Pester')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0'
+    }
+
+    # Scenario: A manifest names an assembly that Import-Module would load before the root module.
+    # Purpose: Reject every executable import hook, including RequiredAssemblies, during data-only inspection.
+    It 'UnitT75_rejects_required_assemblies_before_module_import' {
+        $root = Join-Path $TestDrive 'manifest-required-assemblies'
+        [void](New-Item -ItemType Directory -Path $root)
+        $manifestPath = Join-Path $root 'Pester.psd1'
+        [IO.File]::WriteAllText($manifestPath, @'
+@{
+    RootModule = 'Pester.psm1'
+    ModuleVersion = '6.2.0'
+    FunctionsToExport = @('Invoke-Pester')
+    RequiredAssemblies = @('unapproved.dll')
+}
+'@, [Text.UTF8Encoding]::new($false))
+        Assert-PesterBoundaryError { Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0' } 'initialization hooks' 'RequiredAssemblies was not rejected.'
+    }
+}

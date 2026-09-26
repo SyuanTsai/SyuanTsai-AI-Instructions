@@ -423,8 +423,15 @@ function Get-Policy {
     Assert-JsonBoolean -Value $skillTools.npmDistribution.recordDependencyClosureIntegrity -Expected $true -Context '$.tools.skill-tools.npmDistribution.recordDependencyClosureIntegrity'
 
     $pester = $policy.tools.pester
-    Assert-ExactPropertySet -Value $pester -Expected @('source', 'channel', 'repository') -Context '$.tools.pester'
+    Assert-ExactPropertySet -Value $pester -Expected @('source', 'channel', 'repository', 'approvedPayload') -Context '$.tools.pester'
     Assert-JsonString -Value $pester.repository -Expected $trustedPowerShellRepository -Context '$.tools.pester.repository'
+    Assert-ExactPropertySet -Value $pester.approvedPayload -Expected @('version', 'sha256') -Context '$.tools.pester.approvedPayload'
+    if ($pester.approvedPayload.version -isnot [string] -or
+        [string]$pester.approvedPayload.version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+        $pester.approvedPayload.sha256 -isnot [string] -or
+        [string]$pester.approvedPayload.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Pester approved payload policy must bind one stable version and lowercase SHA-256.'
+    }
 
     Assert-ExactPropertySet -Value $policy.compatibilityLane -Expected @(
         'mayPinOlderVersion', 'requiresExplicitPurpose', 'mayBeCanonicalReleaseGate'
@@ -2643,10 +2650,54 @@ function Get-ApprovedGoRuntimeVersion {
         -OfficialLatestStableVersion $officialLatestStableVersion
 }
 
+function Get-ApprovedPesterPayloadSha256 {
+    param(
+        [Parameter(Mandatory = $true)] $Closure,
+        [Parameter(Mandatory = $true)][string] $Version
+    )
+
+    $metadataPath = "Pester/$Version/PSGetModuleInfo.xml"
+    $metadataEntries = @($Closure.entries | Where-Object { [string]$_.path -ceq $metadataPath })
+    if ($metadataEntries.Count -ne 1) {
+        throw 'Pester payload is missing its one generated PowerShellGet metadata file.'
+    }
+    $payloadEntries = @($Closure.entries | Where-Object { [string]$_.path -cne $metadataPath })
+    if ($payloadEntries.Count -eq 0) { throw 'Pester payload is empty.' }
+    $canonical = ($payloadEntries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Assert-ApprovedPesterManifest {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Version
+    )
+
+    # Import-PowerShellDataFile parses the manifest as data. Test-ModuleManifest
+    # and Import-Module may initialize downloaded code, so neither belongs in
+    # the acquisition process.
+    $manifest = Import-PowerShellDataFile -Path $Path -ErrorAction Stop
+    if ($manifest -isnot [System.Collections.IDictionary] -or
+        [string]$manifest.ModuleVersion -cne $Version -or
+        [string]$manifest.RootModule -cne 'Pester.psm1' -or
+        @($manifest.FunctionsToExport | Where-Object { [string]$_ -ceq 'Invoke-Pester' }).Count -ne 1 -or
+        ($manifest.Contains('ScriptsToProcess') -and @($manifest['ScriptsToProcess']).Count -gt 0) -or
+        ($manifest.Contains('NestedModules') -and @($manifest['NestedModules']).Count -gt 0) -or
+        ($manifest.Contains('RequiredModules') -and @($manifest['RequiredModules']).Count -gt 0) -or
+        ($manifest.Contains('RequiredAssemblies') -and @($manifest['RequiredAssemblies']).Count -gt 0)) {
+        throw "Saved Pester manifest metadata does not bind Pester@$Version without initialization hooks."
+    }
+}
+
 function Resolve-Pester {
     param(
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)][string] $RepositoryEndpoint,
+        [Parameter(Mandatory = $true)] $ApprovedPayload,
         [string] $RequestedInstallRoot
     )
 
@@ -2662,10 +2713,14 @@ function Resolve-Pester {
     if ([string]::IsNullOrWhiteSpace($version) -or $version.Contains('-')) {
         throw "Could not resolve a stable Pester version. Resolved='$version'."
     }
+    if ($version -cne [string]$ApprovedPayload.version) {
+        throw "Latest-stable Pester version '$version' has no approved immutable payload identity."
+    }
 
     $toolInstallPath = $null
     $modulePath = $null
     $moduleClosure = $null
+    $approvedPayloadSha256 = $null
     if ($ShouldInstall) {
         $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'pester'
         try {
@@ -2674,17 +2729,16 @@ function Resolve-Pester {
             if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
                 throw "Saved Pester module manifest was not found: $modulePath"
             }
-            $manifest = Test-ModuleManifest -Path $modulePath -ErrorAction Stop
-            if ([string]$manifest.Version -cne $version) {
-                throw "Saved Pester version mismatch. Expected '$version', got '$($manifest.Version)'."
-            }
-            [void](Import-Module -Name $modulePath -Force -PassThru -ErrorAction Stop)
-            $invokePester = Get-Command Invoke-Pester -CommandType Function, Cmdlet -ErrorAction Stop | Select-Object -First 1
-            if ($null -eq $invokePester -or [string]$invokePester.Module.Version -cne $version) {
-                throw "Saved Pester module did not expose Invoke-Pester@$version."
-            }
             $moduleClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
-            Add-ProcessPathValue -Name 'PSModulePath' -Value $toolInstallPath
+            $approvedPayloadSha256 = Get-ApprovedPesterPayloadSha256 -Closure $moduleClosure -Version $version
+            if ($approvedPayloadSha256 -cne [string]$ApprovedPayload.sha256) {
+                throw "Unapproved Pester payload identity for latest-stable version '$version'."
+            }
+            Assert-ApprovedPesterManifest -Path $modulePath -Version $version
+            $closureAfterManifest = Get-DirectoryClosureIdentity -Path $toolInstallPath
+            if ([string]$closureAfterManifest.sha256 -cne [string]$moduleClosure.sha256) {
+                throw 'Pester payload changed after manifest metadata verification.'
+            }
         }
         catch {
             if (Test-Path -LiteralPath $toolInstallPath) {
@@ -2696,14 +2750,15 @@ function Resolve-Pester {
 
     $identity = "PowerShellGallery:Pester@$version#repository=$expectedRepository"
     if ($null -ne $moduleClosure) {
-        $identity += "#moduleClosureSha256=$($moduleClosure.sha256)"
+        $identity += "#approvedPayloadSha256=$approvedPayloadSha256#moduleClosureSha256=$($moduleClosure.sha256)"
     }
     return [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity
-        identityKind = 'package-coordinate-and-installed-closure'
+        identityKind = 'approved-payload-and-installed-closure'
         installRoot = $toolInstallPath
         modulePath = $modulePath
+        approvedPayloadSha256 = $approvedPayloadSha256
         executablePath = $modulePath
         executableSha256 = if ($null -eq $modulePath) { $null } else { Get-FileSha256 -Path $modulePath }
         dependencyClosureSha256 = if ($null -eq $moduleClosure) { $null } else { [string]$moduleClosure.sha256 }
@@ -3331,7 +3386,7 @@ else {
 
     $resolved = switch ($ToolName) {
         'pester' {
-            Resolve-Pester -ShouldInstall ([bool]$Install) -RepositoryEndpoint ([string]$policy.tools.pester.repository) -RequestedInstallRoot $InstallRoot
+            Resolve-Pester -ShouldInstall ([bool]$Install) -RepositoryEndpoint ([string]$policy.tools.pester.repository) -ApprovedPayload $policy.tools.pester.approvedPayload -RequestedInstallRoot $InstallRoot
         }
         'skill-tools' {
             Resolve-SkillTools -ShouldInstall ([bool]$Install) -Registry ([string]$policy.tools.'skill-tools'.registry) -DistributionPolicy $policy.tools.'skill-tools'.npmDistribution -RequestedInstallRoot $InstallRoot
@@ -3391,6 +3446,7 @@ else {
     }
     if ($ToolName -eq 'pester') {
         $result.modulePath = $resolved.modulePath
+        $result.approvedPayloadSha256 = $resolved.approvedPayloadSha256
     }
     if ($ToolName -eq 'skill-tools') {
         $result.registry = [string]$toolPolicy.registry
