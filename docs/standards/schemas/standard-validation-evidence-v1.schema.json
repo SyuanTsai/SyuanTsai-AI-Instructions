@@ -40,7 +40,8 @@
     },
     "failure": { "$ref": "#/$defs/failure" },
     "artifacts": { "$ref": "#/$defs/artifacts" },
-    "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" }
+    "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" },
+    "sourceMergeExceptionProposal": { "$ref": "#/$defs/sourceMergeExceptionProposal" }
   },
   "allOf": [
     {
@@ -129,9 +130,84 @@
           }
         }
       }
+    },
+    {
+      "if": { "type": "object", "required": ["sourceMergeExceptionProposal"] },
+      "then": {
+        "type": "object",
+        "required": ["state", "exitCode", "releaseEligible", "sourceConformance", "stages"],
+        "properties": {
+          "state": { "const": "FAILED" },
+          "exitCode": { "const": 20 },
+          "releaseEligible": { "const": false },
+          "candidate": {
+            "type": "object",
+            "properties": {
+              "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
+              "sourceRevision": { "const": "66c466540480306c7f5346338d70d036bddb4930" },
+              "contentSha256": { "enum": ["2bf26172a0b114a50464fea49f1f21a899715d0bc588f3e4e0d68a2e6f8e1b35", "d84e46d1476b8735093d4d8bf5efdeef2066a44ccf743348db4e22adefa5f644"] }
+            }
+          },
+          "sourceConformance": { "type": "object", "properties": { "status": { "const": "failed" } } },
+          "stages": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "object", "properties": { "id": { "const": "controlled-acquisition" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "integrity-verification" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "package-validation" }, "status": { "const": "passed" } } },
+              { "type": "object", "properties": { "id": { "const": "skillspector-static" }, "status": { "const": "failed" } } },
+              { "type": "object", "properties": { "id": { "const": "repository-tests" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "conditional-semantic-scan" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "ai-review" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "human-approval" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "publish-or-install" }, "status": { "const": "not-run" } } },
+              { "type": "object", "properties": { "id": { "const": "post-install-verification" }, "status": { "const": "not-run" } } }
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "sourceMergeExceptionProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "contract", "status", "sourceRepository", "sourceRevision", "candidateId", "contentSha256", "scannerReportSha256", "otherScannerReportSha256", "canonicalState", "canonicalExitCode", "sourceConformanceStatus", "supplementalStage", "releaseEligible", "testFixtureOnly", "failureReasons"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "contract": { "const": "proposed-source-merge-exception-v1" },
+        "status": { "oneOf": [{ "const": "eligible-for-policy-review" }, { "const": "rejected" }] },
+        "sourceRepository": { "const": "https://github.com/SyuanTsai/Skill-General.git" },
+        "sourceRevision": { "const": "66c466540480306c7f5346338d70d036bddb4930" },
+        "candidateId": { "$ref": "#/$defs/sha256" },
+        "contentSha256": { "enum": ["2bf26172a0b114a50464fea49f1f21a899715d0bc588f3e4e0d68a2e6f8e1b35", "d84e46d1476b8735093d4d8bf5efdeef2066a44ccf743348db4e22adefa5f644"] },
+        "scannerReportSha256": { "enum": ["cedae2e75f2b5c68970988d8ba191301f6bbbb39a2c8f4fb49a628e8bb8bfed8", "b4662e1d989a5b4fc62019987c6d86264076e09754517c9cd8f10b8601191ed3"] },
+        "otherScannerReportSha256": {
+          "type": "array", "minItems": 5, "maxItems": 5,
+          "prefixItems": [
+            { "enum": ["70e94442f9a9465da47719458b3e33a091aa6236aed3d02f0b5146b48f0ba8a3", "517dcceaea3afcdd47db6f4aa412ffde13257822727b477b61b6cdb929f07aba"] },
+            { "enum": ["32aa16a5deff1ec1e023c28bcc1acc92163553044cf29f9b00964c7f8fc9a05e", "bcece762c5398660f5a236562a63c427af83f2a50c5246696f6a906c51dc75e0"] },
+            { "enum": ["194c3f842797ce28b637e69fd1e05dcb3bc9dbdd9b4042fe56153bd954b19df9", "8a1e9c86ff5bdb935622c5d89ead18999865724b3739f3879ad5570d6c1c993d"] },
+            { "enum": ["b3b5e8210cbe0f8e09de104b597f6ffeefb403cda396542f4a3b52afd6b58c2f", "1d96022a060b427d46257bed11c5555d72350e0be51117209ce9609b57b7311e"] },
+            { "enum": ["3a494d00a496c49d89c9d41e0593a21cbc6128be5da5a2924a61ebf5a095caed", "e2bb948d6fd2cfacef03c973c0144b50bec67595a26ee953f93416ddf073f5ac"] }
+          ],
+          "items": false
+        },
+        "canonicalState": { "const": "FAILED" },
+        "canonicalExitCode": { "const": 20 },
+        "sourceConformanceStatus": { "const": "failed" },
+        "supplementalStage": { "const": "supplemental-repository-tests" },
+        "releaseEligible": { "const": false },
+        "testFixtureOnly": { "const": false },
+        "failureReasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      },
+      "allOf": [
+        { "if": { "type": "object", "properties": { "status": { "const": "eligible-for-policy-review" } }, "required": ["status"] },
+          "then": { "type": "object", "properties": { "failureReasons": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "type": "object", "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
+          "then": { "type": "object", "properties": { "failureReasons": { "type": "array", "minItems": 1 } } } }
+      ]
+    },
     "sourceConformance": {
       "type": "object",
       "additionalProperties": false,

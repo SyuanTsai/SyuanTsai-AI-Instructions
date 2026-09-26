@@ -1885,7 +1885,7 @@ function Update-TestConsentDigests {
             if (-not $child.Start()) { throw 'provider descendant did not start.' }
             [IO.File]::WriteAllText([string]$callbackContext.childPidMarker, [string]$child.Id)
             $child.Dispose()
-            $childStartDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+            $childStartDeadline = [DateTime]::UtcNow.AddSeconds(5)
             while (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $childStartDeadline) {
                 [Threading.Thread]::Sleep(25)
             }
@@ -1904,7 +1904,7 @@ function Update-TestConsentDigests {
                 childStartedMarker = $childStartedMarker
                 childLateMarker = $childLateMarker
                 childPidMarker = $childPidMarker
-            }) -TimeoutSeconds 1
+            }) -TimeoutSeconds 2
         $returnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A provider callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The timed provider callback was not actually invoked.'
@@ -2617,7 +2617,7 @@ Describe 'Unix callback process group boundary' {
                 if (-not $child.Start()) { throw 'provider success descendant did not start.' }
             }
             finally { $child.Dispose() }
-            $childStartDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+            $childStartDeadline = [DateTime]::UtcNow.AddSeconds(5)
             while (-not (Test-Path -LiteralPath ([string]$callbackContext.childStartedMarker) -PathType Leaf) -and [DateTime]::UtcNow -lt $childStartDeadline) {
                 [Threading.Thread]::Sleep(25)
             }

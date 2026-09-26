@@ -304,6 +304,34 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-investigate-datadog-logs.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-manage-notion-ai-memory.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-plan-production-change.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-review-agent-skills.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-scan-for-policy.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-verify-data-access-performance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/pr12-source-merge-exception-proposal.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/managed-skill-lifecycle-v1.schema.json",
       "license": "Apache-2.0"
     },
@@ -673,6 +701,10 @@
     },
     {
       "path": "tests/skills-source-routing.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/source-merge-exception-draft.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

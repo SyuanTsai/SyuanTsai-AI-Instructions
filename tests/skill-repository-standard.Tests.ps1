@@ -3067,6 +3067,31 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationEvidenceSchemaPath | ConvertFrom-Json
         Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'Validation evidence schema must declare all terminal-state consistency rules.'
+        $proposalPolicy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:StandardsRoot 'pr12-source-merge-exception-proposal.json') | ConvertFrom-Json
+        Assert-Equal $proposalPolicy.status 'proposed' 'The PR12 source merge exception must remain inactive pending exact-head policy review.'
+        Assert-Equal $contract.evidence.sourceMergeExceptionProposal.policyPath 'docs/standards/pr12-source-merge-exception-proposal.json' 'The proposal must have one central policy path.'
+        Assert-True ($null -ne $evidenceSchema.properties.sourceMergeExceptionProposal) 'The proposed decision must have a separate schema property.'
+        $proposalDecision = [pscustomobject][ordered]@{
+            schemaVersion = 1; contract = 'proposed-source-merge-exception-v1'; status = 'eligible-for-policy-review'
+            sourceRepository = $proposalPolicy.sourceRepository; sourceRevision = $proposalPolicy.sourceRevision
+            candidateId = 'b' * 64; contentSha256 = $proposalPolicy.contentSha256
+            scannerReportSha256 = $proposalPolicy.scannerReportSha256; canonicalState = 'FAILED'; canonicalExitCode = 20
+            otherScannerReportSha256 = @($proposalPolicy.otherSkillReports | ForEach-Object { $_.sha256 })
+            sourceConformanceStatus = 'failed'; supplementalStage = 'supplemental-repository-tests'
+            releaseEligible = $false; testFixtureOnly = $false; failureReasons = @()
+        }
+        Assert-True (Test-AuthorityJsonSchemaValue -Value $proposalDecision -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'The narrow technical proposal must be schema-valid.'
+        $selfApproved = Copy-TestJsonObject -Value $proposalDecision
+        $selfApproved.status = 'approved-exception'
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $selfApproved -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposal cannot self-assert approval.'
+        $released = Copy-TestJsonObject -Value $proposalDecision
+        $released.releaseEligible = $true
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $released -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposed source exception cannot authorize release.'
+        Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 3 'The review runner and inactive bridge must share the one technical proposal helper.'
+        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'inactive' 'The protected source bridge must remain inactive.'
+        Assert-Match $runner 'protected-authority-unavailable' 'The bridge must fail closed without a protected authority.'
+        Assert-Equal ($contract.evidence.protectedSourceMergeBridgeCandidate.requiredContexts -join ',') 'repository-contract,skill-validator,skill-tools' 'The bridge scope must name only the source contexts.'
+        Assert-Match $runner 'if \(\$SourceMergeExceptionReview -and \$null -ne \$candidateEvidence\)' 'The proposal must be absent from ordinary canonical validation.'
         . $runnerPath `
             -CandidateRoot (Join-Path $TestDrive 'schema-candidate') `
             -AdapterPath (Join-Path $TestDrive 'schema-adapter.json') `

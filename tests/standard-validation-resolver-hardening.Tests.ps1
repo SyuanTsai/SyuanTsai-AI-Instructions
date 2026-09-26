@@ -1062,6 +1062,13 @@ catch {
         $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $proposal = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/pr12-source-merge-exception-proposal.json') | ConvertFrom-Json
+
+        Assert-Equal $proposal.status 'proposed' 'The PR12 scanner limitation must remain an inactive policy proposal.'
+        Assert-Equal $proposal.scannerSource 'NVIDIA/SkillSpector' 'The proposal must not substitute a private scanner source.'
+        Assert-Equal $proposal.scannerVersion '2.12.0' 'The proposal must bind the observed official scanner version.'
+        Assert-False ([bool]$proposal.releaseEligible) 'A source proposal cannot authorize release.'
+        Assert-NotMatch $resolver 'pr12-source-merge-exception-proposal|sourceMergeExceptionProposal' 'Tool resolver must not accept a source merge exception as tool provenance.'
 
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
