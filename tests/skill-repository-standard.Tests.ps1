@@ -499,6 +499,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-True ([bool]$toolchain.tools.'skill-validator'.goDistribution.rejectDangerousEnvironment) 'Dangerous Go build environment must fail closed.'
         Assert-True ([bool]$toolchain.tools.'skill-validator'.goDistribution.recordBinaryHash) 'Installed Go binary hashes must be recorded.'
         Assert-Equal $toolchain.tools.pester.repository 'https://www.powershellgallery.com/api/v2' 'Pester must use the approved PowerShell Gallery endpoint.'
+        Assert-Equal $toolchain.tools.pester.approvedPayload.version '6.2.0' 'Pester payload approval must name the reviewed latest-stable version.'
+        Assert-Equal $toolchain.tools.pester.approvedPayload.sha256 '0182e2c58c18b916d0d98f0f9f0e95be688bf424cf1869850ebd373e3ab75229' 'Pester payload approval must pin the reviewed executable package content.'
         Assert-True ([bool]$toolchain.compatibilityLane.mayPinOlderVersion) 'Compatibility lanes may pin an older version.'
         Assert-True ([bool]$toolchain.compatibilityLane.requiresExplicitPurpose) 'Compatibility pins require an explicit purpose.'
         Assert-True (-not [bool]$toolchain.compatibilityLane.mayBeCanonicalReleaseGate) 'Compatibility lane must not be the canonical release gate.'

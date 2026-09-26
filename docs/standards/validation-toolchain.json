@@ -95,7 +95,11 @@
     "pester": {
       "source": "PowerShellGallery:Pester",
       "channel": "latest-stable",
-      "repository": "https://www.powershellgallery.com/api/v2"
+      "repository": "https://www.powershellgallery.com/api/v2",
+      "approvedPayload": {
+        "version": "6.2.0",
+        "sha256": "0182e2c58c18b916d0d98f0f9f0e95be688bf424cf1869850ebd373e3ab75229"
+      }
     }
   },
   "compatibilityLane": {
