@@ -189,7 +189,7 @@ jobs:
         Assert-True $ps51OddMatch.Success 'PowerShell 5.1 must run its odd shard partition independently.'
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize both partitions.'
         foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Total = 404; Skipped = 6 }
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Total = 409; Skipped = 6 }
                 @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Total = 215; Skipped = 7 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
@@ -215,7 +215,7 @@ jobs:
         Assert-True $ps7OddMatch.Success 'PowerShell 7 must run its odd shard partition independently.'
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize both partitions.'
         foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Total = 404; Skipped = 6 }
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Total = 409; Skipped = 6 }
                 @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Total = 215; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
