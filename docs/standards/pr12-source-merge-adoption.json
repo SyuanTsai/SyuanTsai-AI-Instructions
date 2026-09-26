@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "contract": "protected-source-merge-adoption-v1",
+  "status": "adopted",
+  "sourceRepository": "https://github.com/SyuanTsai/Skill-General.git",
+  "pullRequest": 12,
+  "sourceRevision": "66c466540480306c7f5346338d70d036bddb4930",
+  "scope": "source-merge-only",
+  "affectedSkill": "manage-task-handoff",
+  "affectedComponent": "skills/manage-task-handoff/scripts/GitRefHandoffAdapter.psm1",
+  "businessAndTechnicalNecessity": "Complete the reviewed PR12 source merge while official SkillSpector 2.12.0 cannot complete one adapter component's static tool-misuse analysis.",
+  "riskAssessment": "One of eleven manage-task-handoff components reports static_parse_limit; static_patterns_tool_misuse did not finish for the module. Supplemental tests do not prove the missing static-analysis result.",
+  "compensatingControls": [
+    "Keep all six original official scanner reports and fixed digests without changing canonical FAILED/20.",
+    "Require exact source, paired inventory and module digests, trusted scanner receipt, and no extra findings or incomplete components.",
+    "Require contained raw supplemental general and Pester process events with positive counts, zero failures, and cleanup.",
+    "Require protected central authority review, protected consumer check publication, exact current-head CI, and resolved PR review threads."
+  ],
+  "owner": "Maintainers of the central Standard and Skill-General source repositories",
+  "humanReview": {
+    "date": "2026-09-26",
+    "decision": "accepted-limited-risk",
+    "answer": "接受上述限縮風險與條件",
+    "sourceRevision": "66c466540480306c7f5346338d70d036bddb4930",
+    "limits": "Merge only after PR55 full CI, protected implementation, and fresh CI; no release or installation."
+  },
+  "reviewAndExpiry": "Expires after exact PR12 source merge, source head drift, evidence drift, or rejection of the protected implementation, whichever occurs first.",
+  "canonicalState": "FAILED",
+  "canonicalExitCode": 20,
+  "sourceConformanceStatus": "failed",
+  "releaseEligible": false,
+  "forbiddenUses": [
+    "release",
+    "installation",
+    "publication",
+    "Catalog/Lock pinning",
+    "other source revisions",
+    "other repositories"
+  ],
+  "prerequisiteEvidence": {
+    "centralPullRequest": 55,
+    "centralHead": "8c058541b9e1e1cd975db869d49901e839c51520",
+    "centralMergeCommit": "eb15c22bcc6ea313840f35c5cfc0087bccab2e00",
+    "fullCiRun": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions/actions/runs/36235502764",
+    "fullCiConclusion": "success"
+  }
+}

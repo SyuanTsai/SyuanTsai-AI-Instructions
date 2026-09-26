@@ -3088,7 +3088,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $released.releaseEligible = $true
         Assert-False (Test-AuthorityJsonSchemaValue -Value $released -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposed source exception cannot authorize release.'
         Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 3 'The review runner and inactive bridge must share the one technical proposal helper.'
-        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'pending protected review and adoption' 'The merge-only bridge must remain pending protected review and adoption.'
+        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'adopted merge-only record' 'The merge-only bridge must require the distinct protected adoption record.'
         Assert-Equal $contract.evidence.protectedSourceMergeBridgeCandidate.schemaProperty 'sourceMergeDecision; canonical state and sourceConformance remain FAILED/20 and failed' 'The merge-only decision must remain separate from canonical validation.'
         Assert-True ($null -ne $evidenceSchema.properties.sourceMergeDecision) 'The protected decision must have a separate schema property.'
         $mergeDecision = [pscustomobject][ordered]@{
