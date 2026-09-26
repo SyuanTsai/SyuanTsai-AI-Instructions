@@ -2756,7 +2756,7 @@ catch {
     # starts a second validation run, then replaced with evidence bound to that run.
     # Purpose: Consent lifetime and candidate identity must not make old run evidence reusable.
     It 'InterT63_accepts_only_current_run_bound_v2_evidence_across_validation_runs' {
-        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-v2-cross-run-replay')
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'v2-replay')
         $runA = [guid]::NewGuid().ToString('N')
         $runB = [guid]::NewGuid().ToString('N')
         $artifactsA = New-TestRunnerSemanticV2Artifacts -Fixture $fixture -ValidationRunId $runA
@@ -2775,7 +2775,7 @@ catch {
             Assert-Equal $firstRun.Evidence.state 'PASS' 'Fresh v2 evidence bound to run A must produce PASS.'
             Assert-Equal ([string]$firstRun.Evidence.runId) ([guid]::ParseExact($runA, 'N').ToString()) 'Run A evidence must retain run A ID.'
 
-            $replayArtifactsRoot = Join-Path $fixture.Root 'artifacts-replay-run-b'
+            $replayArtifactsRoot = Join-Path $fixture.Root 'replay-b'
             $replayedRun = Invoke-RunnerFixture `
                 -Fixture $fixture `
                 -ArtifactsRoot $replayArtifactsRoot `
@@ -2794,7 +2794,7 @@ catch {
 
             $artifactsB = New-TestRunnerSemanticV2Artifacts -Fixture $fixture -ValidationRunId $runB
             Assert-Equal $artifactsB.CandidateId $artifactsA.CandidateId 'Both runs must validate the same candidate.'
-            $freshArtifactsRoot = Join-Path $fixture.Root 'artifacts-fresh-run-b'
+            $freshArtifactsRoot = Join-Path $fixture.Root 'fresh-b'
             $freshRun = Invoke-RunnerFixture `
                 -Fixture $fixture `
                 -ArtifactsRoot $freshArtifactsRoot `
@@ -3525,7 +3525,7 @@ jobs:
     # Scenario: A v2 runner import receives evidence with a parseable but non-RFC 3339 generatedAt value and a valid recomputed signature.
     # Purpose: The runner must rely on the shared verifier's schema gate and report BLOCKED=10 for signed lexical timestamp violations.
     It 'InterT194_blocks_resigned_non_rfc3339_v2_timestamp_at_runner_import' {
-        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'semantic-v2-non-rfc3339-timestamp')
+        $fixture = New-RunnerFixture -Root (Join-Path $TestDrive 'v2-ts')
         $artifacts = New-TestRunnerSemanticV2Artifacts -Fixture $fixture
         try {
             $baseline = Invoke-RunnerFixture `
@@ -3575,7 +3575,7 @@ jobs:
             Assert-Match ([string]$direct.reason) 'RFC 3339' 'The verifier must identify the timestamp lexical contract failure.'
 
             Write-TestUtf8File -Path $artifacts.EvidencePath -Text $utf8.GetString($evidenceBytes)
-            $invalidRunnerArtifactsRoot = Join-Path $fixture.Root 'invalid-timestamp-runner-artifacts'
+            $invalidRunnerArtifactsRoot = Join-Path $fixture.Root 'invalid-ts'
             $runner = Invoke-RunnerFixture `
                 -Fixture $fixture `
                 -ArtifactsRoot $invalidRunnerArtifactsRoot `
