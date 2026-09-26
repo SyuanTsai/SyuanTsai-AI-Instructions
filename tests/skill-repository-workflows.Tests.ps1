@@ -7,7 +7,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 4
+            '.github/workflows/pr8-powershell-validation.yml' = 6
             '.github/workflows/standards-conformance.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
@@ -95,8 +95,8 @@ jobs:
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 2 'The dedicated Linux focused job and direct Linux composition step may import Pester in workflow scope; Windows full suites must stay behind the bounded executor.'
-        Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 2 'Both Windows full-suite jobs must delegate module validation and import to the bounded executor.'
-        Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 2 'Workflow logging must use discovery metadata without importing the module first.'
+        Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 4 'All four Windows Pester partitions must use the bounded executor.'
+        Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 4 'Workflow logging must use discovery metadata without importing the module first.'
     }
 
     # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
@@ -182,9 +182,58 @@ jobs:
 
         Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
         Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedTotalCount\s*=\s*617').Count) 2 'Both full-suite shard jobs must include the merged resolver regressions and proposed-exception review tests.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*13').Count) 1 'Windows PowerShell 5.1 must account for the additional skipped Linux procfs case.'
-        Assert-Equal ([regex]::Matches($required, 'ExpectedSkippedCount\s*=\s*12').Count) 1 'Windows PowerShell 7 must account for the additional skipped Linux procfs case.'
+        $ps51EvenMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-even:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $ps51OddMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-odd:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $ps51SummaryMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        Assert-True $ps51EvenMatch.Success 'PowerShell 5.1 must run its even shard partition independently.'
+        Assert-True $ps51OddMatch.Success 'PowerShell 5.1 must run its odd shard partition independently.'
+        Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize both partitions.'
+        foreach ($partition in @(
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Total = 404; Skipped = 6 }
+                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Total = 215; Skipped = 7 }
+            )) {
+            Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
+            Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 5.1 partition must run on Windows.'
+            Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each partition must select its own shard parity.'
+            Assert-Match $partition.Block 'ShardPartitionCount\s*=\s*2' 'Both PowerShell 5.1 jobs must cover the two-way partition.'
+            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*32' 'Both partitions must verify the complete shard inventory.'
+            Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each partition must verify its fixed test count.'
+            Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each partition must verify its fixed platform skip count.'
+        }
+        $ps51Summary = $ps51SummaryMatch.Groups['block'].Value
+        Assert-Match $ps51Summary 'name:\s*Pester \(Windows PowerShell 5\.1\)' 'The branch-required PowerShell 5.1 check name must remain stable.'
+        Assert-Match $ps51Summary 'needs:\s*\[windows-powershell-51-even, windows-powershell-51-odd\]' 'The required summary must depend on both complete partitions.'
+        Assert-Match $ps51Summary 'if:\s*\$\{\{\s*always\(\)\s*\}\}' 'The required summary must run and fail when either partition is skipped or fails.'
+        Assert-Match $ps51Summary 'EVEN_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-even''\]\.result\s*\}\}' 'The required summary must read the even job result through a valid expression.'
+        Assert-Match $ps51Summary 'ODD_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-odd''\]\.result\s*\}\}' 'The required summary must read the odd job result through a valid expression.'
+        Assert-Match $ps51Summary 'EVEN_RESULT.*-cne.*success' 'The required summary must reject a non-success even partition.'
+        Assert-Match $ps51Summary 'ODD_RESULT.*-cne.*success' 'The required summary must reject a non-success odd partition.'
+        $ps7EvenMatch = [regex]::Match($required, '(?ms)^  powershell-7-even:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $ps7OddMatch = [regex]::Match($required, '(?ms)^  powershell-7-odd:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        $ps7SummaryMatch = [regex]::Match($required, '(?ms)^  powershell-7:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        Assert-True $ps7EvenMatch.Success 'PowerShell 7 must run its even shard partition independently.'
+        Assert-True $ps7OddMatch.Success 'PowerShell 7 must run its odd shard partition independently.'
+        Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize both partitions.'
+        foreach ($partition in @(
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Total = 404; Skipped = 6 }
+                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Total = 215; Skipped = 6 }
+            )) {
+            Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
+            Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 7 partition must run on Windows.'
+            Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each PowerShell 7 partition must select its own shard parity.'
+            Assert-Match $partition.Block 'ShardPartitionCount\s*=\s*2' 'Both PowerShell 7 jobs must cover the two-way partition.'
+            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*32' 'Both PowerShell 7 jobs must verify the complete shard inventory.'
+            Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each PowerShell 7 partition must verify its fixed test count.'
+            Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each PowerShell 7 partition must verify its fixed platform skip count.'
+        }
+        $ps7Summary = $ps7SummaryMatch.Groups['block'].Value
+        Assert-Match $ps7Summary 'name:\s*Pester \(PowerShell 7\)' 'The branch-required PowerShell 7 check name must remain stable.'
+        Assert-Match $ps7Summary 'needs:\s*\[powershell-7-even, powershell-7-odd\]' 'The required PowerShell 7 summary must depend on both complete partitions.'
+        Assert-Match $ps7Summary 'if:\s*\$\{\{\s*always\(\)\s*\}\}' 'The required PowerShell 7 summary must fail when either partition is skipped or fails.'
+        Assert-Match $ps7Summary 'EVEN_RESULT:\s*\$\{\{\s*needs\[''powershell-7-even''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the even job result.'
+        Assert-Match $ps7Summary 'ODD_RESULT:\s*\$\{\{\s*needs\[''powershell-7-odd''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the odd job result.'
+        Assert-Match $ps7Summary 'EVEN_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success even partition.'
+        Assert-Match $ps7Summary 'ODD_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success odd partition.'
 
         $standardsJobsMatch = [regex]::Match($standards, '(?ms)^jobs:\r?\n(?<block>.*)\z')
         Assert-True $standardsJobsMatch.Success 'Standards Conformance must define its workflow jobs block.'
@@ -287,8 +336,6 @@ ino: 1
         Assert-Match $summaryJob '\$env:AUTHORITY_RESULT\s*-ne\s*''success''' 'The summary must fail unless the authority job result is success, including skipped or cancelled.'
         Assert-Match $summaryJob '(?i)(throw|exit\s+1)' 'The summary must return a failing status when either dependency is not successful.'
 
-        Assert-Match $required 'windows-powershell-51:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'Windows PowerShell 5.1 full suite must depend on the Linux focused job.'
-        Assert-Match $required 'powershell-7:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'PowerShell 7 full suite must depend on the Linux focused job.'
         Assert-Match $required 'powershell-7-unix-composition:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'The Linux composition job must depend on the dedicated focused job.'
 
         $focusedStepIndex = $standards.IndexOf('Run required Unix callback containment boundary')
@@ -313,6 +360,7 @@ ino: 1
 
         foreach ($workflow in @($standards, $required)) {
             Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal' 'An unapproved proposal must not route a required source check.'
+            Assert-NotMatch $workflow 'sourceMergeDecision|pr12-source-merge-adoption' 'The central regression workflows cannot publish General source checks from their own jobs.'
         }
 
         foreach ($workflow in @($standards, $required)) {

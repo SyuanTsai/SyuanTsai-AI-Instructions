@@ -41,7 +41,8 @@
     "failure": { "$ref": "#/$defs/failure" },
     "artifacts": { "$ref": "#/$defs/artifacts" },
     "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" },
-    "sourceMergeExceptionProposal": { "$ref": "#/$defs/sourceMergeExceptionProposal" }
+    "sourceMergeExceptionProposal": { "$ref": "#/$defs/sourceMergeExceptionProposal" },
+    "sourceMergeDecision": { "$ref": "#/$defs/sourceMergeDecision" }
   },
   "allOf": [
     {
@@ -166,9 +167,51 @@
           }
         }
       }
+    },
+    {
+      "if": { "type": "object", "required": ["sourceMergeDecision"] },
+      "then": {
+        "type": "object",
+        "required": ["sourceMergeExceptionProposal"],
+        "properties": {
+          "state": { "const": "FAILED" },
+          "exitCode": { "const": 20 },
+          "releaseEligible": { "const": false },
+          "sourceConformance": { "type": "object", "properties": { "status": { "const": "failed" } } }
+        }
+      }
     }
   ],
   "$defs": {
+    "sourceMergeDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "status", "fixtureRoute", "requiredContexts", "sourceRevision", "centralRevision", "workflowRevision", "archiveSha256", "releaseEligible", "failureReasons"],
+      "properties": {
+        "contract": { "enum": ["inactive-protected-source-merge-route-v1", "protected-source-merge-decision-v1"] },
+        "status": { "enum": ["eligible-for-protected-check", "failed"] },
+        "fixtureRoute": { "enum": ["eligible", "rejected"] },
+        "requiredContexts": { "const": ["repository-contract", "skill-validator", "skill-tools"] },
+        "sourceRevision": { "const": "66c466540480306c7f5346338d70d036bddb4930" },
+        "centralRevision": { "type": "string" },
+        "workflowRevision": { "type": "string" },
+        "archiveSha256": { "type": "string" },
+        "releaseEligible": { "const": false },
+        "failureReasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "eligible-for-protected-check" } }, "required": ["status"] },
+          "then": { "properties": {
+            "contract": { "const": "protected-source-merge-decision-v1" },
+            "fixtureRoute": { "const": "rejected" },
+            "sourceRevision": { "const": "66c466540480306c7f5346338d70d036bddb4930" },
+            "centralRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "workflowRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "archiveSha256": { "$ref": "#/$defs/sha256" },
+            "failureReasons": { "maxItems": 0 }
+          } } }
+      ]
+    },
     "sourceMergeExceptionProposal": {
       "type": "object",
       "additionalProperties": false,

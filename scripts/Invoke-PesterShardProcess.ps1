@@ -10,6 +10,9 @@ param(
     ),
     [ValidateRange(1, 1024)][int] $BulkShardSize = 1,
     [int] $OuterTimeoutSeconds = 1800,
+    [ValidateRange(1, 16)][int] $ShardPartitionCount = 1,
+    [ValidateRange(0, 15)][int] $ShardPartitionIndex = 0,
+    [ValidateRange(0, 1024)][int] $ExpectedFullShardCount = 0,
     [string] $CancellationPath,
     [string] $TestRoot = './tests',
     [string] $EvidenceRoot
@@ -1991,6 +1994,20 @@ foreach ($shard in @(New-PesterShardPlan `
         -BulkShardSize $BulkShardSize)) {
     $shards.Add($shard)
 }
+if ($ShardPartitionIndex -ge $ShardPartitionCount) {
+    throw 'ShardPartitionIndex must be less than ShardPartitionCount.'
+}
+if ($ExpectedFullShardCount -gt 0 -and $shards.Count -ne $ExpectedFullShardCount) {
+    throw "Pester discovered $($shards.Count) shards; expected exactly $ExpectedFullShardCount before partitioning."
+}
+$selectedShards = New-Object 'System.Collections.Generic.List[object]'
+for ($index = 0; $index -lt $shards.Count; $index++) {
+    if (($index % $ShardPartitionCount) -eq $ShardPartitionIndex) {
+        $selectedShards.Add($shards[$index])
+    }
+}
+if ($selectedShards.Count -eq 0) { throw 'Pester shard partition is empty.' }
+Write-Host "Pester shard plan: full=$($shards.Count) partition=$ShardPartitionIndex/$ShardPartitionCount selected=$($selectedShards.Count)"
 
 $childPowerShell = if ($PSVersionTable.PSEdition -eq 'Desktop') {
     (Get-Command powershell -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -2123,7 +2140,8 @@ $skipped = 0
 $pending = 0
 $inconclusive = 0
 $failedShardProcess = $false
-foreach ($shard in @($shards.ToArray())) {
+foreach ($shard in @($selectedShards.ToArray())) {
+    Write-Host "Starting Pester shard $($shard.Name)"
     $runToken = [guid]::NewGuid().ToString('N')
     $safeName = ($shard.Name -replace '[^A-Za-z0-9_.-]', '-')
     $CancellationPath = $null
