@@ -1035,6 +1035,7 @@ exit ([int]$LASTEXITCODE)
         Assert-Match ([string]$contract.cli.launchBinding) 'SupervisorLaunchBindingPath' 'Production CLI must expose the trusted supervisor launch binding input.'
         Assert-True ([bool]$contract.execution.productionLaunchBinding.required) 'Production validation must require an authenticated launch binding.'
         Assert-Equal ([string]$contract.execution.productionLaunchBinding.attestation) 'trusted-supervisor-validation-launch-v1' 'Launch binding attestation identity must be canonical.'
+        Assert-Match ([string]$contract.execution.productionLaunchBinding.producerHelper) 'New-StandardValidationSupervisorLaunchBinding.*immutable authority trust anchor' 'The contract must expose the existing-trust launch producer without allowing fixture keys to become production authority.'
         Assert-Equal ([string]$contract.execution.productionLaunchBinding.handoffRunIdFormat) 'lowercase-32-character-hexadecimal-N' 'The launch-binding handoff run-ID format must remain canonical.'
         Assert-Equal ([string]$contract.execution.productionLaunchBinding.evidenceRunIdFormat) 'canonical-hyphenated-UUID-D' 'Evidence must declare the schema-compatible run-ID serialization.'
         Assert-Match ([string]$contract.execution.productionLaunchBinding.bindingSnapshot) 'reads.*hashes.*parses.*launch-binding.*snapshot.*evidence registration' 'The production launch-binding contract must retain the authenticated binding snapshot hash.'
@@ -3943,4 +3944,100 @@ Describe 'source conformance projection' {
         Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.status 'failed' 'Missing candidate evidence must fail only the source projection.'
         Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.releaseEligible $false 'Early FAILED output must remain release-ineligible.'
     }
+}
+
+
+Describe 'trusted supervisor launch binding construction' {
+    BeforeAll {
+        $runnerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $runnerPath -CandidateRoot '.' -AdapterPath 'unused' -ArtifactsRoot 'unused' `
+            -SourceRepository 'https://example.org/team/release.git' -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) -DefineFunctionsOnly
+    }
+
+    BeforeEach {
+        $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $candidate = Join-Path $root 'candidate'
+        $artifacts = Join-Path $root 'artifacts'
+        $trusted = Join-Path $root 'trusted'
+        foreach ($path in @($root, $candidate, $artifacts, $trusted)) {
+            [void](New-Item -ItemType Directory -Path $path -Force)
+        }
+        $adapter = Join-Path $root 'adapter.json'
+        [IO.File]::WriteAllText($adapter, '{"schemaVersion":1}', (New-Object Text.UTF8Encoding($false)))
+        $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        [IO.File]::WriteAllText((Join-Path $trusted 'trusted-supervisor-public-key.xml'), $rsa.ToXmlString($false), (New-Object Text.UTF8Encoding($false)))
+        $inputs = @{
+            Path = Join-Path $root 'binding.json'
+            CandidateRoot = $candidate
+            AdapterPath = $adapter
+            ArtifactsRoot = $artifacts
+            OutputPath = Join-Path $artifacts 'result.json'
+            TrustedToolRoot = $trusted
+            SourceRepository = 'https://example.org/team/release.git'
+            SourceRevision = 'a' * 40
+            BaseRevision = 'b' * 40
+            EventName = 'local'
+            CandidateArchiveSha256 = 'c' * 64
+            AuthorityRevision = 'd' * 40
+            ConsumptionPath = Join-Path $root 'consumption.json'
+            DevelopmentHarness = $true
+        }
+    }
+
+    # Scenario: A caller with a fixture signing key signs a fresh candidate and adapter binding without any Owner field.
+    # Purpose: The producer output must be accepted by the existing verifier while retaining exact source and adapter identity.
+    It 'UnitT10_produces_a_verifiable_owner_free_launch_binding' {
+        $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256')) }
+        $binding = New-StandardValidationSupervisorLaunchBinding @inputs
+        $document = Get-Content -Raw -LiteralPath $inputs.Path | ConvertFrom-Json
+        $binding.verified | Should -BeTrue
+        $document.sourceRepository | Should -Be $inputs.SourceRepository
+        $document.PSObject.Properties.Name | Should -Not -Contain 'owner'
+        $document.adapterSha256 | Should -Be (Get-StandardValidationFileSha256 -Path $adapter -Context 'test adapter')
+        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+    }
+
+    # Scenario: The requested signer returns a signature from another key.
+    # Purpose: A caller-supplied callback cannot create a binding unless the configured verifier key authenticates it.
+    It 'UnitT20_rejects_an_untrusted_signer_before_writing' {
+        $otherKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider(2048)
+        try {
+            $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($otherKey.SignData($payload, 'SHA256')) }
+            { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+            Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+        }
+        finally { $otherKey.Dispose() }
+    }
+
+    # Scenario: The requested signer returns no signature.
+    # Purpose: Missing signing capability is reported precisely and cannot be mistaken for a missing source Owner.
+    It 'UnitT30_blocks_missing_signing_capability' {
+        $inputs.SignPayload = { param([byte[]] $payload) $null }
+        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+    }
+
+    # Scenario: A signer callback changes the adapter after the payload snapshot was hashed.
+    # Purpose: A signed binding must not be published if its adapter bytes drift during signing.
+    It 'UnitT40_blocks_adapter_drift_during_signing' {
+        $inputs.SignPayload = {
+            param([byte[]] $payload)
+            [IO.File]::WriteAllText($adapter, '{"schemaVersion":2}', (New-Object Text.UTF8Encoding($false)))
+            [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256'))
+        }
+        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+    }
+
+    # Scenario: A local fixture signer is presented to the production producer path.
+    # Purpose: A development key cannot be elevated to the immutable production trust anchor.
+    It 'UnitT50_rejects_fixture_signing_key_in_production' {
+        $inputs.Remove('DevelopmentHarness')
+        $inputs.SignPayload = { param([byte[]] $payload) [Convert]::ToBase64String($rsa.SignData($payload, 'SHA256')) }
+        { New-StandardValidationSupervisorLaunchBinding @inputs } | Should -Throw
+        Test-Path -LiteralPath $inputs.Path | Should -BeFalse
+    }
+
+    AfterEach { $rsa.Dispose() }
 }

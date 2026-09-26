@@ -5141,6 +5141,125 @@ function New-StandardValidationProtectedAdoptionBinding {
     }
 }
 
+function New-StandardValidationSupervisorLaunchBinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $AdapterPath,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $OutputPath,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $SourceRepository,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $BaseRevision,
+        [Parameter(Mandatory = $true)][ValidateSet('local', 'pre-push', 'pull_request', 'push', 'workflow_dispatch')][string] $EventName,
+        [Parameter(Mandatory = $true)][string] $CandidateArchiveSha256,
+        [Parameter(Mandatory = $true)][string] $AuthorityRevision,
+        [Parameter(Mandatory = $true)][string] $ConsumptionPath,
+        [Parameter(Mandatory = $true)][scriptblock] $SignPayload,
+        [switch] $DevelopmentHarness
+    )
+
+    Assert-StandardValidationSourceRepository -Value $SourceRepository
+    Assert-StandardValidationRevision -Value $SourceRevision -Context 'SourceRevision'
+    Assert-StandardValidationRevision -Value $BaseRevision -Context 'BaseRevision'
+    Assert-StandardValidationRevision -Value $AuthorityRevision -Context 'AuthorityRevision'
+    Assert-StandardValidationSha256 -Value $CandidateArchiveSha256 -Context 'CandidateArchiveSha256'
+
+    $candidateFull = Assert-StandardValidationCanonicalRootPath -Path $CandidateRoot -Context 'launch candidate root'
+    $adapterFull = Assert-StandardValidationCanonicalRootPath -Path $AdapterPath -Context 'launch adapter'
+    $artifactsFull = Assert-StandardValidationCanonicalRootPath -Path $ArtifactsRoot -Context 'launch artifacts root'
+    $outputFull = Assert-StandardValidationCanonicalRootPath -Path $OutputPath -Context 'launch output path'
+    $toolsFull = Assert-StandardValidationCanonicalRootPath -Path $TrustedToolRoot -Context 'launch trusted tool root'
+    $bindingFull = Assert-StandardValidationCanonicalRootPath -Path $Path -Context 'launch binding path'
+    $consumptionFull = Assert-StandardValidationCanonicalRootPath -Path $ConsumptionPath -Context 'launch consumption path'
+    Assert-StandardValidationDistinctRoots -First $candidateFull -Second $artifactsFull -Context 'launch candidate and artifacts roots'
+    Assert-StandardValidationOutsideRoot -Path $toolsFull -Root $candidateFull -Context 'launch trusted tool root'
+    Assert-StandardValidationOutsideRoot -Path $toolsFull -Root $artifactsFull -Context 'launch trusted tool root'
+    foreach ($externalPath in @($adapterFull, $bindingFull, $consumptionFull)) {
+        Assert-StandardValidationOutsideRoot -Path $externalPath -Root $candidateFull -Context 'launch external input'
+        Assert-StandardValidationOutsideRoot -Path $externalPath -Root $artifactsFull -Context 'launch external input'
+    }
+    Assert-StandardValidationOutsideRoot -Path $consumptionFull -Root $toolsFull -Context 'launch consumption path'
+    if (-not (Test-StandardValidationPathWithin -Path $outputFull -Root $artifactsFull)) {
+        throw 'INVALID|Launch output path must be inside the artifacts root.'
+    }
+    if (Test-Path -LiteralPath $bindingFull) {
+        throw 'INVALID|Launch binding path must be create-only.'
+    }
+    Assert-StandardValidationRegularFile -Path $adapterFull -Context 'launch adapter'
+    $adapterSha256 = Get-StandardValidationFileSha256 -Path $adapterFull -Context 'launch adapter'
+    $issuedAt = [DateTime]::UtcNow
+    $expiresAt = $issuedAt.AddMinutes(10)
+    $runIdText = ([guid]::NewGuid()).ToString('N')
+    $fields = @{
+        adapterPath = $adapterFull
+        adapterSha256 = $adapterSha256
+        artifactsRoot = $artifactsFull
+        authorityRevision = $AuthorityRevision
+        baseRevision = $BaseRevision
+        candidateArchiveSha256 = $CandidateArchiveSha256
+        candidateRoot = $candidateFull
+        consumptionPath = $consumptionFull
+        eventName = $EventName
+        expiresAt = $expiresAt.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        issuedAt = $issuedAt.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        outputPath = $outputFull
+        resolutionRunId = $runIdText
+        sourceRepository = $SourceRepository
+        sourceRevision = $SourceRevision
+        trustedToolRoot = $toolsFull
+    }
+    $payload = Get-StandardValidationSignedReceiptPayload -ReceiptType 'validation-launch-v1' -Fields $fields
+    $payloadBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($payload)
+    $signature = & $SignPayload $payloadBytes
+    if ($signature -isnot [string] -or [string]::IsNullOrWhiteSpace($signature)) {
+        throw 'BLOCKED|The trusted supervisor did not sign the launch binding.'
+    }
+    $trustAnchorRoot = if ($DevelopmentHarness) {
+        $toolsFull
+    }
+    else {
+        Assert-StandardValidationCanonicalRootPath `
+            -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') `
+            -Context 'immutable validation trust-anchor root'
+    }
+    $binding = [ordered]@{
+        schemaVersion = 1; evidenceType = 'validation-launch-binding'; status = 'issued'
+        candidateRoot = $candidateFull; adapterPath = $adapterFull; artifactsRoot = $artifactsFull
+        outputPath = $outputFull; trustedToolRoot = $toolsFull; sourceRepository = $SourceRepository
+        sourceRevision = $SourceRevision; baseRevision = $BaseRevision; eventName = $EventName
+        candidateArchiveSha256 = $CandidateArchiveSha256; adapterSha256 = $adapterSha256
+        authorityRevision = $AuthorityRevision; resolutionRunId = $runIdText
+        issuedAt = $fields.issuedAt; expiresAt = $fields.expiresAt
+        consumptionPath = $consumptionFull; signature = $signature
+    }
+    Assert-StandardValidationSignedReceipt `
+        -Receipt $binding -ReceiptType 'validation-launch-v1' -Fields $fields `
+        -TrustAnchorRoot $trustAnchorRoot -Context 'new trusted supervisor launch binding'
+    if ((Get-StandardValidationFileSha256 -Path $adapterFull -Context 'launch adapter revalidation') -cne $adapterSha256) {
+        throw 'BLOCKED|Adapter changed while the trusted supervisor launch binding was signed.'
+    }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($binding | ConvertTo-Json -Depth 10 -Compress))
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($bindingFull, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    catch {
+        throw "INVALID|Launch binding could not be written create-only: $($_.Exception.Message)"
+    }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+    return Assert-StandardValidationSupervisorLaunchBinding `
+        -Path $bindingFull -CandidateRoot $candidateFull -AdapterPath $adapterFull `
+        -AdapterSha256 $adapterSha256 -ArtifactsRoot $artifactsFull -OutputPath $outputFull `
+        -TrustedToolRoot $toolsFull -SourceRepository $SourceRepository `
+        -SourceRevision $SourceRevision -BaseRevision $BaseRevision -EventName $EventName `
+        -CandidateArchiveSha256 $CandidateArchiveSha256 -AuthorityRevision $AuthorityRevision `
+        -TrustAnchorRoot $trustAnchorRoot -Context 'new trusted supervisor launch binding'
+}
+
 # The merge-only decision is eligible only in the protected workflow scope with
 # observed supervisor execution and an adopted record from this central bundle.
 # The ordinary caller and local fixture routes cannot publish a protected check.
