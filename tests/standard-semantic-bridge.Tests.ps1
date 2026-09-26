@@ -1904,7 +1904,7 @@ function Update-TestConsentDigests {
                 childStartedMarker = $childStartedMarker
                 childLateMarker = $childLateMarker
                 childPidMarker = $childPidMarker
-            }) -TimeoutSeconds 1
+            }) -TimeoutSeconds 2
         $returnedTick = [Diagnostics.Stopwatch]::GetTimestamp()
         Assert-TestCondition ([string]$run.status -ceq 'FAILED') 'A provider callback beyond its deadline unexpectedly passed.'
         Assert-TestCondition ([int]$run.providerCallCount -eq 1) 'The timed provider callback was not actually invoked.'
