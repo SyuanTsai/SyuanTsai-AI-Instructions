@@ -5141,8 +5141,9 @@ function New-StandardValidationProtectedAdoptionBinding {
     }
 }
 
-# Inactive route candidate. A production trust anchor and protected publisher do not
-# exist yet: only an explicitly marked local fixture can exercise the allow branch.
+# The merge-only decision is eligible only in the protected workflow scope with
+# observed supervisor execution and an adopted record from this central bundle.
+# The ordinary caller and local fixture routes cannot publish a protected check.
 function New-StandardValidationProtectedSourceMergeDecision {
     param(
         [Parameter(Mandatory = $true)] $TechnicalEvidence,
