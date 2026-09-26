@@ -5084,6 +5084,80 @@ function New-StandardValidationProposedSourceMergeExceptionDecision {
     }
 }
 
+# Inactive route candidate. A production trust anchor and protected publisher do not
+# exist yet: only an explicitly marked local fixture can exercise the allow branch.
+function New-StandardValidationProtectedSourceMergeDecision {
+    param(
+        [Parameter(Mandatory = $true)] $TechnicalEvidence,
+        [Parameter(Mandatory = $true)][string] $EventSourceRevision,
+        [AllowNull()] $TrustedAuthorityRecord,
+        [string] $ExpectedCentralRevision = '',
+        [string] $ExpectedWorkflowRevision = '',
+        [string] $ExpectedArchiveSha256 = '',
+        [bool] $CallerApproval = $false,
+        [switch] $TestOnlyFixtureScope
+    )
+
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $TestOnlyFixtureScope) { [void]$reasons.Add('protected-authority-unavailable') }
+    if ($CallerApproval) { [void]$reasons.Add('caller-approval-untrusted') }
+    if ($null -eq $TrustedAuthorityRecord) { [void]$reasons.Add('protected-adoption-missing') }
+
+    $technical = $null
+    try {
+        $arguments = @{}
+        foreach ($name in @('Report', 'Policy', 'CandidateRoot', 'ExpectedSourceRevision', 'PullRequestNumber',
+                'ScannerReportPath', 'ExpectedScannerReportSha256', 'OtherScannerReportPaths',
+                'ScannerReceipt', 'SupplementalEvidence')) {
+            $arguments[$name] = Get-StandardValidationProperty -Object $TechnicalEvidence -Name $name
+        }
+        if ($TestOnlyFixtureScope) {
+            $arguments.DevelopmentHarness = $true
+            $arguments.TestOnlyFixtureScope = $true
+        }
+        $technical = New-StandardValidationProposedSourceMergeExceptionDecision @arguments
+        if ([string]$technical.status -cne 'eligible-for-policy-review' -or
+            [bool]$technical.releaseEligible -or
+            [bool]$technical.testFixtureOnly -ne [bool]$TestOnlyFixtureScope) {
+            [void]$reasons.Add('technical-evidence-rejected')
+        }
+    }
+    catch { [void]$reasons.Add('technical-evidence-invalid') }
+
+    if ($null -ne $TrustedAuthorityRecord -and $null -ne $technical) {
+        $authority = $TrustedAuthorityRecord
+        $otherHashes = Get-StandardValidationProperty -Object $authority -Name 'otherScannerReportSha256'
+        if ([string](Get-StandardValidationProperty -Object $authority -Name 'contract') -cne 'protected-source-merge-adoption-fixture-v1' -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'status') -cne 'adopted' -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'humanReview') -cne 'approved' -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'sourceRevision') -cne [string]$technical.sourceRevision -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'eventSourceRevision') -cne $EventSourceRevision -or
+            $EventSourceRevision -cne [string]$technical.sourceRevision -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'candidateId') -cne [string]$technical.candidateId -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'contentSha256') -cne [string]$technical.contentSha256 -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'scannerReportSha256') -cne [string]$technical.scannerReportSha256 -or
+            @($otherHashes).Count -ne 5 -or (@($otherHashes) -join "`n") -cne (@($technical.otherScannerReportSha256) -join "`n") -or
+            $ExpectedCentralRevision -cnotmatch '^[0-9a-f]{40}$' -or
+            $ExpectedWorkflowRevision -cnotmatch '^[0-9a-f]{40}$' -or
+            $ExpectedArchiveSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'centralRevision') -cne $ExpectedCentralRevision -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'workflowRevision') -cne $ExpectedWorkflowRevision -or
+            [string](Get-StandardValidationProperty -Object $authority -Name 'archiveSha256') -cne $ExpectedArchiveSha256) {
+            [void]$reasons.Add('protected-adoption-binding-invalid')
+        }
+    }
+
+    return [ordered]@{
+        contract = 'inactive-protected-source-merge-route-v1'
+        status = 'failed'
+        fixtureRoute = if ($TestOnlyFixtureScope -and $reasons.Count -eq 0) { 'eligible' } else { 'rejected' }
+        requiredContexts = @('repository-contract', 'skill-validator', 'skill-tools')
+        releaseEligible = $false
+        failureReasons = @($reasons.ToArray())
+        technicalFailureReasons = if ($null -eq $technical) { @() } else { @($technical.failureReasons) }
+    }
+}
+
 function Test-StandardValidationCanonicalSeverity {
     param([AllowNull()] $Severity)
 

@@ -136,6 +136,14 @@
       "mergeAuthority": "none until final exact-head Human Release/Policy Review under section 19 and an adopted protected bridge",
       "releaseEligibility": "fixed false; prohibited for release, install, publish and other consumers"
     },
+    "protectedSourceMergeBridgeCandidate": {
+      "status": "inactive; no production trust anchor or protected check publisher is installed",
+      "scope": "PR12 source checks only; exact source and GitHub event SHA, central and workflow revision, archive digest, candidate and content identity",
+      "technicalEvidence": "recompute the existing proposed exception from official six report bytes, frozen scanner receipt, raw supplemental process events, positive Pester counts, cleanup, and unchanged canonical FAILED/20",
+      "adoption": "test-only trusted-authority fixture may exercise an offline route; caller approval and proposal alone cannot adopt; production always fails closed until separately reviewed protected authority and Human Release/Policy Review exist",
+      "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
+      "releaseEligibility": "fixed false; no install, publish, or release authorization"
+    },
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",

@@ -141,6 +141,39 @@ Describe 'Proposed PR12 source merge exception' {
             param([bool] $Condition, [string] $Message)
             if (-not $Condition) { throw $Message }
         }
+        function New-BridgeFixture {
+            param([string] $Root)
+            $fixture = New-DraftFixture -Root $Root
+            $proposal = Invoke-DraftDecision -Fixture $fixture
+            Assert-Draft ($proposal.status -ceq 'eligible-for-policy-review') 'Bridge fixture must start with valid technical evidence.'
+            $technical = [ordered]@{
+                Report = $fixture.Report; Policy = $fixture.Policy; CandidateRoot = $fixture.CandidateRoot
+                ExpectedSourceRevision = $fixture.SourceRevision; PullRequestNumber = 12
+                ScannerReportPath = $fixture.ScannerReportPath; ExpectedScannerReportSha256 = $fixture.ScannerReportSha256
+                OtherScannerReportPaths = $fixture.OtherScannerReportPaths; ScannerReceipt = $fixture.Receipt
+                SupplementalEvidence = $fixture.Supplemental
+            }
+            $central = 'd' * 40
+            $workflow = 'e' * 40
+            $archive = 'f' * 64
+            $authority = [ordered]@{
+                contract = 'protected-source-merge-adoption-fixture-v1'; status = 'adopted'; humanReview = 'approved'
+                sourceRevision = $fixture.SourceRevision; eventSourceRevision = $fixture.SourceRevision
+                candidateId = $proposal.candidateId; contentSha256 = $proposal.contentSha256
+                scannerReportSha256 = $proposal.scannerReportSha256
+                otherScannerReportSha256 = @($proposal.otherScannerReportSha256)
+                centralRevision = $central; workflowRevision = $workflow; archiveSha256 = $archive
+            }
+            return [pscustomobject]@{ Fixture = $fixture; Technical = $technical; Authority = $authority
+                Central = $central; Workflow = $workflow; Archive = $archive }
+        }
+        function Invoke-BridgeFixture {
+            param($Bridge, [switch] $TestOnlyFixtureScope)
+            return New-StandardValidationProtectedSourceMergeDecision -TechnicalEvidence $Bridge.Technical `
+                -EventSourceRevision $Bridge.Fixture.SourceRevision -TrustedAuthorityRecord $Bridge.Authority `
+                -ExpectedCentralRevision $Bridge.Central -ExpectedWorkflowRevision $Bridge.Workflow `
+                -ExpectedArchiveSha256 $Bridge.Archive -TestOnlyFixtureScope:$TestOnlyFixtureScope
+        }
     }
 
     # Scenario: the machine-readable authority summary names an older source revision.
@@ -319,5 +352,89 @@ Describe 'Proposed PR12 source merge exception' {
         $raw.process.stderr = 'A different scanner failure.'
         [IO.File]::WriteAllText($path, ($raw | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
         Assert-Draft (-not (Test-StandardValidationPr12IncompleteStaticEvent -Stage $stage)) 'Other Static failures must not dispatch supplemental tests.'
+    }
+
+    # Scenario: an eligible technical proposal is presented without a protected adoption record.
+    # Purpose: required source checks must stay failed until a separately trusted authority is bound.
+    It 'InterT90_rejects_proposal_and_caller_approval_without_trusted_adoption' {
+        $fixture = New-DraftFixture -Root (Join-Path $TestDrive 'bridge-red')
+        $technical = [ordered]@{
+            Report = $fixture.Report; Policy = $fixture.Policy; CandidateRoot = $fixture.CandidateRoot
+            ExpectedSourceRevision = $fixture.SourceRevision; PullRequestNumber = 12
+            ScannerReportPath = $fixture.ScannerReportPath; ExpectedScannerReportSha256 = $fixture.ScannerReportSha256
+            OtherScannerReportPaths = $fixture.OtherScannerReportPaths; ScannerReceipt = $fixture.Receipt
+            SupplementalEvidence = $fixture.Supplemental
+        }
+        $route = New-StandardValidationProtectedSourceMergeDecision -TechnicalEvidence $technical `
+            -EventSourceRevision $fixture.SourceRevision -CallerApproval $true
+        Assert-Draft ($route.status -ceq 'failed') 'A proposal and caller approval must never pass protected checks.'
+    }
+
+    # Scenario: an explicit trusted-authority fixture binds the technical report and exact immutable identities.
+    # Purpose: exercise the complete offline route while keeping production required contexts failed.
+    It 'InterT100_routes_only_the_bound_test_authority_fixture' {
+        $bridge = New-BridgeFixture -Root (Join-Path $TestDrive 'bridge-positive')
+        $result = Invoke-BridgeFixture -Bridge $bridge -TestOnlyFixtureScope
+        Assert-Draft ($result.fixtureRoute -ceq 'eligible') "Bound fixture was rejected: $($result.failureReasons -join ',') / $($result.technicalFailureReasons -join ','); authority=$($bridge.Authority | ConvertTo-Json -Depth 4 -Compress)"
+        Assert-Draft ($result.status -ceq 'failed' -and -not $result.releaseEligible) 'A fixture cannot pass required checks or release.'
+        Assert-Draft (($result.requiredContexts -join ',') -ceq 'repository-contract,skill-validator,skill-tools') 'Source context set drifted.'
+        $production = Invoke-BridgeFixture -Bridge $bridge
+        Assert-Draft ($production.status -ceq 'failed' -and $production.fixtureRoute -ceq 'rejected') 'The same fixture must fail on the production path.'
+    }
+
+    # Scenario: adoption is absent, self-asserted, or bound to another source, event, central, workflow, or archive.
+    # Purpose: keep the bridge closed on authority and immutable identity drift.
+    It 'InterT110_rejects_adoption_or_immutable_identity_drift' {
+        foreach ($drift in @('not-adopted', 'no-human-review', 'source', 'event', 'event-sha', 'central', 'workflow', 'archive', 'candidate', 'content', 'scan-hash', 'other-scan-hash')) {
+            $bridge = New-BridgeFixture -Root (Join-Path $TestDrive "bridge-$drift")
+            switch ($drift) {
+                'not-adopted' { $bridge.Authority.status = 'proposed' }
+                'no-human-review' { $bridge.Authority.humanReview = 'pending' }
+                source { $bridge.Authority.sourceRevision = 'c' * 40 }
+                event { $bridge.Authority.eventSourceRevision = 'c' * 40 }
+                'event-sha' { $bridge.Fixture.SourceRevision = 'c' * 40 }
+                central { $bridge.Authority.centralRevision = 'c' * 40 }
+                workflow { $bridge.Authority.workflowRevision = 'c' * 40 }
+                archive { $bridge.Authority.archiveSha256 = 'c' * 64 }
+                candidate { $bridge.Authority.candidateId = 'c' * 64 }
+                content { $bridge.Authority.contentSha256 = 'c' * 64 }
+                'scan-hash' { $bridge.Authority.scannerReportSha256 = 'c' * 64 }
+                'other-scan-hash' { $bridge.Authority.otherScannerReportSha256[0] = 'c' * 64 }
+            }
+            $result = Invoke-BridgeFixture -Bridge $bridge -TestOnlyFixtureScope
+            Assert-Draft ($result.fixtureRoute -ceq 'rejected' -and $result.status -ceq 'failed') "Authority drift '$drift' routed."
+        }
+    }
+
+    # Scenario: a signed-looking adoption fixture accompanies changed scanner, raw process, counts, cleanup, or canonical state.
+    # Purpose: independently rerun the technical validator before any route decision.
+    It 'InterT120_rejects_tampered_underlying_evidence_even_with_adoption_fixture' {
+        foreach ($drift in @('missing-report', 'extra-finding', 'extra-limitation', 'missing-raw', 'raw-tamper', 'failed-count', 'all-skipped', 'unclean', 'receipt', 'canonical-pass', 'release')) {
+            $bridge = New-BridgeFixture -Root (Join-Path $TestDrive "bridge-evidence-$drift")
+            $fixture = $bridge.Fixture
+            switch ($drift) {
+                'missing-report' { Remove-Item -LiteralPath $fixture.OtherScannerReportPaths[0] }
+                'extra-finding' {
+                    $scan = Get-Content -LiteralPath $fixture.ScannerReportPath -Raw | ConvertFrom-Json
+                    $scan.issues = @([ordered]@{ severity = 'HIGH' })
+                    [IO.File]::WriteAllText($fixture.ScannerReportPath, ($scan | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+                }
+                'extra-limitation' {
+                    $scan = Get-Content -LiteralPath $fixture.ScannerReportPath -Raw | ConvertFrom-Json
+                    $scan.analysis_completeness.ledger_exceptions += [ordered]@{ path = 'SKILL.md'; reason_code = 'static_parse_limit'; analyzers = @('static_patterns_tool_misuse') }
+                    [IO.File]::WriteAllText($fixture.ScannerReportPath, ($scan | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+                }
+                'missing-raw' { Remove-Item -LiteralPath $fixture.Supplemental[1].event.outputPath }
+                'raw-tamper' { [IO.File]::AppendAllText($fixture.Supplemental[1].event.outputPath, 'tampered') }
+                'failed-count' { $fixture.Supplemental[1].record.testResult.failed = 1 }
+                'all-skipped' { $fixture.Supplemental[1].record.testResult.passed = 0; $fixture.Supplemental[1].record.testResult.skipped = 1 }
+                unclean { $fixture.Supplemental[1].event.cleanedUp = $false }
+                receipt { $fixture.Receipt.executableSha256 = 'e' * 64 }
+                'canonical-pass' { $fixture.Report.state = 'PASS' }
+                release { $fixture.Report.releaseEligible = $true }
+            }
+            $result = Invoke-BridgeFixture -Bridge $bridge -TestOnlyFixtureScope
+            Assert-Draft ($result.fixtureRoute -ceq 'rejected' -and $result.status -ceq 'failed') "Evidence drift '$drift' routed."
+        }
     }
 }

@@ -3085,7 +3085,10 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $released = Copy-TestJsonObject -Value $proposalDecision
         $released.releaseEligible = $true
         Assert-False (Test-AuthorityJsonSchemaValue -Value $released -Schema $evidenceSchema.properties.sourceMergeExceptionProposal -RootSchema $evidenceSchema) 'A proposed source exception cannot authorize release.'
-        Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 2 'The review-only runner must use the technical proposal helper exactly once.'
+        Assert-Equal ([regex]::Matches($runner, 'New-StandardValidationProposedSourceMergeExceptionDecision').Count) 3 'The review runner and inactive bridge must share the one technical proposal helper.'
+        Assert-Match $contract.evidence.protectedSourceMergeBridgeCandidate.status 'inactive' 'The protected source bridge must remain inactive.'
+        Assert-Match $runner 'protected-authority-unavailable' 'The bridge must fail closed without a protected authority.'
+        Assert-Equal ($contract.evidence.protectedSourceMergeBridgeCandidate.requiredContexts -join ',') 'repository-contract,skill-validator,skill-tools' 'The bridge scope must name only the source contexts.'
         Assert-Match $runner 'if \(\$SourceMergeExceptionReview -and \$null -ne \$candidateEvidence\)' 'The proposal must be absent from ordinary canonical validation.'
         . $runnerPath `
             -CandidateRoot (Join-Path $TestDrive 'schema-candidate') `
