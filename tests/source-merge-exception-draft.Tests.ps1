@@ -143,6 +143,17 @@ Describe 'Proposed PR12 source merge exception' {
         }
     }
 
+    # Scenario: the machine-readable authority summary names an older source revision.
+    # Purpose: keep the reviewed merge scope bound to the exact source revision in policy.
+    It 'UnitT05_binds_contract_scope_to_exact_policy_revision' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $contract = Get-Content -LiteralPath (Join-Path $root 'docs/standards/standard-validation-contract-v1.json') -Raw | ConvertFrom-Json
+        $policy = Get-Content -LiteralPath (Join-Path $root 'docs/standards/pr12-source-merge-exception-proposal.json') -Raw | ConvertFrom-Json
+        $scope = [string]$contract.evidence.sourceMergeExceptionProposal.scope
+        Assert-Draft ($scope -cmatch ('PR12 exact candidate {0};' -f [regex]::Escape([string]$policy.sourceRevision))) `
+            'The authority contract scope must name the exact proposed source revision.'
+    }
+
     # Scenario: a bound scanner limitation and supplemental raw test records are present.
     # Purpose: preserve the failed canonical result while producing only a reviewable technical proposal.
     It 'UnitT10_keeps_exact_exception_eligible_for_review_without_approving_it' {
