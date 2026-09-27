@@ -42,12 +42,19 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertEqual("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", steps[-1]["uses"].split()[0])
         self.assertEqual("7", steps[-1]["with"]["retention-days"])
         self.assertIn("pester-shard-*.json", steps[-1]["with"]["path"])
-        self.assertIn("DIAGNOSTIC_PARTITION_START", steps[3]["run"])
-        self.assertIn("DIAGNOSTIC_PARTITION_END", steps[3]["run"])
-        self.assertIn("DIAGNOSTIC_PARTITION_EXIT", steps[3]["run"])
-        self.assertIn("ShardPartitionCount = 8", steps[3]["run"])
-        self.assertIn("ExpectedFullShardCount = 32", steps[3]["run"])
-        self.assertIn("OuterTimeoutSeconds = 2400", steps[3]["run"])
+        self.assertEqual("pwsh", steps[1]["shell"])
+        self.assertEqual(("matrix.runtime == 'ps51'", "powershell"),
+                         (steps[2]["if"], steps[2]["shell"]))
+        self.assertEqual(("matrix.runtime == 'ps7'", "pwsh"),
+                         (steps[3]["if"], steps[3]["shell"]))
+        self.assertEqual(steps[2]["run"], steps[3]["run"])
+        self.assertNotIn("${{", " ".join(step["shell"] for step in steps if "shell" in step))
+        self.assertIn("Invoke-PesterEvenDiagnostic.ps1", steps[2]["run"])
+        diagnostic = (ROOT / "scripts/Invoke-PesterEvenDiagnostic.ps1").read_text(encoding="utf-8")
+        for marker in ("DIAGNOSTIC_PARTITION_START", "DIAGNOSTIC_PARTITION_END",
+                       "DIAGNOSTIC_PARTITION_EXIT", "ShardPartitionCount = 8",
+                       "ExpectedFullShardCount = 32", "OuterTimeoutSeconds = 2400"):
+            self.assertIn(marker, diagnostic)
         executor = (ROOT / "scripts/Invoke-PesterShardProcess.ps1").read_text(encoding="utf-8")
         self.assertIn('Write-Host "Starting Pester shard $($shard.Name)"', executor)
         self.assertIn('Write-Host "$($shard.Name) - Total:', executor)
@@ -59,7 +66,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for position in (1, 2, 3):
                 script = self.job["steps"][position]["run"]
-                for key, value in {"shell": "pwsh", "pester": "4.10.1", "runtime": "ps7",
+                for key, value in {"pester": "4.10.1", "runtime": "ps7",
                                    "index": "0", "total": "181"}.items():
                     script = script.replace("${{ matrix." + key + " }}", value)
                 path = Path(directory) / f"step-{position}.ps1"
@@ -72,6 +79,15 @@ class EvenDiagnosticContractTests(unittest.TestCase):
                     result = subprocess.run([host, "-NoProfile", "-Command", parser],
                                             capture_output=True, text=True, timeout=15)
                     self.assertEqual(0, result.returncode, f"{host} step {position}: {result.stderr}")
+            wrapper = ROOT / "scripts/Invoke-PesterEvenDiagnostic.ps1"
+            source = str(wrapper).replace("'", "''")
+            parser = ("$t=$null;$e=$null;"
+                      f"[System.Management.Automation.Language.Parser]::ParseFile('{source}',[ref]$t,[ref]$e)|Out-Null;"
+                      "if($e.Count){$e|ForEach-Object{Write-Error $_.Message};exit 1}")
+            for host in ("powershell", "pwsh"):
+                result = subprocess.run([host, "-NoProfile", "-Command", parser],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(0, result.returncode, f"{host} wrapper: {result.stderr}")
 
     # Scenario: The exact Git test roster is absent, duplicated, or changed.
     # Purpose: Fail before running the executor with stale split counts.
@@ -80,11 +96,11 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertEqual(EXPECTED_FILES, len(names))
         self.assertEqual(EXPECTED_SHA, hashlib.sha256("\n".join(names).encode()).hexdigest())
         self.assertEqual(
-            [("ps51", "powershell", "3.4.0", "0", "181"),
-             ("ps51", "powershell", "3.4.0", "4", "40"),
-             ("ps7", "pwsh", "4.10.1", "0", "181"),
-             ("ps7", "pwsh", "4.10.1", "4", "40")],
-            [(item["runtime"], item["shell"], item["pester"], item["index"], item["total"]) for item in self.matrix],
+            [("ps51", "3.4.0", "0", "181"),
+             ("ps51", "3.4.0", "4", "40"),
+             ("ps7", "4.10.1", "0", "181"),
+             ("ps7", "4.10.1", "4", "40")],
+            [(item["runtime"], item["pester"], item["index"], item["total"]) for item in self.matrix],
         )
         self.assertIn(EXPECTED_SHA, self.inventory_script)
         for runtime, index, total in (("ps51", 0, 181), ("ps51", 4, 40), ("ps7", 0, 181), ("ps7", 4, 40)):
@@ -98,7 +114,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
     @classmethod
     def run_inventory(cls, runtime: str, index: int, total: int, fake_git_names: list[str] | None = None):
         script = cls.inventory_script
-        for key, value in {"shell": "pwsh", "pester": "4.10.1", "runtime": runtime,
+        for key, value in {"pester": "4.10.1", "runtime": runtime,
                            "index": str(index), "total": str(total)}.items():
             script = script.replace("${{ matrix." + key + " }}", value)
         if fake_git_names is not None:

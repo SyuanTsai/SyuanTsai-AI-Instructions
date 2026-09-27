@@ -21,22 +21,18 @@ jobs:
       matrix:
         include:
           - runtime: ps51
-            shell: powershell
             pester: 3.4.0
             index: 0
             total: 181
           - runtime: ps51
-            shell: powershell
             pester: 3.4.0
             index: 4
             total: 40
           - runtime: ps7
-            shell: pwsh
             pester: 4.10.1
             index: 0
             total: 181
           - runtime: ps7
-            shell: pwsh
             pester: 4.10.1
             index: 4
             total: 40
@@ -48,7 +44,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify exact Pester inventory and diagnostic partition
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           # Reviewed 32-file name inventory at the PR58 diagnostic candidate.
@@ -113,47 +109,17 @@ jobs:
           if ($total -ne [int]'${{ matrix.total }}') { throw 'Diagnostic expected test count changed.' }
           Write-Host "DIAGNOSTIC_PLAN runtime=${{ matrix.runtime }} index=$index/8 files=4 total=$total skipped=0 inventory=$actualSha"
 
-      - name: Ensure pinned Pester version
-        shell: ${{ matrix.shell }}
+      - name: Run bounded diagnostic shards on Windows PowerShell 5.1
+        if: matrix.runtime == 'ps51'
+        shell: powershell
         run: |
-          $version = [version]'${{ matrix.pester }}'
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq $version } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion $version -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq $version } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw "Pester $version is unavailable." }
+          & ./scripts/Invoke-PesterEvenDiagnostic.ps1 -Runtime '${{ matrix.runtime }}' -PesterVersion '${{ matrix.pester }}' -PartitionIndex '${{ matrix.index }}' -ExpectedTotalCount '${{ matrix.total }}'
 
-      - name: Run bounded diagnostic shards
-        shell: ${{ matrix.shell }}
+      - name: Run bounded diagnostic shards on PowerShell 7
+        if: matrix.runtime == 'ps7'
+        shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'${{ matrix.pester }}' } | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Reviewed Pester version is unavailable.' }
-          $args = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '${{ matrix.pester }}'
-            ExpectedTotalCount = [int]'${{ matrix.total }}'
-            ExpectedSkippedCount = 0
-            ShardPartitionCount = 8
-            ShardPartitionIndex = [int]'${{ matrix.index }}'
-            ExpectedFullShardCount = 32
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          Write-Host "DIAGNOSTIC_PARTITION_START runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
-          try {
-            # The existing executor emits Starting Pester shard and per-shard Total lines.
-            # Its create-only process and result JSON files are retained below on normal failure.
-            & ./scripts/Invoke-PesterShardProcess.ps1 @args
-            Write-Host "DIAGNOSTIC_PARTITION_END runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
-          }
-          finally {
-            Write-Host "DIAGNOSTIC_PARTITION_EXIT runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
-          }
+          & ./scripts/Invoke-PesterEvenDiagnostic.ps1 -Runtime '${{ matrix.runtime }}' -PesterVersion '${{ matrix.pester }}' -PartitionIndex '${{ matrix.index }}' -ExpectedTotalCount '${{ matrix.total }}'
 
       - name: Retain bounded shard evidence on normal completion or failure
         if: always()
