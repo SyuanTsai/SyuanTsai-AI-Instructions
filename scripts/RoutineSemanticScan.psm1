@@ -499,4 +499,36 @@ function New-RoutineSemanticPreparation {
     }
 }
 
-Export-ModuleMember -Function Test-RoutineSemanticAuthorization, Get-RoutineSemanticGitInventory, New-RoutineSemanticPreparation, Read-RoutineSemanticJsonFile
+function Get-RoutineSemanticDeliveryPlanBinding {
+    param($Consumer, [string] $ConsumerPlanSha256)
+    $source = Get-RoutineSemanticProperty $Consumer 'source'
+    $candidate = Get-RoutineSemanticProperty $Consumer 'candidate'
+    $authority = Get-RoutineSemanticProperty $Consumer 'authority'
+    $tools = Get-RoutineSemanticProperty $Consumer 'tools'
+    $semantic = Get-RoutineSemanticProperty $Consumer 'semantic'
+    if ($null -eq $source -or $null -eq $candidate -or $null -eq $authority -or $null -eq $tools -or $null -eq $semantic) {
+        throw 'DELIVERY_PLAN_INCOMPLETE|Source, candidate, authority, tools and semantic closure are required.'
+    }
+    $hex40 = '^[0-9a-f]{40}$'
+    $hex64 = '^[0-9a-f]{64}$'
+    $artifacts = [ordered]@{}
+    foreach ($name in @('consentRequestPath', 'consentDecisionPath', 'evidencePath', 'publicKeyPath')) {
+        $artifacts[$name] = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $semantic $name) $name
+    }
+    return [pscustomobject][ordered]@{
+        runId = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $Consumer 'runId') 'runId' '^[0-9a-f]{32}$'
+        consumerPlanSha256 = Assert-RoutineSemanticString $ConsumerPlanSha256 'consumerPlanSha256' $hex64
+        sourceRevision = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $source 'revision') 'sourceRevision' $hex40
+        sourceBaseRevision = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $source 'baseRevision') 'sourceBaseRevision' $hex40
+        sourceTree = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $source 'tree') 'sourceTree' $hex40
+        consumerCandidateId = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $candidate 'candidateId') 'consumerCandidateId' $hex64
+        consumerContentSha256 = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $candidate 'contentSha256') 'consumerContentSha256' $hex64
+        authorityArchiveSha256 = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $authority 'archiveSha256') 'authorityArchiveSha256' $hex64
+        authorityRunnerSha256 = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $authority 'runnerSha256') 'authorityRunnerSha256' $hex64
+        toolPolicyReceiptSha256 = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $tools 'policyReceiptSha256') 'toolPolicyReceiptSha256' $hex64
+        publicKeyId = Assert-RoutineSemanticString (Get-RoutineSemanticProperty $semantic 'publicKeyId') 'publicKeyId'
+        artifacts = [pscustomobject]$artifacts
+    }
+}
+
+Export-ModuleMember -Function Test-RoutineSemanticAuthorization, Get-RoutineSemanticGitInventory, New-RoutineSemanticPreparation, Read-RoutineSemanticJsonFile, Get-RoutineSemanticDeliveryPlanBinding

@@ -331,8 +331,17 @@ Describe 'routine semantic immutable Git input preparation' {
             $outputPath = Join-Path $fixture.Root 'prepared-plan.json'
             $consumer = [ordered]@{
                 schemaVersion = 1; artifactType = 'standard-validation-consumer-run-plan-v1'; runId = ('3' * 32)
-                source = [ordered]@{ repository = 'https://example.test/repo.git'; revision = $fixture.Revision }
+                source = [ordered]@{ repository = 'https://example.test/repo.git'; revision = $fixture.Revision; baseRevision = ('6' * 40); tree = ('7' * 40) }
                 candidate = [ordered]@{ candidateId = ('4' * 64); contentSha256 = ('5' * 64) }
+                authority = [ordered]@{ archiveSha256 = ('8' * 64); runnerSha256 = ('9' * 64) }
+                tools = [ordered]@{ policyReceiptSha256 = ('a' * 64) }
+                semantic = [ordered]@{
+                    consentRequestPath = (Join-Path $fixture.Root 'consent-request.json')
+                    consentDecisionPath = (Join-Path $fixture.Root 'consent-decision.json')
+                    evidencePath = (Join-Path $fixture.Root 'evidence.json')
+                    publicKeyPath = (Join-Path $fixture.Root 'public-key.json')
+                    publicKeyId = 'fixture-key'
+                }
             }
             [IO.File]::WriteAllText($consumerPath, ($consumer | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
             [IO.File]::WriteAllText($grantPath, ($params.GrantEnvelope | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
@@ -348,7 +357,14 @@ Describe 'routine semantic immutable Git input preparation' {
             if ($LASTEXITCODE -ne 0) { throw 'Prepare entrypoint failed for a complete fixture.' }
             $cliPlan = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
             if ($cliPlan.consumerBinding.runId -cne ('3' * 32) -or $cliPlan.consumerBinding.candidateId -cne ('4' * 64) -or
-                $cliPlan.candidateId -cne $plan.candidateId -or $cliPlan.ciAdmission -cne 'BLOCKED') { throw 'Prepare entrypoint lost one candidate identity.' }
+                $cliPlan.candidateId -cne $plan.candidateId -or $cliPlan.ciAdmission -cne 'BLOCKED' -or
+                $cliPlan.deliveryBinding.sourceBaseRevision -cne ('6' * 40) -or
+                $cliPlan.deliveryBinding.sourceTree -cne ('7' * 40) -or
+                $cliPlan.deliveryBinding.authorityArchiveSha256 -cne ('8' * 64) -or
+                $cliPlan.deliveryBinding.toolPolicyReceiptSha256 -cne ('a' * 64) -or
+                $cliPlan.deliveryBinding.artifacts.evidencePath -cne $consumer.semantic.evidencePath) {
+                throw 'Prepare entrypoint lost the consumer delivery closure.'
+            }
             $params.Repository = 'https://example.test/other.git'
             $mismatchFailed = $false
             try { [void](New-RoutineSemanticPreparation @params) } catch { $mismatchFailed = $_.Exception.Message -like 'SOURCE_REPOSITORY_MISMATCH*' }

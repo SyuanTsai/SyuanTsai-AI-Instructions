@@ -1,7 +1,13 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Prepare', 'Verify')][string] $Mode,
+    [Parameter(Mandatory = $true)][ValidateSet('Prepare', 'Verify', 'BuildDelivery', 'VerifyDelivery')][string] $Mode,
     [Parameter(Mandatory = $true)][string] $PlanPath,
     [string] $BundlePath,
+    [string] $PreparedPath,
+    [string] $ManifestPath,
+    [string] $ProtectedExpectedPath,
+    [string] $DeliveryClaimPath,
+    [string] $IssuedAtUtc,
+    [string] $ExpiresAtUtc,
     [Parameter(Mandatory = $true)][string] $OutputPath,
     [string] $SourceRoot,
     [string] $GrantPath,
@@ -24,6 +30,37 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'RoutineSemanticScan.psm1') -Force -ErrorAction Stop
 
 try {
+    if ($Mode -ceq 'BuildDelivery' -or $Mode -ceq 'VerifyDelivery') {
+        foreach ($entry in @(
+            @{ value = $BundlePath; name = 'BundlePath' },
+            @{ value = $PreparedPath; name = 'PreparedPath' }
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$entry.value)) { throw "DELIVERY_INPUT_MISSING|$($entry.name) is required." }
+        }
+        $delivery = Join-Path $PSScriptRoot 'routine_semantic_delivery.py'
+        if (-not (Test-Path -LiteralPath $delivery -PathType Leaf)) { throw 'DELIVERY_HELPER_MISSING|Delivery helper is unavailable.' }
+        if ($Mode -ceq 'BuildDelivery') {
+            if ([string]::IsNullOrWhiteSpace($IssuedAtUtc) -or [string]::IsNullOrWhiteSpace($ExpiresAtUtc)) {
+                throw 'DELIVERY_INPUT_MISSING|IssuedAtUtc and ExpiresAtUtc are required.'
+            }
+            & python $delivery build --plan $PlanPath --prepared $PreparedPath --bundle $BundlePath `
+                --issued-at $IssuedAtUtc --expires-at $ExpiresAtUtc --output $OutputPath
+        }
+        else {
+            foreach ($entry in @(
+                @{ value = $ManifestPath; name = 'ManifestPath' },
+                @{ value = $ProtectedExpectedPath; name = 'ProtectedExpectedPath' },
+                @{ value = $DeliveryClaimPath; name = 'DeliveryClaimPath' }
+            )) {
+                if ([string]::IsNullOrWhiteSpace([string]$entry.value)) { throw "DELIVERY_INPUT_MISSING|$($entry.name) is required." }
+            }
+            & python $delivery verify --plan $PlanPath --prepared $PreparedPath --bundle $BundlePath `
+                --manifest $ManifestPath --protected-expected $ProtectedExpectedPath `
+                --claim $DeliveryClaimPath --output $OutputPath
+        }
+        if ($LASTEXITCODE -ne 0) { exit 10 }
+        exit 0
+    }
     if ($Mode -ceq 'Verify') {
         if ([string]::IsNullOrWhiteSpace($BundlePath)) { throw 'BUNDLE_MISSING|Verify requires a bundle path.' }
         $verifier = Join-Path $PSScriptRoot 'routine_semantic_offline.py'
@@ -82,6 +119,10 @@ try {
         sourceRevision = [string]$consumer.source.revision
         consumerPlanSha256 = [string]$consumerRecord.sha256
     })
+    if ($null -ne $consumer.PSObject.Properties['semantic']) {
+        $prepared | Add-Member -NotePropertyName deliveryBinding -NotePropertyValue `
+            (Get-RoutineSemanticDeliveryPlanBinding -Consumer $consumer -ConsumerPlanSha256 $consumerRecord.sha256)
+    }
     $encoded = ([Text.UTF8Encoding]::new($false)).GetBytes(($prepared | ConvertTo-Json -Depth 30) + [Environment]::NewLine)
     $file = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $file.Write($encoded, 0, $encoded.Length) }

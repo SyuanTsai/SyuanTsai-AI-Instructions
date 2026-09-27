@@ -536,6 +536,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/routine_semantic_delivery.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/routine_semantic_fake_graph.py",
       "license": "Apache-2.0"
     },
@@ -805,6 +809,10 @@
     },
     {
       "path": "tests/test_routine_semantic_codex_provider.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_delivery.py",
       "license": "Apache-2.0"
     },
     {
