@@ -83,7 +83,6 @@ function Invoke-MaintenanceAcquisitionDefaultTransport {
     $handler = New-Object Net.Http.HttpClientHandler
     $handler.AllowAutoRedirect = $false
     $handler.UseCookies = $false
-    $handler.UseProxy = $false
     $client = New-Object Net.Http.HttpClient($handler)
     # ResponseHeadersRead ends HttpClient.Timeout coverage when headers arrive.
     # One stopwatch bounds headers, stream creation and every body read together.
