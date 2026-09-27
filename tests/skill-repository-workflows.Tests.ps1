@@ -97,6 +97,14 @@ jobs:
         Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 2 'The dedicated Linux focused job and direct Linux composition step may import Pester in workflow scope; Windows full suites must stay behind the bounded executor.'
         Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 8 'All eight Windows Pester partitions must use the bounded executor.'
         Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 8 'Workflow logging must use discovery metadata without importing the module first.'
+        $diagnosticPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-even-shard-diagnostic.yml'
+        Assert-True (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) 'Manual even-shard diagnostic workflow must exist.'
+        $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $diagnosticPath
+        Assert-Match $diagnostic '(?m)^\s*workflow_dispatch:\s*$' 'Diagnostic must require explicit manual dispatch.'
+        Assert-NotMatch $diagnostic '(?m)^\s*(pull_request|push|schedule|workflow_run):\s*$' 'Diagnostic must not auto-run or replace a required check.'
+        Assert-Match $diagnostic 'timeout-minutes:\s*45' 'Diagnostic jobs must be bounded to 45 minutes.'
+        Assert-Match $diagnostic 'cancel-in-progress:\s*false' 'Diagnostic must not cancel another active run.'
+        Assert-Match $diagnostic 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' 'Normal failure evidence upload must use the reviewed immutable action.'
     }
 
     # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
