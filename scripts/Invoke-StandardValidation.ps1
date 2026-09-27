@@ -359,6 +359,43 @@ function Get-StandardValidationProperty {
     return ,$property.Value
 }
 
+function Assert-StandardValidationSkillValidatorReport {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string] $SkillId
+    )
+
+    foreach ($name in @('skill_dir', 'passed', 'errors', 'warnings', 'results')) {
+        if ($null -eq $Report.PSObject.Properties[$name]) { throw "skill-validator report is missing '$name'." }
+    }
+    $errors = $Report.errors
+    $warnings = $Report.warnings
+    foreach ($count in @($errors, $warnings)) {
+        if (($count -isnot [byte] -and $count -isnot [int16] -and $count -isnot [int32] -and $count -isnot [int64] -and
+             $count -isnot [uint16] -and $count -isnot [uint32] -and $count -isnot [uint64]) -or [decimal]$count -lt 0) {
+            throw "skill-validator report counts must be typed nonnegative integers for '$SkillId'."
+        }
+    }
+    $results = $Report.PSObject.Properties['results'].Value
+    if ($Report.skill_dir -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Report.skill_dir) -or
+        $Report.passed -isnot [bool] -or -not $Report.passed -or [decimal]$errors -ne 0 -or [decimal]$warnings -ne 0 -or
+        $results -isnot [array] -or $results.Count -eq 0) {
+        throw "skill-validator did not produce a clean candidate-bound report for '$SkillId'."
+    }
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not [IO.Path]::GetFullPath([string]$Report.skill_dir).Equals([IO.Path]::GetFullPath($SkillRoot), $comparison)) {
+        throw "skill-validator report root does not match candidate Skill '$SkillId'."
+    }
+    foreach ($result in $results) {
+        if ($null -eq $result -or $null -eq $result.PSObject.Properties['level'] -or
+            $result.level -isnot [string] -or $result.level -cnotin @('pass', 'info')) {
+            throw "skill-validator returned a blocking or malformed result for '$SkillId'."
+        }
+    }
+    return $results
+}
+
 function Test-StandardValidationHasProperty {
     param(
         [Parameter(Mandatory = $true)][AllowNull()] $Object,
