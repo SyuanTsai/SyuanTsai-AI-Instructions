@@ -392,14 +392,19 @@ exit ([int]$LASTEXITCODE)
             $startInfo.CreateNoWindow = $true
             $startInfo.RedirectStandardOutput = $true
             $startInfo.RedirectStandardError = $true
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
+            # On Windows PowerShell 5.1 the first environment getter may return
+            # null while initializing its backing dictionary.
+            $childEnvironment = $startInfo.Environment
+            if ($null -eq $childEnvironment) { $childEnvironment = $startInfo.EnvironmentVariables }
+            if ($null -eq $childEnvironment) { throw 'Runner fixture child environment dictionary is unavailable.' }
+            $childEnvironment['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
             $runnerArguments = @($arguments | Select-Object -Skip 3)
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
+            $childEnvironment['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
                 $runnerArguments | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) }
             ) -join ';'
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
+            $childEnvironment['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
             foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+                $childEnvironment[[string]$entry.Key] = [string]$entry.Value
             }
             $process = New-Object Diagnostics.Process
             $process.StartInfo = $startInfo
