@@ -1272,7 +1272,8 @@ public sealed class C245SlowTrickleStream : Stream {
         $saved = Join-Path $TestDrive 'saved-failure'
         [void](New-Item -ItemType Directory -Path $work)
         [IO.File]::WriteAllText((Join-Path $work 'acquisition-diagnostics.jsonl'), '{"phase":"failure"}')
-        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'), '{"kind":"diagnostic-only"}')
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'),
+            '{"schemaVersion":1,"kind":"diagnostic-only","entries":[],"rejectedCandidates":[]}')
         [IO.File]::WriteAllText((Join-Path $work 'untrusted.whl'), 'do-not-retain')
         Save-SkillSpectorFailureEvidence -WorkPath $work -DestinationPath $saved
         Remove-Item -LiteralPath $work -Recurse -Force
@@ -1280,6 +1281,88 @@ public sealed class C245SlowTrickleStream : Stream {
         Assert-True (Test-Path -LiteralPath (Join-Path $saved 'candidate-inventory.failure.json') -PathType Leaf) 'The partial candidate identity must survive temporary cleanup.'
         Assert-False (Test-Path -LiteralPath (Join-Path $saved 'untrusted.whl')) 'The untrusted wheel must not be copied into diagnostics.'
         Assert-False (Test-Path -LiteralPath (Join-Path $saved 'closure-result.json')) 'A failure must not acquire a success result.'
+    }
+
+    # Scenario: Resolution finishes, but a later install step fails and removes its temporary pool.
+    # Purpose: Retain the completed candidate inventory as diagnostic-only failure evidence.
+    It 'UnitT26r_preserves_completed_candidate_inventory_after_later_failure' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $work = Join-Path $TestDrive 'completed-work'
+        $saved = Join-Path $TestDrive 'completed-failure'
+        [void](New-Item -ItemType Directory -Path $work)
+        $inventory = [ordered]@{
+            schemaVersion = 1
+            inventorySha256 = ('a' * 64)
+            entries = @([ordered]@{ file = 'dependency-1.0-py3-none-any.whl'; sha256 = ('b' * 64) })
+            rejectedCandidates = @()
+        }
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.json'),
+            ($inventory | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'),
+            '{"schemaVersion":1,"kind":"diagnostic-only","entries":[],"rejectedCandidates":[]}',
+            (New-Object Text.UTF8Encoding($false)))
+        Save-SkillSpectorFailureEvidence -WorkPath $work -DestinationPath $saved
+        $failurePath = Join-Path $saved 'candidate-inventory.failure.json'
+        Assert-True (Test-Path -LiteralPath $failurePath -PathType Leaf) 'A completed inventory must survive later install failure.'
+        $failure = Get-Content -Raw -LiteralPath $failurePath | ConvertFrom-Json
+        Assert-Equal $failure.kind 'diagnostic-only' 'The preserved inventory must not impersonate a success receipt.'
+        Assert-Equal $failure.source 'completed-candidate-inventory' 'The diagnostic must disclose its source.'
+        Assert-Equal $failure.entries[0].file 'dependency-1.0-py3-none-any.whl' 'The selected candidate identity must survive.'
+        Assert-Equal @($failure.rejectedCandidates).Count 0 'An empty rejected-candidate list must remain empty.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $saved 'closure-result.json')) 'A failure must not retain the success result.'
+    }
+
+    # Scenario: The helper is stopped while writing its completed inventory.
+    # Purpose: Retain both the damaged bytes and the last complete diagnostic snapshot.
+    It 'UnitT26u_falls_back_to_incremental_inventory_when_completed_json_is_damaged' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $work = Join-Path $TestDrive 'damaged-work'
+        $saved = Join-Path $TestDrive 'damaged-failure'
+        [void](New-Item -ItemType Directory -Path $work)
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.json'), '{"schemaVersion":1,')
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'),
+            '{"schemaVersion":1,"kind":"diagnostic-only","entries":[{"file":"last-verified.whl"}],"rejectedCandidates":[]}',
+            (New-Object Text.UTF8Encoding($false)))
+        Save-SkillSpectorFailureEvidence -WorkPath $work -DestinationPath $saved
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'candidate-inventory.unverified.json')) 'Damaged completed bytes must remain available for diagnosis.'
+        $snapshot = Get-Content -Raw -LiteralPath (Join-Path $saved 'candidate-inventory.failure.json') | ConvertFrom-Json
+        Assert-Equal $snapshot.kind 'diagnostic-only' 'Only the validated snapshot may be classified as diagnostic evidence.'
+        Assert-Equal $snapshot.entries[0].file 'last-verified.whl' 'The last complete candidate must survive a damaged completed inventory.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $saved 'closure-result.json')) 'No success result may be preserved on failure.'
+    }
+
+    # Scenario: Post-install verification blocks after pip completed near the acquisition deadline.
+    # Purpose: Bound the verification worker rather than treating late hashing as success.
+    It 'UnitT26s_bounds_the_post_install_verification_worker' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $failure = $null
+        try {
+            [void](Invoke-BoundedPowerShellWorker -ScriptText 'Start-Sleep -Seconds 4; Write-Output late-success' `
+                -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 1)
+        }
+        catch { $failure = $_.Exception.Message }
+        $watch.Stop()
+        Assert-Match $failure 'acquisition deadline' 'A post-install worker cannot return success after its deadline.'
+        Assert-True ($watch.Elapsed.TotalSeconds -lt 3) 'Post-install verification must stop before the four-second fixture finishes.'
+    }
+
+    # Scenario: A temporary acquisition directory is removed after the main deadline.
+    # Purpose: Keep cleanup limited to its run-owned root and preserve a neighboring directory.
+    It 'UnitT26t_cleans_only_the_run_owned_temporary_directory' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $allowedRoot = Join-Path $TestDrive 'cleanup-root'
+        [void](New-Item -ItemType Directory -Path $allowedRoot)
+        $owned = Join-Path $allowedRoot ('ss-' + [guid]::NewGuid().ToString('N'))
+        $neighbor = Join-Path $allowedRoot 'neighbor'
+        [void](New-Item -ItemType Directory -Path $owned)
+        [void](New-Item -ItemType Directory -Path $neighbor)
+        [IO.File]::WriteAllText((Join-Path $owned 'payload.txt'), 'owned')
+        [IO.File]::WriteAllText((Join-Path $neighbor 'retain.txt'), 'unrelated')
+        Remove-BoundedRunOwnedDirectory -Path $owned -AllowedRoot $allowedRoot `
+            -LeafPattern '^ss-[0-9a-f]{32}$' -CleanupTimeoutSeconds 5
+        Assert-False (Test-Path -LiteralPath $owned) 'The owned temporary directory must be removed.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $neighbor 'retain.txt')) 'Neighboring files must remain.'
     }
 
     # Scenario: The direct Python child exits but its owned descendant keeps redirected streams open.
@@ -1373,6 +1456,40 @@ public sealed class C245NonCooperativeStream : Stream {
         finally { $deadline.Dispose(); $inputBody.Dispose(); $outputBody.Dispose(); $watch.Stop() }
         Assert-True $cancelled 'A noncooperative body read must stop at cancellation.'
         Assert-True ($watch.Elapsed.TotalSeconds -lt 2) 'The deadline wait must not linger on a pending task.'
+    }
+
+    # Scenario: The root wheel fits but a selected dependency has a longer install member.
+    # Purpose: Check every locked wheel before pip writes any dependency into the venv.
+    It 'UnitT26q_checks_selected_dependency_wheel_members_before_install' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+        $installPath = New-RunOwnedInstallDirectory -Root (Join-Path $TestDrive 'wheelhouse-root') -ToolName 'skillspector'
+        $sitePackages = Join-Path $installPath 'venv\Lib\site-packages'
+        $memberLength = 249 - $sitePackages.Length - 'deep/'.Length - 1
+        Assert-True ($memberLength -gt 30) 'The fixture needs room for an overlong dependency member.'
+        $wheelhouse = Join-Path $TestDrive 'dependency-member-wheelhouse'
+        [void](New-Item -ItemType Directory -Path $wheelhouse)
+        $rootWheel = Join-Path $wheelhouse 'skillspector-1.0-py3-none-any.whl'
+        $dependencyWheel = Join-Path $wheelhouse 'dependency-1.0-py3-none-any.whl'
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        foreach ($spec in @(
+            [pscustomobject]@{ path = $rootWheel; member = 'skillspector/__init__.py' },
+            [pscustomobject]@{ path = $dependencyWheel; member = 'deep/' + ('n' * $memberLength) + '.py' }
+        )) {
+            $archive = [IO.Compression.ZipFile]::Open($spec.path, [IO.Compression.ZipArchiveMode]::Create)
+            try { [void]$archive.CreateEntry($spec.member) }
+            finally { $archive.Dispose() }
+        }
+        Assert-PythonWheelInstallPath -InstallPath $installPath -WheelPath $rootWheel
+        $manifest = [pscustomobject]@{ entries = @(
+            [pscustomobject]@{ file = (Split-Path -Leaf $rootWheel) },
+            [pscustomobject]@{ file = (Split-Path -Leaf $dependencyWheel) }
+        ) }
+        $failure = $null
+        try { Assert-PythonWheelhouseInstallPaths -InstallPath $installPath -WheelhousePath $wheelhouse -Manifest $manifest }
+        catch { $failure = $_.Exception.Message }
+        Assert-Match $failure 'wheel member exceeds safe Windows install path length' 'The selected dependency must fail before pip installation.'
     }
 
     It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {

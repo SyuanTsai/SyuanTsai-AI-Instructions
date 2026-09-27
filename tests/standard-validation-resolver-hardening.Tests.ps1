@@ -147,6 +147,20 @@ Describe 'Standard validation resolver hardening' {
         Assert-Equal $metadata.consoleEntryPoint 'skillspector.cli:main' 'Installed metadata must bind the exact console entry-point target.'
         Assert-False (Test-Path -LiteralPath $marker) 'Static metadata verification must not process executable .pth startup lines.'
 
+        $executable = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            Join-Path $venv 'Scripts\skillspector.exe'
+        }
+        else { Join-Path $venv 'bin/skillspector' }
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $executable) -Force)
+        [IO.File]::WriteAllText($executable, 'synthetic installed executable')
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $verified = Invoke-BoundedInstalledSkillSpectorVerification `
+            -VirtualEnvironmentPath $venv -InstallPath $venv -ExpectedVersion '2.11.0' `
+            -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 30
+        Assert-Equal $verified.consoleEntryPoint 'skillspector.cli:main' 'The bounded post-install worker must verify the static entry point.'
+        Assert-Match $verified.installedClosureSha256 '^[0-9a-f]{64}$' 'The bounded worker must hash the installed closure.'
+        Assert-False (Test-Path -LiteralPath $marker) 'The bounded worker must not execute .pth startup code.'
+
         $resolverLines = Get-Content -Encoding UTF8 -LiteralPath $script:ResolverPath
         $codeOnly = (($resolverLines | Where-Object { $_ -notmatch '^\s*#' }) -join "`n")
         Assert-NotMatch $codeOnly 'importlib\.metadata' 'Resolver code must not start installed Python for post-install version verification.'

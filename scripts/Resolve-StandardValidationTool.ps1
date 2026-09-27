@@ -837,6 +837,18 @@ function Assert-PythonWheelInstallPath {
     finally { $archive.Dispose() }
 }
 
+function Assert-PythonWheelhouseInstallPaths {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        [Parameter(Mandatory = $true)][string] $WheelhousePath,
+        [Parameter(Mandatory = $true)] $Manifest
+    )
+    foreach ($entry in @($Manifest.entries)) {
+        Assert-PythonWheelInstallPath -InstallPath $InstallPath `
+            -WheelPath (Join-Path $WheelhousePath ([string]$entry.file))
+    }
+}
+
 function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -1196,10 +1208,53 @@ function Save-SkillSpectorFailureEvidence {
         [string]::IsNullOrWhiteSpace($DestinationPath) -or
         -not (Test-Path -LiteralPath $WorkPath -PathType Container)) { return }
     [void](New-Item -ItemType Directory -Path $DestinationPath -Force)
-    foreach ($name in @('acquisition-diagnostics.jsonl', 'candidate-inventory.failure.json', 'offline-backtracking-plan.json')) {
+    foreach ($name in @('acquisition-diagnostics.jsonl', 'offline-backtracking-plan.json')) {
         $source = Join-Path $WorkPath $name
         if (Test-Path -LiteralPath $source -PathType Leaf) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $DestinationPath $name) -Force
+        }
+    }
+    $failureInventoryPath = Join-Path $WorkPath 'candidate-inventory.failure.json'
+    $completedInventoryPath = Join-Path $WorkPath 'candidate-inventory.json'
+    $saveIncrementalSnapshot = $false
+    if (Test-Path -LiteralPath $completedInventoryPath -PathType Leaf) {
+            try {
+                $inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $completedInventoryPath | ConvertFrom-Json
+                if ([int]$inventory.schemaVersion -ne 1 -or $null -eq $inventory.entries) {
+                    throw 'Completed candidate inventory is not a schema 1 inventory.'
+                }
+                $rejectedCandidates = [object[]]@()
+                if ($null -ne $inventory.rejectedCandidates) {
+                    $rejectedCandidates = [object[]]@($inventory.rejectedCandidates)
+                }
+                $diagnostic = [ordered]@{
+                    schemaVersion = 1
+                    kind = 'diagnostic-only'
+                    source = 'completed-candidate-inventory'
+                    inventorySha256 = [string]$inventory.inventorySha256
+                    entries = @($inventory.entries)
+                    rejectedCandidates = $rejectedCandidates
+                }
+                [IO.File]::WriteAllText((Join-Path $DestinationPath 'candidate-inventory.failure.json'),
+                    ($diagnostic | ConvertTo-Json -Depth 64), (New-Object Text.UTF8Encoding($false)))
+            }
+            catch {
+                Copy-Item -LiteralPath $completedInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.unverified.json') -Force
+                $saveIncrementalSnapshot = $true
+            }
+    }
+    else { $saveIncrementalSnapshot = $true }
+    if ($saveIncrementalSnapshot -and (Test-Path -LiteralPath $failureInventoryPath -PathType Leaf)) {
+        try {
+            $snapshot = Get-Content -Raw -Encoding UTF8 -LiteralPath $failureInventoryPath | ConvertFrom-Json
+            if ([int]$snapshot.schemaVersion -ne 1 -or
+                [string]$snapshot.kind -cne 'diagnostic-only' -or $null -eq $snapshot.entries) {
+                throw 'Incremental candidate inventory is not a diagnostic-only schema 1 snapshot.'
+            }
+            Copy-Item -LiteralPath $failureInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.failure.json') -Force
+        }
+        catch {
+            Copy-Item -LiteralPath $failureInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.failure.unverified.json') -Force
         }
     }
 }
@@ -3490,6 +3545,119 @@ function Resolve-SkillValidator {
     }
 }
 
+function Invoke-BoundedPowerShellWorker {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScriptText,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch] $AcquisitionStopwatch,
+        [Parameter(Mandatory = $true)][int] $AcquisitionLimitSeconds
+    )
+    $encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
+    $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    return @(Invoke-CheckedCommand -Command $hostPath -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedWorker
+    ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
+}
+
+function Remove-BoundedRunOwnedDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $AllowedRoot,
+        [Parameter(Mandatory = $true)][string] $LeafPattern,
+        [int] $CleanupTimeoutSeconds = 15
+    )
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $resolved) -cnotmatch $LeafPattern) {
+        throw "Run-owned cleanup path escaped its expected root: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $item = Get-Item -Force -LiteralPath $resolved -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Run-owned cleanup target is not a regular directory: $resolved"
+    }
+    $path64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($resolved))
+    $root64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($root))
+    $pattern64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LeafPattern))
+    $worker = @'
+$ErrorActionPreference = 'Stop'
+function Decode([string]$value) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value)) }
+$path = [IO.Path]::GetFullPath((Decode '%PATH%'))
+$root = Decode '%ROOT%'
+$pattern = Decode '%PATTERN%'
+if (-not $path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path -Leaf $path) -cnotmatch $pattern) { throw 'Run-owned cleanup path changed before deletion.' }
+if (Test-Path -LiteralPath $path) {
+    $item = Get-Item -Force -LiteralPath $path
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Run-owned cleanup target changed before deletion.'
+    }
+    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+}
+'@
+    $worker = $worker.Replace('%PATH%', $path64).Replace('%ROOT%', $root64).Replace('%PATTERN%', $pattern64)
+    $encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($worker))
+    $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    [void](Invoke-CheckedCommand -Command $hostPath -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedWorker
+    ) -TimeoutSeconds $CleanupTimeoutSeconds)
+}
+
+function Invoke-BoundedInstalledSkillSpectorVerification {
+    param(
+        [Parameter(Mandatory = $true)][string] $VirtualEnvironmentPath,
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersion,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch] $AcquisitionStopwatch,
+        [Parameter(Mandatory = $true)][int] $AcquisitionLimitSeconds
+    )
+    $sourcePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'))
+    $encodedPaths = @{
+        source = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sourcePath))
+        policy = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$PolicyPath))
+        venv = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($VirtualEnvironmentPath))
+        install = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($InstallPath))
+        version = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ExpectedVersion))
+    }
+    $worker = @'
+$ErrorActionPreference = 'Stop'
+function Decode([string]$value) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value)) }
+$source = Decode '%SOURCE%'
+$policy = Decode '%POLICY%'
+$venv = Decode '%VENV%'
+$postInstallRoot = Decode '%INSTALL%'
+$version = Decode '%VERSION%'
+. $source -PolicyPath $policy -ValidatePolicyOnly | Out-Null
+$metadata = Get-InstalledPythonDistributionMetadata -VirtualEnvironmentPath $venv -DistributionName 'skillspector'
+if ([string]$metadata.version -cne $version) { throw "Installed SkillSpector version mismatch. Expected '$version', got '$($metadata.version)'." }
+$executable = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    Join-Path $venv 'Scripts\skillspector.exe'
+} else { Join-Path $venv 'bin/skillspector' }
+$executable = [IO.Path]::GetFullPath($executable)
+if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Installed SkillSpector executable was not found: $executable" }
+$result = [ordered]@{
+    schemaVersion = 1
+    consoleEntryPoint = [string]$metadata.consoleEntryPoint
+    executablePath = $executable
+    executableSha256 = Get-FileSha256 -Path $executable
+    installedClosureSha256 = (Get-DirectoryClosureIdentity -Path $postInstallRoot).sha256
+}
+Write-Output ($result | ConvertTo-Json -Compress -Depth 5)
+'@
+    foreach ($key in $encodedPaths.Keys) {
+        $worker = $worker.Replace("%$($key.ToUpperInvariant())%", [string]$encodedPaths[$key])
+    }
+    $output = @(Invoke-BoundedPowerShellWorker -ScriptText $worker `
+        -AcquisitionStopwatch $AcquisitionStopwatch -AcquisitionLimitSeconds $AcquisitionLimitSeconds)
+    $result = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+    if ([int]$result.schemaVersion -ne 1 -or
+        [string]$result.executableSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$result.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Bounded installed SkillSpector verification returned invalid evidence.'
+    }
+    return $result
+}
+
 function Resolve-SkillSpector {
     param(
         [bool] $ShouldInstall,
@@ -3593,6 +3761,7 @@ function Resolve-SkillSpector {
     $backtrackingEvidence = $null
     $consoleEntryPoint = $null
     $installedMetadataVerification = $null
+    $cleanupFailure = $null
     try {
         if ($ShouldInstall) {
             $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
@@ -3665,6 +3834,8 @@ function Resolve-SkillSpector {
                 if ($rootEntry.Count -ne 1 -or [string]$rootEntry[0].version -cne $version -or [string]$rootEntry[0].sha256 -cne $expectedHash) {
                     throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
                 }
+                Assert-PythonWheelhouseInstallPaths -InstallPath $toolInstallPath `
+                    -WheelhousePath $wheelhouse -Manifest $manifest
                 $selectedEntries = @($resolutionEvidence.selectedEntries)
                 if ($selectedEntries.Count -ne @($manifest.entries).Count) {
                     throw "Offline backtracking selection count mismatch. Expected '$(@($manifest.entries).Count)', got '$($selectedEntries.Count)'."
@@ -3711,30 +3882,19 @@ function Resolve-SkillSpector {
                     '-r', $lockPath
                 ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
 
-                # Read the installed dist-info files directly. Starting the installed interpreter here
-                # would process site-packages .pth startup lines before the resolver has verified metadata.
-                $installedMetadata = Get-InstalledPythonDistributionMetadata `
-                    -VirtualEnvironmentPath $venvPath `
-                    -DistributionName 'skillspector'
-                if ([string]$installedMetadata.version -cne $version) {
-                    throw "Installed SkillSpector version mismatch. Expected '$version', got '$($installedMetadata.version)'."
-                }
-
-                $installedExecutablePath = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                    Join-Path $venvPath 'Scripts\skillspector.exe'
-                }
-                else {
-                    Join-Path $venvPath 'bin/skillspector'
-                }
-                $installedExecutablePath = [IO.Path]::GetFullPath($installedExecutablePath)
-                if (-not (Test-Path -LiteralPath $installedExecutablePath -PathType Leaf)) {
-                    throw "Installed SkillSpector executable was not found: $installedExecutablePath"
-                }
+                # Verify metadata and hash the installed closure in a bounded
+                # child without starting the unverified venv interpreter.
+                $installedVerification = Invoke-BoundedInstalledSkillSpectorVerification `
+                    -VirtualEnvironmentPath $venvPath -InstallPath $toolInstallPath `
+                    -ExpectedVersion $version -AcquisitionStopwatch $acquisitionStopwatch `
+                    -AcquisitionLimitSeconds $AcquisitionLimitSeconds
 
                 return [ordered]@{
                     manifest = $manifest
-                    executablePath = $installedExecutablePath
-                    consoleEntryPoint = [string]$installedMetadata.consoleEntryPoint
+                    executablePath = [string]$installedVerification.executablePath
+                    executableSha256 = [string]$installedVerification.executableSha256
+                    installedClosureSha256 = [string]$installedVerification.installedClosureSha256
+                    consoleEntryPoint = [string]$installedVerification.consoleEntryPoint
                     installedMetadataVerification = 'static-dist-info-metadata'
                     resolutionEvidence = $resolutionEvidence
                 }
@@ -3745,31 +3905,36 @@ function Resolve-SkillSpector {
             $consoleEntryPoint = [string]$installation.consoleEntryPoint
             $installedMetadataVerification = [string]$installation.installedMetadataVerification
             $installEnvironment = 'isolated-venv'
-            $executableSha256 = Get-FileSha256 -Path $executablePath
-            $installedClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
+            $executableSha256 = [string]$installation.executableSha256
+            $installedClosure = [ordered]@{ sha256 = [string]$installation.installedClosureSha256 }
             Add-ProcessPathValue -Name 'PATH' -Value (Split-Path -Parent $executablePath)
         }
     }
     catch {
         Save-SkillSpectorFailureEvidence -WorkPath $dependencyResolutionPath -DestinationPath $failureRoot
         if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
-            $installItem = Get-Item -Force -LiteralPath $toolInstallPath -ErrorAction SilentlyContinue
-            if ($null -ne $installItem -and $installItem.PSIsContainer -and
-                ($installItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
-                Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $toolInstallPath -AllowedRoot $diagnosticInstallRoot `
+                    -LeafPattern '^ss-[0-9a-f]{12}$'
             }
+            catch { Write-Warning ("Run-owned install cleanup failed: {0}" -f $_.Exception.Message) }
         }
         throw
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
-            $tempItem = Get-Item -Force -LiteralPath $tempRoot -ErrorAction SilentlyContinue
-            if ($null -ne $tempItem -and $tempItem.PSIsContainer -and
-                ($tempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
-                Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
+                    -LeafPattern '^ss-[0-9a-f]{32}$'
+            }
+            catch {
+                $cleanupFailure = $_
+                Write-Warning ("Run-owned temporary cleanup failed: {0}" -f $_.Exception.Message)
             }
         }
     }
+    if ($null -ne $cleanupFailure) { throw $cleanupFailure }
+    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
 
     $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#rootDirectReferences=blocked#credentialIsolation=github-token-cleared-before-python#dependencyClosure=unresolved"
     $identityKind = 'release-commit-asset-metadata'
@@ -3779,6 +3944,7 @@ function Resolve-SkillSpector {
         $identityKind = 'release-commit-asset-metadata-dependency-closure-and-executable'
     }
 
+    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
     return [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity

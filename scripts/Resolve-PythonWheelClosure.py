@@ -245,7 +245,12 @@ def file_sha256(path: Path) -> str:
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
-    path.write_text(text, encoding="utf-8", newline="\n")
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(text)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
 
 
 def safe_filename(value: str) -> str:
@@ -663,6 +668,7 @@ class LazyPoolResolver:
         candidate_dir: Path,
         plan_path: Path,
         budget: Optional[AcquisitionBudget] = None,
+        failure_inventory_path: Optional[Path] = None,
     ) -> None:
         self.catalog = catalog
         self.root_wheel = root_wheel.resolve(strict=True)
@@ -670,6 +676,7 @@ class LazyPoolResolver:
         self.candidate_dir = candidate_dir.resolve()
         self.plan_path = plan_path.resolve()
         self.budget = budget
+        self.failure_inventory_path = failure_inventory_path
         self.rounds = 0
         self.candidate_dir.mkdir(parents=True, exist_ok=False)
         self.requirements: Dict[str, Dict[str, Requirement]] = {}
@@ -677,6 +684,7 @@ class LazyPoolResolver:
         self.requested_extras: Dict[str, Set[str]] = {}
         self.entries: Dict[str, PoolEntry] = {}
         self.attempted: Dict[str, Set[str]] = {}
+        self.conflict_frontier: List[str] = []
         self.last_pip_error = ""
 
         if not SHA256_RE.fullmatch(root_sha256) or file_sha256(self.root_wheel) != root_sha256:
@@ -700,6 +708,21 @@ class LazyPoolResolver:
         self.entries[root_copy.name] = PoolEntry(root_descriptor, root_copy, root_metadata, "approved-root-wheel")
         self._register_requirement(Requirement(f"{root_metadata.name}=={root_metadata.version}"), self.root_project)
         self._discover_dependencies()
+        self._write_failure_inventory_snapshot()
+
+    def _write_failure_inventory_snapshot(self) -> None:
+        if self.failure_inventory_path is None:
+            return
+        inventory = self.inventory()
+        snapshot = {
+            "schemaVersion": 1, "kind": "diagnostic-only",
+            "source": "incremental-verified-candidates",
+            "inventorySha256": inventory["inventorySha256"],
+            "entries": inventory["entries"],
+            "rejectedCandidates": inventory["rejectedCandidates"],
+        }
+        path = self.failure_inventory_path
+        write_json(path, snapshot)
 
     def _register_requirement(self, requirement: Requirement, source_project: str) -> bool:
         if requirement.url is not None:
@@ -798,6 +821,7 @@ class LazyPoolResolver:
                                    candidate_count=len(self.entries), project=project,
                                    version=str(descriptor.version), source=source)
             self._discover_dependencies()
+            self._write_failure_inventory_snapshot()
             return True
         return False
 
@@ -900,6 +924,29 @@ class LazyPoolResolver:
                 return project
         return None
 
+    def _remember_conflict_parents(self) -> None:
+        # The active graph may change after a parent backtrack, while pip's
+        # verified pool still contains the earlier parent version. Preserve
+        # alternative parents of actual contradictions so a failed first
+        # branch does not erase a still-solvable sibling branch.
+        for project in sorted(self.requirements):
+            requirements = list(self.requirements[project].values())
+            entries = [entry for entry in self.entries.values()
+                       if entry.metadata.normalized_name == project]
+            if not entries or any(all(
+                not requirement.specifier or requirement.specifier.contains(
+                    entry.descriptor.version, prereleases=True
+                ) for requirement in requirements
+            ) for entry in entries):
+                continue
+            sources = {
+                source for names in self.requirement_sources.get(project, {}).values()
+                for source in names if source != self.root_project
+            }
+            for source in sorted(sources):
+                if source not in self.conflict_frontier:
+                    self.conflict_frontier.append(source)
+
     def _hinted_backtrack_project(self) -> Optional[str]:
         # pip's text is a hint only. A project must also be present in the
         # verified wheel requirement graph before it can drive acquisition.
@@ -957,13 +1004,22 @@ class LazyPoolResolver:
                 "ResolutionImpossible", "Cannot install", "No matching distribution found"
             )):
                 raise ClosureError("Offline pip failed without a dependency-resolution conflict: " + self.last_pip_error[-12000:])
+            self._remember_conflict_parents()
             hinted_source = self._hinted_backtrack_project()
             conflict_source = hinted_source or self._conflict_backtrack_project()
-            if conflict_source is None or not self._add_next_candidate(
+            added = bool(conflict_source) and self._add_next_candidate(
                 conflict_source,
                 source="pip missing-project hint verified against requirement graph"
                 if hinted_source else "verified requirement graph",
-            ):
+            )
+            if not added:
+                for parent in self.conflict_frontier:
+                    if parent != conflict_source and self._add_next_candidate(
+                        parent, source="verified prior conflict parent"
+                    ):
+                        added = True
+                        break
+            if not added:
                 raise ClosureError(
                     "Verified local wheel candidates are exhausted and pip cannot resolve the root wheel.\n"
                     + self.last_pip_error[-12000:]
@@ -1364,7 +1420,10 @@ def resolve_command(arguments: argparse.Namespace) -> None:
     resolver = None
     try:
         budget.record(phase="start", round_number=0, candidate_count=0)
-        resolver = LazyPoolResolver(catalog, root_wheel, arguments.root_sha256, candidate_dir, plan_path, budget)
+        resolver = LazyPoolResolver(
+            catalog, root_wheel, arguments.root_sha256, candidate_dir, plan_path, budget,
+            Path(arguments.inventory).with_suffix(".failure.json"),
+        )
         rounds = resolver.resolve()
         inventory = resolver.inventory()
         selection = validate_and_select_plan(plan_path, resolver, selected_dir)
@@ -1609,6 +1668,32 @@ def self_test_command(arguments: argparse.Namespace) -> None:
             (entry["normalizedName"], entry["version"]) for entry in multi_selected["entries"]
         }:
             raise AssertionError("Multi-step backtracking did not select the valid older candidate")
+        branch_root = make_test_wheel(
+            sources, "branch-root", "1.0", ("branch-a>=1", "branch-b>=1", "branch-d==1.0"),
+        )
+        branch_candidates = [
+            make_test_wheel(sources, "branch-a", "2.0", ("branch-e==1.0",)),
+            make_test_wheel(sources, "branch-a", "1.0", ("branch-d==2.0",)),
+            make_test_wheel(sources, "branch-b", "2.0", ("branch-e==2.0",)),
+            make_test_wheel(sources, "branch-b", "1.0"),
+            make_test_wheel(sources, "branch-d", "2.0"),
+            make_test_wheel(sources, "branch-d", "1.0"),
+            make_test_wheel(sources, "branch-e", "2.0"),
+            make_test_wheel(sources, "branch-e", "1.0"),
+        ]
+        branch = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in branch_candidates]),
+            branch_root, file_sha256(branch_root), root / "branch-pool", root / "branch-plan.json",
+        )
+        branch.resolve()
+        branch_selection = validate_and_select_plan(
+            root / "branch-plan.json", branch, root / "branch-selected"
+        )
+        branch_selected = {(entry["normalizedName"], entry["version"])
+                           for entry in branch_selection["entries"]}
+        if not {("branch-a", "2.0"), ("branch-b", "1.0"),
+                ("branch-d", "1.0"), ("branch-e", "1.0")}.issubset(branch_selected):
+            raise AssertionError("A failed first parent branch hid the valid sibling branch")
         hint_root = make_test_wheel(
             sources, "hint-root", "1.0", ("httpx>=0.28", "langsmith>=1"),
         )
@@ -1643,6 +1728,7 @@ def self_test_command(arguments: argparse.Namespace) -> None:
             budget=AcquisitionBudget(seconds=30, max_rounds=1, max_candidates=32,
                                      max_bytes=32 * 1024 * 1024, diagnostics_path=bounded_events,
                                      run_id="self-test", head_sha="0" * 40),
+            failure_inventory_path=root / "bounded-inventory.failure.json",
         )
         try:
             bounded.resolve()
@@ -1653,6 +1739,29 @@ def self_test_command(arguments: argparse.Namespace) -> None:
             raise AssertionError("A second pip round must exceed the configured round limit")
         if not bounded_events.is_file() or '"phase":"pip"' not in bounded_events.read_text(encoding="utf-8"):
             raise AssertionError("Bounded resolver must persist a pip round before failing")
+        snapshot_path = root / "bounded-inventory.failure.json"
+        incremental_inventory = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        if incremental_inventory.get("kind") != "diagnostic-only" or not incremental_inventory.get("entries"):
+            raise AssertionError("A forced resolver stop must retain its last complete candidate snapshot")
+        previous_snapshot = snapshot_path.read_bytes()
+        original_replace = os.replace
+        try:
+            def fail_snapshot_replace(source: object, destination: object) -> None:
+                if Path(destination) == snapshot_path:
+                    raise OSError("synthetic snapshot replacement interruption")
+                original_replace(source, destination)
+            os.replace = fail_snapshot_replace
+            try:
+                bounded._write_failure_inventory_snapshot()
+            except OSError as error:
+                if "synthetic snapshot replacement interruption" not in str(error):
+                    raise
+            else:
+                raise AssertionError("Fault injection did not interrupt the snapshot replacement")
+        finally:
+            os.replace = original_replace
+        if snapshot_path.read_bytes() != previous_snapshot:
+            raise AssertionError("Interrupted snapshot replacement damaged the last complete inventory")
         # Exercise the production command path, including durable failure
         # inventory and the absence of a success receipt.
         command_args = argparse.Namespace(
