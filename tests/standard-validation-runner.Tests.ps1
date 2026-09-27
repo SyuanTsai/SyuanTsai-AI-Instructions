@@ -1570,6 +1570,28 @@ exit ([int]$LASTEXITCODE)
         foreach ($name in @('event.json', 'run.json', 'pr.json', 'artifacts.json')) {
             Assert-False ((Get-Content -Raw -LiteralPath (Join-Path $inputs.OutputRoot $name) -Encoding UTF8) -match 'fixture-secret') 'Diagnostic evidence must not persist the token.'
         }
+        # Scenario: a protected workflow_run caller derives run and PR identity from its saved event.
+        # Purpose: candidate data cannot choose acquisition IDs, and the call path remains diagnostic only.
+        $consumerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidatorMaintenanceProtectedConsumer.ps1'
+        Assert-True (Test-Path -LiteralPath $consumerPath -PathType Leaf) 'Protected maintenance consumer entry point is missing.'
+        $consumerInputs = @{
+            EventName = 'workflow_run'; EventPath = $eventPath
+            RepositoryFullName = 'owner/repo'; RepositoryId = 730; WorkflowId = 42
+            AuthorityRevision = ('c' * 40); TestIds = @('UnitT10', 'UnitT20')
+            AccessToken = $inputs.AccessToken; OutputRoot = Join-Path $root 'consumer-evidence'
+            Transport = $transport
+        }
+        $consumer = & $consumerPath @consumerInputs
+        Assert-Equal $consumer.status 'protected-consumer-diagnostic' 'The consumer may only return a diagnostic binding.'
+        Assert-Equal $consumer.runId $runId 'The consumer must derive the run ID from the saved event.'
+        Assert-Equal $consumer.pullRequestNumber 7 'The consumer must derive the sole PR from the saved event.'
+        Assert-Equal $consumer.ciAdmission 'BLOCKED' 'The protected consumer does not grant CI admission.'
+        $badConsumer = @{}; foreach ($key in $consumerInputs.Keys) { $badConsumer[$key] = $consumerInputs[$key] }
+        $badConsumer.EventName = 'pull_request'
+        $badConsumer.OutputRoot = Join-Path $root 'bad-consumer-event'
+        $rejected = $false
+        try { [void](& $consumerPath @badConsumer) } catch { $rejected = $_.Exception.Message -match 'requires a workflow_run event' }
+        Assert-True $rejected 'A non-workflow_run invocation must stop before acquisition.'
         $rejected = $false
         try { [void](& $acquirerPath @inputs) } catch { $rejected = $_.Exception.Message -match 'must be new' }
         Assert-True $rejected 'A diagnostic output root must be create-only.'
@@ -1605,6 +1627,95 @@ exit ([int]$LASTEXITCODE)
         $rejected = $false
         try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'oversized evidence' }
         Assert-True $rejected 'An injected ZIP beyond the download quota must be rejected before persistence.'
+
+        # Scenario: a real loopback HTTP peer completes headers, then stalls or sends a slow body.
+        # Purpose: the default transport must bound the entire body with one deadline on PS5.1 and PS7.
+        if (-not ('StandardMaintenanceBodyFixtureV1' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+public sealed class StandardMaintenanceBodyFixtureV1 : IDisposable {
+    private readonly TcpListener listener;
+    private readonly Thread worker;
+    private readonly string mode;
+    private TcpClient client;
+    public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
+    public bool WorkerAlive { get { return worker.IsAlive; } }
+    public bool Accepted { get; private set; }
+    public StandardMaintenanceBodyFixtureV1(string mode) {
+        this.mode = mode;
+        listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        worker = new Thread(Serve);
+        worker.IsBackground = true;
+        worker.Start();
+    }
+    private void Serve() {
+        try {
+            client = listener.AcceptTcpClient();
+            Accepted = true;
+            using (NetworkStream stream = client.GetStream()) {
+                int tail = 0;
+                while (true) {
+                    int next = stream.ReadByte();
+                    if (next < 0) return;
+                    tail = (tail << 8) | next;
+                    if (tail == 0x0d0a0d0a) break;
+                }
+                byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n");
+                stream.Write(header, 0, header.Length);
+                stream.Flush();
+                if (mode == "stall") {
+                    Thread.Sleep(3000);
+                } else {
+                    for (int i = 0; i < 12; i++) {
+                        stream.WriteByte((byte)'x');
+                        stream.Flush();
+                        Thread.Sleep(300);
+                    }
+                }
+            }
+        } catch (SocketException) { } catch (System.IO.IOException) { } catch (ObjectDisposedException) { }
+    }
+    public void Dispose() {
+        listener.Stop();
+        if (client != null) client.Close();
+        if (!worker.Join(4000)) throw new Exception("Loopback worker did not stop.");
+    }
+}
+'@
+        }
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($acquirerPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The acquisition script must parse before a real HTTP deadline probe.'
+        $transportDefinition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-MaintenanceAcquisitionDefaultTransport'
+        }, $true)
+        Assert-True ($null -ne $transportDefinition) 'The default HTTP transport must exist.'
+        Invoke-Expression $transportDefinition.Extent.Text
+        foreach ($mode in @('stall', 'trickle')) {
+            $fixture = New-Object StandardMaintenanceBodyFixtureV1($mode)
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $blocked = $false
+            try {
+                try {
+                    [void](Invoke-MaintenanceAcquisitionDefaultTransport `
+                        -Uri "http://127.0.0.1:$($fixture.Port)/body" -Headers @{} `
+                        -MaximumBytes 1024 -DeadlineMilliseconds 700)
+                }
+                catch { $blocked = $_.Exception.Message -match '^BLOCKED\|' }
+                $watch.Stop()
+                Assert-True $fixture.Accepted "$mode fixture must receive the real HTTP request."
+                Assert-True $blocked "$mode body must fail closed at the deadline."
+                Assert-True ($watch.ElapsedMilliseconds -le 2000) "$mode body exceeded the absolute deadline."
+            }
+            finally { $fixture.Dispose() }
+            Assert-False $fixture.WorkerAlive "$mode fixture worker must be cleaned up."
+        }
     }
 
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.

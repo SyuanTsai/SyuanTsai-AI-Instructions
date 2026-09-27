@@ -77,13 +77,20 @@ function Write-MaintenanceAcquisitionNewFile {
 }
 
 function Invoke-MaintenanceAcquisitionDefaultTransport {
-    param([string] $Uri, [hashtable] $Headers, [int] $MaximumBytes)
+    param([string] $Uri, [hashtable] $Headers, [int] $MaximumBytes, [int] $DeadlineMilliseconds = 30000)
+    if ($DeadlineMilliseconds -lt 1) { throw 'BLOCKED|HTTP deadline is invalid.' }
     Add-Type -AssemblyName System.Net.Http
     $handler = New-Object Net.Http.HttpClientHandler
     $handler.AllowAutoRedirect = $false
     $handler.UseCookies = $false
+    $handler.UseProxy = $false
     $client = New-Object Net.Http.HttpClient($handler)
-    $client.Timeout = [TimeSpan]::FromSeconds(30)
+    # ResponseHeadersRead ends HttpClient.Timeout coverage when headers arrive.
+    # One stopwatch bounds headers, stream creation and every body read together.
+    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+    $deadline = New-Object Threading.CancellationTokenSource
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $deadline.CancelAfter($DeadlineMilliseconds)
     $request = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, ([uri]$Uri))
     $response = $null
     $stream = $null
@@ -94,15 +101,26 @@ function Invoke-MaintenanceAcquisitionDefaultTransport {
                 throw 'BLOCKED|A required HTTP request header could not be set.'
             }
         }
-        $response = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $sendTask = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $deadline.Token)
+        $remaining = $DeadlineMilliseconds - [int]$watch.ElapsedMilliseconds
+        if ($remaining -le 0 -or -not $sendTask.Wait($remaining)) { throw 'BLOCKED|HTTP response exceeded the time quota.' }
+        $response = $sendTask.GetAwaiter().GetResult()
         $buffered = New-Object IO.MemoryStream
         if ($null -ne $response.Content) {
             if ($null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -gt $MaximumBytes) {
                 throw 'BLOCKED|HTTP response exceeds the byte quota.'
             }
-            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $streamTask = $response.Content.ReadAsStreamAsync()
+            $remaining = $DeadlineMilliseconds - [int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0 -or -not $streamTask.Wait($remaining)) { throw 'BLOCKED|HTTP response exceeded the time quota.' }
+            $stream = $streamTask.GetAwaiter().GetResult()
             $buffer = New-Object byte[] 8192
-            while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            while ($true) {
+                $readTask = $stream.ReadAsync($buffer, 0, $buffer.Length, $deadline.Token)
+                $remaining = $DeadlineMilliseconds - [int]$watch.ElapsedMilliseconds
+                if ($remaining -le 0 -or -not $readTask.Wait($remaining)) { throw 'BLOCKED|HTTP response exceeded the time quota.' }
+                $count = $readTask.GetAwaiter().GetResult()
+                if ($count -le 0) { break }
                 if ($buffered.Length + $count -gt $MaximumBytes) { throw 'BLOCKED|HTTP response exceeds the byte quota.' }
                 $buffered.Write($buffer, 0, $count)
             }
@@ -114,14 +132,17 @@ function Invoke-MaintenanceAcquisitionDefaultTransport {
             Location = $location
         }
     }
-    catch { throw 'BLOCKED|HTTP request failed or exceeded the byte quota.' }
+    catch { throw 'BLOCKED|HTTP request failed or exceeded the byte or time quota.' }
     finally {
+        $deadline.Cancel()
         if ($null -ne $buffered) { $buffered.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
         if ($null -ne $response) { $response.Dispose() }
         $request.Dispose()
         $client.Dispose()
         $handler.Dispose()
+        $deadline.Dispose()
+        $watch.Stop()
     }
 }
 
