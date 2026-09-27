@@ -1282,6 +1282,99 @@ public sealed class C245SlowTrickleStream : Stream {
         Assert-False (Test-Path -LiteralPath (Join-Path $saved 'closure-result.json')) 'A failure must not acquire a success result.'
     }
 
+    # Scenario: The direct Python child exits but its owned descendant keeps redirected streams open.
+    # Purpose: Bound stream draining to the same acquisition deadline as process exit.
+    It 'UnitT26n_bounds_inherited_streams_after_the_direct_child_exits' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $python = Assert-Command -Name 'python'
+        $pidFile = (Join-Path $TestDrive 'owned-descendant.pid').Replace('\', '/')
+        $fixtureCode = "import subprocess,sys; p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(4); print(123)']); open(r'$pidFile','w').write(str(p.pid)); print(456)"
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $deadlineError = $null
+        try { [void](Invoke-CheckedCommand -Command $python -Arguments @('-I', '-c', $fixtureCode) -TimeoutSeconds 1) }
+        catch { $deadlineError = $_.Exception.Message }
+        $watch.Stop()
+        Assert-Match $deadlineError 'acquisition deadline' 'Inherited stdout/stderr must not turn a timed-out acquisition into success.'
+        Assert-True ($watch.Elapsed.TotalSeconds -lt 3) 'Inherited stream cleanup must finish within a bounded grace.'
+        Assert-True (Test-Path -LiteralPath $pidFile -PathType Leaf) 'The fixture must expose its owned descendant PID.'
+        $descendantId = [int](Get-Content -Raw -LiteralPath $pidFile)
+        Assert-False ($null -ne (Get-Process -Id $descendantId -ErrorAction SilentlyContinue)) 'The owned descendant must be stopped without touching unrelated processes.'
+    }
+
+    # Scenario: Resolve emits plan files quickly, then the independent verifier stalls.
+    # Purpose: Carry the remaining acquisition deadline into the verifier process too.
+    It 'UnitT26o_bounds_the_closure_evidence_verifier_with_remaining_time' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $python = Assert-Command -Name 'python'
+        $helper = Join-Path $TestDrive 'stalling-verifier.py'
+        [IO.File]::WriteAllText($helper, @'
+import pathlib
+import sys
+import time
+args = sys.argv[1:]
+if args[0] == "resolve":
+    for flag in ("--plan", "--inventory", "--result"):
+        pathlib.Path(args[args.index(flag) + 1]).write_text("{}", encoding="utf-8")
+elif args[0] == "verify":
+    time.sleep(4)
+    print("{}")
+'@, (New-Object Text.UTF8Encoding($false)))
+        $rootWheel = Join-Path $TestDrive 'root-1.0-py3-none-any.whl'
+        [IO.File]::WriteAllText($rootWheel, 'synthetic')
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $deadlineError = $null
+        try {
+            [void](Resolve-PythonWheelClosureFromApprovedIndex `
+                -PythonCommand $python -HelperPath $helper -ApprovedIndex 'https://pypi.org/simple' `
+                -RootWheelPath $rootWheel -RootWheelSha256 ('0' * 64) `
+                -CandidatePath (Join-Path $TestDrive 'candidate') -WheelhousePath (Join-Path $TestDrive 'selected') `
+                -WorkPath (Join-Path $TestDrive 'work') -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 1)
+        }
+        catch { $deadlineError = $_.Exception.Message }
+        $watch.Stop()
+        Assert-Match $deadlineError 'acquisition deadline' 'The separate verifier must use the remaining acquisition time.'
+        Assert-True ($watch.Elapsed.TotalSeconds -lt 3) 'A stalled verifier must end before its four-second fixture finishes.'
+    }
+
+    # Scenario: A response body ignores the cancellation token while its read task stays pending.
+    # Purpose: End the acquisition wait at the absolute deadline even when a stream fails to cooperate.
+    It 'UnitT26p_bounds_a_noncooperative_http_body_read' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        if (-not ('C245NonCooperativeStream' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class C245NonCooperativeStream : Stream {
+    public override bool CanRead { get { return true; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return false; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token) {
+        return new TaskCompletionSource<int>().Task;
+    }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+    public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+}
+'@
+        }
+        $inputBody = New-Object C245NonCooperativeStream
+        $outputBody = New-Object IO.MemoryStream
+        $deadline = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromMilliseconds(300))
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $cancelled = $false
+        try { [void](Copy-BoundedHttpBody -InputStream $inputBody -OutputStream $outputBody -CancellationToken $deadline.Token -MaximumBytes 1024) }
+        catch { $cancelled = $_.Exception.ToString() -match 'cancel' }
+        finally { $deadline.Dispose(); $inputBody.Dispose(); $outputBody.Dispose(); $watch.Stop() }
+        Assert-True $cancelled 'A noncooperative body read must stop at cancellation.'
+        Assert-True ($watch.Elapsed.TotalSeconds -lt 2) 'The deadline wait must not linger on a pending task.'
+    }
+
     It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
         . $script:AuthorityGatePath -DefineFunctionsOnly
 

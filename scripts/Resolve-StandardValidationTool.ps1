@@ -501,6 +501,34 @@ function Assert-NpmCommand {
     return Assert-Command -Name $name
 }
 
+function Stop-RunOwnedDirectDescendants {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process] $ParentProcess,
+        [Parameter(Mandatory = $true)][DateTime] $ParentStartedUtc,
+        [Parameter(Mandatory = $true)][DateTime] $ParentExitObservedUtc
+    )
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    try {
+        $children = @(Get-CimInstance -ClassName Win32_Process `
+            -Filter ("ParentProcessId = {0}" -f $ParentProcess.Id) `
+            -OperationTimeoutSec 2 -ErrorAction Stop)
+    }
+    catch { return }
+    foreach ($child in $children) {
+        $ownedProcess = $null
+        try {
+            $createdUtc = ([DateTime]$child.CreationDate).ToUniversalTime()
+            if ($createdUtc -lt $ParentStartedUtc.AddSeconds(-1) -or
+                $createdUtc -gt $ParentExitObservedUtc) { continue }
+            $ownedProcess = [System.Diagnostics.Process]::GetProcessById([int]$child.ProcessId)
+            if ([Math]::Abs(($ownedProcess.StartTime.ToUniversalTime() - $createdUtc).TotalSeconds) -gt 2) { continue }
+            if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
+        }
+        catch { }
+        finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+    }
+}
+
 function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -542,23 +570,58 @@ function Invoke-CheckedCommand {
         $process.StartInfo = $startInfo
         try {
             if (-not $process.Start()) { throw "$commandPath could not be started." }
+            $parentStartedUtc = $process.StartTime.ToUniversalTime()
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
+            $drainTask = [System.Threading.Tasks.Task]::WhenAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
             $childWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $process.HasExited) {
+            $lastProgressSeconds = 0
+            while (-not ($process.HasExited -and $drainTask.IsCompleted)) {
                 $remainingMilliseconds = ($TimeoutSeconds * 1000) - $childWatch.ElapsedMilliseconds
                 if ($remainingMilliseconds -le 0) { break }
                 $waitMilliseconds = [int][Math]::Min(30000, $remainingMilliseconds)
-                if (-not $process.WaitForExit($waitMilliseconds)) {
+                if ($process.HasExited) {
+                    [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne($waitMilliseconds)
+                }
+                else {
+                    [void]$process.WaitForExit($waitMilliseconds)
+                }
+                if ($childWatch.Elapsed.TotalSeconds - $lastProgressSeconds -ge 30) {
                     Write-Host ("Acquisition child still running: {0}; elapsed={1:n1}s; deadline={2}s" -f
                         [IO.Path]::GetFileName($commandPath), $childWatch.Elapsed.TotalSeconds, $TimeoutSeconds)
+                    $lastProgressSeconds = $childWatch.Elapsed.TotalSeconds
                 }
             }
-            if (-not $process.HasExited) {
-                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                    try { & taskkill.exe /PID $process.Id /T /F *> $null } catch { }
+            if (-not ($process.HasExited -and $drainTask.IsCompleted)) {
+                if (-not $process.HasExited) {
+                    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                        $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $killerInfo.FileName = 'taskkill.exe'
+                        $killerInfo.Arguments = "/PID $($process.Id) /T /F"
+                        $killerInfo.UseShellExecute = $false
+                        $killerInfo.CreateNoWindow = $true
+                        $killer = New-Object System.Diagnostics.Process
+                        $killer.StartInfo = $killerInfo
+                        try {
+                            if ($killer.Start() -and -not $killer.WaitForExit(2000)) { $killer.Kill() }
+                        }
+                        catch { }
+                        finally { $killer.Dispose() }
+                    }
+                    if (-not $process.HasExited) { $process.Kill() }
                 }
-                if (-not $process.HasExited) { $process.Kill() }
+                else {
+                    if ($null -ne (Get-Command Stop-RunOwnedDirectDescendants -ErrorAction SilentlyContinue)) {
+                        Stop-RunOwnedDirectDescendants -ParentProcess $process `
+                            -ParentStartedUtc $parentStartedUtc -ParentExitObservedUtc ([DateTime]::UtcNow)
+                    }
+                }
+                # An already-exited direct child may leave owned descendants
+                # holding the pipes open. Close our pipe ends without waiting
+                # for those descendants or touching unrelated processes.
+                $process.StandardOutput.Close()
+                $process.StandardError.Close()
+                [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne(1000)
                 throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
             }
             $stdout = $stdoutTask.GetAwaiter().GetResult()
@@ -995,6 +1058,22 @@ function Get-RemainingAcquisitionSeconds {
     return [int][Math]::Ceiling($remaining)
 }
 
+function Wait-CancellableAcquisitionTask {
+    param(
+        [Parameter(Mandatory = $true)][System.Threading.Tasks.Task] $Task,
+        [Parameter(Mandatory = $true)][System.Threading.CancellationToken] $CancellationToken,
+        [Parameter(Mandatory = $true)][string] $PendingMessage
+    )
+    while (-not $Task.IsCompleted) {
+        $CancellationToken.ThrowIfCancellationRequested()
+        $outcome = [Threading.WaitHandle]::WaitAny(
+            [Threading.WaitHandle[]]@(([IAsyncResult]$Task).AsyncWaitHandle, $CancellationToken.WaitHandle), 30000)
+        if ($outcome -eq 1) { $CancellationToken.ThrowIfCancellationRequested() }
+        if ($outcome -eq [Threading.WaitHandle]::WaitTimeout) { Write-Host $PendingMessage }
+    }
+    $CancellationToken.ThrowIfCancellationRequested()
+}
+
 function Copy-BoundedHttpBody {
     param(
         [Parameter(Mandatory = $true)][IO.Stream] $InputStream,
@@ -1006,11 +1085,8 @@ function Copy-BoundedHttpBody {
     $total = 0L
     while ($true) {
         $readTask = $InputStream.ReadAsync($buffer, 0, $buffer.Length, $CancellationToken)
-        while (-not $readTask.IsCompleted) {
-            if (-not ([IAsyncResult]$readTask).AsyncWaitHandle.WaitOne(30000)) {
-                Write-Host ("SkillSpector HTTP body pending; bytesReceived={0}; cancellationDeadlineActive=true" -f $total)
-            }
-        }
+        Wait-CancellableAcquisitionTask -Task $readTask -CancellationToken $CancellationToken `
+            -PendingMessage ("SkillSpector HTTP body pending; bytesReceived={0}; cancellationDeadlineActive=true" -f $total)
         $received = $readTask.GetAwaiter().GetResult()
         if ($received -eq 0) { break }
         $total += $received
@@ -1061,11 +1137,8 @@ function Invoke-BoundedGitHubGet {
             [void]$request.Headers.TryAddWithoutValidation([string]$key, [string]$Headers[$key])
         }
         $headersTask = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancellation.Token)
-        while (-not $headersTask.IsCompleted) {
-            if (-not ([IAsyncResult]$headersTask).AsyncWaitHandle.WaitOne(30000)) {
-                Write-Host ("SkillSpector HTTP headers pending from {0}; acquisitionDeadlineActive=true" -f $request.RequestUri.Host)
-            }
-        }
+        Wait-CancellableAcquisitionTask -Task $headersTask -CancellationToken $cancellation.Token `
+            -PendingMessage ("SkillSpector HTTP headers pending from {0}; acquisitionDeadlineActive=true" -f $request.RequestUri.Host)
         $response = $headersTask.GetAwaiter().GetResult()
         [void]$response.EnsureSuccessStatusCode()
         $finalUri = $response.RequestMessage.RequestUri
@@ -1082,7 +1155,10 @@ function Invoke-BoundedGitHubGet {
         if ($response.Content.Headers.ContentLength -gt $maximum) {
             throw 'SkillSpector HTTP response exceeds the acquisition byte limit.'
         }
-        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $streamTask = $response.Content.ReadAsStreamAsync()
+        Wait-CancellableAcquisitionTask -Task $streamTask -CancellationToken $cancellation.Token `
+            -PendingMessage ("SkillSpector HTTP stream pending from {0}; acquisitionDeadlineActive=true" -f $request.RequestUri.Host)
+        $stream = $streamTask.GetAwaiter().GetResult()
         $output = if ([string]::IsNullOrWhiteSpace($OutFile)) {
             New-Object System.IO.MemoryStream
         }
@@ -1429,7 +1505,7 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
             '--plan', $planPath,
             '--inventory', $inventoryPath,
             '--result', $resultPath
-        ))
+        ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
         $verification = ($verificationOutput -join [Environment]::NewLine) | ConvertFrom-Json
     }
     catch {
