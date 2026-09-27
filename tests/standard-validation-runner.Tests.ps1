@@ -1169,6 +1169,69 @@ exit ([int]$LASTEXITCODE)
         Assert-Equal $typedResults[0].level 'pass' 'The shared report rule must retain the original clean result.'
     }
 
+    # Scenario: A maintenance test report names a different candidate than the protected event.
+    # Purpose: Maintenance success must not be promoted into an accepted candidate or release result.
+    It 'UnitT03_rejects_wrong_candidate_maintenance_report_from_protected_inputs' {
+        $verifierPath = Join-Path $script:RepositoryRoot 'scripts/Assert-StandardValidatorMaintenanceReport.ps1'
+        Assert-True (Test-Path -LiteralPath $verifierPath -PathType Leaf) 'Protected maintenance report verifier is missing.'
+        $resultsPath = Join-Path $TestDrive 'maintenance-results.json'
+        Write-TestUtf8File -Path $resultsPath -Text '{"tests":2,"failed":0}'
+        $resultsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resultsPath).Hash.ToLowerInvariant()
+        $reportPath = Join-Path $TestDrive 'maintenance-report.json'
+        $report = [ordered]@{
+            schemaVersion = 1
+            evidenceType = 'validator-maintenance-report-v1'
+            status = 'passed'
+            candidateRevision = ('a' * 40)
+            authorityRevision = ('b' * 40)
+            eventName = 'pull_request'
+            runId = ('c' * 32)
+            runAttempt = 2
+            resultsSha256 = $resultsSha256
+            tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+            releaseEligible = $false
+        }
+        Write-TestUtf8File -Path $reportPath -Text ($report | ConvertTo-Json -Depth 10 -Compress)
+        $inputs = @{
+            ReportPath = $reportPath
+            ResultsPath = $resultsPath
+            ExpectedReportSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $reportPath).Hash.ToLowerInvariant()
+            ExpectedResultsSha256 = $resultsSha256
+            ExpectedCandidateRevision = ('d' * 40)
+            ExpectedAuthorityRevision = ('b' * 40)
+            ExpectedEventName = 'pull_request'
+            ExpectedRunId = ('c' * 32)
+            ExpectedRunAttempt = 2
+            ExpectedTestIds = @('UnitT10', 'UnitT20')
+        }
+        $rejected = $false
+        try { [void](& $verifierPath @inputs) }
+        catch { $rejected = $_.Exception.Message -match 'candidate revision' }
+        Assert-True $rejected 'A wrong candidate report must be rejected using the independent protected event SHA.'
+        $inputs.ExpectedCandidateRevision = ('a' * 40)
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'authority'; key = 'ExpectedAuthorityRevision'; value = ('d' * 40) },
+            [pscustomobject]@{ name = 'event'; key = 'ExpectedEventName'; value = 'push' },
+            [pscustomobject]@{ name = 'run'; key = 'ExpectedRunId'; value = ('d' * 32) },
+            [pscustomobject]@{ name = 'attempt'; key = 'ExpectedRunAttempt'; value = 3 },
+            [pscustomobject]@{ name = 'report artifact'; key = 'ExpectedReportSha256'; value = ('0' * 64) },
+            [pscustomobject]@{ name = 'results artifact'; key = 'ExpectedResultsSha256'; value = ('0' * 64) },
+            [pscustomobject]@{ name = 'coverage'; key = 'ExpectedTestIds'; value = @('UnitT10', 'UnitT30') }
+        )) {
+            $wrongInputs = @{}
+            foreach ($key in $inputs.Keys) { $wrongInputs[$key] = $inputs[$key] }
+            $wrongInputs[$case.key] = $case.value
+            $rejected = $false
+            try { [void](& $verifierPath @wrongInputs) }
+            catch { $rejected = $true }
+            Assert-True $rejected "A wrong protected $($case.name) binding must be rejected."
+        }
+        $decision = & $verifierPath @inputs
+        Assert-Equal $decision.status 'verified-local-binding' 'A matching maintenance report may only bind its local evidence.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'A maintenance report must not grant CI admission.'
+        Assert-False $decision.releaseEligible 'A maintenance report must not grant release eligibility.'
+    }
+
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
     # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
     It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
