@@ -68,9 +68,10 @@ class EvenDiagnosticContractTests(unittest.TestCase):
                 parser = ("$t=$null;$e=$null;"
                           f"[System.Management.Automation.Language.Parser]::ParseFile('{source}',[ref]$t,[ref]$e)|Out-Null;"
                           "if($e.Count){$e|ForEach-Object{Write-Error $_.Message};exit 1}")
-                result = subprocess.run(["pwsh", "-NoProfile", "-Command", parser],
-                                        capture_output=True, text=True, timeout=15)
-                self.assertEqual(0, result.returncode, f"step {position}: {result.stderr}")
+                for host in ("powershell", "pwsh"):
+                    result = subprocess.run([host, "-NoProfile", "-Command", parser],
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertEqual(0, result.returncode, f"{host} step {position}: {result.stderr}")
 
     # Scenario: The exact Git test roster is absent, duplicated, or changed.
     # Purpose: Fail before running the executor with stale split counts.
@@ -103,7 +104,8 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         if fake_git_names is not None:
             names = ",".join("'" + name + "'" for name in fake_git_names)
             script = "function git { $global:LASTEXITCODE = 0; @(" + names + ") }\n" + script
-        return subprocess.run(["pwsh", "-NoProfile", "-Command", script], cwd=ROOT,
+        host = "powershell" if runtime == "ps51" else "pwsh"
+        return subprocess.run([host, "-NoProfile", "-Command", script], cwd=ROOT,
                               capture_output=True, text=True, timeout=20)
 
 
