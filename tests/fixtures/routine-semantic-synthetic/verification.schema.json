@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.test/routine-semantic-ci-verification-v1-fixture.schema.json",
+  "title": "Development-only offline synthetic verification result",
+  "description": "Only this blocked synthetic result is produced by the current central verifier. It is not a production scan receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "artifactType", "sourceRevision", "candidateId", "candidateInventorySha256", "resolutionRunId", "producerCandidateId", "selectedBlobInventorySha256", "receiptBundleSha256", "authorizationStatus", "scanStatus", "trustStatus", "ciAdmission", "plannedWorkItemCount", "successfulProviderCallCount", "analyzers", "releaseEligible"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "artifactType": {"const": "routine-semantic-ci-verification-v1"},
+    "sourceRevision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidateId": {"$ref": "#/$defs/sha256"},
+    "candidateInventorySha256": {"$ref": "#/$defs/sha256"},
+    "resolutionRunId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "producerCandidateId": {"$ref": "#/$defs/sha256"},
+    "selectedBlobInventorySha256": {"$ref": "#/$defs/sha256"},
+    "receiptBundleSha256": {"$ref": "#/$defs/sha256"},
+    "authorizationStatus": {"const": "fixture-only"},
+    "scanStatus": {"const": "SYNTHETIC"},
+    "trustStatus": {"const": "unverified"},
+    "ciAdmission": {"const": "BLOCKED"},
+    "plannedWorkItemCount": {"type": "integer", "minimum": 3},
+    "successfulProviderCallCount": {"const": 0},
+    "analyzers": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "status", "workItemCount"],
+        "properties": {
+          "id": {"enum": ["semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"]},
+          "status": {"const": "synthetic"},
+          "workItemCount": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "releaseEligible": {"const": false}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

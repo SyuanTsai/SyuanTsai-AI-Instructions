@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.test/routine-semantic-synthetic-bundle-v1.schema.json",
+  "title": "Development-only routine semantic synthetic bundle",
+  "description": "Structural fixture schema. The central offline verifier enforces exact hashes, dual identities and work coverage. This schema cannot authorize production egress or CI admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "artifactType", "consumerPlanSha256", "producerPlan", "requiredAnalyzerIds", "workItems"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "artifactType": {"const": "routine-semantic-synthetic-bundle-v1"},
+    "consumerPlanSha256": {"$ref": "#/$defs/sha256"},
+    "producerPlan": {
+      "type": "object",
+      "required": ["schemaVersion", "artifactType", "candidateId", "authority", "sourceInventory", "decision", "consumerBinding", "payloadComplete", "scanStatus", "ciAdmission", "releaseEligible"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "artifactType": {"const": "routine-semantic-prepared-plan-v1"},
+        "candidateId": {"$ref": "#/$defs/sha256"},
+        "authority": {
+          "type": "object",
+          "required": ["repository", "sourceRevision"],
+          "properties": {"repository": {"type": "string"}, "sourceRevision": {"$ref": "#/$defs/sha1"}}
+        },
+        "sourceInventory": {
+          "type": "object",
+          "required": ["sourceRevision", "files", "sourceBytes", "inputInventorySha256"],
+          "properties": {
+            "sourceRevision": {"$ref": "#/$defs/sha1"},
+            "sourceBytes": {"type": "integer", "minimum": 0},
+            "inputInventorySha256": {"$ref": "#/$defs/sha256"},
+            "files": {
+              "type": "array", "minItems": 1,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["path", "gitBlobSha1", "bytes", "sha256"],
+                "properties": {
+                  "path": {"type": "string"},
+                  "gitBlobSha1": {"$ref": "#/$defs/sha1"},
+                  "bytes": {"type": "integer", "minimum": 0},
+                  "sha256": {"$ref": "#/$defs/sha256"}
+                }
+              }
+            }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "required": ["candidateId", "inputInventorySha256", "status", "scopeAllowed", "egressAuthorized"],
+          "properties": {
+            "candidateId": {"$ref": "#/$defs/sha256"},
+            "inputInventorySha256": {"$ref": "#/$defs/sha256"},
+            "status": {"const": "PREPARED_FIXTURE_ONLY"},
+            "scopeAllowed": {"const": true},
+            "egressAuthorized": {"const": false}
+          }
+        },
+        "consumerBinding": {
+          "type": "object", "additionalProperties": false,
+          "required": ["runId", "candidateId", "contentSha256", "sourceRevision", "consumerPlanSha256"],
+          "properties": {
+            "runId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "candidateId": {"$ref": "#/$defs/sha256"},
+            "contentSha256": {"$ref": "#/$defs/sha256"},
+            "sourceRevision": {"$ref": "#/$defs/sha1"},
+            "consumerPlanSha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "payloadComplete": {"const": false},
+        "scanStatus": {"const": "NOT_RUN"},
+        "ciAdmission": {"const": "BLOCKED"},
+        "releaseEligible": {"const": false}
+      }
+    },
+    "requiredAnalyzerIds": {
+      "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+      "items": {"enum": ["semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"]}
+    },
+    "workItems": {
+      "type": "array", "minItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "analyzerId", "path", "selectedBlobSha256", "promptBase64", "promptSha256", "responseBase64", "responseSha256", "rawGraphBase64", "rawGraphSha256", "rawFindingsBase64", "rawFindingsSha256"],
+        "properties": {
+          "id": {"$ref": "#/$defs/sha256"},
+          "analyzerId": {"enum": ["semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"]},
+          "path": {"type": "string"},
+          "selectedBlobSha256": {"$ref": "#/$defs/sha256"},
+          "promptBase64": {"type": "string"},
+          "promptSha256": {"$ref": "#/$defs/sha256"},
+          "responseBase64": {"type": "string"},
+          "responseSha256": {"$ref": "#/$defs/sha256"},
+          "rawGraphBase64": {"type": "string"},
+          "rawGraphSha256": {"$ref": "#/$defs/sha256"},
+          "rawFindingsBase64": {"type": "string"},
+          "rawFindingsSha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
