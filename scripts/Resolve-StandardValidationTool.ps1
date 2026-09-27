@@ -634,12 +634,14 @@ function Invoke-CheckedCommand {
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $startInfo
         try {
+            $childWatch = [System.Diagnostics.Stopwatch]::StartNew()
             if (-not $process.Start()) { throw "$commandPath could not be started." }
             $parentStartedUtc = $process.StartTime.ToUniversalTime()
             $ownedUnixGroupId = 0
             if ($unixOwnedGroup) {
                 $groupProbe = [Diagnostics.Stopwatch]::StartNew()
-                while (-not $process.HasExited -and $groupProbe.ElapsedMilliseconds -lt 1000) {
+                while (-not $process.HasExited -and $groupProbe.ElapsedMilliseconds -lt 1000 -and
+                    $childWatch.ElapsedMilliseconds -lt ($TimeoutSeconds * 1000)) {
                     $observedGroupId = Get-ResolverUnixProcessGroupId -ProcessId $process.Id
                     if ($observedGroupId -eq $process.Id) {
                         $ownedUnixGroupId = $observedGroupId
@@ -650,6 +652,9 @@ function Invoke-CheckedCommand {
                 if ($ownedUnixGroupId -le 0) {
                     $process.StandardInput.Close()
                     if (-not $process.HasExited) { $process.Kill() }
+                    if ($childWatch.ElapsedMilliseconds -ge ($TimeoutSeconds * 1000)) {
+                        throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
+                    }
                     throw 'Could not establish an exclusive Unix process group for a bounded acquisition command.'
                 }
                 $process.StandardInput.WriteLine('start')
@@ -658,7 +663,6 @@ function Invoke-CheckedCommand {
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
             $drainTask = [System.Threading.Tasks.Task]::WhenAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
-            $childWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastProgressSeconds = 0
             while (-not ($process.HasExited -and $drainTask.IsCompleted)) {
                 $remainingMilliseconds = ($TimeoutSeconds * 1000) - $childWatch.ElapsedMilliseconds
