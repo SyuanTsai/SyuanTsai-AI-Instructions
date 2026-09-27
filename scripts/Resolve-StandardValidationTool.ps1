@@ -529,6 +529,51 @@ function Stop-RunOwnedDirectDescendants {
     }
 }
 
+function Get-ResolverUnixProcessGroupId {
+    param([Parameter(Mandatory = $true)][int] $ProcessId)
+    $statPath = "/proc/$ProcessId/stat"
+    if (-not [IO.File]::Exists($statPath)) { return -1 }
+    try {
+        $stat = [IO.File]::ReadAllText($statPath)
+        if ($stat -match '^\s*[0-9]+\s+\(.*\)\s+\S\s+[0-9]+\s+(?<pgrp>[0-9]+)\s+') {
+            return [int]$Matches.pgrp
+        }
+    }
+    catch { }
+    return -1
+}
+
+function Stop-RunOwnedUnixProcessGroup {
+    param([Parameter(Mandatory = $true)][int] $ProcessGroupId)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or $ProcessGroupId -le 0) { return }
+    $killPath = @('/usr/bin/kill', '/bin/kill') | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$killPath)) {
+        throw 'No Unix kill executable is available for run-owned process-group cleanup.'
+    }
+    $members = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | Where-Object {
+        $_.Name -match '^[0-9]+$' -and
+        (Get-ResolverUnixProcessGroupId -ProcessId ([int]$_.Name)) -eq $ProcessGroupId
+    })
+    if ($members.Count -eq 0) { return }
+    $signalInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $signalInfo.FileName = [string]$killPath
+    $signalInfo.UseShellExecute = $false
+    $signalInfo.CreateNoWindow = $true
+    $signalInfo.ArgumentList.Add('-KILL')
+    $signalInfo.ArgumentList.Add('--')
+    $signalInfo.ArgumentList.Add("-$ProcessGroupId")
+    $signal = New-Object System.Diagnostics.Process
+    $signal.StartInfo = $signalInfo
+    try {
+        if ($signal.Start()) {
+            if (-not $signal.WaitForExit(1000)) { $signal.Kill() }
+        }
+    }
+    finally { $signal.Dispose() }
+}
+
 function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -548,17 +593,37 @@ function Invoke-CheckedCommand {
     }
 
     if ($TimeoutSeconds -gt 0) {
+        $unixOwnedGroup = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix
+        $launchArguments = @($Arguments)
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $commandPath
+        if ($unixOwnedGroup) {
+            $setsidPath = @('/usr/bin/setsid', '/bin/setsid') | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+            } | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace([string]$setsidPath) -or
+                -not (Test-Path -LiteralPath '/bin/sh' -PathType Leaf) -or
+                -not (Test-Path -LiteralPath '/proc' -PathType Container) -or
+                $null -eq $startInfo.GetType().GetProperty('ArgumentList')) {
+                throw 'Owned Unix process-group containment is unavailable for a bounded acquisition command.'
+            }
+            $startInfo.FileName = [string]$setsidPath
+            $startInfo.RedirectStandardInput = $true
+            # The shell cannot execute the requested command until the parent
+            # has verified a new, exclusive process group for this run.
+            $launchArguments = @('/bin/sh', '-c', 'IFS= read -r token || exit 125; exec "$@"', 'resolver-owned', $commandPath) + @($Arguments)
+        }
+        else {
+            $startInfo.FileName = $commandPath
+        }
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         if ($null -ne $startInfo.GetType().GetProperty('ArgumentList')) {
-            foreach ($argument in $Arguments) { [void]$startInfo.ArgumentList.Add($argument) }
+            foreach ($argument in $launchArguments) { [void]$startInfo.ArgumentList.Add($argument) }
         }
         else {
-            $quoted = foreach ($argument in $Arguments) {
+            $quoted = foreach ($argument in $launchArguments) {
                 if ($argument.Contains('"') -or $argument.EndsWith('\')) {
                     throw 'Bounded command contains an argument that cannot be safely quoted on this PowerShell runtime.'
                 }
@@ -571,6 +636,25 @@ function Invoke-CheckedCommand {
         try {
             if (-not $process.Start()) { throw "$commandPath could not be started." }
             $parentStartedUtc = $process.StartTime.ToUniversalTime()
+            $ownedUnixGroupId = 0
+            if ($unixOwnedGroup) {
+                $groupProbe = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $process.HasExited -and $groupProbe.ElapsedMilliseconds -lt 1000) {
+                    $observedGroupId = Get-ResolverUnixProcessGroupId -ProcessId $process.Id
+                    if ($observedGroupId -eq $process.Id) {
+                        $ownedUnixGroupId = $observedGroupId
+                        break
+                    }
+                    Start-Sleep -Milliseconds 10
+                }
+                if ($ownedUnixGroupId -le 0) {
+                    $process.StandardInput.Close()
+                    if (-not $process.HasExited) { $process.Kill() }
+                    throw 'Could not establish an exclusive Unix process group for a bounded acquisition command.'
+                }
+                $process.StandardInput.WriteLine('start')
+                $process.StandardInput.Close()
+            }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
             $drainTask = [System.Threading.Tasks.Task]::WhenAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
@@ -593,6 +677,9 @@ function Invoke-CheckedCommand {
                 }
             }
             if (-not ($process.HasExited -and $drainTask.IsCompleted)) {
+                if ($unixOwnedGroup -and $ownedUnixGroupId -gt 0) {
+                    Stop-RunOwnedUnixProcessGroup -ProcessGroupId $ownedUnixGroupId
+                }
                 if (-not $process.HasExited) {
                     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                         $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
