@@ -1365,6 +1365,74 @@ public sealed class C245SlowTrickleStream : Stream {
         Assert-True (Test-Path -LiteralPath (Join-Path $neighbor 'retain.txt')) 'Neighboring files must remain.'
     }
 
+    # Scenario: Acquisition succeeds, then temporary cleanup exhausts the budget.
+    # Purpose: Preserve completed diagnostics and reclaim the install through the same failure path.
+    It 'UnitT26v_retains_evidence_and_reclaims_install_after_a_tail_deadline' {
+        . $script:ResolverPath -PolicyPath $script:ToolchainPath -ValidatePolicyOnly | Out-Null
+        $script:tailCleanup = (Get-Item Function:Remove-BoundedRunOwnedDirectory).ScriptBlock
+        $script:tailExpired = $false
+        $script:tailBytes = [Text.Encoding]::UTF8.GetBytes('synthetic root wheel')
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $script:tailHash = ([BitConverter]::ToString($hasher.ComputeHash($script:tailBytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $hasher.Dispose() }
+        $script:tailRoot = Join-Path $TestDrive 'tail-install'
+        $sibling = Join-Path $script:tailRoot 'adjacent-root'
+        [void](New-Item -ItemType Directory -Path $sibling -Force)
+        Mock Assert-Command { 'python' }
+        Mock Assert-NoConflictingPipEnvironment { }
+        Mock Assert-NoConflictingPythonEnvironment { }
+        Mock Get-GitHubHeaders { @{} }
+        Mock Assert-PythonWheelInstallPath { }
+        Mock Add-ProcessPathValue { }
+        Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
+        Mock Invoke-BoundedGitHubGet {
+            if ($OutFile) {
+                [IO.File]::WriteAllBytes($OutFile, $script:tailBytes)
+                $script:tailWork = Join-Path (Split-Path -Parent $OutFile) 'dependency-resolution'
+            }
+            elseif ($Uri -like '*/releases/latest') {
+                [pscustomobject]@{ draft=$false; prerelease=$false; tag_name='v1.0.0'; assets=@([pscustomobject]@{
+                    name='skillspector-1.0.0-py3-none-any.whl'; digest=('sha256:'+$script:tailHash)
+                    browser_download_url='https://github.com/NVIDIA/SkillSpector/releases/download/v1.0.0/skillspector-1.0.0-py3-none-any.whl'
+                }) }
+            }
+            else { [pscustomobject]@{ object=[pscustomobject]@{ sha=('a'*40); type='commit' } } }
+        }
+        Mock Invoke-WithApprovedPipEnvironment {
+            [void](New-Item -ItemType Directory -Path $script:tailWork -Force)
+            [IO.File]::WriteAllText((Join-Path $script:tailWork 'offline-backtracking-plan.json'), '{"fixture":"completed-plan"}')
+            [IO.File]::WriteAllText((Join-Path $script:tailWork 'candidate-inventory.json'), '{"schemaVersion":1,"entries":[{"file":"verified-candidate.whl"}],"rejectedCandidates":[]}')
+            $script:tailInstall = (Get-ChildItem -LiteralPath $script:tailRoot -Directory | Where-Object Name -match '^ss-[0-9a-f]{12}$').FullName
+            @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='fixture:main'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
+        }
+        Mock Remove-BoundedRunOwnedDirectory {
+            & $script:tailCleanup -Path $Path -AllowedRoot $AllowedRoot -LeafPattern $LeafPattern
+            if ((Split-Path -Leaf $Path) -match '^ss-[0-9a-f]{32}$') { $script:tailExpired = $true }
+        }
+        Mock Get-RemainingAcquisitionSeconds {
+            if ($script:tailExpired) { throw 'synthetic tail acquisition deadline exceeded' }
+            2
+        }
+        $tokenBefore = $env:GITHUB_TOKEN
+        $ghBefore = $env:GH_TOKEN
+        $failure = $null
+        $receipt = $null
+        try {
+            $policy = Get-Policy -Path $script:ToolchainPath
+            try { $receipt = Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $script:tailRoot -AcquisitionLimitSeconds 2 }
+            catch { $failure = $_.Exception.Message }
+        }
+        finally { $env:GITHUB_TOKEN = $tokenBefore; $env:GH_TOKEN = $ghBefore }
+        Assert-Match $failure 'synthetic tail acquisition deadline exceeded' 'The late budget failure must propagate.'
+        $saved = Join-Path $script:tailRoot ('skillspector-failure-'+$script:ResolverRunId)
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'offline-backtracking-plan.json')) 'The completed plan must survive tail cleanup.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'candidate-inventory.failure.json')) 'The completed candidate identities must survive tail cleanup.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'failure.json')) 'The late failure must retain its diagnostic summary.'
+        Assert-False (Test-Path -LiteralPath $script:tailInstall) 'The failed install must be reclaimed.'
+        Assert-True (Test-Path -LiteralPath $sibling) 'Adjacent roots must survive.'
+        Assert-True ($null -eq $receipt) 'A late failure must not return a success receipt.'
+    }
+
     # Scenario: The direct Python child exits but its owned descendant keeps redirected streams open.
     # Purpose: Bound stream draining to the same acquisition deadline as process exit.
     It 'UnitT26n_bounds_inherited_streams_after_the_direct_child_exits' {

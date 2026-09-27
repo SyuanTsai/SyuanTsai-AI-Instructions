@@ -3761,7 +3761,6 @@ function Resolve-SkillSpector {
     $backtrackingEvidence = $null
     $consoleEntryPoint = $null
     $installedMetadataVerification = $null
-    $cleanupFailure = $null
     try {
         if ($ShouldInstall) {
             $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
@@ -3909,31 +3908,14 @@ function Resolve-SkillSpector {
             $installedClosure = [ordered]@{ sha256 = [string]$installation.installedClosureSha256 }
             Add-ProcessPathValue -Name 'PATH' -Value (Split-Path -Parent $executablePath)
         }
-    }
-    catch {
+        # Preserve diagnostic-only bytes before destructive cleanup. They also
+        # cover failures in cleanup, identity construction, or the final budget
+        # check; these files never constitute a successful tool receipt.
         Save-SkillSpectorFailureEvidence -WorkPath $dependencyResolutionPath -DestinationPath $failureRoot
-        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
-            try {
-                Remove-BoundedRunOwnedDirectory -Path $toolInstallPath -AllowedRoot $diagnosticInstallRoot `
-                    -LeafPattern '^ss-[0-9a-f]{12}$'
-            }
-            catch { Write-Warning ("Run-owned install cleanup failed: {0}" -f $_.Exception.Message) }
-        }
-        throw
-    }
-    finally {
         if (Test-Path -LiteralPath $tempRoot) {
-            try {
-                Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
-                    -LeafPattern '^ss-[0-9a-f]{32}$'
-            }
-            catch {
-                $cleanupFailure = $_
-                Write-Warning ("Run-owned temporary cleanup failed: {0}" -f $_.Exception.Message)
-            }
+            Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
+                -LeafPattern '^ss-[0-9a-f]{32}$'
         }
-    }
-    if ($null -ne $cleanupFailure) { throw $cleanupFailure }
     [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
 
     $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#rootDirectReferences=blocked#credentialIsolation=github-token-cleared-before-python#dependencyClosure=unresolved"
@@ -3944,8 +3926,7 @@ function Resolve-SkillSpector {
         $identityKind = 'release-commit-asset-metadata-dependency-closure-and-executable'
     }
 
-    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
-    return [ordered]@{
+    $resolvedResult = [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity
         identityKind = $identityKind
@@ -3977,6 +3958,31 @@ function Resolve-SkillSpector {
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $closure)
         installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
+    }
+    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
+    return $resolvedResult
+    }
+    catch {
+        $acquisitionFailure = $_
+        try { Save-SkillSpectorFailureEvidence -WorkPath $dependencyResolutionPath -DestinationPath $failureRoot }
+        catch { Write-Warning ("Failure evidence preservation failed: {0}" -f $_.Exception.Message) }
+        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $toolInstallPath -AllowedRoot $diagnosticInstallRoot `
+                    -LeafPattern '^ss-[0-9a-f]{12}$'
+            }
+            catch { Write-Warning ("Run-owned install cleanup failed: {0}" -f $_.Exception.Message) }
+        }
+        throw $acquisitionFailure
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
+                    -LeafPattern '^ss-[0-9a-f]{32}$'
+            }
+            catch { Write-Warning ("Run-owned temporary cleanup failed: {0}" -f $_.Exception.Message) }
+        }
     }
 }
 
