@@ -1309,6 +1309,10 @@ exit ([int]$LASTEXITCODE)
     # Scenario: Protected-side code receives saved workflow_run, run, PR and artifact snapshots plus a retained ZIP.
     # Purpose: Bind independent identities and bytes before calling the existing report verifier; keep admission blocked.
     It 'UnitT50_binds_injected_maintenance_metadata_and_rejects_cross_run_or_archive_drift' {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            Add-Type -AssemblyName System.IO.Compression
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+        }
         $issuerPath = Join-Path $script:RepositoryRoot 'scripts/Assert-StandardValidatorMaintenanceInputs.ps1'
         Assert-True (Test-Path -LiteralPath $issuerPath -PathType Leaf) 'Maintenance input issuer is missing.'
         $repository = [ordered]@{ id = 730; full_name = 'owner/repo' }
