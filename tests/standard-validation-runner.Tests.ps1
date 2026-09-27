@@ -1169,6 +1169,80 @@ exit ([int]$LASTEXITCODE)
         Assert-Equal $typedResults[0].level 'pass' 'The shared report rule must retain the original clean result.'
     }
 
+    # Scenario: The report root is a case variant on a volume whose comparison behavior differs from the host OS default.
+    # Purpose: Bind reports using the runner's filesystem-aware comparison of both normalized roots.
+    It 'UnitT02_uses_filesystem_case_behavior_for_skill_validator_report_root' {
+        . $script:RunnerPath -DefineFunctionsOnly -CandidateRoot $TestDrive -AdapterPath $script:RunnerPath `
+            -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test' -SourceRevision ('0' * 40) -BaseRevision ('0' * 40)
+        $skillRoot = Join-Path $TestDrive 'case-skill'
+        $reportedRoot = Join-Path $TestDrive 'CASE-SKILL'
+        [void](New-Item -ItemType Directory -Path $skillRoot -Force)
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+            [void](New-Item -ItemType Directory -Path $reportedRoot -Force)
+        }
+        $report = [pscustomobject]@{
+            skill_dir = $reportedRoot; passed = $true; errors = 0; warnings = 0
+            results = @([pscustomobject]@{ level = 'pass' })
+        }
+        $isWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        $comparison = if ($isWindowsHost) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+        $originalComparison = (Get-Item Function:\Get-StandardValidationPathComparison).ScriptBlock
+        try {
+            Set-Item Function:\Get-StandardValidationPathComparison -Value {
+                param([string[]] $Paths)
+                if ($Paths.Count -ne 2 -or
+                    $Paths[0] -cne [IO.Path]::GetFullPath($reportedRoot) -or
+                    $Paths[1] -cne [IO.Path]::GetFullPath($skillRoot)) {
+                    throw 'Report-root comparison must inspect both normalized paths.'
+                }
+                return $comparison
+            }
+            if ($isWindowsHost) {
+                $rejected = $false
+                try { [void](Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'case-skill') }
+                catch { $rejected = $_.Exception.Message -match 'report root does not match' }
+                Assert-True $rejected 'A case-sensitive Windows directory must reject a different report root.'
+            }
+            $comparison = [StringComparison]::OrdinalIgnoreCase
+            $caseVariantEntries = @(Get-ChildItem -LiteralPath $TestDrive -Force | Where-Object {
+                [string]::Equals($_.Name, 'case-skill', [StringComparison]::OrdinalIgnoreCase)
+            })
+            $sameEntry = $caseVariantEntries.Count -eq 1
+            if ($sameEntry) {
+                $results = @(Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'case-skill')
+                Assert-Equal $results.Count 1 'A case-insensitive volume must accept an equivalent report root.'
+            }
+            else {
+                $rejected = $false
+                try { [void](Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'case-skill') }
+                catch { $rejected = $_.Exception.Message -match 'report root does not match' }
+                Assert-True $rejected 'Distinct case-variant directories must not bind to the same report.'
+            }
+            $skillRoot = Join-Path $TestDrive 'single-skill'
+            $reportedRoot = Join-Path $TestDrive 'SINGLE-SKILL'
+            [void](New-Item -ItemType Directory -Path $skillRoot -Force)
+            $report.skill_dir = $reportedRoot
+            if (Test-Path -LiteralPath $reportedRoot -PathType Container) {
+                $results = @(Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'single-skill')
+                Assert-Equal $results.Count 1 'An existing case-insensitive alias must bind to its candidate root.'
+            }
+            else {
+                $rejected = $false
+                try { [void](Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'single-skill') }
+                catch { $rejected = $_.Exception.Message -match 'report root does not match' }
+                Assert-True $rejected 'A nonexistent case variant must not bind on a case-sensitive volume.'
+            }
+            $skillRoot = Join-Path $TestDrive 'case-missing'
+            $reportedRoot = Join-Path $TestDrive 'CASE-MISSING'
+            $report.skill_dir = $reportedRoot
+            $rejected = $false
+            try { [void](Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'case-missing') }
+            catch { $rejected = $_.Exception.Message -match 'report root does not match' }
+            Assert-True $rejected 'Equivalent spelling alone must not bind nonexistent report roots.'
+        }
+        finally { Set-Item Function:\Get-StandardValidationPathComparison -Value $originalComparison }
+    }
+
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
     # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
     It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
