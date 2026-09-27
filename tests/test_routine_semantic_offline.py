@@ -37,6 +37,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.plan_path = self.root / "consumer-plan.json"
+        self.prepared_path = self.root / "prepared-plan.json"
         self.bundle_path = self.root / "synthetic-bundle.json"
         self.output_path = self.root / "verified.json"
         self.consumer = {
@@ -71,6 +72,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
             "requiredAnalyzerIds": list(ANALYZERS),
             "workItems": [],
         }
+        self.prepared_path.write_text(json.dumps(self.producer), encoding="utf-8")
         for analyzer in ANALYZERS:
             work_id = digest((analyzer + "\n" + file["path"] + "\n" + file["sha256"]).encode())
             prompt64, prompt_sha = payload("synthetic prompt for " + analyzer)
@@ -89,7 +91,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.plan_path.write_text(json.dumps(consumer or self.consumer), encoding="utf-8")
         self.bundle_path.write_text(json.dumps(bundle or self.bundle), encoding="utf-8")
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "verify", "--plan", str(self.plan_path), "--bundle", str(self.bundle_path), "--output", str(self.output_path)],
+            [sys.executable, str(SCRIPT), "verify", "--plan", str(self.plan_path), "--prepared", str(self.prepared_path), "--bundle", str(self.bundle_path), "--output", str(self.output_path)],
             capture_output=True, text=True, timeout=20,
         )
 
@@ -148,7 +150,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
     def test_InterT50_central_powershell_verify_entrypoint_runs(self):
         self.bundle_path.write_text(json.dumps(self.bundle), encoding="utf-8")
         result = subprocess.run(
-            ["pwsh", "-NoProfile", "-File", str(ENTRYPOINT), "-Mode", "Verify", "-PlanPath", str(self.plan_path), "-BundlePath", str(self.bundle_path), "-OutputPath", str(self.output_path)],
+            ["pwsh", "-NoProfile", "-File", str(ENTRYPOINT), "-Mode", "Verify", "-PlanPath", str(self.plan_path), "-PreparedPath", str(self.prepared_path), "-BundlePath", str(self.bundle_path), "-OutputPath", str(self.output_path)],
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(0, result.returncode, result.stderr)
@@ -159,7 +161,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
     def test_InterT60_rejects_duplicate_keys_and_missing_raw_graph(self):
         self.bundle_path.write_text('{"schemaVersion":1,"schemaVersion":1}', encoding="utf-8")
         duplicate = subprocess.run(
-            [sys.executable, str(SCRIPT), "verify", "--plan", str(self.plan_path), "--bundle", str(self.bundle_path), "--output", str(self.output_path)],
+            [sys.executable, str(SCRIPT), "verify", "--plan", str(self.plan_path), "--prepared", str(self.prepared_path), "--bundle", str(self.bundle_path), "--output", str(self.output_path)],
             capture_output=True, text=True, timeout=20,
         )
         self.assertNotEqual(0, duplicate.returncode)
@@ -181,6 +183,47 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         )
         self.assertNotEqual(0, result.returncode)
         self.assertIn("TRUST_POLICY_REVIEW_REQUIRED", result.stderr)
+        self.assertFalse(self.output_path.exists())
+
+    # Scenario: The bundle embeds a producer plan different from the saved Prepare output.
+    # Purpose: Offline Verify must consume the actual prepared artifact, including its trust decision.
+    def test_InterT80_rejects_missing_or_substituted_prepared_plan(self):
+        self.bundle_path.write_text(json.dumps(self.bundle), encoding="utf-8")
+        self.prepared_path.unlink()
+        missing = self.verify()
+        self.assertNotEqual(0, missing.returncode)
+        self.assertFalse(self.output_path.exists())
+        changed = copy.deepcopy(self.producer)
+        changed["decision"]["egressAuthorized"] = True
+        self.prepared_path.write_text(json.dumps(changed), encoding="utf-8")
+        substituted = self.verify()
+        self.assertNotEqual(0, substituted.returncode)
+        self.assertIn("PREPARED_PLAN_MISMATCH", substituted.stderr)
+        self.assertFalse(self.output_path.exists())
+
+    # Scenario: A caller omits the saved Prepare output from the public Verify entrypoint.
+    # Purpose: The wrapper cannot silently fall back to the bundle's self-asserted plan.
+    def test_InterT90_entrypoint_requires_prepared_plan(self):
+        self.bundle_path.write_text(json.dumps(self.bundle), encoding="utf-8")
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-File", str(ENTRYPOINT), "-Mode", "Verify", "-PlanPath", str(self.plan_path), "-BundlePath", str(self.bundle_path), "-OutputPath", str(self.output_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("PREPARED_MISSING", result.stderr)
+        self.assertFalse(self.output_path.exists())
+
+    # Scenario: A fixture issuer changes both saved plan and bundle consistently.
+    # Purpose: Even a matching fixture cannot claim provider egress or CI admission.
+    def test_InterT100_matching_fixture_cannot_promote(self):
+        changed = copy.deepcopy(self.producer)
+        changed["decision"]["egressAuthorized"] = True
+        self.prepared_path.write_text(json.dumps(changed), encoding="utf-8")
+        bundle = copy.deepcopy(self.bundle)
+        bundle["producerPlan"] = changed
+        result = self.verify(bundle)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("FIXTURE_DECISION_REQUIRED", result.stderr)
         self.assertFalse(self.output_path.exists())
 
 

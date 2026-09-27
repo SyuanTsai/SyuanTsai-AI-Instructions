@@ -90,7 +90,7 @@ def raw_payload(item: dict[str, Any], stem: str) -> bytes:
     return data
 
 
-def verify(consumer: dict[str, Any], consumer_bytes: bytes, bundle: dict[str, Any], bundle_bytes: bytes) -> dict[str, Any]:
+def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, Any], bundle: dict[str, Any], bundle_bytes: bytes) -> dict[str, Any]:
     require(consumer.get("schemaVersion") == 1 and type(consumer.get("schemaVersion")) is int, "CONSUMER_VERSION")
     require(consumer.get("artifactType") == "standard-validation-consumer-run-plan-v1", "CONSUMER_TYPE")
     run_id = hex_value(consumer.get("runId"), HEX32, "CONSUMER_RUN_ID")
@@ -109,6 +109,10 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, bundle: dict[str, An
     require(bundle["artifactType"] == "routine-semantic-synthetic-bundle-v1", "BUNDLE_TYPE")
     require(bundle["consumerPlanSha256"] == consumer_sha, "CONSUMER_PLAN_REPLAY")
     producer = bundle["producerPlan"]
+    # Compare decoded JSON with types preserved. Formatting may differ when a
+    # synthetic bundle embeds the saved Prepare output; its decision may not.
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    require(canonical(prepared) == canonical(producer), "PREPARED_PLAN_MISMATCH")
     require(type(producer) is dict and producer.get("artifactType") == "routine-semantic-prepared-plan-v1", "PRODUCER_PLAN_TYPE")
     require(producer.get("schemaVersion") == 1 and type(producer.get("schemaVersion")) is int, "PRODUCER_PLAN_VERSION")
     producer_id = hex_value(producer.get("candidateId"), HEX64, "PRODUCER_CANDIDATE_ID")
@@ -192,14 +196,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("verify",))
     parser.add_argument("--plan", required=True, type=Path)
+    parser.add_argument("--prepared", required=True, type=Path)
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         require(not args.output.exists() and not args.output.is_symlink(), "OUTPUT_EXISTS")
         consumer, consumer_bytes = read_json(args.plan, "CONSUMER_PLAN")
+        prepared, _ = read_json(args.prepared, "PREPARED_PLAN")
         bundle, bundle_bytes = read_json(args.bundle, "BUNDLE")
-        result = verify(consumer, consumer_bytes, bundle, bundle_bytes)
+        result = verify(consumer, consumer_bytes, prepared, bundle, bundle_bytes)
         encoded = (json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         with args.output.open("xb") as stream:
             stream.write(encoded)

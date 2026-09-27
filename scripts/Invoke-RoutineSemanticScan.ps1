@@ -63,9 +63,10 @@ try {
     }
     if ($Mode -ceq 'Verify') {
         if ([string]::IsNullOrWhiteSpace($BundlePath)) { throw 'BUNDLE_MISSING|Verify requires a bundle path.' }
+        if ([string]::IsNullOrWhiteSpace($PreparedPath)) { throw 'PREPARED_MISSING|Verify requires the saved Prepare output.' }
         $verifier = Join-Path $PSScriptRoot 'routine_semantic_offline.py'
         if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) { throw 'VERIFIER_MISSING|Offline verifier is unavailable.' }
-        & python $verifier verify --plan $PlanPath --bundle $BundlePath --output $OutputPath
+        & python $verifier verify --plan $PlanPath --prepared $PreparedPath --bundle $BundlePath --output $OutputPath
         if ($LASTEXITCODE -ne 0) { exit 10 }
         exit 0
     }
