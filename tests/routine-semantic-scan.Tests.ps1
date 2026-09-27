@@ -418,6 +418,16 @@ Describe 'routine semantic immutable Git input preparation' {
             $changedFailed = $false
             try { [void](New-RoutineSemanticPreparation @params) } catch { $changedFailed = $_.Exception.Message -like 'WORK_COVERAGE_INVALID*' }
             if (-not $changedFailed) { throw 'Changed selected source hash was accepted.' }
+            $params.WorkManifest.calls[0].sourceSha256 = $sourceSha
+            $params.WorkManifest.egressAuthorized = 'False'
+            $typedBooleanFailed = $false
+            try { [void](New-RoutineSemanticPreparation @params) } catch { $typedBooleanFailed = $_.Exception.Message -like 'WORK_MANIFEST_BINDING_INVALID*' }
+            if (-not $typedBooleanFailed) { throw 'String False was accepted as a boolean boundary.' }
+            $params.WorkManifest.egressAuthorized = $false
+            $params.WorkManifest.calls[0].analyzerId = @('semantic_developer_intent')
+            $typedAnalyzerFailed = $false
+            try { [void](New-RoutineSemanticPreparation @params) } catch { $typedAnalyzerFailed = $_.Exception.Message -like 'WORK_COVERAGE_INVALID*' }
+            if (-not $typedAnalyzerFailed) { throw 'Analyzer array was accepted as a scalar name.' }
         }
         finally { $key.Dispose() }
     }

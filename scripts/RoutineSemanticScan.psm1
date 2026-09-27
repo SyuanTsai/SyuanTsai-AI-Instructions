@@ -461,15 +461,21 @@ function New-RoutineSemanticPreparation {
     $workVersion = Get-RoutineSemanticProperty $WorkManifest 'schemaVersion'
     $workFileCount = Get-RoutineSemanticProperty $WorkManifest 'sourceFileCount'
     $workSourceBytes = Get-RoutineSemanticProperty $WorkManifest 'sourceBytes'
+    $workType = Get-RoutineSemanticProperty $WorkManifest 'artifactType'
+    $workRevision = Get-RoutineSemanticProperty $WorkManifest 'sourceRevision'
+    $workStatus = Get-RoutineSemanticProperty $WorkManifest 'status'
+    $workAdmission = Get-RoutineSemanticProperty $WorkManifest 'ciAdmission'
+    $workEgress = Get-RoutineSemanticProperty $WorkManifest 'egressAuthorized'
+    $workRelease = Get-RoutineSemanticProperty $WorkManifest 'releaseEligible'
     if (($workVersion -isnot [int] -and $workVersion -isnot [long]) -or $workVersion -ne 1 -or
-        (Get-RoutineSemanticProperty $WorkManifest 'artifactType') -cne 'routine-semantic-fake-preflight-v1' -or
-        (Get-RoutineSemanticProperty $WorkManifest 'sourceRevision') -cne $Revision -or
+        $workType -isnot [string] -or $workType -cne 'routine-semantic-fake-preflight-v1' -or
+        $workRevision -isnot [string] -or $workRevision -cne $Revision -or
         ($workFileCount -isnot [int] -and $workFileCount -isnot [long]) -or $workFileCount -ne @($inventory.files).Count -or
         ($workSourceBytes -isnot [int] -and $workSourceBytes -isnot [long]) -or $workSourceBytes -ne $inventory.sourceBytes -or
-        (Get-RoutineSemanticProperty $WorkManifest 'status') -cne 'READY_FAKE_ONLY' -or
-        (Get-RoutineSemanticProperty $WorkManifest 'egressAuthorized') -cne $false -or
-        (Get-RoutineSemanticProperty $WorkManifest 'ciAdmission') -cne 'BLOCKED' -or
-        (Get-RoutineSemanticProperty $WorkManifest 'releaseEligible') -cne $false) {
+        $workStatus -isnot [string] -or $workStatus -cne 'READY_FAKE_ONLY' -or
+        $workEgress -isnot [bool] -or $workEgress -or
+        $workAdmission -isnot [string] -or $workAdmission -cne 'BLOCKED' -or
+        $workRelease -isnot [bool] -or $workRelease) {
         throw 'WORK_MANIFEST_BINDING_INVALID|Frozen work manifest does not match the selected source and fixture boundary.'
     }
     [void](Assert-RoutineSemanticString (Get-RoutineSemanticProperty $WorkManifest 'promptManifestSha256') 'promptManifestSha256' '^[0-9a-f]{64}$')
@@ -485,10 +491,12 @@ function New-RoutineSemanticPreparation {
     $analyzers = @('semantic_developer_intent', 'semantic_quality_policy', 'semantic_security_discovery')
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($call in $calls) {
-        $analyzer = [string](Get-RoutineSemanticProperty $call 'analyzerId')
-        $path = [string](Get-RoutineSemanticProperty $call 'sourcePath')
-        if ($analyzer -cnotin $analyzers -or -not $selected.ContainsKey($path) -or
-            (Get-RoutineSemanticProperty $call 'sourceSha256') -cne $selected[$path] -or
+        $analyzer = Get-RoutineSemanticProperty $call 'analyzerId'
+        $path = Get-RoutineSemanticProperty $call 'sourcePath'
+        $sourceSha = Get-RoutineSemanticProperty $call 'sourceSha256'
+        if ($analyzer -isnot [string] -or $path -isnot [string] -or $sourceSha -isnot [string] -or
+            $analyzer -cnotin $analyzers -or -not $selected.ContainsKey($path) -or
+            $sourceSha -cne $selected[$path] -or
             -not $seen.Add("$analyzer`n$path")) {
             throw 'WORK_COVERAGE_INVALID|Work is missing, repeated, or outside the frozen source.'
         }
