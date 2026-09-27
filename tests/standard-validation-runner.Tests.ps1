@@ -1455,6 +1455,156 @@ exit ([int]$LASTEXITCODE)
             }
             Assert-MaintenanceRejected $bad $case.name $case.pattern
         }
+        # Scenario: A protected caller injects fixed-path GitHub responses and an artifact redirect.
+        # Purpose: Retain bounded diagnostic bytes, keep the token off storage, and call the existing issuer.
+        $acquirerPath = Join-Path $script:RepositoryRoot 'scripts/Get-StandardValidatorMaintenanceEvidence.ps1'
+        Assert-True (Test-Path -LiteralPath $acquirerPath -PathType Leaf) 'Protected maintenance acquisition candidate is missing.'
+        $root = Join-Path $TestDrive 'maintenance-acquisition'
+        [void](New-Item -ItemType Directory -Path $root -Force)
+        $repo = [ordered]@{ id = 730; full_name = 'owner/repo' }
+        $headRepo = [ordered]@{ id = 731; full_name = 'fork/repo' }
+        $runId = 123456
+        $headLink = [ordered]@{ number = 7; head = [ordered]@{ sha = ('a' * 40); repo = $headRepo } }
+        $run = [ordered]@{
+            id = $runId; run_attempt = 2; head_sha = ('b' * 40); workflow_id = 42
+            repository = $repo; head_repository = $headRepo; event = 'pull_request'
+            status = 'completed'; conclusion = 'success'; pull_requests = @($headLink)
+        }
+        $event = [ordered]@{
+            action = 'completed'; repository = $repo
+            workflow_run = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = ('b' * 40); workflow_id = 42
+                repository = $repo; event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @($headLink)
+            }
+        }
+        $eventPath = Join-Path $root 'event.json'
+        Write-TestUtf8File $eventPath ($event | ConvertTo-Json -Depth 15 -Compress)
+        $pr = [ordered]@{ number = 7; base = [ordered]@{ repo = $repo }; head = [ordered]@{ sha = ('a' * 40); repo = $headRepo } }
+        $results = '{"tests":2,"failed":0}'
+        $resultsSha = [Security.Cryptography.SHA256]::Create()
+        try { $resultsShaText = ([BitConverter]::ToString($resultsSha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($results))) -replace '-', '').ToLowerInvariant() }
+        finally { $resultsSha.Dispose() }
+        $report = [ordered]@{
+            schemaVersion = 1; evidenceType = 'validator-maintenance-report-v1'; status = 'passed'
+            candidateRevision = ('a' * 40); authorityRevision = ('c' * 40)
+            eventName = 'pull_request'; runId = ('{0:x32}' -f $runId); runAttempt = 2
+            resultsSha256 = $resultsShaText
+            tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+            releaseEligible = $false
+        }
+        $zipPath = Join-Path $root 'source.zip'
+        $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($file in @(
+                [pscustomobject]@{ name = 'report.json'; text = ($report | ConvertTo-Json -Depth 10 -Compress) },
+                [pscustomobject]@{ name = 'results.json'; text = $results }
+            )) {
+                $writer = New-Object IO.StreamWriter($zip.CreateEntry($file.name).Open(), (New-Object Text.UTF8Encoding($false)))
+                try { $writer.Write($file.text) } finally { $writer.Dispose() }
+            }
+        }
+        finally { $zip.Dispose() }
+        $zipBytes = [IO.File]::ReadAllBytes($zipPath)
+        $artifact = [ordered]@{
+            id = 99; name = 'validator-maintenance-123456-2'; expired = $false
+            size_in_bytes = $zipBytes.Length
+            digest = 'sha256:' + (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            workflow_run = [ordered]@{ id = $runId; repository_id = 730; head_repository_id = 731; head_sha = ('b' * 40) }
+        }
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        $responses = @{
+            'https://api.github.com/repos/owner/repo/actions/runs/123456' = $utf8.GetBytes(($run | ConvertTo-Json -Depth 15 -Compress))
+            'https://api.github.com/repos/owner/repo/pulls/7' = $utf8.GetBytes(($pr | ConvertTo-Json -Depth 15 -Compress))
+            'https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100' = $utf8.GetBytes((([ordered]@{ total_count = 1; artifacts = @($artifact) }) | ConvertTo-Json -Depth 15 -Compress))
+        }
+        $transportState = [pscustomobject]@{
+            ZipBytes = $zipBytes
+            Responses = $responses
+            Calls = (New-Object 'System.Collections.Generic.List[object]')
+            Redirect = 'https://fixture.blob.core.windows.net/retained.zip'
+        }
+        $transport = {
+            param($Uri, $Headers, $MaximumBytes)
+            $transportState.Calls.Add([pscustomobject]@{
+                uri = $Uri; hasAuthorization = $Headers.ContainsKey('Authorization'); maximumBytes = $MaximumBytes
+            })
+            if ($Uri -ceq 'https://api.github.com/repos/owner/repo/actions/artifacts/99/zip') {
+                return [pscustomobject]@{ StatusCode = 302; Body = [byte[]]@(); Location = $transportState.Redirect }
+            }
+            if ($Uri -ceq $transportState.Redirect) {
+                return [pscustomobject]@{ StatusCode = 200; Body = $transportState.ZipBytes; Location = $null }
+            }
+            if ($transportState.Responses.ContainsKey($Uri)) {
+                return [pscustomobject]@{ StatusCode = 200; Body = $transportState.Responses[$Uri]; Location = $null }
+            }
+            throw 'Unexpected injected transport URL.'
+        }.GetNewClosure()
+        $inputs = @{
+            EventPath = $eventPath; RepositoryFullName = 'owner/repo'; RepositoryId = 730
+            WorkflowId = 42; RunId = $runId; RunAttempt = 2; PullRequestNumber = 7
+            AuthorityRevision = ('c' * 40); TestIds = @('UnitT10', 'UnitT20')
+            AccessToken = (ConvertTo-SecureString 'fixture-secret' -AsPlainText -Force)
+            OutputRoot = Join-Path $root 'evidence'; Transport = $transport
+        }
+        $decision = & $acquirerPath @inputs
+        Assert-Equal $decision.status 'diagnostic-acquisition-binding' 'Only diagnostic acquisition is established.'
+        Assert-Equal $decision.transportKind 'injected' 'The test transport must be identified as injected diagnostic input.'
+        Assert-Equal $decision.verifierStatus 'verified-local-binding' 'The existing report verifier must run.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'Acquisition must not grant CI admission.'
+        Assert-Equal $transportState.Calls.Count 5 'Only three fixed metadata endpoints, one fixed artifact endpoint, and one storage URL may be fetched.'
+        foreach ($call in @($transportState.Calls | Select-Object -First 4)) {
+            Assert-True $call.hasAuthorization 'Only the fixed GitHub API requests may receive the token.'
+        }
+        Assert-False $transportState.Calls[4].hasAuthorization 'The artifact redirect must never receive the API token.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $inputs.OutputRoot 'artifact.zip') -PathType Leaf) 'Retained artifact bytes are missing.'
+        foreach ($pair in @(
+            [pscustomobject]@{ name = 'run.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/actions/runs/123456'] },
+            [pscustomobject]@{ name = 'pr.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/pulls/7'] },
+            [pscustomobject]@{ name = 'artifacts.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100'] },
+            [pscustomobject]@{ name = 'artifact.zip'; bytes = $transportState.ZipBytes }
+        )) {
+            $retained = [IO.File]::ReadAllBytes((Join-Path $inputs.OutputRoot $pair.name))
+            Assert-Equal ([Convert]::ToBase64String($retained)) ([Convert]::ToBase64String($pair.bytes)) 'Diagnostic evidence must retain exact response bytes.'
+        }
+        foreach ($name in @('event.json', 'run.json', 'pr.json', 'artifacts.json')) {
+            Assert-False ((Get-Content -Raw -LiteralPath (Join-Path $inputs.OutputRoot $name) -Encoding UTF8) -match 'fixture-secret') 'Diagnostic evidence must not persist the token.'
+        }
+        $rejected = $false
+        try { [void](& $acquirerPath @inputs) } catch { $rejected = $_.Exception.Message -match 'must be new' }
+        Assert-True $rejected 'A diagnostic output root must be create-only.'
+        $bad = @{}; foreach ($key in $inputs.Keys) { $bad[$key] = $inputs[$key] }
+        $bad.OutputRoot = Join-Path $root 'bad-redirect'
+        $transportState.Redirect = 'https://attacker.example/zip'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'redirect host' }
+        Assert-True $rejected 'An unapproved redirect host must be rejected before any storage request.'
+        $transportState.Redirect = 'https://fixture.blob.core.windows.net/retained.zip'
+        $runUri = 'https://api.github.com/repos/owner/repo/actions/runs/123456'
+        $savedRunBytes = $transportState.Responses[$runUri]
+        $wrongRun = ConvertFrom-Json -InputObject $utf8.GetString($savedRunBytes)
+        $wrongRun.id = 123457
+        $transportState.Responses[$runUri] = $utf8.GetBytes(($wrongRun | ConvertTo-Json -Depth 15 -Compress))
+        $bad.OutputRoot = Join-Path $root 'bad-run'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'API run id' }
+        Assert-True $rejected 'A fetched run from another run ID must be rejected before artifact download.'
+        $transportState.Responses[$runUri] = $savedRunBytes
+        $listingUri = 'https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100'
+        $savedListingBytes = $transportState.Responses[$listingUri]
+        $wrongListing = ConvertFrom-Json -InputObject $utf8.GetString($savedListingBytes)
+        $wrongListing.artifacts[0].name = 'validator-maintenance-123456-3'
+        $transportState.Responses[$listingUri] = $utf8.GetBytes(($wrongListing | ConvertTo-Json -Depth 15 -Compress))
+        $bad.OutputRoot = Join-Path $root 'bad-attempt'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'run-attempt maintenance artifact' }
+        Assert-True $rejected 'An artifact from another attempt must be rejected.'
+        $transportState.Responses[$listingUri] = $savedListingBytes
+        $transportState.ZipBytes = New-Object byte[] 4194305
+        $bad.OutputRoot = Join-Path $root 'bad-size'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'oversized evidence' }
+        Assert-True $rejected 'An injected ZIP beyond the download quota must be rejected before persistence.'
     }
 
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
