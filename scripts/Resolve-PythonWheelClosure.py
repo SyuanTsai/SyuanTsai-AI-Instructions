@@ -12,14 +12,18 @@ before pip can see it.  pip then performs the actual dependency backtracking wit
 from __future__ import annotations
 
 import argparse
+import contextlib
 import email.policy
 import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -52,6 +56,71 @@ SHA256_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
 
 class ClosureError(RuntimeError):
     """A fail-closed acquisition or resolution error."""
+
+
+class AcquisitionBudget:
+    """Run-local limits and append-only diagnostic evidence, never a receipt."""
+
+    def __init__(self, *, seconds: float, max_rounds: int, max_candidates: int,
+                 max_bytes: int, diagnostics_path: Path, run_id: str, head_sha: str,
+                 initial_bytes: int = 0) -> None:
+        if seconds <= 0 or min(max_rounds, max_candidates, max_bytes) <= 0 or initial_bytes < 0:
+            raise ClosureError("Acquisition limits must be positive")
+        self.started = time.monotonic()
+        self.deadline = self.started + seconds
+        self.max_rounds = max_rounds
+        self.max_candidates = max_candidates
+        self.max_bytes = max_bytes
+        self.bytes_received = initial_bytes
+        if initial_bytes > max_bytes:
+            raise ClosureError("Acquisition byte limit exceeded by the root wheel")
+        self.diagnostics_path = diagnostics_path
+        self.run_id = run_id
+        self.head_sha = head_sha
+        self.last_progress = self.started
+        self.last_round = 0
+        self.last_candidate_count = 0
+
+    def remaining(self, phase: str) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ClosureError(f"Acquisition deadline exceeded during {phase}")
+        if time.monotonic() - self.last_progress >= 30:
+            self.record(phase="waiting", round_number=self.last_round,
+                        candidate_count=self.last_candidate_count, source=phase)
+        return remaining
+
+    def consume(self, size: int) -> None:
+        self.bytes_received += size
+        if self.bytes_received > self.max_bytes:
+            raise ClosureError("Acquisition byte limit exceeded")
+
+    def record(self, *, phase: str, round_number: int, candidate_count: int,
+               exit_code: Optional[int] = None, error: str = "",
+               project: str = "", version: str = "", source: str = "",
+               error_class: str = "") -> None:
+        self.diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        sanitized_error = __import__("re").sub(r"(?i)\b(?:https?|file|git\+https?)://\S+", "<redacted-url>", error)
+        sanitized_error = __import__("re").sub(
+            r"(?i)\b(?:authorization|token|password|secret)\s*[:=]\s*\S+",
+            "<redacted-credential>", sanitized_error,
+        )
+        event = {
+            "schemaVersion": 1, "kind": "diagnostic-only", "runId": self.run_id,
+            "headSha": self.head_sha, "phase": phase, "round": round_number,
+            "project": project, "version": version, "constraintSource": source,
+            "candidateCount": candidate_count, "bytesReceived": self.bytes_received,
+            "elapsedSeconds": round(time.monotonic() - self.started, 3),
+            "exitCode": exit_code, "errorClass": error_class,
+            "errorSummary": sanitized_error[-2048:],
+        }
+        with self.diagnostics_path.open("a", encoding="utf-8", newline="\n") as output:
+            output.write(json.dumps(event, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        self.last_progress = time.monotonic()
+        self.last_round = round_number
+        self.last_candidate_count = candidate_count
 
 
 def validate_https_url(url: str, allowed_hosts: Iterable[str]) -> str:
@@ -360,11 +429,12 @@ def verify_candidate(path: Path, descriptor: Descriptor) -> WheelMetadata:
 
 
 class PyPISimpleCatalog:
-    def __init__(self, index_url: str) -> None:
+    def __init__(self, index_url: str, budget: Optional[AcquisitionBudget] = None) -> None:
         normalized = index_url.rstrip("/")
         if normalized != APPROVED_INDEX:
             raise ClosureError(f"Unapproved Python Simple index: {index_url!r}")
         self.index_url = normalized
+        self.budget = budget
         self._cache: Dict[str, List[Descriptor]] = {}
         self._rejected_candidates: List[Mapping[str, str]] = []
         self._tag_rank: Dict[Tag, int] = {tag: rank for rank, tag in enumerate(sys_tags())}
@@ -395,7 +465,8 @@ class PyPISimpleCatalog:
         url = f"{self.index_url}/{urllib.parse.quote(project, safe='-')}/"
         request = urllib.request.Request(url, headers={"Accept": SIMPLE_JSON_MEDIA_TYPE})
         try:
-            with self._simple_opener.open(request, timeout=60) as response:
+            timeout = min(30, self.budget.remaining("Simple JSON") if self.budget else 30)
+            with self._simple_opener.open(request, timeout=timeout) as response:
                 final_url = self._validate_remote_url(response.geturl(), ("pypi.org",))
                 content_type = response.headers.get_content_type()
                 if content_type not in (SIMPLE_JSON_MEDIA_TYPE, "application/json"):
@@ -405,9 +476,22 @@ class PyPISimpleCatalog:
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None and int(content_length) > MAX_SIMPLE_JSON_BYTES:
                     raise ClosureError(f"Simple JSON response is too large for {project!r}")
-                raw_payload = response.read(MAX_SIMPLE_JSON_BYTES + 1)
-                if len(raw_payload) > MAX_SIMPLE_JSON_BYTES:
-                    raise ClosureError(f"Simple JSON response is too large for {project!r}")
+                raw_parts = []
+                total = 0
+                read_chunk = response.read1 if hasattr(response, "read1") else response.read
+                while True:
+                    if self.budget is not None:
+                        self.budget.remaining("Simple JSON")
+                    chunk = read_chunk(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_SIMPLE_JSON_BYTES:
+                        raise ClosureError(f"Simple JSON response is too large for {project!r}")
+                    if self.budget is not None:
+                        self.budget.consume(len(chunk))
+                    raw_parts.append(chunk)
+                raw_payload = b"".join(raw_parts)
                 payload = json.loads(raw_payload.decode("utf-8"))
         except ClosureError:
             raise
@@ -510,15 +594,21 @@ class PyPISimpleCatalog:
         total = 0
         request = urllib.request.Request(descriptor.url, headers={"Accept": "application/octet-stream"})
         try:
-            with self._artifact_opener.open(request, timeout=120) as response, temporary.open("xb") as output:
+            timeout = min(30, self.budget.remaining("wheel download") if self.budget else 30)
+            with self._artifact_opener.open(request, timeout=timeout) as response, temporary.open("xb") as output:
                 self._validate_remote_url(response.geturl(), APPROVED_ARTIFACT_HOSTS)
+                read_chunk = response.read1 if hasattr(response, "read1") else response.read
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    if self.budget is not None:
+                        self.budget.remaining("wheel download")
+                    chunk = read_chunk(1024 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
                     if total > MAX_WHEEL_BYTES:
                         raise ClosureError(f"Wheel exceeds size limit: {descriptor.filename!r}")
+                    if self.budget is not None:
+                        self.budget.consume(len(chunk))
                     digest.update(chunk)
                     output.write(chunk)
             if digest.hexdigest() != descriptor.sha256:
@@ -572,18 +662,21 @@ class LazyPoolResolver:
         root_sha256: str,
         candidate_dir: Path,
         plan_path: Path,
+        budget: Optional[AcquisitionBudget] = None,
     ) -> None:
         self.catalog = catalog
         self.root_wheel = root_wheel.resolve(strict=True)
         self.root_sha256 = root_sha256
         self.candidate_dir = candidate_dir.resolve()
         self.plan_path = plan_path.resolve()
+        self.budget = budget
+        self.rounds = 0
         self.candidate_dir.mkdir(parents=True, exist_ok=False)
         self.requirements: Dict[str, Dict[str, Requirement]] = {}
+        self.requirement_sources: Dict[str, Dict[str, Set[str]]] = {}
         self.requested_extras: Dict[str, Set[str]] = {}
         self.entries: Dict[str, PoolEntry] = {}
         self.attempted: Dict[str, Set[str]] = {}
-        self.scan_state: Dict[str, Tuple[str, ...]] = {}
         self.last_pip_error = ""
 
         if not SHA256_RE.fullmatch(root_sha256) or file_sha256(self.root_wheel) != root_sha256:
@@ -605,10 +698,10 @@ class LazyPoolResolver:
         self.root_project = root_metadata.normalized_name
         self.root_copy = root_copy
         self.entries[root_copy.name] = PoolEntry(root_descriptor, root_copy, root_metadata, "approved-root-wheel")
-        self._register_requirement(Requirement(f"{root_metadata.name}=={root_metadata.version}"))
+        self._register_requirement(Requirement(f"{root_metadata.name}=={root_metadata.version}"), self.root_project)
         self._discover_dependencies()
 
-    def _register_requirement(self, requirement: Requirement) -> bool:
+    def _register_requirement(self, requirement: Requirement, source_project: str) -> bool:
         if requirement.url is not None:
             raise ClosureError(f"Python direct dependency reference is not allowed: {requirement}")
         project = canonicalize_name(requirement.name)
@@ -616,6 +709,7 @@ class LazyPoolResolver:
         bucket = self.requirements.setdefault(project, {})
         changed = raw not in bucket
         bucket[raw] = requirement
+        self.requirement_sources.setdefault(project, {}).setdefault(raw, set()).add(source_project)
         extras = self.requested_extras.setdefault(project, set())
         previous_count = len(extras)
         extras.update(canonicalize_name(extra) for extra in requirement.extras)
@@ -635,20 +729,39 @@ class LazyPoolResolver:
                 yield requirement
 
     def _discover_dependencies(self) -> bool:
-        changed_any = False
+        old_requirements = {
+            project: set(bucket) for project, bucket in self.requirements.items()
+        }
+        old_extras = {
+            project: set(extras) for project, extras in self.requested_extras.items()
+        }
+        # Only the current candidate for each project drives acquisition.
+        # Older verified wheels remain in pip's offline pool, but their losing
+        # requirements must not permanently grow the acquisition graph.
+        current_entries = {
+            entry.metadata.normalized_name: entry for entry in self.entries.values()
+        }
+        self.requirements = {}
+        self.requirement_sources = {}
+        self.requested_extras = {}
+        root_metadata = self.entries[self.root_copy.name].metadata
+        self._register_requirement(
+            Requirement(f"{root_metadata.name}=={root_metadata.version}"), self.root_project
+        )
         while True:
             changed = False
-            for entry in list(self.entries.values()):
+            for entry in current_entries.values():
                 project = entry.metadata.normalized_name
-                extras = tuple(sorted(self.requested_extras.get(project, set())))
-                if self.scan_state.get(entry.path.name) == extras:
+                if project not in self.requirements:
                     continue
-                self.scan_state[entry.path.name] = extras
+                extras = self.requested_extras.get(project, set())
                 for requirement in self._active_requirements(entry.metadata, set(extras)):
-                    changed = self._register_requirement(requirement) or changed
-            changed_any = changed_any or changed
+                    changed = self._register_requirement(requirement, project) or changed
             if not changed:
-                return changed_any
+                return (
+                    old_requirements != {project: set(bucket) for project, bucket in self.requirements.items()}
+                    or old_extras != self.requested_extras
+                )
 
     def _eligible(self, descriptor: Descriptor) -> bool:
         requirements = self.requirements.get(descriptor.project, {})
@@ -663,17 +776,27 @@ class LazyPoolResolver:
             for requirement in requirements.values()
         )
 
-    def _add_next_candidate(self, project: str) -> bool:
+    def _add_next_candidate(self, project: str, source: str = "verified requirement graph") -> bool:
         if project == self.root_project:
             return False
         attempted = self.attempted.setdefault(project, set())
         for descriptor in self.catalog.descriptors(project):
             if descriptor.filename in attempted or not self._eligible(descriptor):
                 continue
+            if self.budget is not None:
+                self.budget.remaining("candidate acquisition")
+                if len(self.entries) >= self.budget.max_candidates:
+                    raise ClosureError("Acquisition candidate limit exceeded")
             attempted.add(descriptor.filename)
             path = self.catalog.materialize(descriptor, self.candidate_dir)
+            if self.budget is not None and not hasattr(self.catalog, "budget"):
+                self.budget.consume(path.stat().st_size)
             metadata = verify_candidate(path, descriptor)
             self.entries[path.name] = PoolEntry(descriptor, path, metadata, "pypi-simple-json")
+            if self.budget is not None:
+                self.budget.record(phase="candidate", round_number=self.rounds,
+                                   candidate_count=len(self.entries), project=project,
+                                   version=str(descriptor.version), source=source)
             self._discover_dependencies()
             return True
         return False
@@ -713,26 +836,139 @@ class LazyPoolResolver:
             str(self.plan_path),
             str(self.root_copy),
         ]
-        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        self.last_pip_error = (result.stdout + "\n" + result.stderr).strip()
-        return result.returncode == 0 and self.plan_path.is_file()
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            while True:
+                try:
+                    timeout = min(30, self.budget.remaining("offline pip")) if self.budget else None
+                    stdout, stderr = process.communicate(timeout=timeout)
+                    break
+                except subprocess.TimeoutExpired:
+                    if self.budget is not None:
+                        self.budget.record(phase="waiting", round_number=self.rounds,
+                                           candidate_count=len(self.entries), source="offline pip")
+        except Exception:
+            process.kill()
+            process.communicate(timeout=5)
+            raise
+        self.last_pip_error = (stdout + "\n" + stderr).strip()
+        return process.returncode == 0 and self.plan_path.is_file()
+
+    def _conflict_backtrack_project(self) -> Optional[str]:
+        # pip remains the final resolver. A local contradiction only identifies
+        # which already-verified parent may usefully gain another candidate.
+        for project in sorted(self.requirements):
+            requirements = list(self.requirements[project].values())
+            entries = [entry for entry in self.entries.values() if entry.metadata.normalized_name == project]
+            if not entries or any(
+                all(not requirement.specifier or requirement.specifier.contains(
+                    entry.descriptor.version, prereleases=True
+                ) for requirement in requirements)
+                for entry in entries
+            ):
+                continue
+            sources = {
+                source
+                for names in self.requirement_sources.get(project, {}).values()
+                for source in names
+                if source != self.root_project
+            }
+            # A single unsatisfied constraint usually needs another version of
+            # this project. Multiple incompatible parent constraints instead
+            # require a parent backtrack before trying its entire version list.
+            if len(requirements) == 1 and project != self.root_project and any(
+                descriptor.filename not in self.attempted.get(project, set())
+                and self._eligible(descriptor)
+                for descriptor in self.catalog.descriptors(project)
+            ):
+                return project
+            for source in sorted(sources):
+                if any(
+                    descriptor.filename not in self.attempted.get(source, set())
+                    and self._eligible(descriptor)
+                    for descriptor in self.catalog.descriptors(source)
+                ):
+                    return source
+            # The conflicting project itself may need an older candidate.
+            if project != self.root_project and any(
+                descriptor.filename not in self.attempted.get(project, set())
+                and self._eligible(descriptor)
+                for descriptor in self.catalog.descriptors(project)
+            ):
+                return project
+        return None
+
+    def _hinted_backtrack_project(self) -> Optional[str]:
+        # pip's text is a hint only. A project must also be present in the
+        # verified wheel requirement graph before it can drive acquisition.
+        hints: List[str] = []
+        in_missing_section = False
+        for line in self.last_pip_error.splitlines():
+            if "no matching distributions available for your environment:" in line:
+                in_missing_section = True
+                continue
+            if in_missing_section:
+                name = line.strip()
+                if line.startswith("    ") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+                    hints.append(canonicalize_name(name))
+                    continue
+                in_missing_section = False
+            match = re.search(r"No matching distribution found for ([A-Za-z0-9][A-Za-z0-9_.-]*)", line)
+            if match:
+                hints.append(canonicalize_name(match.group(1)))
+        for project in dict.fromkeys(hints):
+            if project == self.root_project or project not in self.requirements:
+                continue
+            if any(
+                descriptor.filename not in self.attempted.get(project, set())
+                and self._eligible(descriptor)
+                for descriptor in self.catalog.descriptors(project)
+            ):
+                return project
+        return None
 
     def resolve(self) -> int:
         self._seed_new_projects()
         rounds = 0
         while True:
             rounds += 1
-            if self._run_offline_plan():
+            self.rounds = rounds
+            if self.budget is not None:
+                self.budget.remaining("offline resolution")
+                if rounds > self.budget.max_rounds:
+                    raise ClosureError("Acquisition round limit exceeded")
+                self.budget.record(phase="pip", round_number=rounds,
+                                   candidate_count=len(self.entries), source="offline verified pool")
+            solved = self._run_offline_plan()
+            if self.budget is not None:
+                self.budget.record(phase="pip-result", round_number=rounds,
+                                    candidate_count=len(self.entries), exit_code=0 if solved else 1,
+                                    error=self.last_pip_error if not solved else "",
+                                    error_class="" if solved else (
+                                        "resolution-conflict" if any(marker in self.last_pip_error for marker in (
+                                            "ResolutionImpossible", "Cannot install", "No matching distribution found"
+                                        )) else "pip-process-failure"
+                                    ))
+            if solved:
                 return rounds
-            expanded = False
-            for project in sorted(self.requirements):
-                expanded = self._add_next_candidate(project) or expanded
-            expanded = self._seed_new_projects() or expanded
-            if not expanded:
+            if not any(marker in self.last_pip_error for marker in (
+                "ResolutionImpossible", "Cannot install", "No matching distribution found"
+            )):
+                raise ClosureError("Offline pip failed without a dependency-resolution conflict: " + self.last_pip_error[-12000:])
+            hinted_source = self._hinted_backtrack_project()
+            conflict_source = hinted_source or self._conflict_backtrack_project()
+            if conflict_source is None or not self._add_next_candidate(
+                conflict_source,
+                source="pip missing-project hint verified against requirement graph"
+                if hinted_source else "verified requirement graph",
+            ):
                 raise ClosureError(
                     "Verified local wheel candidates are exhausted and pip cannot resolve the root wheel.\n"
                     + self.last_pip_error[-12000:]
                 )
+            self._seed_new_projects()
 
     def inventory(self) -> Mapping[str, object]:
         entries = sorted((entry.to_json() for entry in self.entries.values()), key=lambda item: (item["normalizedName"], item["version"], item["file"]))
@@ -1118,11 +1354,32 @@ def resolve_command(arguments: argparse.Namespace) -> None:
             if not directory.is_dir() or any(directory.iterdir()):
                 raise ClosureError(f"Resolver output directory must be absent or empty: {directory}")
             directory.rmdir()
-    catalog = PyPISimpleCatalog(arguments.index_url)
-    resolver = LazyPoolResolver(catalog, root_wheel, arguments.root_sha256, candidate_dir, plan_path)
-    rounds = resolver.resolve()
-    inventory = resolver.inventory()
-    selection = validate_and_select_plan(plan_path, resolver, selected_dir)
+    budget = AcquisitionBudget(
+        seconds=arguments.deadline_seconds, max_rounds=arguments.max_rounds,
+        max_candidates=arguments.max_candidates, max_bytes=arguments.max_bytes,
+        diagnostics_path=Path(arguments.diagnostics), run_id=arguments.run_id,
+        head_sha=arguments.head_sha, initial_bytes=arguments.initial_bytes,
+    )
+    catalog = PyPISimpleCatalog(arguments.index_url, budget)
+    resolver = None
+    try:
+        budget.record(phase="start", round_number=0, candidate_count=0)
+        resolver = LazyPoolResolver(catalog, root_wheel, arguments.root_sha256, candidate_dir, plan_path, budget)
+        rounds = resolver.resolve()
+        inventory = resolver.inventory()
+        selection = validate_and_select_plan(plan_path, resolver, selected_dir)
+    except Exception as error:
+        budget.record(phase="failure", round_number=resolver.rounds if resolver else 0,
+                      candidate_count=len(resolver.entries) if resolver else 0,
+                      error=f"{type(error).__name__}: {error}",
+                      error_class=type(error).__name__)
+        if resolver is not None:
+            write_json(Path(arguments.inventory).with_suffix(".failure.json"), {
+                "schemaVersion": 1, "kind": "diagnostic-only",
+                "entries": list(resolver.inventory()["entries"]),
+                "rejectedCandidates": list(catalog.rejected_candidates()),
+            })
+        raise
     write_json(Path(arguments.inventory), inventory)
     result = {
         "schemaVersion": SCHEMA_VERSION,
@@ -1135,6 +1392,8 @@ def resolve_command(arguments: argparse.Namespace) -> None:
         "selectedClosureSha256": selection["selectedClosureSha256"],
         "selectedEntries": selection["entries"],
     }
+    budget.record(phase="selection-verified", round_number=rounds,
+                  candidate_count=len(inventory["entries"]))
     write_json(Path(arguments.result), result)
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
 
@@ -1188,7 +1447,7 @@ def expect_closure_error(action: object, context: str) -> None:
     raise AssertionError(f"Expected fail-closed error: {context}")
 
 
-def self_test_command(_: argparse.Namespace) -> None:
+def self_test_command(arguments: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="python-wheel-closure-self-test-") as temporary:
         root = Path(temporary)
         sources = root / "sources"
@@ -1203,10 +1462,12 @@ def self_test_command(_: argparse.Namespace) -> None:
                 "rcpkg==2.0rc1",
                 "range-rc>=2.0rc1,<2.0rc3",
                 "extra-pkg[foo]==1.0",
+                "quiet-c>=1",
+                "quiet-d>=1",
             ),
         )
         candidates = [
-            make_test_wheel(sources, "a", "2.0", ("c==1.0",)),
+            make_test_wheel(sources, "a", "2.0", ("c==1.0", "retired-dep==1.0")),
             make_test_wheel(sources, "a", "1.0", ("c==2.0",)),
             make_test_wheel(sources, "b", "2.0", ("c==2.0",)),
             make_test_wheel(sources, "c", "2.0"),
@@ -1222,6 +1483,11 @@ def self_test_command(_: argparse.Namespace) -> None:
             ),
             make_test_wheel(sources, "foo-dep", "1.0"),
             make_test_wheel(sources, "inactive-dep", "1.0"),
+            make_test_wheel(sources, "retired-dep", "1.0"),
+            make_test_wheel(sources, "quiet-c", "2.0"),
+            make_test_wheel(sources, "quiet-c", "1.0"),
+            make_test_wheel(sources, "quiet-d", "2.0"),
+            make_test_wheel(sources, "quiet-d", "1.0"),
         ]
         resolver = LazyPoolResolver(
             LocalCatalog([local_descriptor(path) for path in candidates]),
@@ -1317,6 +1583,145 @@ def self_test_command(_: argparse.Namespace) -> None:
             or ("inactive-dep", "1.0") not in selected
         ):
             raise AssertionError(f"Offline pip did not backtrack to the valid A 1.0 closure: {sorted(selected)}")
+        unrelated_old = {"quiet_c-1.0-py3-none-any.whl", "quiet_d-1.0-py3-none-any.whl"}
+        if unrelated_old.intersection(resolver.entries):
+            raise AssertionError("A/B dependency conflict downloaded unrelated older quiet candidates")
+        if "retired-dep" in resolver.requirements:
+            raise AssertionError("Requirements from the retired A 2.0 candidate polluted the active graph")
+        multi_root = make_test_wheel(sources, "multi-root", "1.0", ("multi-a>=1", "multi-b==1.0"))
+        multi_candidates = [
+            make_test_wheel(sources, "multi-a", "3.0", ("multi-c==1.0",)),
+            make_test_wheel(sources, "multi-a", "2.0", ("multi-c==3.0",)),
+            make_test_wheel(sources, "multi-a", "1.0", ("multi-c==2.0",)),
+            make_test_wheel(sources, "multi-b", "1.0", ("multi-c==2.0",)),
+            make_test_wheel(sources, "multi-c", "3.0"),
+            make_test_wheel(sources, "multi-c", "2.0"),
+            make_test_wheel(sources, "multi-c", "1.0"),
+        ]
+        multi = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in multi_candidates]),
+            multi_root, file_sha256(multi_root), root / "multi-pool", root / "multi-plan.json",
+        )
+        if multi.resolve() < 3:
+            raise AssertionError("A legal dependency graph must survive multiple local backtracks")
+        multi_selected = validate_and_select_plan(root / "multi-plan.json", multi, root / "multi-selected")
+        if ("multi-a", "1.0") not in {
+            (entry["normalizedName"], entry["version"]) for entry in multi_selected["entries"]
+        }:
+            raise AssertionError("Multi-step backtracking did not select the valid older candidate")
+        hint_root = make_test_wheel(
+            sources, "hint-root", "1.0", ("httpx>=0.28", "langsmith>=1"),
+        )
+        hint_candidates = [
+            make_test_wheel(sources, "httpx", "2.0"),
+            make_test_wheel(sources, "httpx", "0.28.1"),
+            make_test_wheel(sources, "langsmith", "2.0"),
+            make_test_wheel(sources, "langsmith", "1.0"),
+        ]
+        hinted = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in hint_candidates]),
+            hint_root, file_sha256(hint_root), root / "hint-pool", root / "hint-plan.json",
+        )
+        hinted._seed_new_projects()
+        hinted.last_pip_error = (
+            "Additionally, some packages in these conflicts have no matching distributions "
+            "available for your environment:\n    httpx\n\nERROR: ResolutionImpossible"
+        )
+        if hinted._hinted_backtrack_project() != "httpx":
+            raise AssertionError("A verified pip missing-project hint must prioritize httpx over unrelated projects")
+        if not hinted._add_next_candidate("httpx") or "httpx-0.28.1-py3-none-any.whl" not in hinted.entries:
+            raise AssertionError("The verified missing-project hint must materialize the older httpx candidate")
+        if "langsmith-1.0-py3-none-any.whl" in hinted.entries:
+            raise AssertionError("The httpx conflict must not expand unrelated langsmith versions")
+        bounded_events = root / "bounded-rounds.jsonl"
+        bounded = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in candidates]),
+            root_wheel,
+            file_sha256(root_wheel),
+            root / "bounded-pool",
+            root / "bounded-plan.json",
+            budget=AcquisitionBudget(seconds=30, max_rounds=1, max_candidates=32,
+                                     max_bytes=32 * 1024 * 1024, diagnostics_path=bounded_events,
+                                     run_id="self-test", head_sha="0" * 40),
+        )
+        try:
+            bounded.resolve()
+        except ClosureError as error:
+            if "round limit" not in str(error):
+                raise AssertionError(f"Wrong bounded resolver failure: {error}") from error
+        else:
+            raise AssertionError("A second pip round must exceed the configured round limit")
+        if not bounded_events.is_file() or '"phase":"pip"' not in bounded_events.read_text(encoding="utf-8"):
+            raise AssertionError("Bounded resolver must persist a pip round before failing")
+        # Exercise the production command path, including durable failure
+        # inventory and the absence of a success receipt.
+        command_args = argparse.Namespace(
+            index_url=APPROVED_INDEX, root_wheel=str(root_wheel), root_sha256=file_sha256(root_wheel),
+            candidate_dir=str(root / "command-pool"), selected_dir=str(root / "command-selected"),
+            plan=str(root / "command-plan.json"), inventory=str(root / "command-inventory.json"),
+            result=str(root / "command-result.json"), diagnostics=str(root / "command-events.jsonl"),
+            run_id="self-test", head_sha="0" * 40, deadline_seconds=30, max_rounds=1,
+            max_candidates=32, max_bytes=32 * 1024 * 1024, initial_bytes=0,
+        )
+        original_catalog = globals()["PyPISimpleCatalog"]
+        try:
+            globals()["PyPISimpleCatalog"] = lambda index_url, budget: LocalCatalog(
+                [local_descriptor(path) for path in candidates]
+            )
+            expect_closure_error(lambda: resolve_command(command_args), "command round cap")
+        finally:
+            globals()["PyPISimpleCatalog"] = original_catalog
+        command_events = Path(command_args.diagnostics).read_text(encoding="utf-8")
+        failure_inventory = Path(command_args.inventory).with_suffix(".failure.json")
+        if ('"phase":"failure"' not in command_events or not failure_inventory.is_file()
+                or Path(command_args.result).exists()):
+            raise AssertionError("Command failure must retain diagnostics and inventory without a success result")
+        if arguments.evidence_dir:
+            evidence_dir = Path(arguments.evidence_dir)
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            if any(evidence_dir.iterdir()):
+                raise AssertionError("Self-test evidence directory must be empty")
+            shutil.copyfile(Path(command_args.diagnostics), evidence_dir / "acquisition-diagnostics.jsonl")
+            shutil.copyfile(failure_inventory, evidence_dir / "candidate-inventory.failure.json")
+            if Path(command_args.plan).is_file():
+                shutil.copyfile(Path(command_args.plan), evidence_dir / "offline-backtracking-plan.json")
+        success_args = argparse.Namespace(**{
+            **vars(command_args),
+            "candidate_dir": str(root / "command-success-pool"),
+            "selected_dir": str(root / "command-success-selected"),
+            "plan": str(root / "command-success-plan.json"),
+            "inventory": str(root / "command-success-inventory.json"),
+            "result": str(root / "command-success-result.json"),
+            "diagnostics": str(root / "command-success-events.jsonl"),
+            "max_rounds": 32,
+        })
+        try:
+            globals()["PyPISimpleCatalog"] = lambda index_url, budget: LocalCatalog(
+                [local_descriptor(path) for path in candidates]
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                resolve_command(success_args)
+        finally:
+            globals()["PyPISimpleCatalog"] = original_catalog
+        if verify_evidence(
+            Path(success_args.candidate_dir), Path(success_args.selected_dir),
+            Path(success_args.plan), Path(success_args.inventory), Path(success_args.result),
+        )["verified"] is not True:
+            raise AssertionError("Production command did not verify its successful offline closure")
+        transport = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in candidates]),
+            root_wheel,
+            file_sha256(root_wheel),
+            root / "transport-pool",
+            root / "transport-plan.json",
+        )
+        transport._seed_new_projects()
+        initial_candidates = len(transport.entries)
+        transport.last_pip_error = "pip child process could not start"
+        transport._run_offline_plan = lambda: False
+        expect_closure_error(transport.resolve, "non-resolution pip process failure")
+        if len(transport.entries) != initial_candidates:
+            raise AssertionError("Non-resolution pip failure must not expand wheel candidates")
 
         expect_closure_error(
             lambda: validate_https_url("https://pypi.org:444/simple/demo/", ("pypi.org",)),
@@ -1356,6 +1761,7 @@ def self_test_command(_: argparse.Namespace) -> None:
         class _SelfTestResponse:
             def __init__(self, payload: bytes) -> None:
                 self._payload = payload
+                self._read = False
                 self.headers = _SelfTestHeaders()
 
             def __enter__(self) -> "_SelfTestResponse":
@@ -1368,6 +1774,9 @@ def self_test_command(_: argparse.Namespace) -> None:
                 return "https://pypi.org/simple/fallback-project/"
 
             def read(self, _limit: int = -1) -> bytes:
+                if self._read:
+                    return b""
+                self._read = True
                 return self._payload
 
         class _SelfTestSimpleOpener:
@@ -1375,7 +1784,7 @@ def self_test_command(_: argparse.Namespace) -> None:
                 self._payload = payload
 
             def open(self, _request: object, timeout: int) -> _SelfTestResponse:
-                if timeout != 60:
+                if timeout != 30:
                     raise AssertionError("Simple JSON discovery must use the bounded self-test timeout")
                 return _SelfTestResponse(self._payload)
 
@@ -1614,6 +2023,14 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--plan", required=True)
     resolve.add_argument("--inventory", required=True)
     resolve.add_argument("--result", required=True)
+    resolve.add_argument("--diagnostics", required=True)
+    resolve.add_argument("--run-id", required=True)
+    resolve.add_argument("--head-sha", required=True)
+    resolve.add_argument("--deadline-seconds", type=float, default=600)
+    resolve.add_argument("--max-rounds", type=int, default=128)
+    resolve.add_argument("--max-candidates", type=int, default=256)
+    resolve.add_argument("--max-bytes", type=int, default=536870912)
+    resolve.add_argument("--initial-bytes", type=int, default=0)
     resolve.set_defaults(handler=resolve_command)
     verify = subcommands.add_parser("verify")
     verify.add_argument("--candidate-dir", required=True)
@@ -1623,6 +2040,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--result", required=True)
     verify.set_defaults(handler=verify_command)
     self_test = subcommands.add_parser("self-test")
+    self_test.add_argument("--evidence-dir")
     self_test.set_defaults(handler=self_test_command)
     return parser
 

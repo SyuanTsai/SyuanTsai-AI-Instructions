@@ -1137,6 +1137,151 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $resolver 'executableSha256 = \$resolved\.executableSha256' 'Every tool receipt must project its exact executable hash.'
     }
 
+    # Scenario: A wheel member fits below the Windows limit only with the short run-owned root.
+    # Purpose: Fail before dependency acquisition when a real install target cannot be written.
+    It 'UnitT26i_probes_the_longest_wheel_member_under_a_short_install_root' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+
+        $requestedRoot = Join-Path $TestDrive 'short-wheel-root'
+        $short = New-RunOwnedInstallDirectory -Root $requestedRoot -ToolName 'skillspector'
+        $long = Join-Path $requestedRoot ("skillspector-{0}" -f [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $long)
+        $sitePackages = Join-Path $short 'venv\Lib\site-packages'
+        $longSitePackages = Join-Path $long 'venv\Lib\site-packages'
+        $memberLength = 264 - $longSitePackages.Length - 1 - 'pathprobe/'.Length
+        Assert-True ($memberLength -gt 40) 'TestDrive must leave enough space for the synthetic wheel member.'
+        $member = ('n' * ($memberLength - 4)) + '.txt'
+        $wheelPath = Join-Path $TestDrive 'pathprobe-1.0-py3-none-any.whl'
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $archive = [IO.Compression.ZipFile]::Open($wheelPath, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $members = [ordered]@{
+                ("pathprobe/{0}" -f $member) = 'installed-path-probe'
+                'pathprobe-1.0.dist-info/METADATA' = "Metadata-Version: 2.1`nName: pathprobe`nVersion: 1.0`n"
+                'pathprobe-1.0.dist-info/WHEEL' = "Wheel-Version: 1.0`nGenerator: path-probe`nRoot-Is-Purelib: true`nTag: py3-none-any`n"
+                'pathprobe-1.0.dist-info/RECORD' = ''
+            }
+            foreach ($name in $members.Keys) {
+                $entry = $archive.CreateEntry($name)
+                $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                try { $writer.Write([string]$members[$name]) }
+                finally { $writer.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+
+        $longError = $null
+        try { Assert-PythonWheelInstallPath -InstallPath $long -WheelPath $wheelPath }
+        catch { $longError = $_.Exception.Message }
+        Assert-Match $longError 'path length|headroom' 'The old long root must fail before installation.'
+        Assert-PythonWheelInstallPath -InstallPath $short -WheelPath $wheelPath
+        Assert-True ($short.Length -lt $long.Length) 'The run-owned SkillSpector root must be shorter than the old form.'
+        $venvPath = Join-Path $short 'venv'
+        $python = Assert-Command -Name 'python'
+        [void](Invoke-IsolatedPythonCommand -PythonCommand $python -Arguments @('-S', '-m', 'venv', '--copies', $venvPath) -TimeoutSeconds 30)
+        $venvPython = Join-Path $venvPath 'Scripts\python.exe'
+        [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @('-m', 'pip', 'install', '--no-index', '--no-deps', '--no-cache-dir', $wheelPath) -TimeoutSeconds 30)
+        $installedFile = Join-Path $sitePackages ("pathprobe/{0}" -f $member)
+        Assert-Equal ([IO.File]::ReadAllText($installedFile)) 'installed-path-probe' 'The synthetic wheel member must be installed and readable under the short root.'
+        $unrelated = Join-Path $requestedRoot 'unrelated.txt'
+        [IO.File]::WriteAllText($unrelated, 'retain')
+        Remove-Item -LiteralPath $short -Recurse -Force
+        Assert-True (Test-Path -LiteralPath $unrelated -PathType Leaf) 'Cleaning the run-owned install must retain neighboring files.'
+    }
+
+    # Scenario: A Python child stalls during acquisition.
+    # Purpose: Bound the child process and report a deadline error to the caller.
+    It 'UnitT26j_terminates_a_stalled_python_child_at_the_acquisition_deadline' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $python = Assert-Command -Name 'python'
+        $deadlineError = $null
+        try {
+            [void](Invoke-CheckedCommand -Command $python -Arguments @('-c', 'import time; time.sleep(4)') -TimeoutSeconds 1)
+        }
+        catch { $deadlineError = $_.Exception.Message }
+        Assert-Match $deadlineError 'acquisition deadline' 'The stalled child must be terminated at the configured deadline.'
+    }
+
+    # Scenario: A response body sends bytes repeatedly without ever going idle.
+    # Purpose: Enforce the absolute cancellation token instead of a socket inactivity timeout.
+    It 'UnitT26k_cancels_a_slow_trickle_http_body_at_the_absolute_deadline' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        if (-not ('C245SlowTrickleStream' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class C245SlowTrickleStream : Stream {
+    public override bool CanRead { get { return true; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return false; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token) {
+        await Task.Delay(50, token);
+        buffer[offset] = 1;
+        return 1;
+    }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+    public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+}
+'@
+        }
+        $inputBody = New-Object C245SlowTrickleStream
+        $outputBody = New-Object IO.MemoryStream
+        $deadline = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromMilliseconds(300))
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $cancelled = $false
+        try { [void](Copy-BoundedHttpBody -InputStream $inputBody -OutputStream $outputBody -CancellationToken $deadline.Token -MaximumBytes 1024) }
+        catch { $cancelled = $_.Exception.ToString() -match 'cancel' }
+        finally { $deadline.Dispose(); $inputBody.Dispose(); $outputBody.Dispose(); $watch.Stop() }
+        Assert-True $cancelled 'A continuously trickling body must stop at the absolute deadline.'
+        Assert-True ($watch.Elapsed.TotalSeconds -lt 2) 'Slow-trickle cancellation must finish promptly.'
+    }
+
+    # Scenario: Interpreter acquisition fails before a wheel can be downloaded.
+    # Purpose: Keep a diagnostic-only failure outside the cleaned install root.
+    It 'UnitT26l_retains_failure_diagnostics_when_acquisition_stops_early' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $policy = Get-Policy -Path $script:ToolchainPath
+        $requestedRoot = Join-Path $TestDrive 'failed-acquisition'
+        Mock Assert-Command { throw 'synthetic interpreter acquisition failure' }
+        $failureMessage = $null
+        try {
+            [void](Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $requestedRoot -AcquisitionLimitSeconds 1)
+        }
+        catch { $failureMessage = $_.Exception.Message }
+        Assert-Match $failureMessage 'synthetic interpreter acquisition failure' 'The original acquisition failure must propagate.'
+        $failurePath = Join-Path $requestedRoot ("skillspector-failure-{0}/failure.json" -f $script:ResolverRunId)
+        Assert-True (Test-Path -LiteralPath $failurePath -PathType Leaf) 'The diagnostic-only failure must survive cleanup.'
+        $failure = Get-Content -Raw -LiteralPath $failurePath | ConvertFrom-Json
+        Assert-Equal $failure.kind 'diagnostic-only' 'A failure artifact cannot impersonate a success receipt.'
+        Assert-Equal $failure.runId $script:ResolverRunId 'The failure artifact must bind to the current run.'
+    }
+
+    # Scenario: The resolver has produced partial diagnostics and temp cleanup follows.
+    # Purpose: Preserve only diagnostic files outside the cleaned untrusted wheel pool.
+    It 'UnitT26m_preserves_partial_resolver_evidence_before_temp_cleanup' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $work = Join-Path $TestDrive 'partial-work'
+        $saved = Join-Path $TestDrive 'saved-failure'
+        [void](New-Item -ItemType Directory -Path $work)
+        [IO.File]::WriteAllText((Join-Path $work 'acquisition-diagnostics.jsonl'), '{"phase":"failure"}')
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'), '{"kind":"diagnostic-only"}')
+        [IO.File]::WriteAllText((Join-Path $work 'untrusted.whl'), 'do-not-retain')
+        Save-SkillSpectorFailureEvidence -WorkPath $work -DestinationPath $saved
+        Remove-Item -LiteralPath $work -Recurse -Force
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'acquisition-diagnostics.jsonl') -PathType Leaf) 'The append-only events must survive temporary cleanup.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $saved 'candidate-inventory.failure.json') -PathType Leaf) 'The partial candidate identity must survive temporary cleanup.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $saved 'untrusted.whl')) 'The untrusted wheel must not be copied into diagnostics.'
+        Assert-False (Test-Path -LiteralPath (Join-Path $saved 'closure-result.json')) 'A failure must not acquire a success result.'
+    }
+
     It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
