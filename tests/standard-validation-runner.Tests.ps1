@@ -1306,6 +1306,157 @@ exit ([int]$LASTEXITCODE)
         Assert-False $decision.releaseEligible 'A maintenance report must not grant release eligibility.'
     }
 
+    # Scenario: Protected-side code receives saved workflow_run, run, PR and artifact snapshots plus a retained ZIP.
+    # Purpose: Bind independent identities and bytes before calling the existing report verifier; keep admission blocked.
+    It 'UnitT50_binds_injected_maintenance_metadata_and_rejects_cross_run_or_archive_drift' {
+        $issuerPath = Join-Path $script:RepositoryRoot 'scripts/Assert-StandardValidatorMaintenanceInputs.ps1'
+        Assert-True (Test-Path -LiteralPath $issuerPath -PathType Leaf) 'Maintenance input issuer is missing.'
+        $repository = [ordered]@{ id = 730; full_name = 'owner/repo' }
+        $headRepository = [ordered]@{ id = 731; full_name = 'fork/repo' }
+        $runId = 123456
+        $runHead = 'b' * 40
+        $candidate = 'a' * 40
+        $authority = 'c' * 40
+        $fixtureIndex = 0
+        function New-MaintenanceIssuerFixture {
+            param([string] $Root)
+            [void](New-Item -ItemType Directory -Path $Root -Force)
+            $results = '{"tests":2,"failed":0}'
+            $resultsBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($results)
+            $hasher = [Security.Cryptography.SHA256]::Create()
+            try { $resultsSha = ([BitConverter]::ToString($hasher.ComputeHash($resultsBytes)) -replace '-', '').ToLowerInvariant() }
+            finally { $hasher.Dispose() }
+            $report = [ordered]@{
+                schemaVersion = 1; evidenceType = 'validator-maintenance-report-v1'; status = 'passed'
+                candidateRevision = $candidate; authorityRevision = $authority; eventName = 'pull_request'
+                runId = ('{0:x32}' -f $runId); runAttempt = 2; resultsSha256 = $resultsSha
+                tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+                releaseEligible = $false
+            }
+            $zipPath = Join-Path $Root 'artifact.zip'
+            $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($file in @(
+                    [pscustomobject]@{ name = 'report.json'; content = ($report | ConvertTo-Json -Depth 10 -Compress) },
+                    [pscustomobject]@{ name = 'results.json'; content = $results }
+                )) {
+                    $entry = $zip.CreateEntry($file.name)
+                    $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                    try { $writer.Write($file.content) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $zip.Dispose() }
+            $eventRun = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = $runHead; workflow_id = 42
+                repository = $repository; event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @([ordered]@{ number = 7; head = [ordered]@{ sha = $candidate; repo = $headRepository } })
+            }
+            $run = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = $runHead; workflow_id = 42
+                repository = $repository; head_repository = $headRepository
+                event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @([ordered]@{ number = 7; head = [ordered]@{ sha = $candidate; repo = $headRepository } })
+            }
+            $pr = [ordered]@{
+                number = 7; base = [ordered]@{ repo = $repository }
+                head = [ordered]@{ sha = $candidate; repo = $headRepository }
+            }
+            $artifact = [ordered]@{
+                id = 99; name = "validator-maintenance-$runId-2"; expired = $false
+                size_in_bytes = (Get-Item -LiteralPath $zipPath).Length
+                digest = 'sha256:' + (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                workflow_run = [ordered]@{
+                    id = $runId; repository_id = 730; head_repository_id = 731; head_sha = $runHead
+                }
+            }
+            $paths = @{
+                EventPath = Join-Path $Root 'event.json'
+                RunMetadataPath = Join-Path $Root 'run.json'
+                PullRequestMetadataPath = Join-Path $Root 'pr.json'
+                ArtifactsMetadataPath = Join-Path $Root 'artifacts.json'
+                ArtifactZipPath = $zipPath
+                ExpectedRepositoryFullName = 'owner/repo'; ExpectedRepositoryId = 730
+                ExpectedWorkflowId = 42; ExpectedAuthorityRevision = $authority
+                ExpectedTestIds = @('UnitT10', 'UnitT20')
+                OutputRoot = Join-Path $Root 'extracted'
+            }
+            Write-TestUtf8File $paths.EventPath (([ordered]@{ action = 'completed'; repository = $repository; workflow_run = $eventRun }) | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.RunMetadataPath ($run | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.PullRequestMetadataPath ($pr | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.ArtifactsMetadataPath (([ordered]@{ total_count = 1; artifacts = @($artifact) }) | ConvertTo-Json -Depth 10 -Compress)
+            return $paths
+        }
+        function Set-MaintenanceFixtureJson {
+            param([string] $Path, [scriptblock] $Change)
+            $value = ConvertFrom-Json -InputObject (Get-Content -Raw -LiteralPath $Path -Encoding UTF8)
+            & $Change $value
+            Write-TestUtf8File $Path ($value | ConvertTo-Json -Depth 15 -Compress)
+        }
+        function Assert-MaintenanceRejected {
+            param([hashtable] $Inputs, [string] $Context, [string] $Pattern)
+            $failure = ''
+            try { [void](& $issuerPath @Inputs) } catch { $failure = [string]$_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) "$Context must be rejected."
+            Assert-Match $failure $Pattern "$Context must fail at its intended binding."
+        }
+        $good = New-MaintenanceIssuerFixture (Join-Path $TestDrive 'maintenance-issuer-good')
+        $decision = & $issuerPath @good
+        Assert-Equal $decision.status 'injected-metadata-binding' 'The saved snapshots may establish only diagnostic bindings.'
+        Assert-Equal $decision.verifierStatus 'verified-local-binding' 'The issuer must invoke the existing report verifier.'
+        Assert-Equal $decision.candidateRevision $candidate 'The PR head, rather than the run merge SHA, is the candidate.'
+        Assert-Equal $decision.runHeadSha $runHead 'The producing run head SHA remains separately bound.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'Saved metadata must never grant formal CI admission.'
+        Assert-False $decision.releaseEligible 'Saved metadata must never grant release eligibility.'
+
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'missing artifact'; pattern = 'Expected one unique maintenance artifact'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts = @(); $x.total_count = 0 } } },
+            [pscustomobject]@{ name = 'duplicate artifact'; pattern = 'Expected one unique maintenance artifact'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts = @($x.artifacts[0], $x.artifacts[0]); $x.total_count = 2 } } },
+            [pscustomobject]@{ name = 'run id'; pattern = 'run id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.id = 123457 } } },
+            [pscustomobject]@{ name = 'run attempt'; pattern = 'run attempt differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.run_attempt = 3 } } },
+            [pscustomobject]@{ name = 'repository'; pattern = 'event repository id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.EventPath { param($x) $x.repository.id = 999 } } },
+            [pscustomobject]@{ name = 'head SHA'; pattern = 'artifact run head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts[0].workflow_run.head_sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'PR head advanced after run'; pattern = 'frozen PR head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.PullRequestMetadataPath { param($x) $x.head.sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'missing frozen PR head'; pattern = 'missing head'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.pull_requests[0].PSObject.Properties.Remove('head') } } },
+            [pscustomobject]@{ name = 'stale event PR head'; pattern = 'event run frozen PR head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.EventPath { param($x) $x.workflow_run.pull_requests[0].head.sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'mixed frozen head repository'; pattern = 'frozen PR head repository id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.pull_requests[0].head.repo.id = 999 } } },
+            [pscustomobject]@{ name = 'archive digest'; pattern = 'artifact digest differs'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts[0].digest = 'sha256:' + ('0' * 64) } } }
+        )) {
+            $fixtureIndex++
+            $bad = New-MaintenanceIssuerFixture (Join-Path $TestDrive "maintenance-issuer-bad-$fixtureIndex")
+            & $case.change $bad
+            Assert-MaintenanceRejected $bad $case.name $case.pattern
+        }
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'result bytes drift'; extra = $null; results = '{"tests":2,"failed":1}'; pattern = 'result binding differs' },
+            [pscustomobject]@{ name = 'ZIP traversal'; extra = '../escape.ps1'; results = $null; pattern = 'unsafe archive entry' },
+            [pscustomobject]@{ name = 'extra executable'; extra = 'run.ps1'; results = $null; pattern = 'exactly two files' }
+        )) {
+            $fixtureIndex++
+            $bad = New-MaintenanceIssuerFixture (Join-Path $TestDrive "maintenance-issuer-bad-$fixtureIndex")
+            $zip = [IO.Compression.ZipFile]::Open($bad.ArtifactZipPath, [IO.Compression.ZipArchiveMode]::Update)
+            try {
+                if ($null -ne $case.results) {
+                    $old = $zip.GetEntry('results.json')
+                    $old.Delete()
+                    $entry = $zip.CreateEntry('results.json')
+                    $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                    try { $writer.Write($case.results) } finally { $writer.Dispose() }
+                }
+                else {
+                    if ($case.name -eq 'ZIP traversal') { $zip.GetEntry('results.json').Delete() }
+                    [void]$zip.CreateEntry($case.extra)
+                }
+            }
+            finally { $zip.Dispose() }
+            Set-MaintenanceFixtureJson $bad.ArtifactsMetadataPath {
+                param($x)
+                $x.artifacts[0].size_in_bytes = (Get-Item -LiteralPath $bad.ArtifactZipPath).Length
+                $x.artifacts[0].digest = 'sha256:' + (Get-FileHash -LiteralPath $bad.ArtifactZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            Assert-MaintenanceRejected $bad $case.name $case.pattern
+        }
+    }
+
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
     # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
     It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
