@@ -1,0 +1,70 @@
+name: Validator Maintenance Producer
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic-producer:
+    name: Untrusted validator maintenance diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Ensure fixed Pester versions
+        shell: pwsh
+        run: |
+          $pester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'4.10.1' } |
+            Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+          if ($null -eq (Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1)) {
+            throw 'Pester 4.10.1 is unavailable.'
+          }
+          $maintenancePester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'5.9.0' } |
+            Select-Object -First 1
+          if ($null -eq $maintenancePester) {
+            Install-Module Pester -RequiredVersion 5.9.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+          if ($null -eq (Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'5.9.0' } | Select-Object -First 1)) {
+            throw 'Pester 5.9.0 is unavailable.'
+          }
+
+      - name: Produce bounded diagnostic report
+        shell: pwsh
+        env:
+          CANDIDATE_REVISION: ${{ github.event.pull_request.head.sha }}
+          PRODUCER_RUN_ID: ${{ github.run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = & ./scripts/Invoke-StandardValidatorMaintenanceProducer.ps1 `
+            -CandidateRevision $env:CANDIDATE_REVISION `
+            -AuthorityRevision 'e69c453888db93e2d2697ea7f0b11df13cd1b8d2' `
+            -RunId ([long]$env:PRODUCER_RUN_ID) `
+            -RunAttempt ([int]$env:PRODUCER_RUN_ATTEMPT) `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP 'validator-maintenance-producer')
+          if ($result.ciAdmission -cne 'BLOCKED' -or $result.releaseEligible -ne $false) {
+            throw 'Diagnostic producer must remain non-admitting.'
+          }
+
+      - name: Upload exactly one diagnostic artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: validator-maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/validator-maintenance-producer/report.json
+            ${{ runner.temp }}/validator-maintenance-producer/results.json
+          if-no-files-found: error
+          retention-days: 1
