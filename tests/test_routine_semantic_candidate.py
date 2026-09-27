@@ -137,16 +137,34 @@ class RoutineSemanticCandidateTests(unittest.TestCase):
                           "maximumOutputTokens": 2048, "timeoutSecondsRequested": 1,
                           "status": "FAKE_RESPONSE", "analyzerId": call["analyzerId"],
                           "sourcePath": call["sourcePath"], "sourceSha256": call["sourceSha256"],
+                          "workId": "work-" + call["analyzerId"],
                           "rawPromptFile": name, "responseBase64": __import__("base64").b64encode(response).decode("ascii")})
+        statuses = []
+        ledger = []
+        telemetry = []
+        for index, analyzer in enumerate(("semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery")):
+            work_id = "work-" + analyzer
+            statuses.append({"analyzer_id": analyzer, "status": "completed", "planned_work": [
+                {"work_id": work_id, "path": "SKILL.md", "start_line": None, "end_line": None}]})
+            ledger.append({"record_type": "work_item", "phase": "semantic", "work_id": work_id,
+                           "analyzer_id": analyzer, "path": "SKILL.md", "start_line": None,
+                           "end_line": None, "outcome": "completed", "reason_code": None,
+                           "input_finding_ids": [],
+                           "emitted_finding_ids": ["synthetic-1"] if index == 0 else []})
+            telemetry.append({"node": analyzer, "work_id": work_id, "path": "SKILL.md",
+                              "start_line": None, "end_line": None, "ok": True, "error": None})
         graph = {"skill": "example", "sourceRevision": self.revision, "calls": 3,
-                 "analyzerStatusEvents": [{"analyzer_id": a, "status": "completed"} for a in ("semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery")],
-                 "analysisCompleteness": {"is_complete": True}, "executionSuccessful": True,
-                 "inspectionLedger": [{"synthetic": True}], "rawFindings": [{"finding_id": "synthetic-1"}],
+                 "analyzerStatusEvents": statuses,
+                 "analysisCompleteness": {"is_complete": True, "status": "complete",
+                                          "execution_successful": True,
+                                          "ledger_exceptions": [], "limitations": [], "scope_exclusions": []},
+                 "executionSuccessful": True,
+                 "inspectionLedger": ledger, "rawFindings": [{"finding_id": "synthetic-1"}],
                  "filteredFindings": [], "suppressedFindings": [{"finding_id": "synthetic-1", "reason": "synthetic"}],
-                 "llmCallLog": [], "reportBody": "Synthetic only"}
+                 "llmCallLog": telemetry, "reportBody": "Synthetic only"}
         raw = json.dumps(graph).encode()
         (graph_dir / "graph-example.json").write_bytes(raw)
-        manifest = {"schemaVersion": 1, "artifactType": "routine-semantic-fake-graph-v1",
+        manifest = {"schemaVersion": 2, "artifactType": "routine-semantic-fake-graph-v2",
                     "sourceRevision": self.revision, "preflightPromptManifestSha256": prepared["promptManifestSha256"],
                     "requiredCalls": 3, "actualFakeCalls": 3, "maximumCalls": 3,
                     "promptSetExact": True, "graphComplete": True,
@@ -181,6 +199,77 @@ class RoutineSemanticCandidateTests(unittest.TestCase):
         manifest_path.write_text(original, encoding="utf-8")
         graph_path = graph_dir / "graph-example.json"
         graph_path.write_bytes(graph_path.read_bytes() + b"\n")
+        with self.assertRaises(CandidateError):
+            verify_inactive(preflight_path, graph_dir)
+
+    def test_UnitT100_inactive_receipt_rejects_missing_node_or_call(self):
+        # Scenario: One semantic node or provider telemetry row disappears from a hashed fake graph.
+        # Purpose: A successful call count cannot hide incomplete scanner execution.
+        preflight_path, graph_dir = self.build_fake_receipt()
+        graph_path = graph_dir / "graph-example.json"
+        manifest_path = graph_dir / "manifest.json"
+        original_graph = json.loads(graph_path.read_text())
+        for field in ("analyzerStatusEvents", "llmCallLog"):
+            graph = json.loads(json.dumps(original_graph))
+            graph[field].pop()
+            graph_path.write_text(json.dumps(graph), encoding="utf-8")
+            manifest = json.loads(manifest_path.read_text())
+            manifest["graphs"][0]["sha256"] = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(CandidateError):
+                verify_inactive(preflight_path, graph_dir)
+
+    def test_UnitT110_inactive_receipt_rejects_mixed_candidate_work_or_truncated_ledger(self):
+        # Scenario: A call borrows another work ID, the candidate changes, or output is truncated.
+        # Purpose: Refuse cross-work attribution and incomplete raw scanner evidence.
+        preflight_path, graph_dir = self.build_fake_receipt()
+        manifest_path = graph_dir / "manifest.json"
+        original = json.loads(manifest_path.read_text())
+        mixed = json.loads(json.dumps(original))
+        mixed["calls"][0]["workId"] = mixed["calls"][1]["workId"]
+        manifest_path.write_text(json.dumps(mixed), encoding="utf-8")
+        with self.assertRaises(CandidateError):
+            verify_inactive(preflight_path, graph_dir)
+        mixed = json.loads(json.dumps(original))
+        mixed["sourceRevision"] = "0" * 40
+        manifest_path.write_text(json.dumps(mixed), encoding="utf-8")
+        with self.assertRaises(CandidateError):
+            verify_inactive(preflight_path, graph_dir)
+        graph_path = graph_dir / "graph-example.json"
+        graph = json.loads(graph_path.read_text())
+        graph["inspectionLedger"].append({"phase": "ledger_output", "reason_code": "output_limit",
+                                           "record_type": "system", "emitted_finding_ids": []})
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        original["graphs"][0]["sha256"] = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(original), encoding="utf-8")
+        with self.assertRaises(CandidateError):
+            verify_inactive(preflight_path, graph_dir)
+
+    def test_UnitT115_inactive_receipt_rejects_legacy_weak_graph_contract(self):
+        # Scenario: An older fake manifest has no independently checked work binding.
+        # Purpose: Require the stronger versioned contract for new inactive receipts.
+        preflight_path, graph_dir = self.build_fake_receipt()
+        manifest_path = graph_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schemaVersion"] = 1
+        manifest["artifactType"] = "routine-semantic-fake-graph-v1"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaises(CandidateError):
+            verify_inactive(preflight_path, graph_dir)
+
+    def test_UnitT120_inactive_receipt_rejects_hidden_raw_finding(self):
+        # Scenario: A graph drops the raw finding while its primary work ledger retains the emitted ID.
+        # Purpose: A filtered or suppressed view cannot conceal scanner findings.
+        preflight_path, graph_dir = self.build_fake_receipt()
+        graph_path = graph_dir / "graph-example.json"
+        manifest_path = graph_dir / "manifest.json"
+        graph = json.loads(graph_path.read_text())
+        graph["rawFindings"] = []
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        manifest = json.loads(manifest_path.read_text())
+        manifest["graphs"][0]["sha256"] = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+        manifest["graphs"][0]["rawFindings"] = 0
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaises(CandidateError):
             verify_inactive(preflight_path, graph_dir)
 

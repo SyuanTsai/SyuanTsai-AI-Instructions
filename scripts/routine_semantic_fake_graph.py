@@ -26,6 +26,7 @@ import threading
 from unittest.mock import patch
 
 from routine_semantic_candidate import CandidateError, preflight
+from routine_semantic_inactive_receipt import index_semantic_work
 
 
 def digest(data: bytes) -> str:
@@ -121,8 +122,15 @@ def run(inventory_path: Path, prompt_directory: Path, source_repo: Path,
         raise CandidateError("PREFLIGHT_CALL_CAP_BLOCKED")
     if output_directory.exists() or output_directory.is_symlink():
         raise CandidateError("OUTPUT_EXISTS")
-    from skillspector.graph import create_graph
-    from skillspector.providers import use_provider, reset_provider
+    # SkillSpector reads this workflow deadline at import time. The default
+    # 600-second budget would hand our 180-second fake provider an invalid
+    # timeout before it can record even a local call.
+    with patch.dict(os.environ, {"SKILLSPECTOR_MAX_WORKFLOW_SECONDS": "180"}):
+        from skillspector.graph import create_graph
+        from skillspector.providers import use_provider, reset_provider
+        from skillspector.state import MAX_WORKFLOW_SECONDS
+    if MAX_WORKFLOW_SECONDS != 180:
+        raise CandidateError("FAKE_SCANNER_DEADLINE_NOT_PINNED")
 
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     groups = sorted({item["path"].split("/")[1] for item in inventory["items"]})
@@ -189,13 +197,21 @@ def run(inventory_path: Path, prompt_directory: Path, source_repo: Path,
         raise CandidateError("PREFLIGHT_PROMPT_HASH_DUPLICATE")
     observed = Counter(item["promptSha256"] for item in provider.calls)
     complete = len(provider.calls) == reviewed["requiredCalls"] and expected == observed
+    work_index: dict[tuple[str, str], str] = {}
     for graph in graph_results:
+        indexed = index_semantic_work(graph, graph["skill"])
+        if set(work_index).intersection(indexed):
+            raise CandidateError("FAKE_GRAPH_WORK_DUPLICATE")
+        work_index.update(indexed)
         statuses = {event.get("analyzer_id"): event.get("status")
                     for event in graph["analyzerStatusEvents"] if type(event) is dict}
         complete &= all(statuses.get(analyzer) == "completed" for analyzer in (
             "semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"))
         complete &= graph["analysisCompleteness"].get("is_complete") is True
         complete &= graph["executionSuccessful"] is True
+    expected_work = {(item["analyzerId"], item["sourcePath"]) for item in reviewed["calls"]}
+    if set(work_index) != expected_work or len(work_index) != len(reviewed["calls"]):
+        raise CandidateError("FAKE_GRAPH_WORK_COVERAGE")
     output_directory.mkdir()
     call_records = []
     expected_by_sha = {item["promptSha256"]: item for item in reviewed["calls"]}
@@ -203,9 +219,13 @@ def run(inventory_path: Path, prompt_directory: Path, source_repo: Path,
         name = f"prompt-{record['sequence']:03d}-{record['promptSha256'][:12]}.txt"
         (output_directory / name).write_bytes(data)
         planned = expected_by_sha.get(record["promptSha256"], {})
+        key = (planned.get("analyzerId"), planned.get("sourcePath"))
+        if key not in work_index:
+            raise CandidateError("FAKE_CALL_WORK_MISSING")
         call_records.append({**record, "analyzerId": planned.get("analyzerId"),
                              "sourcePath": planned.get("sourcePath"),
                              "sourceSha256": planned.get("sourceSha256"),
+                             "workId": work_index[key],
                              "rawPromptFile": name,
                              "responseBase64": base64.b64encode(provider.RESPONSE).decode("ascii")})
     graph_records = []
@@ -218,7 +238,7 @@ def run(inventory_path: Path, prompt_directory: Path, source_repo: Path,
                               "filteredFindings": len(graph["filteredFindings"]),
                               "suppressedFindings": len(graph["suppressedFindings"]),
                               "analysisComplete": graph["analysisCompleteness"].get("is_complete")})
-    result = {"schemaVersion": 1, "artifactType": "routine-semantic-fake-graph-v1",
+    result = {"schemaVersion": 2, "artifactType": "routine-semantic-fake-graph-v2",
               "observedAtUtc": datetime.now(timezone.utc).isoformat(),
               "sourceRevision": inventory["candidate"],
               "preflightPromptManifestSha256": reviewed["promptManifestSha256"],
