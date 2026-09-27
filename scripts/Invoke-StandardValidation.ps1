@@ -359,6 +359,44 @@ function Get-StandardValidationProperty {
     return ,$property.Value
 }
 
+function Test-StandardValidationSameResolvedPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $First,
+        [Parameter(Mandatory = $true)][string] $Second
+    )
+
+    if ([string]::Equals($First, $Second, [StringComparison]::Ordinal)) { return $true }
+    if (-not [string]::Equals($First, $Second, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    [void](Get-Item -Force -LiteralPath $First -ErrorAction Stop)
+    [void](Get-Item -Force -LiteralPath $Second -ErrorAction Stop)
+    if ([string]::Equals($First, [IO.Path]::GetPathRoot($First), [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $firstParent = Split-Path -Parent $First
+    $secondParent = Split-Path -Parent $Second
+    if ([string]::IsNullOrWhiteSpace($firstParent) -or [string]::IsNullOrWhiteSpace($secondParent) -or
+        -not (Test-StandardValidationSameResolvedPath -First $firstParent -Second $secondParent)) {
+        return $false
+    }
+
+    # Directory enumeration exposes the actual entry names even where Windows
+    # PowerShell 5.1 Get-Item.FullName preserves the requested spelling.
+    $entries = @(Get-ChildItem -Force -LiteralPath $firstParent -ErrorAction Stop)
+    $resolvedNames = @()
+    foreach ($leaf in @((Split-Path -Leaf $First), (Split-Path -Leaf $Second))) {
+        $exact = @($entries | Where-Object { [string]::Equals($_.Name, $leaf, [StringComparison]::Ordinal) })
+        if ($exact.Count -eq 1) {
+            $resolvedNames += [string]$exact[0].Name
+            continue
+        }
+        $caseVariant = @($entries | Where-Object { [string]::Equals($_.Name, $leaf, [StringComparison]::OrdinalIgnoreCase) })
+        if ($caseVariant.Count -ne 1) { return $false }
+        $resolvedNames += [string]$caseVariant[0].Name
+    }
+    return [string]::Equals($resolvedNames[0], $resolvedNames[1], [StringComparison]::Ordinal)
+}
+
 function Assert-StandardValidationSkillValidatorReport {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -383,8 +421,17 @@ function Assert-StandardValidationSkillValidatorReport {
         $results -isnot [array] -or $results.Count -eq 0) {
         throw "skill-validator did not produce a clean candidate-bound report for '$SkillId'."
     }
-    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-    if (-not [IO.Path]::GetFullPath([string]$Report.skill_dir).Equals([IO.Path]::GetFullPath($SkillRoot), $comparison)) {
+    $reportedRoot = [IO.Path]::GetFullPath([string]$Report.skill_dir)
+    $expectedRoot = [IO.Path]::GetFullPath($SkillRoot)
+    $comparison = Get-StandardValidationPathComparison -Paths @($reportedRoot, $expectedRoot)
+    $rootsMatch = [string]::Equals($reportedRoot, $expectedRoot, $comparison)
+    if ($rootsMatch -and -not [string]::Equals($reportedRoot, $expectedRoot, [StringComparison]::Ordinal)) {
+        # The path-comparison helper is conservative for containment, so a
+        # differently cased equality also needs matching filesystem entries.
+        try { $rootsMatch = Test-StandardValidationSameResolvedPath -First $reportedRoot -Second $expectedRoot }
+        catch { $rootsMatch = $false }
+    }
+    if (-not $rootsMatch) {
         throw "skill-validator report root does not match candidate Skill '$SkillId'."
     }
     foreach ($result in $results) {
