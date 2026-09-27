@@ -1,0 +1,165 @@
+name: Draft even shard diagnostic
+
+# Manual diagnostic only. This workflow is not a required source check.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr8-even-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  even-diagnostic:
+    name: Diagnostic ${{ matrix.runtime }} index ${{ matrix.index }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: ps51
+            shell: powershell
+            pester: 3.4.0
+            index: 0
+            total: 181
+          - runtime: ps51
+            shell: powershell
+            pester: 3.4.0
+            index: 4
+            total: 40
+          - runtime: ps7
+            shell: pwsh
+            pester: 4.10.1
+            index: 0
+            total: 181
+          - runtime: ps7
+            shell: pwsh
+            pester: 4.10.1
+            index: 4
+            total: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact Pester inventory and diagnostic partition
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Reviewed 32-file name inventory at the PR58 diagnostic candidate.
+          $expectedInventorySha256 = '242160f809b58b99b844c7228fce04c1c8ac876a30194544a9089c1f800b99ae'
+          [string[]]$tracked = @(git ls-tree -r --name-only HEAD -- tests |
+            Where-Object { $_ -cmatch '^tests/[^/]+\.Tests\.ps1$' })
+          if ($LASTEXITCODE -ne 0) { throw 'Git test inventory lookup failed.' }
+          [Array]::Sort($tracked, [StringComparer]::Ordinal)
+          [string[]]$present = @(Get-ChildItem -LiteralPath tests -Filter '*.Tests.ps1' -File |
+            ForEach-Object { 'tests/' + $_.Name })
+          [Array]::Sort($present, [StringComparer]::Ordinal)
+          if ($tracked.Count -ne 32 -or $present.Count -ne 32 -or
+              ($tracked -join "`n") -cne ($present -join "`n")) {
+            throw 'Tracked and checked-out Pester file inventories differ.'
+          }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          try {
+            $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($tracked -join "`n"))
+            $actualSha = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+          }
+          finally { $sha.Dispose() }
+          if ($actualSha -cne $expectedInventorySha256) { throw 'Pester inventory changed from reviewed candidate.' }
+          [string[]]$isolated = @('tests/standard-validation-runner.Tests.ps1', 'tests/syp101-production-smoke-contract.Tests.ps1')
+          [string[]]$ordered = @($isolated) + @($tracked | Where-Object { $isolated -cnotcontains $_ })
+          if ($ordered.Count -ne 32 -or @($ordered | Select-Object -Unique).Count -ne 32) {
+            throw 'Pester shard ordering lost or duplicated a test file.'
+          }
+          $index = [int]'${{ matrix.index }}'
+          [string[]]$selected = @(for ($i = $index; $i -lt $ordered.Count; $i += 8) { $ordered[$i] })
+          $expected = if ($index -eq 0) {
+            [string[]]@(
+              'tests/standard-validation-runner.Tests.ps1',
+              'tests/bootstrap-ai-instructions.Tests.ps1',
+              'tests/skill-repository-standard.Tests.ps1',
+              'tests/skills-source-routing.Tests.ps1'
+            )
+          }
+          elseif ($index -eq 4) {
+            [string[]]@(
+              'tests/ai-instructions-contract.Tests.ps1',
+              'tests/license-delivery.Tests.ps1',
+              'tests/skills-selection.Tests.ps1',
+              'tests/standard-semantic-preflight.Tests.ps1'
+            )
+          }
+          else { throw 'Unreviewed diagnostic partition index.' }
+          if ($selected.Count -ne 4 -or ($selected -join "`n") -cne ($expected -join "`n")) {
+            throw 'Diagnostic partition differs from reviewed exact shard assignment.'
+          }
+          $counts = @{
+            'tests/standard-validation-runner.Tests.ps1' = 48
+            'tests/bootstrap-ai-instructions.Tests.ps1' = 75
+            'tests/skill-repository-standard.Tests.ps1' = 47
+            'tests/skills-source-routing.Tests.ps1' = 11
+            'tests/ai-instructions-contract.Tests.ps1' = 6
+            'tests/license-delivery.Tests.ps1' = 9
+            'tests/skills-selection.Tests.ps1' = 17
+            'tests/standard-semantic-preflight.Tests.ps1' = 8
+          }
+          $total = 0
+          foreach ($file in $selected) { $total += [int]$counts[$file] }
+          if ($total -ne [int]'${{ matrix.total }}') { throw 'Diagnostic expected test count changed.' }
+          Write-Host "DIAGNOSTIC_PLAN runtime=${{ matrix.runtime }} index=$index/8 files=4 total=$total skipped=0 inventory=$actualSha"
+
+      - name: Ensure pinned Pester version
+        shell: ${{ matrix.shell }}
+        run: |
+          $version = [version]'${{ matrix.pester }}'
+          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq $version } | Select-Object -First 1
+          if ($null -eq $pester) {
+            Install-Module Pester -RequiredVersion $version -Scope CurrentUser -Force -SkipPublisherCheck
+            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq $version } | Select-Object -First 1
+          }
+          if ($null -eq $pester) { throw "Pester $version is unavailable." }
+
+      - name: Run bounded diagnostic shards
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module Pester -ListAvailable |
+            Where-Object { $_.Version -eq [version]'${{ matrix.pester }}' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Reviewed Pester version is unavailable.' }
+          $args = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '${{ matrix.pester }}'
+            ExpectedTotalCount = [int]'${{ matrix.total }}'
+            ExpectedSkippedCount = 0
+            ShardPartitionCount = 8
+            ShardPartitionIndex = [int]'${{ matrix.index }}'
+            ExpectedFullShardCount = 32
+            OuterTimeoutSeconds = 2400
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
+          }
+          Write-Host "DIAGNOSTIC_PARTITION_START runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
+          try {
+            # The existing executor emits Starting Pester shard and per-shard Total lines.
+            # Its create-only process and result JSON files are retained below on normal failure.
+            & ./scripts/Invoke-PesterShardProcess.ps1 @args
+            Write-Host "DIAGNOSTIC_PARTITION_END runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
+          }
+          finally {
+            Write-Host "DIAGNOSTIC_PARTITION_EXIT runtime=${{ matrix.runtime }} index=${{ matrix.index }} utc=$([DateTime]::UtcNow.ToString('o'))"
+          }
+
+      - name: Retain bounded shard evidence on normal completion or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: even-diagnostic-${{ matrix.runtime }}-${{ matrix.index }}
+          path: ${{ runner.temp }}/pester-shard-*.json
+          if-no-files-found: warn
+          retention-days: 7
