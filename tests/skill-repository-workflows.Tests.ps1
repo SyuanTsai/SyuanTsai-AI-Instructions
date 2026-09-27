@@ -267,7 +267,9 @@ jobs:
         Assert-Equal $odd.Count 16 'The odd job must retain sixteen shards.'
         $assigned = @($evenA) + @($evenB) + @($odd)
         Assert-Equal @($assigned | Select-Object -Unique).Count 32 'Every discovered shard must be assigned exactly once.'
-        Assert-Equal ((@($assigned | Sort-Object -CaseSensitive)) -join '|') ($testFiles -join '|') 'The partition union must equal the full test file inventory.'
+        [string[]]$assignedOrdinal = @($assigned)
+        [Array]::Sort($assignedOrdinal, [StringComparer]::Ordinal)
+        Assert-Equal ($assignedOrdinal -join '|') ($testFiles -join '|') 'The partition union must equal the full test file inventory.'
 
         $standardsJobsMatch = [regex]::Match($standards, '(?ms)^jobs:\r?\n(?<block>.*)\z')
         Assert-True $standardsJobsMatch.Success 'Standards Conformance must define its workflow jobs block.'
