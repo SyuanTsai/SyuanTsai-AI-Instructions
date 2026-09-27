@@ -359,6 +359,90 @@ function Get-StandardValidationProperty {
     return ,$property.Value
 }
 
+function Test-StandardValidationSameResolvedPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $First,
+        [Parameter(Mandatory = $true)][string] $Second
+    )
+
+    if ([string]::Equals($First, $Second, [StringComparison]::Ordinal)) { return $true }
+    if (-not [string]::Equals($First, $Second, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    [void](Get-Item -Force -LiteralPath $First -ErrorAction Stop)
+    [void](Get-Item -Force -LiteralPath $Second -ErrorAction Stop)
+    if ([string]::Equals($First, [IO.Path]::GetPathRoot($First), [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $firstParent = Split-Path -Parent $First
+    $secondParent = Split-Path -Parent $Second
+    if ([string]::IsNullOrWhiteSpace($firstParent) -or [string]::IsNullOrWhiteSpace($secondParent) -or
+        -not (Test-StandardValidationSameResolvedPath -First $firstParent -Second $secondParent)) {
+        return $false
+    }
+
+    # Directory enumeration exposes the actual entry names even where Windows
+    # PowerShell 5.1 Get-Item.FullName preserves the requested spelling.
+    $entries = @(Get-ChildItem -Force -LiteralPath $firstParent -ErrorAction Stop)
+    $resolvedNames = @()
+    foreach ($leaf in @((Split-Path -Leaf $First), (Split-Path -Leaf $Second))) {
+        $exact = @($entries | Where-Object { [string]::Equals($_.Name, $leaf, [StringComparison]::Ordinal) })
+        if ($exact.Count -eq 1) {
+            $resolvedNames += [string]$exact[0].Name
+            continue
+        }
+        $caseVariant = @($entries | Where-Object { [string]::Equals($_.Name, $leaf, [StringComparison]::OrdinalIgnoreCase) })
+        if ($caseVariant.Count -ne 1) { return $false }
+        $resolvedNames += [string]$caseVariant[0].Name
+    }
+    return [string]::Equals($resolvedNames[0], $resolvedNames[1], [StringComparison]::Ordinal)
+}
+
+function Assert-StandardValidationSkillValidatorReport {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string] $SkillId
+    )
+
+    foreach ($name in @('skill_dir', 'passed', 'errors', 'warnings', 'results')) {
+        if ($null -eq $Report.PSObject.Properties[$name]) { throw "skill-validator report is missing '$name'." }
+    }
+    $errors = $Report.errors
+    $warnings = $Report.warnings
+    foreach ($count in @($errors, $warnings)) {
+        if (($count -isnot [byte] -and $count -isnot [int16] -and $count -isnot [int32] -and $count -isnot [int64] -and
+             $count -isnot [uint16] -and $count -isnot [uint32] -and $count -isnot [uint64]) -or [decimal]$count -lt 0) {
+            throw "skill-validator report counts must be typed nonnegative integers for '$SkillId'."
+        }
+    }
+    $results = $Report.PSObject.Properties['results'].Value
+    if ($Report.skill_dir -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Report.skill_dir) -or
+        $Report.passed -isnot [bool] -or -not $Report.passed -or [decimal]$errors -ne 0 -or [decimal]$warnings -ne 0 -or
+        $results -isnot [array] -or $results.Count -eq 0) {
+        throw "skill-validator did not produce a clean candidate-bound report for '$SkillId'."
+    }
+    $reportedRoot = [IO.Path]::GetFullPath([string]$Report.skill_dir)
+    $expectedRoot = [IO.Path]::GetFullPath($SkillRoot)
+    $comparison = Get-StandardValidationPathComparison -Paths @($reportedRoot, $expectedRoot)
+    $rootsMatch = [string]::Equals($reportedRoot, $expectedRoot, $comparison)
+    if ($rootsMatch -and -not [string]::Equals($reportedRoot, $expectedRoot, [StringComparison]::Ordinal)) {
+        # The path-comparison helper is conservative for containment, so a
+        # differently cased equality also needs matching filesystem entries.
+        try { $rootsMatch = Test-StandardValidationSameResolvedPath -First $reportedRoot -Second $expectedRoot }
+        catch { $rootsMatch = $false }
+    }
+    if (-not $rootsMatch) {
+        throw "skill-validator report root does not match candidate Skill '$SkillId'."
+    }
+    foreach ($result in $results) {
+        if ($null -eq $result -or $null -eq $result.PSObject.Properties['level'] -or
+            $result.level -isnot [string] -or $result.level -cnotin @('pass', 'info')) {
+            throw "skill-validator returned a blocking or malformed result for '$SkillId'."
+        }
+    }
+    return $results
+}
+
 function Test-StandardValidationHasProperty {
     param(
         [Parameter(Mandatory = $true)][AllowNull()] $Object,

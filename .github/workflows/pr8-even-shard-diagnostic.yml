@@ -23,7 +23,7 @@ jobs:
           - runtime: ps51
             pester: 3.4.0
             index: 0
-            total: 181
+            total: 182
           - runtime: ps51
             pester: 3.4.0
             index: 4
@@ -31,7 +31,7 @@ jobs:
           - runtime: ps7
             pester: 4.10.1
             index: 0
-            total: 181
+            total: 182
           - runtime: ps7
             pester: 4.10.1
             index: 4
@@ -95,7 +95,7 @@ jobs:
             throw 'Diagnostic partition differs from reviewed exact shard assignment.'
           }
           $counts = @{
-            'tests/standard-validation-runner.Tests.ps1' = 48
+            'tests/standard-validation-runner.Tests.ps1' = 49
             'tests/bootstrap-ai-instructions.Tests.ps1' = 75
             'tests/skill-repository-standard.Tests.ps1' = 47
             'tests/skills-source-routing.Tests.ps1' = 11

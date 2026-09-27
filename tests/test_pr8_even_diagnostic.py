@@ -67,7 +67,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
             for position in (1, 2, 3):
                 script = self.job["steps"][position]["run"]
                 for key, value in {"pester": "4.10.1", "runtime": "ps7",
-                                   "index": "0", "total": "181"}.items():
+                                   "index": "0", "total": "182"}.items():
                     script = script.replace("${{ matrix." + key + " }}", value)
                 path = Path(directory) / f"step-{position}.ps1"
                 path.write_text(script, encoding="utf-8")
@@ -96,19 +96,19 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertEqual(EXPECTED_FILES, len(names))
         self.assertEqual(EXPECTED_SHA, hashlib.sha256("\n".join(names).encode()).hexdigest())
         self.assertEqual(
-            [("ps51", "3.4.0", "0", "181"),
+            [("ps51", "3.4.0", "0", "182"),
              ("ps51", "3.4.0", "4", "40"),
-             ("ps7", "4.10.1", "0", "181"),
+             ("ps7", "4.10.1", "0", "182"),
              ("ps7", "4.10.1", "4", "40")],
             [(item["runtime"], item["pester"], item["index"], item["total"]) for item in self.matrix],
         )
         self.assertIn(EXPECTED_SHA, self.inventory_script)
-        for runtime, index, total in (("ps51", 0, 181), ("ps51", 4, 40), ("ps7", 0, 181), ("ps7", 4, 40)):
+        for runtime, index, total in (("ps51", 0, 182), ("ps51", 4, 40), ("ps7", 0, 182), ("ps7", 4, 40)):
             result = self.run_inventory(runtime, index, total)
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertIn(f"index={index}/8 files=4 total={total} skipped=0", result.stdout)
         for changed in (names[:-1], names + ["tests/extra.Tests.ps1"], names + [names[0]], names[:-1] + ["tests/changed.Tests.ps1"]):
-            result = self.run_inventory("ps7", 0, 181, fake_git_names=changed)
+            result = self.run_inventory("ps7", 0, 182, fake_git_names=changed)
             self.assertNotEqual(0, result.returncode, result.stdout)
 
     @classmethod
