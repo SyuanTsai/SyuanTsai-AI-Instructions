@@ -3507,6 +3507,9 @@ function Resolve-SkillSpector {
         Join-Path ([IO.Path]::GetFullPath($diagnosticInstallRoot)) ("skillspector-failure-{0}" -f $script:ResolverRunId)
     } else { $null }
     $dependencyResolutionPath = $null
+    $tag = $null
+    $digest = $null
+    $closureHelperSha256 = $null
     trap {
         if (-not [string]::IsNullOrWhiteSpace($failureRoot)) {
             [void](New-Item -ItemType Directory -Path $failureRoot -Force -ErrorAction SilentlyContinue)
