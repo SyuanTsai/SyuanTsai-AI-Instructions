@@ -383,7 +383,7 @@ function Assert-StandardValidationSkillValidatorReport {
         $results -isnot [array] -or $results.Count -eq 0) {
         throw "skill-validator did not produce a clean candidate-bound report for '$SkillId'."
     }
-    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
     if (-not [IO.Path]::GetFullPath([string]$Report.skill_dir).Equals([IO.Path]::GetFullPath($SkillRoot), $comparison)) {
         throw "skill-validator report root does not match candidate Skill '$SkillId'."
     }

@@ -1154,6 +1154,19 @@ exit ([int]$LASTEXITCODE)
         $launchBindingIndex = $runnerSource.IndexOf('$launchBinding = Assert-StandardValidationSupervisorLaunchBinding', [StringComparison]::Ordinal)
         $productionReceiptIndex = $runnerSource.IndexOf('$runId = Get-StandardValidationProductionRunId', [StringComparison]::Ordinal)
         Assert-True ($launchBindingIndex -ge 0 -and $productionReceiptIndex -ge 0 -and $launchBindingIndex -lt $productionReceiptIndex) 'The authenticated launch binding must precede package-adapter receipt validation.'
+        # A malformed package report must fail in the shared function while a typed report keeps its result records.
+        . $script:RunnerPath -DefineFunctionsOnly -CandidateRoot $TestDrive -AdapterPath $script:RunnerPath `
+            -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test' -SourceRevision ('0' * 40) -BaseRevision ('0' * 40)
+        $skillRoot = Join-Path $TestDrive 'package-report-skill'
+        $report = [pscustomobject]@{ skill_dir = $skillRoot; passed = $true; errors = '0'; warnings = 0; results = @([pscustomobject]@{ level = 'pass' }) }
+        $malformedRejected = $false
+        try { [void](Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'package-report-skill') }
+        catch { $malformedRejected = $_.Exception.Message -match 'typed nonnegative integer' }
+        Assert-True $malformedRejected 'The central runner must reject coercible string counts in package reports.'
+        $report.errors = 0
+        $typedResults = @(Assert-StandardValidationSkillValidatorReport -Report $report -SkillRoot $skillRoot -SkillId 'package-report-skill')
+        Assert-Equal $typedResults.Count 1 'A typed clean package report must keep one result record.'
+        Assert-Equal $typedResults[0].level 'pass' 'The shared report rule must retain the original clean result.'
     }
 
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
