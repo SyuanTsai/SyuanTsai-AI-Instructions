@@ -48,6 +48,10 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertIn("ShardPartitionCount = 8", steps[3]["run"])
         self.assertIn("ExpectedFullShardCount = 32", steps[3]["run"])
         self.assertIn("OuterTimeoutSeconds = 2400", steps[3]["run"])
+        executor = (ROOT / "scripts/Invoke-PesterShardProcess.ps1").read_text(encoding="utf-8")
+        self.assertIn('Write-Host "Starting Pester shard $($shard.Name)"', executor)
+        self.assertIn('Write-Host "$($shard.Name) - Total:', executor)
+        self.assertIn("$processEvidencePath", executor)
 
     # Scenario: GitHub expands static matrix values into the PowerShell steps.
     # Purpose: A YAML-valid workflow must also contain parsable scripts before dispatch.
