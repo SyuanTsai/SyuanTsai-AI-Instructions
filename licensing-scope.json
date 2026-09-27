@@ -556,6 +556,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/routine_semantic_provider_invocation.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/safe-zip.psm1",
       "license": "Apache-2.0"
     },
