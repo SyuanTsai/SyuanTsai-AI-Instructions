@@ -436,6 +436,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-RoutineSemanticScan.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
       "license": "Apache-2.0"
     },
@@ -457,6 +461,10 @@
     },
     {
       "path": "scripts/Resolve-StandardValidationTool.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/RoutineSemanticScan.psm1",
       "license": "Apache-2.0"
     },
     {
@@ -517,6 +525,14 @@
     },
     {
       "path": "scripts/license-delivery.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_codex_provider.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_offline.py",
       "license": "Apache-2.0"
     },
     {
@@ -608,6 +624,26 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/routine-semantic-synthetic/bundle.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/consumer-plan.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/generate.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/synthetic-bundle.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/verification.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/semantic-raw-graph/alpha-skill/SKILL.md",
       "license": "Apache-2.0"
     },
@@ -657,6 +693,10 @@
     },
     {
       "path": "tests/production-skills-catalog.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/routine-semantic-scan.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -741,6 +781,14 @@
     },
     {
       "path": "tests/syp101-production-smoke-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_codex_provider.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_offline.py",
       "license": "Apache-2.0"
     },
     {
