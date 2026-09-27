@@ -22,6 +22,8 @@ HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 ARTIFACT_KEYS = ("consentRequestPath", "consentDecisionPath", "evidencePath", "publicKeyPath")
 MAX_INPUT = 16 * 1024 * 1024
+MAX_CLOSURE_FILE = 256 * 1024 * 1024
+TOOL_STEMS = ("policyReceipt", "toolchain", "childRunner", "preparationHelper", "preparation", "adapter")
 
 
 def require(condition: bool, code: str) -> None:
@@ -93,6 +95,20 @@ def absolute_file(path_text: Any, code: str) -> Path:
     return path
 
 
+def verify_file_hash(path_text: Any, expected: Any, code: str) -> None:
+    path = absolute_file(path_text, code + "_PATH")
+    expected_sha = hexdigest(expected, HEX64, code + "_SHA256")
+    require(path.is_file() and not path.is_symlink() and path.resolve(strict=True) == path,
+            code + "_MISSING_OR_UNSAFE")
+    size = path.stat().st_size
+    require(0 < size <= MAX_CLOSURE_FILE, code + "_SIZE")
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            hasher.update(chunk)
+    require(hasher.hexdigest() == expected_sha, code + "_HASH_MISMATCH")
+
+
 def prepare_bindings(plan: dict[str, Any], plan_data: bytes, prepared: dict[str, Any], prepared_data: bytes,
                      bundle_path: Path) -> dict[str, Any]:
     require(plan.get("schemaVersion") == 1 and type(plan.get("schemaVersion")) is int and
@@ -126,9 +142,25 @@ def prepare_bindings(plan: dict[str, Any], plan_data: bytes, prepared: dict[str,
     runner_sha = hexdigest(authority.get("runnerSha256"), HEX64, "AUTHORITY_RUNNER")
     for name in ("archivePath", "runnerPath"):
         absolute_file(authority.get(name), "AUTHORITY_" + name.upper())
+    verify_file_hash(authority.get("archivePath"), archive_sha, "AUTHORITY_ARCHIVE")
+    verify_file_hash(authority.get("runnerPath"), runner_sha, "AUTHORITY_RUNNER")
     require(type(authority.get("revision")) is str and authority["revision"], "AUTHORITY_REVISION")
-    require(len(tools) > 0, "TOOLS_EMPTY")
+    required_tool_fields = {name for stem in TOOL_STEMS for name in (stem + "Path", stem + "Sha256")}
+    required_tool_fields.add("receipts")
+    require(set(tools) == required_tool_fields, "TOOLS_FIELDS")
     tool_receipt_sha = hexdigest(tools.get("policyReceiptSha256"), HEX64, "TOOL_POLICY_RECEIPT")
+    for stem in TOOL_STEMS:
+        verify_file_hash(tools.get(stem + "Path"), tools.get(stem + "Sha256"), "TOOL_" + stem.upper())
+    receipts = tools.get("receipts")
+    require(type(receipts) is list and len(receipts) == 4, "TOOL_RECEIPTS_MISSING")
+    seen_tools: set[str] = set()
+    for receipt in receipts:
+        require(type(receipt) is dict and set(receipt) == {"tool", "path", "sha256"} and
+                type(receipt["tool"]) is str and receipt["tool"] and receipt["tool"] not in seen_tools,
+                "TOOL_RECEIPT_FIELDS")
+        seen_tools.add(receipt["tool"])
+        verify_file_hash(receipt["path"], receipt["sha256"], "TOOL_RECEIPT")
+    require(seen_tools == {"skillspector", "skill-validator", "skill-tools", "pester"}, "TOOL_RECEIPTS_SCOPE")
     expected_binding = {
         "runId": run_id, "consumerPlanSha256": digest(plan_data), "sourceRevision": revision,
         "sourceBaseRevision": base, "sourceTree": tree, "consumerCandidateId": consumer_id,

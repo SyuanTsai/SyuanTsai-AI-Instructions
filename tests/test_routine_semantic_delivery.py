@@ -35,17 +35,34 @@ class DeliveryFixtureTests(unittest.TestCase):
         for key, path in self.artifact_paths.items():
             path.write_text('fixture-' + key, encoding="utf-8")
         self.bundle_path.write_text("fixture-bundle", encoding="utf-8")
+        def closure_file(name: str) -> tuple[str, str]:
+            path = self.root / name
+            data = ("fixture-closure-" + name).encode("utf-8")
+            path.write_bytes(data)
+            return str(path), delivery.digest(data)
+
+        authority_archive_path, authority_archive_sha = closure_file("authority.zip")
+        authority_runner_path, authority_runner_sha = closure_file("runner.ps1")
+        tools: dict[str, object] = {}
+        for stem in delivery.TOOL_STEMS:
+            path, sha = closure_file(stem + ".bin")
+            tools[stem + "Path"] = path
+            tools[stem + "Sha256"] = sha
+        tools["receipts"] = [
+            {"tool": name, "path": path, "sha256": sha}
+            for name in ("skillspector", "skill-validator", "skill-tools", "pester")
+            for path, sha in [closure_file("receipt-" + name + ".json")]
+        ]
         self.plan = {
             "schemaVersion": 1, "artifactType": "standard-validation-consumer-run-plan-v1",
             "runId": "a" * 32,
             "source": {"repository": "https://example.test/source.git", "revision": "b" * 40,
                        "baseRevision": "c" * 40, "tree": "d" * 40},
             "candidate": {"candidateId": "e" * 64, "contentSha256": "f" * 64},
-            "authority": {"revision": "1" * 40, "archivePath": str(self.root / "authority.zip"),
-                          "archiveSha256": "2" * 64, "runnerPath": str(self.root / "runner.ps1"),
-                          "runnerSha256": "3" * 64},
-            "tools": {"policyReceiptPath": str(self.root / "tool-receipt.json"),
-                      "policyReceiptSha256": "4" * 64},
+            "authority": {"revision": "1" * 40, "archivePath": authority_archive_path,
+                          "archiveSha256": authority_archive_sha, "runnerPath": authority_runner_path,
+                          "runnerSha256": authority_runner_sha},
+            "tools": tools,
             "semantic": {**{key: str(path) for key, path in self.artifact_paths.items()},
                          "publicKeyId": "fixture-key"},
         }
@@ -171,6 +188,22 @@ class DeliveryFixtureTests(unittest.TestCase):
         write_json(self.prepared_path, self.prepared)
         self.manifest()
         with self.assertRaisesRegex(ValueError, "DELIVERY_CLAIM_COLLIDES_WITH_RESUME"):
+            self.verify()
+
+    def test_UnitT47_executable_closure_byte_tamper_rejects(self) -> None:
+        # Scenario: An authority or resolved tool file changes after manifest creation.
+        # Purpose: Check actual executable bytes, not only the plan's declared hashes.
+        self.manifest()
+        runner = Path(self.plan["authority"]["runnerPath"])
+        original = runner.read_bytes()
+        runner.write_bytes(b"tampered-runner")
+        with self.assertRaisesRegex(ValueError, "AUTHORITY_RUNNER_HASH_MISMATCH"):
+            self.verify()
+        self.assertFalse(self.claim_path.exists())
+        runner.write_bytes(original)
+        tool = Path(self.plan["tools"]["toolchainPath"])
+        tool.write_bytes(b"tampered-tool")
+        with self.assertRaisesRegex(ValueError, "TOOL_TOOLCHAIN_HASH_MISMATCH"):
             self.verify()
 
     def test_UnitT50_independent_expected_digest_is_required(self) -> None:
