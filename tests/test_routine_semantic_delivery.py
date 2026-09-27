@@ -273,6 +273,62 @@ class DeliveryFixtureTests(unittest.TestCase):
         binding = json.loads(result.stdout)
         self.assertEqual(binding, self.prepared["deliveryBinding"])
 
+    def test_InterT30_real_cli_rejects_five_delivery_failures(self) -> None:
+        # Scenario: The actual CLI receives missing, partial, changed, cross-run or expired delivery.
+        # Purpose: Verify that every required failure exits 10 before an output or claim is created.
+        if shutil.which("pwsh") is None or shutil.which("python") is None:
+            self.skipTest("CLI runtimes unavailable")
+        cli = Path(__file__).resolve().parents[1] / "scripts" / "Invoke-RoutineSemanticScan.ps1"
+        output = self.root / "rejected-verification.json"
+        command = ["pwsh", "-NoProfile", "-File", str(cli), "-Mode", "VerifyDelivery",
+                   "-PlanPath", str(self.plan_path), "-PreparedPath", str(self.prepared_path),
+                   "-BundlePath", str(self.bundle_path), "-ManifestPath", str(self.manifest_path),
+                   "-ProtectedExpectedPath", str(self.expected_path),
+                   "-DeliveryClaimPath", str(self.claim_path), "-OutputPath", str(output)]
+
+        def rejected(label: str) -> None:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 10, f"{label}: {result.stderr}")
+            self.assertFalse(output.exists(), label)
+            self.assertFalse(self.claim_path.exists(), label)
+
+        self.manifest()
+        evidence = self.artifact_paths["evidencePath"]
+        original = evidence.read_bytes()
+        evidence.unlink()
+        rejected("missing")
+        evidence.write_bytes(original)
+
+        self.manifest()
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        del manifest["artifacts"]["publicKeyPath"]
+        manifest_data = write_json(self.manifest_path, manifest)
+        expected = json.loads(self.expected_path.read_text(encoding="utf-8"))
+        expected["manifestSha256"] = delivery.digest(manifest_data)
+        write_json(self.expected_path, expected)
+        rejected("partial")
+
+        self.manifest()
+        evidence.write_bytes(b"changed-evidence")
+        rejected("tamper")
+        evidence.write_bytes(original)
+
+        self.manifest()
+        expected = json.loads(self.expected_path.read_text(encoding="utf-8"))
+        expected["runId"] = "9" * 32
+        write_json(self.expected_path, expected)
+        rejected("cross-run")
+
+        self.manifest()
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest["issuedAtUtc"] = "2026-01-01T00:00:00Z"
+        manifest["expiresAtUtc"] = "2026-01-01T00:30:00Z"
+        manifest_data = write_json(self.manifest_path, manifest)
+        expected = json.loads(self.expected_path.read_text(encoding="utf-8"))
+        expected["manifestSha256"] = delivery.digest(manifest_data)
+        write_json(self.expected_path, expected)
+        rejected("expired")
+
 
 if __name__ == "__main__":
     unittest.main()
