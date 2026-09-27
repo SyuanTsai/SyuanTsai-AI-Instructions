@@ -230,7 +230,7 @@ function Test-RoutineSemanticAuthorization {
     foreach ($name in @('provider', 'account', 'modelFamily', 'purpose')) { [void](Assert-RoutineSemanticString (Get-RoutineSemanticProperty $grant $name) "grant $name") }
     foreach ($name in @('dataHandlingSha256', 'approvalEvidenceSha256')) { [void](Assert-RoutineSemanticString (Get-RoutineSemanticProperty $grant $name) "grant $name" '^[0-9a-f]{64}$') }
     $maxBytes = Assert-RoutineSemanticInteger (Get-RoutineSemanticProperty $grant 'maxSourceBytes') 'maxSourceBytes' 1 2097152
-    $maxCalls = Assert-RoutineSemanticInteger (Get-RoutineSemanticProperty $grant 'maxCalls') 'maxCalls' 1 48
+    $maxCalls = Assert-RoutineSemanticInteger (Get-RoutineSemanticProperty $grant 'maxCalls') 'maxCalls' 1 78
     $notBefore = Get-RoutineSemanticUtcTime (Get-RoutineSemanticProperty $grant 'notBefore') 'grant notBefore'
     $grantExpiry = Get-RoutineSemanticUtcTime (Get-RoutineSemanticProperty $grant 'expiresAt') 'grant expiresAt'
     $nowUtc = [DateTimeOffset]$Now.ToUniversalTime()
@@ -438,6 +438,8 @@ function New-RoutineSemanticPreparation {
         [Parameter(Mandatory = $true)] [string] $DataHandlingSha256,
         [Parameter(Mandatory = $true)] [string] $ToolReceiptSha256,
         [Parameter(Mandatory = $true)] [int] $PlannedCalls,
+        [Parameter(Mandatory = $true)] $WorkManifest,
+        [Parameter(Mandatory = $true)] [string] $WorkManifestSha256,
         [Parameter(Mandatory = $true)] [int] $MaximumBytes,
         [AllowNull()] $GrantEnvelope,
         [AllowNull()] $RevocationEnvelope,
@@ -454,7 +456,49 @@ function New-RoutineSemanticPreparation {
     $inventory = Get-RoutineSemanticGitInventory -RepositoryRoot $RepositoryRoot -Revision $Revision -PathPrefixes $PathPrefixes -MaximumBytes $MaximumBytes
     [void](Assert-RoutineSemanticString $ToolReceiptSha256 'toolReceiptSha256' '^[0-9a-f]{64}$')
     [void](Assert-RoutineSemanticString $DataHandlingSha256 'dataHandlingSha256' '^[0-9a-f]{64}$')
-    [void](Assert-RoutineSemanticInteger $PlannedCalls 'plannedCalls' 1 48)
+    [void](Assert-RoutineSemanticInteger $PlannedCalls 'plannedCalls' 1 78)
+    [void](Assert-RoutineSemanticString $WorkManifestSha256 'workManifestSha256' '^[0-9a-f]{64}$')
+    $workVersion = Get-RoutineSemanticProperty $WorkManifest 'schemaVersion'
+    $workFileCount = Get-RoutineSemanticProperty $WorkManifest 'sourceFileCount'
+    $workSourceBytes = Get-RoutineSemanticProperty $WorkManifest 'sourceBytes'
+    if (($workVersion -isnot [int] -and $workVersion -isnot [long]) -or $workVersion -ne 1 -or
+        (Get-RoutineSemanticProperty $WorkManifest 'artifactType') -cne 'routine-semantic-fake-preflight-v1' -or
+        (Get-RoutineSemanticProperty $WorkManifest 'sourceRevision') -cne $Revision -or
+        ($workFileCount -isnot [int] -and $workFileCount -isnot [long]) -or $workFileCount -ne @($inventory.files).Count -or
+        ($workSourceBytes -isnot [int] -and $workSourceBytes -isnot [long]) -or $workSourceBytes -ne $inventory.sourceBytes -or
+        (Get-RoutineSemanticProperty $WorkManifest 'status') -cne 'READY_FAKE_ONLY' -or
+        (Get-RoutineSemanticProperty $WorkManifest 'egressAuthorized') -cne $false -or
+        (Get-RoutineSemanticProperty $WorkManifest 'ciAdmission') -cne 'BLOCKED' -or
+        (Get-RoutineSemanticProperty $WorkManifest 'releaseEligible') -cne $false) {
+        throw 'WORK_MANIFEST_BINDING_INVALID|Frozen work manifest does not match the selected source and fixture boundary.'
+    }
+    [void](Assert-RoutineSemanticString (Get-RoutineSemanticProperty $WorkManifest 'promptManifestSha256') 'promptManifestSha256' '^[0-9a-f]{64}$')
+    $requiredCalls = Assert-RoutineSemanticInteger (Get-RoutineSemanticProperty $WorkManifest 'requiredCalls') 'requiredCalls' 1 78
+    $manifestCap = Assert-RoutineSemanticInteger (Get-RoutineSemanticProperty $WorkManifest 'maximumCalls') 'maximumCalls' 1 78
+    $calls = @($WorkManifest.calls)
+    if ($requiredCalls -ne $calls.Count -or $requiredCalls -ne (3 * @($inventory.files).Count) -or
+        $requiredCalls -ne $PlannedCalls -or $manifestCap -lt $requiredCalls) {
+        throw 'WORK_CALL_COUNT_MISMATCH|Manifest, request, and complete analyzer matrix must agree.'
+    }
+    $selected = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($file in @($inventory.files)) { $selected.Add([string]$file.path, [string]$file.sha256) }
+    $analyzers = @('semantic_developer_intent', 'semantic_quality_policy', 'semantic_security_discovery')
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($call in $calls) {
+        $analyzer = [string](Get-RoutineSemanticProperty $call 'analyzerId')
+        $path = [string](Get-RoutineSemanticProperty $call 'sourcePath')
+        if ($analyzer -cnotin $analyzers -or -not $selected.ContainsKey($path) -or
+            (Get-RoutineSemanticProperty $call 'sourceSha256') -cne $selected[$path] -or
+            -not $seen.Add("$analyzer`n$path")) {
+            throw 'WORK_COVERAGE_INVALID|Work is missing, repeated, or outside the frozen source.'
+        }
+        [void](Assert-RoutineSemanticString (Get-RoutineSemanticProperty $call 'promptSha256') 'promptSha256' '^[0-9a-f]{64}$')
+    }
+    foreach ($path in $selected.Keys) {
+        foreach ($analyzer in $analyzers) {
+            if (-not $seen.Contains("$analyzer`n$path")) { throw 'WORK_COVERAGE_INVALID|Analyzer work is incomplete.' }
+        }
+    }
     foreach ($item in @(@{ value = $Provider; name = 'provider' }, @{ value = $Account; name = 'account' }, @{ value = $ModelFamily; name = 'modelFamily' }, @{ value = $Purpose; name = 'purpose' })) {
         [void](Assert-RoutineSemanticString $item.value $item.name)
     }
@@ -462,7 +506,7 @@ function New-RoutineSemanticPreparation {
         'routine-semantic-candidate-v1', $repositoryValue, $Revision,
         $inventory.inputInventorySha256, $ToolReceiptSha256, $DataCategory,
         $Provider, $Account, $ModelFamily, $Purpose, $DataHandlingSha256,
-        [string]$inventory.sourceBytes, [string]$PlannedCalls
+        [string]$inventory.sourceBytes, [string]$PlannedCalls, $WorkManifestSha256
     ) -join "`n"
     $candidateId = Get-RoutineSemanticSha256 ([Text.UTF8Encoding]::new($false)).GetBytes($candidateText)
     $candidate = [pscustomobject][ordered]@{
@@ -490,7 +534,7 @@ function New-RoutineSemanticPreparation {
         sourceInventory = $inventory
         decision = $decision
         route = [pscustomobject][ordered]@{ provider = $Provider; account = $Account; modelFamily = $ModelFamily; purpose = $Purpose; dataHandlingSha256 = $DataHandlingSha256 }
-        executionPlan = [pscustomobject][ordered]@{ plannedCalls = $PlannedCalls; toolReceiptSha256 = $ToolReceiptSha256; analyzerSet = @(); providerTextInventory = @(); maximumSourceBytes = $MaximumBytes }
+        executionPlan = [pscustomobject][ordered]@{ plannedCalls = $PlannedCalls; workManifestSha256 = $WorkManifestSha256; toolReceiptSha256 = $ToolReceiptSha256; analyzerSet = @($analyzers); providerTextInventory = @(); maximumSourceBytes = $MaximumBytes }
         payloadComplete = $false
         scanStatus = 'NOT_RUN'
         ciAdmission = 'BLOCKED'

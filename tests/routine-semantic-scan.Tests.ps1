@@ -244,6 +244,23 @@ Describe 'routine semantic standing grant and run derivation' {
         }
         finally { $case.Key.Dispose() }
     }
+
+    # Scenario: A fixture grant explicitly covers the frozen 78-work budget.
+    # Purpose: 78 is a bounded development decision; 79 cannot be silently split or admitted.
+    It 'UnitT100_bounds_explicit_fixture_grant_at_78_calls' {
+        $case = New-TestCase
+        try {
+            $case.Grant.maxCalls = 78
+            $case.Candidate.plannedCalls = 78
+            $decision = Invoke-TestDecision -Case $case
+            if (-not $decision.scopeAllowed -or $decision.egressAuthorized -or $decision.releaseEligible) { throw '78-call fixture decision crossed its boundary.' }
+            $case.Candidate.plannedCalls = 79
+            $failed = $false
+            try { [void](Invoke-TestDecision -Case $case) } catch { $failed = $true }
+            if (-not $failed) { throw '79 calls were accepted by a 78-call fixture grant.' }
+        }
+        finally { $case.Key.Dispose() }
+    }
 }
 
 Describe 'routine semantic immutable Git input preparation' {
@@ -316,10 +333,27 @@ Describe 'routine semantic immutable Git input preparation' {
                 RepositoryRoot = $fixture.Root; Revision = $fixture.Revision; Repository = 'https://example.test/repo.git'
                 PathPrefixes = @('skills/'); DataCategory = 'skill-instructions'; Provider = 'fixture-provider'
                 Account = 'fixture-account'; ModelFamily = 'fixture-model'; Purpose = 'routine semantic review'
-                DataHandlingSha256 = ('a' * 64); ToolReceiptSha256 = ('f' * 64); PlannedCalls = 1; MaximumBytes = 2048
+                DataHandlingSha256 = ('a' * 64); ToolReceiptSha256 = ('f' * 64); PlannedCalls = 3; MaximumBytes = 2048
                 GrantEnvelope = (New-LocalEnvelope $grant $key); RevocationEnvelope = (New-LocalEnvelope $registry $key)
                 FixturePublicKeyXml = $key.ToXmlString($false); DevelopmentHarness = $true; Now = $now
             }
+            $sourceSha = 'a0d43e94b57a5cc0d44b22288720eab2f42a2e7e17ccb2f55f51ae2953cc42a4'
+            $calls = @('semantic_developer_intent', 'semantic_quality_policy', 'semantic_security_discovery') | ForEach-Object {
+                [pscustomobject]@{ analyzerId = $_; sourcePath = 'skills/example/SKILL.md'; sourceSha256 = $sourceSha; promptSha256 = ('d' * 64) }
+            }
+            $workManifest = [pscustomobject]@{
+                schemaVersion = 1; artifactType = 'routine-semantic-fake-preflight-v1'
+                sourceRevision = $fixture.Revision; sourceFileCount = 1; sourceBytes = 21
+                promptManifestSha256 = ('e' * 64); requiredCalls = 3; maximumCalls = 3
+                status = 'READY_FAKE_ONLY'; calls = $calls; egressAuthorized = $false
+                ciAdmission = 'BLOCKED'; releaseEligible = $false
+            }
+            $workManifestPath = Join-Path $fixture.Root 'work-manifest.json'
+            [IO.File]::WriteAllText($workManifestPath, ($workManifest | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+            $params.WorkManifest = $workManifest
+            $manifestHash = [Security.Cryptography.SHA256]::Create()
+            try { $params.WorkManifestSha256 = ([BitConverter]::ToString($manifestHash.ComputeHash([IO.File]::ReadAllBytes($workManifestPath)))).Replace('-', '').ToLowerInvariant() }
+            finally { $manifestHash.Dispose() }
             $plan = New-RoutineSemanticPreparation @params
             if ($plan.sourceInventory.sourceBytes -ne 21 -or $plan.sourceInventory.files.Count -ne 1) { throw 'Controller did not derive actual committed source.' }
             if ($plan.decision.candidateId -cne $plan.candidateId -or $plan.decision.inputInventorySha256 -cne $plan.sourceInventory.inputInventorySha256) { throw 'Plan bindings are inconsistent.' }
@@ -353,7 +387,7 @@ Describe 'routine semantic immutable Git input preparation' {
                 -FixturePublicKeyPath $keyPath -PathPrefixes 'skills/' -DataCategory 'skill-instructions' `
                 -Provider 'fixture-provider' -Account 'fixture-account' -ModelFamily 'fixture-model' `
                 -Purpose 'routine semantic review' -DataHandlingSha256 ('a' * 64) -ToolReceiptSha256 ('f' * 64) `
-                -PlannedCalls 1 -MaximumBytes 2048 -DevelopmentHarness
+                -PlannedCalls 3 -MaximumBytes 2048 -WorkManifestPath $workManifestPath -DevelopmentHarness
             if ($LASTEXITCODE -ne 0) { throw 'Prepare entrypoint failed for a complete fixture.' }
             $cliPlan = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
             if ($cliPlan.consumerBinding.runId -cne ('3' * 32) -or $cliPlan.consumerBinding.candidateId -cne ('4' * 64) -or
@@ -369,6 +403,21 @@ Describe 'routine semantic immutable Git input preparation' {
             $mismatchFailed = $false
             try { [void](New-RoutineSemanticPreparation @params) } catch { $mismatchFailed = $_.Exception.Message -like 'SOURCE_REPOSITORY_MISMATCH*' }
             if (-not $mismatchFailed) { throw 'Caller repository mismatch passed preparation.' }
+            $params.Repository = 'https://example.test/repo.git'
+            $params.PlannedCalls = 2
+            $shortFailed = $false
+            try { [void](New-RoutineSemanticPreparation @params) } catch { $shortFailed = $_.Exception.Message -like 'WORK_CALL_COUNT_MISMATCH*' }
+            if (-not $shortFailed) { throw 'Claimed two calls accepted a complete three-work manifest.' }
+            $params.PlannedCalls = 3
+            $params.WorkManifest.calls = @($calls | Select-Object -First 2)
+            $missingFailed = $false
+            try { [void](New-RoutineSemanticPreparation @params) } catch { $missingFailed = $_.Exception.Message -like 'WORK_*' }
+            if (-not $missingFailed) { throw 'A manifest missing one analyzer work item was accepted.' }
+            $params.WorkManifest.calls = $calls
+            $params.WorkManifest.calls[0].sourceSha256 = '9' * 64
+            $changedFailed = $false
+            try { [void](New-RoutineSemanticPreparation @params) } catch { $changedFailed = $_.Exception.Message -like 'WORK_COVERAGE_INVALID*' }
+            if (-not $changedFailed) { throw 'Changed selected source hash was accepted.' }
         }
         finally { $key.Dispose() }
     }

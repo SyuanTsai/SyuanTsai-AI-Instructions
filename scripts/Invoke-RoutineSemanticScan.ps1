@@ -21,6 +21,7 @@ param(
     [string] $Purpose,
     [string] $DataHandlingSha256,
     [string] $ToolReceiptSha256,
+    [string] $WorkManifestPath,
     [int] $PlannedCalls,
     [int] $MaximumBytes,
     [switch] $DevelopmentHarness
@@ -83,7 +84,8 @@ try {
         @{ value = $ModelFamily; name = 'ModelFamily' },
         @{ value = $Purpose; name = 'Purpose' },
         @{ value = $DataHandlingSha256; name = 'DataHandlingSha256' },
-        @{ value = $ToolReceiptSha256; name = 'ToolReceiptSha256' }
+        @{ value = $ToolReceiptSha256; name = 'ToolReceiptSha256' },
+        @{ value = $WorkManifestPath; name = 'WorkManifestPath' }
     )) {
         if ([string]::IsNullOrWhiteSpace([string]$entry.value)) { throw "PREPARE_INPUT_MISSING|$($entry.name) is required." }
     }
@@ -100,6 +102,7 @@ try {
     }
     $grant = (Read-RoutineSemanticJsonFile -Path $GrantPath -Context 'fixture grant envelope').value
     $revocations = (Read-RoutineSemanticJsonFile -Path $RevocationPath -Context 'fixture revocation envelope').value
+    $workRecord = Read-RoutineSemanticJsonFile -Path $WorkManifestPath -Context 'frozen work manifest'
     $keyItem = Get-Item -LiteralPath $FixturePublicKeyPath -Force
     if ($keyItem.PSIsContainer -or (($keyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $keyItem.Length -gt 16384) {
         throw 'FIXTURE_KEY_INVALID|Fixture public key file is invalid.'
@@ -111,6 +114,7 @@ try {
         -DataCategory $DataCategory -Provider $Provider -Account $Account `
         -ModelFamily $ModelFamily -Purpose $Purpose -DataHandlingSha256 $DataHandlingSha256 `
         -ToolReceiptSha256 $ToolReceiptSha256 -PlannedCalls $PlannedCalls `
+        -WorkManifest $workRecord.value -WorkManifestSha256 $workRecord.sha256 `
         -MaximumBytes $MaximumBytes -GrantEnvelope $grant -RevocationEnvelope $revocations `
         -FixturePublicKeyXml $publicKeyXml -DevelopmentHarness
     $prepared | Add-Member -NotePropertyName consumerBinding -NotePropertyValue ([pscustomobject][ordered]@{
