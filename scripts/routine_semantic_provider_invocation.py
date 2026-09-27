@@ -22,7 +22,9 @@ from routine_semantic_prompt_envelope import build_envelopes
 DESTINATION = "https://api.openai.com/v1/responses"
 PURPOSE = "routine semantic review"
 DATA_CATEGORY = "skill-instructions"
-MAX_CALLS = 48
+# Offline candidate budget covers the complete 26-file, three-analyzer inventory.
+# It is not a grant to send any source content to a provider.
+MAX_CALLS = 78
 MAX_OUTPUT_TOKENS = 2048
 BODY_FIELDS = {"model", "input", "tools", "tool_choice", "max_output_tokens", "truncation", "store"}
 

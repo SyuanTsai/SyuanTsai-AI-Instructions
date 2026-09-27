@@ -127,7 +127,7 @@ class PromptEnvelopeTests(unittest.TestCase):
             self.assertEqual(entry["sourcePath"], "skills/example/SKILL.md")
 
     def test_UnitT50_stub_ledger_rejects_mutation_and_budget_increase(self):
-        # Scenario: A raw response changes, or caller asks above the standing 48-call cap.
+        # Scenario: A raw response changes, or caller asks above the 78-call candidate cap.
         # Purpose: Keep local evidence immutable and avoid a silent scope expansion.
         result = invoke_stub_only(self.inventory, self.preflight, self.prompts, self.repo,
                                   model="candidate-model", maximum_calls=3)
@@ -153,7 +153,68 @@ class PromptEnvelopeTests(unittest.TestCase):
             verify_stub_ledger(result)
         with self.assertRaises(CandidateError):
             invoke_stub_only(self.inventory, self.preflight, self.prompts, self.repo,
-                             model="candidate-model", maximum_calls=49)
+                             model="candidate-model", maximum_calls=79)
+
+    def test_UnitT55_full_coverage_candidate_cap_remains_offline_and_blocked(self):
+        # Scenario: The candidate budget allows the 78 calls required by the frozen inventory.
+        # Purpose: A complete offline candidate is possible without granting real egress or CI admission.
+        self.preflight.write_text(json.dumps(preflight(self.inventory, self.prompts, self.repo, 78)), encoding="utf-8")
+        result = invoke_stub_only(self.inventory, self.preflight, self.prompts, self.repo,
+                                  model="candidate-model", maximum_calls=78)
+        self.assertEqual(result["maximumCalls"], 78)
+        self.assertEqual(result["requestCount"], 3)
+        self.assertTrue(verify_stub_ledger(result))
+        self.assertEqual(result["realProviderCalls"], 0)
+        self.assertEqual(result["ciAdmission"], "BLOCKED")
+
+    def test_InterT20_seventy_eight_stub_calls_cover_every_synthetic_work_item(self):
+        # Scenario: Twenty-six frozen files each have all three analyzer prompts.
+        # Purpose: Exercise the complete candidate call count without a real transport or admission.
+        files = [self.repo / "skills/example/SKILL.md"]
+        for number in range(25):
+            path = self.repo / f"skills/example/file-{number:02}.txt"
+            path.write_text(f"synthetic source {number}\n", encoding="utf-8")
+            files.append(path)
+        subprocess.run(["git", "-C", str(self.repo), "add", "skills"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Test",
+                        "-c", "user.email=test@example.test", "commit", "-qm", "complete fixture"], check=True)
+        revision = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        inventory_items = []
+        prompt_items = []
+        for source in sorted(files):
+            relative = source.relative_to(self.repo).as_posix()
+            blob = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse",
+                                            f"HEAD:{relative}"], text=True).strip()
+            raw = subprocess.check_output(["git", "-C", str(self.repo), "cat-file", "blob", blob])
+            inventory_items.append({"path": relative, "gitBlobSha1": blob, "bytes": len(raw),
+                                    "sha256": hashlib.sha256(raw).hexdigest(),
+                                    "changed": True, "skillInstructions": source.name == "SKILL.md"})
+        for old in self.prompts.iterdir():
+            old.unlink()
+        for analyzer in ("semantic_developer_intent", "semantic_quality_policy",
+                         "semantic_security_discovery"):
+            for source in sorted(files):
+                name = f"{analyzer}-{source.name}.txt"
+                raw = f"Synthetic only\n## File: {source.name}\n{analyzer}".encode("utf-8")
+                (self.prompts / name).write_bytes(raw)
+                prompt_items.append({"file": name, "skill": "example", "analyzerId": analyzer,
+                                     "promptSha256": hashlib.sha256(raw).hexdigest(),
+                                     "promptBytes": len(raw), "model": "diagnostic-local",
+                                     "maxOutputTokensRequested": 2048})
+        self.inventory.write_text(json.dumps({"candidate": revision, "items": inventory_items}), encoding="utf-8")
+        self.prompts.joinpath("manifest.json").write_text(json.dumps({"schemaVersion": 1,
+            "sourceRevision": revision, "sourceInventorySha256": hashlib.sha256(self.inventory.read_bytes()).hexdigest(),
+            "sourceFileCount": 26, "sourceBytes": sum(item["bytes"] for item in inventory_items),
+            "promptCandidates": prompt_items, "realProviderCalls": 0,
+            "egressAuthorized": False}), encoding="utf-8")
+        self.preflight.write_text(json.dumps(preflight(self.inventory, self.prompts, self.repo, 78)), encoding="utf-8")
+        result = invoke_stub_only(self.inventory, self.preflight, self.prompts, self.repo,
+                                  model="candidate-model", maximum_calls=78)
+        self.assertEqual(result["requestCount"], 78)
+        self.assertEqual(len({(call["analyzerId"], call["sourcePath"]) for call in result["calls"]}), 78)
+        self.assertTrue(verify_stub_ledger(result))
+        self.assertEqual(result["realProviderCalls"], 0)
+        self.assertEqual(result["ciAdmission"], "BLOCKED")
 
     def test_UnitT60_stub_path_never_opens_network_socket(self):
         # Scenario: The local stub candidate executes with socket connections forbidden.

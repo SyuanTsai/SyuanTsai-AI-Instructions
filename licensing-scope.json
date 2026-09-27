@@ -556,6 +556,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/routine_semantic_ledger_bridge.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/routine_semantic_provider_invocation.py",
       "license": "Apache-2.0"
     },
@@ -821,6 +825,10 @@
     },
     {
       "path": "tests/test_routine_semantic_offline.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_ledger_bridge.py",
       "license": "Apache-2.0"
     },
     {
