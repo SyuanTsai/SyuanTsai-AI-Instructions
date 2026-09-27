@@ -91,6 +91,8 @@ class SyntheticCodexProvider:
             "-c", "approval_policy=never",
             "-c", "forced_login_method=chatgpt",
             "-c", "apps._default.enabled=false",
+            "-c", "features.shell_tool=false",
+            "-c", "web_search=disabled",
         ]
         self.last_ledger = None
         with tempfile.TemporaryDirectory(prefix="routine-semantic-synthetic-") as scratch:
