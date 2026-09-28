@@ -3859,6 +3859,7 @@ jobs:
           done
 '@
         Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job) 'Exact head/result-bound check reporting must be recognized.'
+        Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job.Replace("`r`n", "`n").Replace("`n", "`r`n")) 'CRLF check-report metadata must preserve the exact same head/result binding.'
         Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job.Replace('needs: [canonical]', "needs:`n      - canonical")) 'Multiline needs must preserve the same exact result binding.'
         foreach ($unsafe in @(
             $job.Replace('/check-runs', '/releases'),
@@ -3885,6 +3886,13 @@ jobs:
         Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1') 1 'Reviewed dynamic canonical execution must count once.'
         foreach ($unsafe in @(
             $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', 'TRUSTED_SUPERVISOR_COMMIT: ${{ github.event.pull_request.head.sha }}'),
+            $workflow.Replace('      - name: Set up approved Go runtime', "      - shell: bash`n        run: echo 'exit 0' > `"`$RUNNER_TEMP/standard-v1-trusted-supervisor/scripts/Validate.ps1`"`n`n      - name: Set up approved Go runtime"),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', "GITHUB_ENV: ignored.env`n          TRUSTED_SUPERVISOR_COMMIT: `${{ github.sha }}"),
+            $workflow.Replace('      - name: Materialize protected validation supervisor', "      - if: false`n        name: Materialize protected validation supervisor"),
+            $workflow.Replace('      - name: Materialize protected validation supervisor', "      - shell: bash`n        run: echo candidate/bin >> `"`$GITHUB_PATH`"`n`n      - name: Materialize protected validation supervisor"),
+            $workflow.Replace('PUSH_BEFORE_SHA: ${{ github.event.before }}', 'push_before_sha: ${{ github.event.before }}'),
+            $workflow.Replace('        id: canonical-validation', "        id: canonical-validation`n        if: false"),
+            $workflow.Replace('    name: Darktide Translate Standard v1', "    name: Darktide Translate Standard v1`n    env:`n      TRUSTED_SUPERVISOR_ROOT: candidate"),
             $workflow.Replace("Join-Path `$env:TRUSTED_SUPERVISOR_ROOT 'scripts/Validate.ps1'", "Join-Path `$env:GITHUB_WORKSPACE 'scripts/Validate.ps1'"),
             $workflow.Replace('& $trustedValidator @validatorArguments', '$trustedValidator = ''candidate.ps1''; & $trustedValidator @validatorArguments'),
             $workflow.Replace('& $trustedValidator @validatorArguments', "`$validatorArguments['RepositoryRoot']='other'; & `$trustedValidator @validatorArguments"),
@@ -3903,6 +3911,9 @@ jobs:
         }
         $duplicate = $workflow.Replace('& $trustedValidator @validatorArguments', "& `$trustedValidator @validatorArguments`n          & `$trustedValidator @validatorArguments")
         Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $duplicate -CanonicalRelativePath 'scripts/Validate.ps1') 2 'Two actual canonical calls must remain visible to the once-only guard.'
+        $crlfSource = (Get-Content -Raw -LiteralPath $script:AuthorityGatePath).Replace("`r`n", "`n").Replace("`n", "`r`n")
+        . ([scriptblock]::Create($crlfSource)) -DefineFunctionsOnly
+        Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1') 1 'A CRLF checkout of the actual classifier must recognize the same reviewed construction.'
     }
 
     # Scenario: The full PR41 fixture uses a base-owned supervisor and one PR candidate, while mutations attempt bypass or duplicate routing.
@@ -3922,6 +3933,7 @@ jobs:
         $unboundReport = ([string]$report.text).Replace('  publish-head-required-checks:', '  unbound-report:').Replace("HEAD_SHA: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'push' && github.sha || '' }}", 'HEAD_SHA: unbound')
         foreach ($unsafe in @(
             ($workflow + "`n" + $unboundReport),
+            ($workflow + "`n  unverified-dynamic:`n    steps:`n      - shell: pwsh`n        run: |`n          `$trustedValidator = './candidate.ps1'`n          & `$trustedValidator @validatorArguments`n"),
             $workflow.Replace('& $trustedValidator @validatorArguments', "gh release create v1.0.0`n          & `$trustedValidator @validatorArguments"),
             $workflow.Replace('& $trustedValidator @validatorArguments', "& `$trustedValidator @validatorArguments`n          gh release create v1.0.0"),
             $workflow.Replace('& $trustedValidator @validatorArguments', '& $trustedValidator @validatorArguments || true'),

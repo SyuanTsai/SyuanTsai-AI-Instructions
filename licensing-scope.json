@@ -688,6 +688,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/PR41-protected-workflow.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/routine-semantic-synthetic/bundle.schema.json",
       "license": "Apache-2.0"
     },

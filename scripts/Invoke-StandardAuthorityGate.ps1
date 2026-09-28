@@ -1482,38 +1482,134 @@ trap - ERR
     return $false
 }
 
+function Test-AuthorityConsumerBoundStepMetadata {
+    param([Parameter(Mandatory = $true)] $Step, [string] $Shell, [hashtable] $Environment = @{})
+
+    $header = ([regex]::Split([string]$Step.text, '(?m)^[ \t]*(?:-[ \t]+)?(?:run|uses):'))[0]
+    if ($header -match '(?m)^[ \t]*(?:-[ \t]+)?(?:if|"if"|''if''):' ) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($Shell) -and
+        $header -notmatch ('(?m)^[ \t]*shell:[ \t]*' + [regex]::Escape($Shell) + '[ \t]*$')) { return $false }
+    $envHeaders = @([regex]::Matches($header, '(?m)^(?<indent>[ \t]*)(?:env|"env"|''env''):[ \t]*$'))
+    if ($Environment.Count -eq 0) { return $envHeaders.Count -eq 0 -and $header -notmatch '(?m)^[ \t]*(?:env|"env"|''env''):' }
+    if ($envHeaders.Count -ne 1) { return $false }
+    $entry = $envHeaders[0]
+    $seen = @{}
+    foreach ($line in $header.Substring($entry.Index + $entry.Length).Replace("`r", '').Split("`n")) {
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        if (([regex]::Match($line, '^[ \t]*')).Length -le $entry.Groups['indent'].Length) { break }
+        $value = [regex]::Match($line, '^[ \t]*(?<key>[A-Za-z_][A-Za-z0-9_]*):[ \t]*(?<value>[^\r\n]*)$')
+        if (-not $value.Success) { return $false }
+        $key = $value.Groups['key'].Value
+        if ($seen.ContainsKey($key) -or @($Environment.Keys) -cnotcontains $key -or
+            $value.Groups['value'].Value.Trim() -cne [string]$Environment[$key]) { return $false }
+        $seen[$key] = $true
+    }
+    return $seen.Count -eq $Environment.Count
+}
+
+function Test-AuthorityConsumerBaseOwnedCheckoutStep {
+    param([Parameter(Mandatory = $true)] $Step)
+
+    $expected = @'
+- name: Checkout immutable candidate
+uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+with:
+ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+fetch-depth: 0
+persist-credentials: false
+'@
+    $actual = @(([string]$Step.text).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 -and $_ -notmatch '^#' }) -join "`n"
+    return $actual -ceq $expected.Replace("`r", '')
+}
+
+function Test-AuthorityConsumerBaseOwnedIntermediateStep {
+    param([Parameter(Mandatory = $true)] $Step)
+
+    if (-not (Test-AuthorityConsumerBoundStepMetadata -Step $Step)) { return $false }
+    if (Test-AuthorityConsumerDisjointEnvironmentExporter -Step $Step) { return $true }
+    # The reviewed sequence has one pinned setup action and one fixed namespace
+    # probe. Any other intervening executable could rewrite supervisor files.
+    $setup = @'
+- name: Set up approved Go runtime
+uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+with:
+go-version: 'stable'
+check-latest: true
+cache: false
+'@
+    $namespace = @'
+- name: Enable unprivileged Linux user namespaces
+shell: bash
+run: |
+set -euo pipefail
+sudo -n sysctl -w kernel.unprivileged_userns_clone=1
+if sudo -n sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+fi
+if ! unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- true; then
+echo 'The hosted Linux runner could not establish the required unprivileged user/PID namespace.' >&2
+exit 1
+fi
+'@
+    $actual = @(([string]$Step.text).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 -and $_ -notmatch '^#' }) -join "`n"
+    return $actual -ceq $setup.Replace("`r", '') -or $actual -ceq $namespace.Replace("`r", '')
+}
+
 function Get-AuthorityConsumerVerifiedDynamicCanonicalCount {
     param(
         [Parameter(Mandatory = $true)][string] $Text,
         [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
     )
     if ($CanonicalRelativePath -cne 'scripts/Validate.ps1') { return 0 }
+    $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
+    if ($workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):') { return 0 }
     $expected = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedMaterializerTemplate)
     $expectedInvocation = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedInvocationTemplate)
     $count = 0
     foreach ($job in @(Get-AuthorityConsumerWorkflowJobs -Text $Text)) {
+        $jobHeader = ([regex]::Split([string]$job.text, '(?m)^\s+steps\s*:'))[0]
+        if ($jobHeader -match '(?m)^[ \t]*(?:env|defaults|container|services|if|"env"|''env''|"defaults"|''defaults''|"container"|''container''|"services"|''services''|"if"|''if''):') { continue }
         $steps = @(Get-AuthorityConsumerWorkflowExecutableSteps -Text ([string]$job.text))
+        $checkoutSeen = $false
+        $materializerObserved = $false
         $materializerSeen = $false
         foreach ($step in $steps) {
+            if (-not $checkoutSeen) {
+                if (-not (Test-AuthorityConsumerBaseOwnedCheckoutStep -Step $step)) { break }
+                $checkoutSeen = $true
+                continue
+            }
             $executable = [string]$step.executableText
             $identity = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $executable
             if ($identity -ceq $expected -and
+                (Test-AuthorityConsumerBoundStepMetadata -Step $step -Shell 'pwsh' -Environment @{
+                    TRUSTED_SUPERVISOR_COMMIT = '${{ github.sha }}'
+                    TRUSTED_DEFAULT_BRANCH = '${{ github.event.repository.default_branch }}'
+                }) -and
                 @([regex]::Matches([string]$step.text, '(?m)^[ \t]*TRUSTED_SUPERVISOR_COMMIT:')).Count -eq 1 -and
                 @([regex]::Matches([string]$step.text, '(?m)^[ \t]*TRUSTED_DEFAULT_BRANCH:')).Count -eq 1 -and
                 [string]$step.text -match '(?m)^[ \t]*TRUSTED_SUPERVISOR_COMMIT:[ \t]*\$\{\{ github\.sha \}\}[ \t]*$' -and
                 [string]$step.text -match '(?m)^[ \t]*TRUSTED_DEFAULT_BRANCH:[ \t]*\$\{\{ github\.event\.repository\.default_branch \}\}[ \t]*$' -and
                 -not (Test-AuthorityConsumerFailureSuppression -Text ([string]$step.text))) {
+                if ($materializerObserved) { break }
+                $materializerObserved = $true
                 $materializerSeen = $true
                 continue
             }
+            if (-not $materializerObserved) { break }
             if ($executable -notmatch '(?i)\$trustedValidator\b') {
-                if ([string]$step.text -match '(?i)TRUSTED_SUPERVISOR_ROOT|TRUSTED_SUPERVISOR_SHA') { $materializerSeen = $false }
-                if ($executable -match 'GITHUB_ENV') {
-                    if (-not (Test-AuthorityConsumerDisjointEnvironmentExporter -Step $step)) { $materializerSeen = $false }
-                }
+                if ($materializerSeen -and -not (Test-AuthorityConsumerBaseOwnedIntermediateStep -Step $step)) { $materializerSeen = $false }
                 continue
             }
             if (-not $materializerSeen) { continue }
+            # Consume this materializer binding even when the attempted caller
+            # is unknown. A later familiar call cannot repair an intervening
+            # operation that may already have rewritten the protected files.
+            $materializerSeen = $false
+            if (-not (Test-AuthorityConsumerBoundStepMetadata -Step $step -Shell 'pwsh' -Environment @{
+                PULL_REQUEST_BASE_SHA = '${{ github.event_name == ''workflow_dispatch'' && github.event.inputs.base_sha || github.event.pull_request.base.sha }}'
+                PUSH_BEFORE_SHA = '${{ github.event.before }}'
+            })) { continue }
             if ([string]$step.text -notmatch '(?m)^[ \t]*shell:[ \t]*pwsh[ \t]*$' -or
                 [string]$step.text -match '(?m)^[ \t]*(?:TRUSTED_SUPERVISOR_ROOT|TRUSTED_SUPERVISOR_SHA):') { continue }
             if ($executable -notmatch '(?m)^\s*RepositoryRoot\s*=\s*\[IO\.Path\]::GetFullPath\(\(Get-Location\)\.Path\)\s*$') { continue }
@@ -1653,6 +1749,7 @@ function Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand {
     param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
     $executable = Get-AuthorityConsumerExecutableText -Text $Text
     $verifiedDynamic = Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $Text -CanonicalRelativePath $CanonicalRelativePath
+    $observedDynamicCalls = 0
     $pathPattern = '(?i)(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]+\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)'
     foreach ($line in $executable.Replace("`r", '').Split("`n")) {
         foreach ($segment in [regex]::Split($line, '(?:;|&&|\|\|)')) {
@@ -1660,8 +1757,9 @@ function Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand {
             if ([string]::IsNullOrWhiteSpace($command) -or
                 $command -match '^(?i)(?:echo|printf|Write-Output|Write-Host|Get-Item|Get-FileHash|Test-Path|Select-String|cat|grep)\b' -or
                 $command -match '^(?:\$[A-Za-z_][A-Za-z0-9_]*\s*=|[A-Za-z_][A-Za-z0-9_]*=)') { continue }
-            if ($command -match '^&\s*\$trustedValidator\b') {
-                if ($verifiedDynamic -eq 0) { return $true }
+            if ($command -match '&\s*\$trustedValidator\b') {
+                if ($command -cne '& $trustedValidator @validatorArguments') { return $true }
+                $observedDynamicCalls++
                 continue
             }
             foreach ($path in [regex]::Matches($command, $pathPattern)) {
@@ -1672,7 +1770,7 @@ function Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand {
             if ($command -match '^(?i)(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan))|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)\b') { return $true }
         }
     }
-    return $false
+    return $observedDynamicCalls -ne $verifiedDynamic
 }
 
 function Test-AuthorityConsumerNonCanonicalValidationCommand {
@@ -1733,6 +1831,7 @@ function Test-AuthorityConsumerOpaqueReleaseHelper {
 function Test-AuthorityConsumerHeadCheckReport {
     param([Parameter(Mandatory = $true)][string] $JobText)
 
+    $JobText = $JobText.Replace("`r`n", "`n").Replace("`r", "`n")
     # This is a deliberately bounded shell grammar, not a name/endpoint
     # exemption. Unknown command shapes keep the normal mutation guard.
     $steps = @(Get-AuthorityConsumerWorkflowExecutableSteps -Text $JobText)
@@ -1807,7 +1906,7 @@ function Get-AuthorityConsumerWorkflowReleaseExecutableText {
     $jobs = @(Get-AuthorityConsumerWorkflowJobs -Text $Text)
     if ($jobs.Count -eq 0) { return $executable }
     $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
-    if ($workflowHeader -match '(?m)^[ \t]*(?:env|defaults):') { return $executable }
+    if ($workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):') { return $executable }
     $fragments = New-Object 'System.Collections.Generic.List[string]'
     $canonicalJobs = @($jobs | Where-Object { (Get-AuthorityConsumerWorkflowCanonicalCount -Text ("jobs:`n" + [string]$_.text) -CanonicalRelativePath 'scripts/Validate.ps1') -eq 1 })
     foreach ($job in $jobs) {
