@@ -95,6 +95,26 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
             capture_output=True, text=True, timeout=20,
         )
 
+    def shared_findings_digest(self, findings, *, expect_valid=True):
+        values = self.root / "shared-findings.json"
+        values.write_text(json.dumps(findings, ensure_ascii=False), encoding="utf-8")
+        checker = self.root / "shared-digest.ps1"
+        checker.write_text(
+            "param($ModulePath, $ValuePath)\nImport-Module $ModulePath -Force\n"
+            "$value = ConvertFrom-Json -InputObject (Get-Content -Raw -LiteralPath $ValuePath) -NoEnumerate\n"
+            "& (Get-Module StandardSemanticBridge) { param($value) "
+            "$normalized = @(Get-StandardSemanticBridgeCanonicalFindings -Findings $value); "
+            "Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalized } $value\n",
+            encoding="utf-8")
+        result = subprocess.run(["pwsh", "-NoProfile", "-File", str(checker),
+                                 str(SCRIPT.parent / "StandardSemanticBridge.psm1"), str(values)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        if not expect_valid:
+            self.assertNotEqual(0, result.returncode, "Shared safe-path helper accepted unsafe findings.")
+            return result.stderr
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.strip()
+
     # Scenario: A complete synthetic ledger binds both consumer and producer candidate namespaces.
     # Purpose: Offline integration can verify all raw work without claiming a real semantic scan.
     def test_InterT10_verifies_complete_synthetic_bundle_with_dual_identity(self):
@@ -143,10 +163,7 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         verified = json.loads(self.output_path.read_text(encoding="utf-8"))
         self.assertEqual([finding], verified["normalizedFindings"])
-        canonical = {name: finding[name] for name in
-                     ("severity", "fingerprint", "ruleId", "message", "path", "analyzerId")}
-        self.assertEqual(digest(json.dumps([canonical], ensure_ascii=False, separators=(",", ":")).encode()),
-                         verified["normalizedFindingsSha256"])
+        self.assertEqual(self.shared_findings_digest([finding]), verified["normalizedFindingsSha256"])
         binding = verified["rawResultBindings"][0]
         self.assertEqual(work["id"], binding["workItemId"])
         self.assertEqual(1, binding["findingCount"])
@@ -166,6 +183,18 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.output_path.write_text(json.dumps(verified), encoding="utf-8")
         rejected = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(10, rejected.returncode, rejected.stderr)
+        for message in ('臺灣正體 "quoted" <tag> / \\ café', 'separators:\u0085\u2028\u2029'):
+            with self.subTest(message=message):
+                self.output_path.unlink()
+                variant = {**finding, "message": message, "path": finding["path"].replace("/", "\\")}
+                work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                    json.dumps({"workItemId": work["id"], "findings": [variant]}))
+                result = self.verify(bundle)
+                self.assertEqual(0, result.returncode, result.stderr)
+                verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+                normalized = {**variant, "path": finding["path"]}
+                self.assertEqual([normalized], verified["normalizedFindings"])
+                self.assertEqual(self.shared_findings_digest([variant]), verified["normalizedFindingsSha256"])
 
     # Scenario: Correctly hashed raw findings contain malformed or out-of-work findings.
     # Purpose: Raw digest validity alone cannot hide invalid normalized schema/type/scope.
@@ -187,6 +216,36 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
                 result = self.verify(bundle)
                 self.assertEqual(10, result.returncode, result.stderr)
                 self.assertFalse(self.output_path.exists())
+        for unsafe in ("skills/example/dir\\..\\SKILL.md", "skills/example//SKILL.md",
+                       "skills/example/./SKILL.md", "skills/example/\x1fSKILL.md"):
+            with self.subTest(bound_inventory_path=unsafe):
+                self.shared_findings_digest([{**valid, "path": unsafe}], expect_valid=False)
+                self.output_path.unlink(missing_ok=True)
+                bundle = copy.deepcopy(self.bundle)
+                producer = bundle["producerPlan"]
+                file = producer["sourceInventory"]["files"][0]
+                file["path"] = unsafe
+                text = "\n".join(("routine-semantic-git-inventory-v1", self.consumer["source"]["revision"],
+                                   f'{unsafe}\t{file["gitBlobSha1"]}\t{file["bytes"]}\t{file["sha256"]}'))
+                inventory_sha = digest(text.encode())
+                producer["sourceInventory"]["inputInventorySha256"] = inventory_sha
+                producer["decision"]["inputInventorySha256"] = inventory_sha
+                for work in bundle["workItems"]:
+                    work["path"] = unsafe
+                    work["id"] = digest(f'{work["analyzerId"]}\n{unsafe}\n{file["sha256"]}'.encode())
+                    work["rawGraphBase64"], work["rawGraphSha256"] = payload(json.dumps({
+                        "artifactType": "synthetic-raw-graph-v1", "workItemId": work["id"], "analyzerId": work["analyzerId"]}))
+                    finding = {**valid, "path": unsafe, "analyzerId": work["analyzerId"]}
+                    work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                        json.dumps({"workItemId": work["id"], "findings": [finding]}))
+                self.prepared_path.write_text(json.dumps(producer), encoding="utf-8")
+                try:
+                    result = self.verify(bundle)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn("INVENTORY_FILE_PATH", result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    self.prepared_path.write_text(json.dumps(self.producer), encoding="utf-8")
 
     # Scenario: The bundle changes either identity, the selected blob, or a raw payload hash.
     # Purpose: A caller cannot replay or mix candidate and work evidence.

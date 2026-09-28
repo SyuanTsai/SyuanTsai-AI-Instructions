@@ -90,6 +90,16 @@ def raw_payload(item: dict[str, Any], stem: str) -> bytes:
     return data
 
 
+def canonical_path(value: Any, code: str) -> str:
+    # Match the bridge's safe relative path semantics before scope comparison.
+    require(type(value) is str and bool(value.strip()) and
+            re.search(r"[\x00-\x1f\x7f]", value) is None, code)
+    normalized = value.replace("\\", "/")
+    require(not normalized.startswith("/") and re.match(r"^[A-Za-z]:", normalized) is None and
+            all(part not in ("", ".", "..") for part in normalized.split("/")), code)
+    return normalized
+
+
 def normalized_finding(value: Any, analyzer: str, path: str) -> dict[str, str]:
     # Use StandardSemanticBridge's canonical six-field finding shape. This is
     # only fixture consistency validation, never a trusted evidence admission.
@@ -101,8 +111,18 @@ def normalized_finding(value: Any, analyzer: str, path: str) -> dict[str, str]:
                 re.search(r"[\x00-\x1f\x7f]", scalar) is None, "FINDING_SCALAR")
     require(finding["severity"] in ("critical", "high", "medium", "low", "informational"),
             "FINDING_SEVERITY")
-    require(finding["analyzerId"] == analyzer and finding["path"] == path, "FINDING_SCOPE")
-    return {name: finding[name] for name in fields}
+    finding_path = canonical_path(finding["path"], "FINDING_PATH")
+    require(finding["analyzerId"] == analyzer and finding_path == path, "FINDING_SCOPE")
+    return {name: finding_path if name == "path" else finding[name] for name in fields}
+
+
+def canonical_findings_bytes(findings: list[dict[str, str]]) -> bytes:
+    # All six property names are ASCII, so sort_keys matches bridge ordinal
+    # object ordering. Newtonsoft also escapes these three Unicode separators.
+    text = json.dumps(findings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    for character in ("\u0085", "\u2028", "\u2029"):
+        text = text.replace(character, "\\u" + format(ord(character), "04x"))
+    return text.encode("utf-8")
 
 
 def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, Any], bundle: dict[str, Any], bundle_bytes: bytes) -> dict[str, Any]:
@@ -151,7 +171,8 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
     for item in files:
         exact_keys(item, {"path", "gitBlobSha1", "bytes", "sha256"}, "INVENTORY_FILE_FIELDS")
         path = item["path"]
-        require(type(path) is str and path.startswith("skills/") and path not in selected and ".." not in path.split("/") and "\x00" not in path, "INVENTORY_FILE_PATH")
+        require(canonical_path(path, "INVENTORY_FILE_PATH") == path and
+                path.startswith("skills/") and path not in selected, "INVENTORY_FILE_PATH")
         blob = hex_value(item["gitBlobSha1"], HEX40, "INVENTORY_BLOB_ID")
         file_sha = hex_value(item["sha256"], HEX64, "INVENTORY_FILE_SHA")
         size = item["bytes"]
@@ -195,7 +216,7 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
     require(seen == {(analyzer, path) for analyzer in ANALYZERS for path in selected}, "WORK_COVERAGE_INCOMPLETE")
     normalized.sort(key=lambda finding: "\x00".join(finding[name] for name in
                     ("analyzerId", "ruleId", "fingerprint", "path", "severity", "message")).encode("utf-16-be"))
-    normalized_bytes = json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    normalized_bytes = canonical_findings_bytes(normalized)
 
     return {
         "schemaVersion": 1,
