@@ -104,6 +104,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/pr8-even-shard-diagnostic.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".github/workflows/pr8-powershell-validation.yml",
       "license": "Apache-2.0"
     },
@@ -432,6 +436,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-PesterEvenDiagnostic.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-PesterShardProcess.ps1",
       "license": "Apache-2.0"
     },
@@ -741,6 +749,10 @@
     },
     {
       "path": "tests/syp101-production-smoke-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_pr8_even_diagnostic.py",
       "license": "Apache-2.0"
     },
     {
