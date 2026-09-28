@@ -15,6 +15,8 @@ param(
 
     [string] $RunId,
 
+    [ValidateRange(1, 3600)][int] $AcquisitionTimeoutSeconds = 900,
+
     [string] $GoCommandPath,
 
     [string] $OutputPath
@@ -499,10 +501,84 @@ function Assert-NpmCommand {
     return Assert-Command -Name $name
 }
 
+function Stop-RunOwnedDirectDescendants {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process] $ParentProcess,
+        [Parameter(Mandatory = $true)][DateTime] $ParentStartedUtc,
+        [Parameter(Mandatory = $true)][DateTime] $ParentExitObservedUtc
+    )
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    try {
+        $children = @(Get-CimInstance -ClassName Win32_Process `
+            -Filter ("ParentProcessId = {0}" -f $ParentProcess.Id) `
+            -OperationTimeoutSec 2 -ErrorAction Stop)
+    }
+    catch { return }
+    foreach ($child in $children) {
+        $ownedProcess = $null
+        try {
+            $createdUtc = ([DateTime]$child.CreationDate).ToUniversalTime()
+            if ($createdUtc -lt $ParentStartedUtc.AddSeconds(-1) -or
+                $createdUtc -gt $ParentExitObservedUtc) { continue }
+            $ownedProcess = [System.Diagnostics.Process]::GetProcessById([int]$child.ProcessId)
+            if ([Math]::Abs(($ownedProcess.StartTime.ToUniversalTime() - $createdUtc).TotalSeconds) -gt 2) { continue }
+            if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
+        }
+        catch { }
+        finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
+    }
+}
+
+function Get-ResolverUnixProcessGroupId {
+    param([Parameter(Mandatory = $true)][int] $ProcessId)
+    $statPath = "/proc/$ProcessId/stat"
+    if (-not [IO.File]::Exists($statPath)) { return -1 }
+    try {
+        $stat = [IO.File]::ReadAllText($statPath)
+        if ($stat -match '^\s*[0-9]+\s+\(.*\)\s+\S\s+[0-9]+\s+(?<pgrp>[0-9]+)\s+') {
+            return [int]$Matches.pgrp
+        }
+    }
+    catch { }
+    return -1
+}
+
+function Stop-RunOwnedUnixProcessGroup {
+    param([Parameter(Mandatory = $true)][int] $ProcessGroupId)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or $ProcessGroupId -le 0) { return }
+    $killPath = @('/usr/bin/kill', '/bin/kill') | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$killPath)) {
+        throw 'No Unix kill executable is available for run-owned process-group cleanup.'
+    }
+    $members = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | Where-Object {
+        $_.Name -match '^[0-9]+$' -and
+        (Get-ResolverUnixProcessGroupId -ProcessId ([int]$_.Name)) -eq $ProcessGroupId
+    })
+    if ($members.Count -eq 0) { return }
+    $signalInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $signalInfo.FileName = [string]$killPath
+    $signalInfo.UseShellExecute = $false
+    $signalInfo.CreateNoWindow = $true
+    $signalInfo.ArgumentList.Add('-KILL')
+    $signalInfo.ArgumentList.Add('--')
+    $signalInfo.ArgumentList.Add("-$ProcessGroupId")
+    $signal = New-Object System.Diagnostics.Process
+    $signal.StartInfo = $signalInfo
+    try {
+        if ($signal.Start()) {
+            if (-not $signal.WaitForExit(1000)) { $signal.Kill() }
+        }
+    }
+    finally { $signal.Dispose() }
+}
+
 function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
-        [Parameter(Mandatory = $true)][string[]] $Arguments
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [int] $TimeoutSeconds = 0
     )
 
     $commandPath = if ([IO.Path]::IsPathRooted($Command)) {
@@ -514,6 +590,140 @@ function Invoke-CheckedCommand {
     }
     else {
         Assert-Command -Name $Command
+    }
+
+    if ($TimeoutSeconds -gt 0) {
+        $unixOwnedGroup = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix
+        $launchArguments = @($Arguments)
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        if ($unixOwnedGroup) {
+            $setsidPath = @('/usr/bin/setsid', '/bin/setsid') | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+            } | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace([string]$setsidPath) -or
+                -not (Test-Path -LiteralPath '/bin/sh' -PathType Leaf) -or
+                -not (Test-Path -LiteralPath '/proc' -PathType Container) -or
+                $null -eq $startInfo.GetType().GetProperty('ArgumentList')) {
+                throw 'Owned Unix process-group containment is unavailable for a bounded acquisition command.'
+            }
+            $startInfo.FileName = [string]$setsidPath
+            $startInfo.RedirectStandardInput = $true
+            # The shell cannot execute the requested command until the parent
+            # has verified a new, exclusive process group for this run.
+            $launchArguments = @('/bin/sh', '-c', 'IFS= read -r token || exit 125; exec "$@"', 'resolver-owned', $commandPath) + @($Arguments)
+        }
+        else {
+            $startInfo.FileName = $commandPath
+        }
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        if ($null -ne $startInfo.GetType().GetProperty('ArgumentList')) {
+            foreach ($argument in $launchArguments) { [void]$startInfo.ArgumentList.Add($argument) }
+        }
+        else {
+            $quoted = foreach ($argument in $launchArguments) {
+                if ($argument.Contains('"') -or $argument.EndsWith('\')) {
+                    throw 'Bounded command contains an argument that cannot be safely quoted on this PowerShell runtime.'
+                }
+                '"' + $argument + '"'
+            }
+            $startInfo.Arguments = $quoted -join ' '
+        }
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        try {
+            $childWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            if (-not $process.Start()) { throw "$commandPath could not be started." }
+            $parentStartedUtc = $process.StartTime.ToUniversalTime()
+            $ownedUnixGroupId = 0
+            if ($unixOwnedGroup) {
+                $groupProbe = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $process.HasExited -and $groupProbe.ElapsedMilliseconds -lt 1000 -and
+                    $childWatch.ElapsedMilliseconds -lt ($TimeoutSeconds * 1000)) {
+                    $observedGroupId = Get-ResolverUnixProcessGroupId -ProcessId $process.Id
+                    if ($observedGroupId -eq $process.Id) {
+                        $ownedUnixGroupId = $observedGroupId
+                        break
+                    }
+                    Start-Sleep -Milliseconds 10
+                }
+                if ($ownedUnixGroupId -le 0) {
+                    $process.StandardInput.Close()
+                    if (-not $process.HasExited) { $process.Kill() }
+                    if ($childWatch.ElapsedMilliseconds -ge ($TimeoutSeconds * 1000)) {
+                        throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
+                    }
+                    throw 'Could not establish an exclusive Unix process group for a bounded acquisition command.'
+                }
+                $process.StandardInput.WriteLine('start')
+                $process.StandardInput.Close()
+            }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            $drainTask = [System.Threading.Tasks.Task]::WhenAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
+            $lastProgressSeconds = 0
+            while (-not ($process.HasExited -and $drainTask.IsCompleted)) {
+                $remainingMilliseconds = ($TimeoutSeconds * 1000) - $childWatch.ElapsedMilliseconds
+                if ($remainingMilliseconds -le 0) { break }
+                $waitMilliseconds = [int][Math]::Min(30000, $remainingMilliseconds)
+                if ($process.HasExited) {
+                    [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne($waitMilliseconds)
+                }
+                else {
+                    [void]$process.WaitForExit($waitMilliseconds)
+                }
+                if ($childWatch.Elapsed.TotalSeconds - $lastProgressSeconds -ge 30) {
+                    Write-Host ("Acquisition child still running: {0}; elapsed={1:n1}s; deadline={2}s" -f
+                        [IO.Path]::GetFileName($commandPath), $childWatch.Elapsed.TotalSeconds, $TimeoutSeconds)
+                    $lastProgressSeconds = $childWatch.Elapsed.TotalSeconds
+                }
+            }
+            if (-not ($process.HasExited -and $drainTask.IsCompleted)) {
+                if ($unixOwnedGroup -and $ownedUnixGroupId -gt 0) {
+                    Stop-RunOwnedUnixProcessGroup -ProcessGroupId $ownedUnixGroupId
+                }
+                if (-not $process.HasExited) {
+                    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                        $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $killerInfo.FileName = 'taskkill.exe'
+                        $killerInfo.Arguments = "/PID $($process.Id) /T /F"
+                        $killerInfo.UseShellExecute = $false
+                        $killerInfo.CreateNoWindow = $true
+                        $killer = New-Object System.Diagnostics.Process
+                        $killer.StartInfo = $killerInfo
+                        try {
+                            if ($killer.Start() -and -not $killer.WaitForExit(2000)) { $killer.Kill() }
+                        }
+                        catch { }
+                        finally { $killer.Dispose() }
+                    }
+                    if (-not $process.HasExited) { $process.Kill() }
+                }
+                else {
+                    if ($null -ne (Get-Command Stop-RunOwnedDirectDescendants -ErrorAction SilentlyContinue)) {
+                        Stop-RunOwnedDirectDescendants -ParentProcess $process `
+                            -ParentStartedUtc $parentStartedUtc -ParentExitObservedUtc ([DateTime]::UtcNow)
+                    }
+                }
+                # An already-exited direct child may leave owned descendants
+                # holding the pipes open. Close our pipe ends without waiting
+                # for those descendants or touching unrelated processes.
+                $process.StandardOutput.Close()
+                $process.StandardError.Close()
+                [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne(1000)
+                throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
+            }
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            if ($process.ExitCode -ne 0) {
+                throw "$commandPath failed with exit code $($process.ExitCode): $stderr"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Verbose $stderr }
+            return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
+        }
+        finally { $process.Dispose() }
     }
 
     $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("standard-command-stderr-{0}.txt" -f [guid]::NewGuid().ToString('N'))
@@ -570,9 +780,73 @@ function New-RunOwnedInstallDirectory {
     }
     $fullRoot = [IO.Path]::GetFullPath($Root)
     [void](New-Item -ItemType Directory -Path $fullRoot -Force)
-    $toolRoot = Join-Path $fullRoot ("{0}-{1}" -f $ToolName, [guid]::NewGuid().ToString('N'))
-    [void](New-Item -ItemType Directory -Path $toolRoot)
-    return [IO.Path]::GetFullPath($toolRoot)
+    $rootItem = Get-Item -Force -LiteralPath $fullRoot
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Run-owned install root must be a regular directory: '$fullRoot'."
+    }
+    $prefix = if ($ToolName -ceq 'skillspector') { 'ss' } else { $ToolName }
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        $identifier = [guid]::NewGuid().ToString('N')
+        if ($ToolName -ceq 'skillspector') { $identifier = $identifier.Substring(0, 12) }
+        $toolRoot = Join-Path $fullRoot ("{0}-{1}" -f $prefix, $identifier)
+        if (-not (Test-Path -LiteralPath $toolRoot)) {
+            [void](New-Item -ItemType Directory -Path $toolRoot -ErrorAction Stop)
+            return [IO.Path]::GetFullPath($toolRoot)
+        }
+    }
+    throw "Unable to allocate a unique run-owned install directory under '$fullRoot'."
+}
+
+function Assert-PythonWheelInstallPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        [string] $WheelPath
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    $sitePackages = Join-Path $InstallPath 'venv\Lib\site-packages'
+    $probePath = Join-Path $sitePackages (('p' * 96) + '.probe')
+    if ($probePath.Length -ge 248) {
+        throw "SkillSpector install root leaves insufficient Windows path headroom: $($probePath.Length) characters."
+    }
+    [void](New-Item -ItemType Directory -Path $sitePackages -Force)
+    try {
+        [IO.File]::WriteAllText($probePath, 'path-probe', (New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::ReadAllText($probePath) -cne 'path-probe') {
+            throw 'SkillSpector install path probe could not be read back.'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $probePath) { Remove-Item -LiteralPath $probePath -Force }
+    }
+    if ([string]::IsNullOrWhiteSpace($WheelPath)) { return }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $archive = [IO.Compression.ZipFile]::OpenRead($WheelPath)
+    try {
+        foreach ($member in $archive.Entries) {
+            $relative = [string]$member.FullName
+            if ($relative.StartsWith('/') -or $relative.StartsWith('\') -or $relative -match '(^|[\\/])\.\.([\\/]|$)' -or $relative -match '^[A-Za-z]:') {
+                throw "SkillSpector wheel contains an unsafe archive path: '$relative'."
+            }
+            $target = Join-Path $sitePackages ($relative -replace '/', [IO.Path]::DirectorySeparatorChar)
+            if ($target.Length -ge 248) {
+                throw "SkillSpector wheel member exceeds safe Windows install path length: $($target.Length) characters: '$relative'."
+            }
+        }
+    }
+    finally { $archive.Dispose() }
+}
+
+function Assert-PythonWheelhouseInstallPaths {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        [Parameter(Mandatory = $true)][string] $WheelhousePath,
+        [Parameter(Mandatory = $true)] $Manifest
+    )
+    foreach ($entry in @($Manifest.entries)) {
+        Assert-PythonWheelInstallPath -InstallPath $InstallPath `
+            -WheelPath (Join-Path $WheelhousePath ([string]$entry.file))
+    }
 }
 
 function Get-FileSha256 {
@@ -870,10 +1144,189 @@ function Add-ProcessPathValue {
 function Invoke-IsolatedPythonCommand {
     param(
         [Parameter(Mandatory = $true)][string] $PythonCommand,
-        [Parameter(Mandatory = $true)][string[]] $Arguments
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [int] $TimeoutSeconds = 0
     )
 
-    return Invoke-CheckedCommand -Command $PythonCommand -Arguments (@('-I') + $Arguments)
+    return Invoke-CheckedCommand -Command $PythonCommand -Arguments (@('-I') + $Arguments) -TimeoutSeconds $TimeoutSeconds
+}
+
+function Get-RemainingAcquisitionSeconds {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Stopwatch] $Stopwatch,
+        [Parameter(Mandatory = $true)][int] $LimitSeconds
+    )
+    $remaining = $LimitSeconds - $Stopwatch.Elapsed.TotalSeconds
+    if ($remaining -le 0) { throw "SkillSpector acquisition deadline exceeded after $LimitSeconds seconds." }
+    return [int][Math]::Ceiling($remaining)
+}
+
+function Wait-CancellableAcquisitionTask {
+    param(
+        [Parameter(Mandatory = $true)][System.Threading.Tasks.Task] $Task,
+        [Parameter(Mandatory = $true)][System.Threading.CancellationToken] $CancellationToken,
+        [Parameter(Mandatory = $true)][string] $PendingMessage
+    )
+    while (-not $Task.IsCompleted) {
+        $CancellationToken.ThrowIfCancellationRequested()
+        $outcome = [Threading.WaitHandle]::WaitAny(
+            [Threading.WaitHandle[]]@(([IAsyncResult]$Task).AsyncWaitHandle, $CancellationToken.WaitHandle), 30000)
+        if ($outcome -eq 1) { $CancellationToken.ThrowIfCancellationRequested() }
+        if ($outcome -eq [Threading.WaitHandle]::WaitTimeout) { Write-Host $PendingMessage }
+    }
+    $CancellationToken.ThrowIfCancellationRequested()
+}
+
+function Copy-BoundedHttpBody {
+    param(
+        [Parameter(Mandatory = $true)][IO.Stream] $InputStream,
+        [Parameter(Mandatory = $true)][IO.Stream] $OutputStream,
+        [Parameter(Mandatory = $true)][System.Threading.CancellationToken] $CancellationToken,
+        [Parameter(Mandatory = $true)][long] $MaximumBytes
+    )
+    $buffer = New-Object byte[] (1024 * 1024)
+    $total = 0L
+    while ($true) {
+        $readTask = $InputStream.ReadAsync($buffer, 0, $buffer.Length, $CancellationToken)
+        Wait-CancellableAcquisitionTask -Task $readTask -CancellationToken $CancellationToken `
+            -PendingMessage ("SkillSpector HTTP body pending; bytesReceived={0}; cancellationDeadlineActive=true" -f $total)
+        $received = $readTask.GetAwaiter().GetResult()
+        if ($received -eq 0) { break }
+        $total += $received
+        if ($total -gt $MaximumBytes) { throw 'SkillSpector HTTP response exceeds the acquisition byte limit.' }
+        $OutputStream.Write($buffer, 0, $received)
+    }
+    return $total
+}
+
+function Save-SkillSpectorFailureEvidence {
+    param(
+        [string] $WorkPath,
+        [string] $DestinationPath
+    )
+    if ([string]::IsNullOrWhiteSpace($WorkPath) -or
+        [string]::IsNullOrWhiteSpace($DestinationPath) -or
+        -not (Test-Path -LiteralPath $WorkPath -PathType Container)) { return }
+    [void](New-Item -ItemType Directory -Path $DestinationPath -Force)
+    foreach ($name in @('acquisition-diagnostics.jsonl', 'offline-backtracking-plan.json')) {
+        $source = Join-Path $WorkPath $name
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $DestinationPath $name) -Force
+        }
+    }
+    $failureInventoryPath = Join-Path $WorkPath 'candidate-inventory.failure.json'
+    $completedInventoryPath = Join-Path $WorkPath 'candidate-inventory.json'
+    $saveIncrementalSnapshot = $false
+    if (Test-Path -LiteralPath $completedInventoryPath -PathType Leaf) {
+            try {
+                $inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $completedInventoryPath | ConvertFrom-Json
+                if ([int]$inventory.schemaVersion -ne 1 -or $null -eq $inventory.entries) {
+                    throw 'Completed candidate inventory is not a schema 1 inventory.'
+                }
+                $rejectedCandidates = [object[]]@()
+                if ($null -ne $inventory.rejectedCandidates) {
+                    $rejectedCandidates = [object[]]@($inventory.rejectedCandidates)
+                }
+                $diagnostic = [ordered]@{
+                    schemaVersion = 1
+                    kind = 'diagnostic-only'
+                    source = 'completed-candidate-inventory'
+                    inventorySha256 = [string]$inventory.inventorySha256
+                    entries = @($inventory.entries)
+                    rejectedCandidates = $rejectedCandidates
+                }
+                [IO.File]::WriteAllText((Join-Path $DestinationPath 'candidate-inventory.failure.json'),
+                    ($diagnostic | ConvertTo-Json -Depth 64), (New-Object Text.UTF8Encoding($false)))
+            }
+            catch {
+                Copy-Item -LiteralPath $completedInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.unverified.json') -Force
+                $saveIncrementalSnapshot = $true
+            }
+    }
+    else { $saveIncrementalSnapshot = $true }
+    if ($saveIncrementalSnapshot -and (Test-Path -LiteralPath $failureInventoryPath -PathType Leaf)) {
+        try {
+            $snapshot = Get-Content -Raw -Encoding UTF8 -LiteralPath $failureInventoryPath | ConvertFrom-Json
+            if ([int]$snapshot.schemaVersion -ne 1 -or
+                [string]$snapshot.kind -cne 'diagnostic-only' -or $null -eq $snapshot.entries) {
+                throw 'Incremental candidate inventory is not a diagnostic-only schema 1 snapshot.'
+            }
+            Copy-Item -LiteralPath $failureInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.failure.json') -Force
+        }
+        catch {
+            Copy-Item -LiteralPath $failureInventoryPath -Destination (Join-Path $DestinationPath 'candidate-inventory.failure.unverified.json') -Force
+        }
+    }
+}
+
+function Invoke-BoundedGitHubGet {
+    param(
+        [Parameter(Mandatory = $true)][string] $Uri,
+        [Parameter(Mandatory = $true)][hashtable] $Headers,
+        [Parameter(Mandatory = $true)][System.Diagnostics.Stopwatch] $Stopwatch,
+        [Parameter(Mandatory = $true)][int] $LimitSeconds,
+        [string] $OutFile
+    )
+
+    $remaining = Get-RemainingAcquisitionSeconds -Stopwatch $Stopwatch -LimitSeconds $LimitSeconds
+    Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $cancellation = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($remaining))
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Uri)
+    $response = $null
+    $stream = $null
+    $output = $null
+    try {
+        $client.Timeout = [TimeSpan]::FromSeconds($remaining)
+        foreach ($key in $Headers.Keys) {
+            [void]$request.Headers.TryAddWithoutValidation([string]$key, [string]$Headers[$key])
+        }
+        $headersTask = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancellation.Token)
+        Wait-CancellableAcquisitionTask -Task $headersTask -CancellationToken $cancellation.Token `
+            -PendingMessage ("SkillSpector HTTP headers pending from {0}; acquisitionDeadlineActive=true" -f $request.RequestUri.Host)
+        $response = $headersTask.GetAwaiter().GetResult()
+        [void]$response.EnsureSuccessStatusCode()
+        $finalUri = $response.RequestMessage.RequestUri
+        $allowedHost = if ([string]::IsNullOrWhiteSpace($OutFile)) {
+            $finalUri.Host -ceq 'api.github.com'
+        }
+        else {
+            $finalUri.Host -ceq 'github.com' -or $finalUri.Host -match '^[a-z0-9-]+\.githubusercontent\.com$'
+        }
+        if ($finalUri.Scheme -cne 'https' -or -not $allowedHost) {
+            throw "SkillSpector download redirected to an unapproved host: $($finalUri.Host)."
+        }
+        $maximum = if ([string]::IsNullOrWhiteSpace($OutFile)) { 8 * 1024 * 1024 } else { 512 * 1024 * 1024 }
+        if ($response.Content.Headers.ContentLength -gt $maximum) {
+            throw 'SkillSpector HTTP response exceeds the acquisition byte limit.'
+        }
+        $streamTask = $response.Content.ReadAsStreamAsync()
+        Wait-CancellableAcquisitionTask -Task $streamTask -CancellationToken $cancellation.Token `
+            -PendingMessage ("SkillSpector HTTP stream pending from {0}; acquisitionDeadlineActive=true" -f $request.RequestUri.Host)
+        $stream = $streamTask.GetAwaiter().GetResult()
+        $output = if ([string]::IsNullOrWhiteSpace($OutFile)) {
+            New-Object System.IO.MemoryStream
+        }
+        else {
+            [IO.File]::Open($OutFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        }
+        [void](Copy-BoundedHttpBody -InputStream $stream -OutputStream $output -CancellationToken $cancellation.Token -MaximumBytes $maximum)
+        if (-not [string]::IsNullOrWhiteSpace($OutFile)) { return $OutFile }
+        return ([Text.Encoding]::UTF8.GetString($output.ToArray()) | ConvertFrom-Json)
+    }
+    catch [System.OperationCanceledException] {
+        throw "SkillSpector HTTP acquisition deadline exceeded after $LimitSeconds seconds."
+    }
+    finally {
+        if ($null -ne $output) { $output.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+        $request.Dispose()
+        $cancellation.Dispose()
+        $client.Dispose()
+        $handler.Dispose()
+    }
 }
 
 function Get-GitHubHeaders {
@@ -1143,7 +1596,9 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
         [Parameter(Mandatory = $true)][string] $RootWheelSha256,
         [Parameter(Mandatory = $true)][string] $CandidatePath,
         [Parameter(Mandatory = $true)][string] $WheelhousePath,
-        [Parameter(Mandatory = $true)][string] $WorkPath
+        [Parameter(Mandatory = $true)][string] $WorkPath,
+        [Parameter(Mandatory = $true)][System.Diagnostics.Stopwatch] $AcquisitionStopwatch,
+        [Parameter(Mandatory = $true)][int] $AcquisitionLimitSeconds
     )
 
     if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf)) {
@@ -1153,6 +1608,9 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
     $planPath = Join-Path $WorkPath 'offline-backtracking-plan.json'
     $inventoryPath = Join-Path $WorkPath 'candidate-inventory.json'
     $resultPath = Join-Path $WorkPath 'closure-result.json'
+    $diagnosticsPath = Join-Path $WorkPath 'acquisition-diagnostics.jsonl'
+    $sourceHead = if ([string]$env:GITHUB_SHA -match '^[0-9a-f]{40}$') { [string]$env:GITHUB_SHA } else { 'unknown' }
+    $remaining = Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
 
     [void](Invoke-IsolatedPythonCommand -PythonCommand $PythonCommand -Arguments @(
         $HelperPath, 'resolve',
@@ -1163,8 +1621,14 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
         '--selected-dir', $WheelhousePath,
         '--plan', $planPath,
         '--inventory', $inventoryPath,
-        '--result', $resultPath
-    ))
+        '--result', $resultPath,
+        '--diagnostics', $diagnosticsPath,
+        '--run-id', $script:ResolverRunId,
+        '--head-sha', $sourceHead,
+        '--deadline-seconds', [string]$remaining,
+        '--max-rounds', '128', '--max-candidates', '256', '--max-bytes', '536870912',
+        '--initial-bytes', [string]((Get-Item -LiteralPath $RootWheelPath).Length)
+    ) -TimeoutSeconds $remaining)
     foreach ($path in @($planPath, $inventoryPath, $resultPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Python wheel closure helper did not produce required evidence: $path"
@@ -1187,7 +1651,7 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
             '--plan', $planPath,
             '--inventory', $inventoryPath,
             '--result', $resultPath
-        ))
+        ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
         $verification = ($verificationOutput -join [Environment]::NewLine) | ConvertFrom-Json
     }
     catch {
@@ -3081,13 +3545,159 @@ function Resolve-SkillValidator {
     }
 }
 
+function Invoke-BoundedPowerShellWorker {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScriptText,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch] $AcquisitionStopwatch,
+        [Parameter(Mandatory = $true)][int] $AcquisitionLimitSeconds
+    )
+    $encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
+    $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    return @(Invoke-CheckedCommand -Command $hostPath -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedWorker
+    ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
+}
+
+function Remove-BoundedRunOwnedDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $AllowedRoot,
+        [Parameter(Mandatory = $true)][string] $LeafPattern,
+        [int] $CleanupTimeoutSeconds = 15
+    )
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $resolved) -cnotmatch $LeafPattern) {
+        throw "Run-owned cleanup path escaped its expected root: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $item = Get-Item -Force -LiteralPath $resolved -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Run-owned cleanup target is not a regular directory: $resolved"
+    }
+    $path64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($resolved))
+    $root64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($root))
+    $pattern64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LeafPattern))
+    $worker = @'
+$ErrorActionPreference = 'Stop'
+function Decode([string]$value) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value)) }
+$path = [IO.Path]::GetFullPath((Decode '%PATH%'))
+$root = Decode '%ROOT%'
+$pattern = Decode '%PATTERN%'
+if (-not $path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path -Leaf $path) -cnotmatch $pattern) { throw 'Run-owned cleanup path changed before deletion.' }
+if (Test-Path -LiteralPath $path) {
+    $item = Get-Item -Force -LiteralPath $path
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Run-owned cleanup target changed before deletion.'
+    }
+    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+}
+'@
+    $worker = $worker.Replace('%PATH%', $path64).Replace('%ROOT%', $root64).Replace('%PATTERN%', $pattern64)
+    $encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($worker))
+    $hostPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    [void](Invoke-CheckedCommand -Command $hostPath -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedWorker
+    ) -TimeoutSeconds $CleanupTimeoutSeconds)
+}
+
+function Invoke-BoundedInstalledSkillSpectorVerification {
+    param(
+        [Parameter(Mandatory = $true)][string] $VirtualEnvironmentPath,
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersion,
+        [Parameter(Mandatory = $true)][Diagnostics.Stopwatch] $AcquisitionStopwatch,
+        [Parameter(Mandatory = $true)][int] $AcquisitionLimitSeconds
+    )
+    $sourcePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'))
+    $encodedPaths = @{
+        source = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sourcePath))
+        policy = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$PolicyPath))
+        venv = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($VirtualEnvironmentPath))
+        install = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($InstallPath))
+        version = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ExpectedVersion))
+    }
+    $worker = @'
+$ErrorActionPreference = 'Stop'
+function Decode([string]$value) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value)) }
+$source = Decode '%SOURCE%'
+$policy = Decode '%POLICY%'
+$venv = Decode '%VENV%'
+$postInstallRoot = Decode '%INSTALL%'
+$version = Decode '%VERSION%'
+. $source -PolicyPath $policy -ValidatePolicyOnly | Out-Null
+$metadata = Get-InstalledPythonDistributionMetadata -VirtualEnvironmentPath $venv -DistributionName 'skillspector'
+if ([string]$metadata.version -cne $version) { throw "Installed SkillSpector version mismatch. Expected '$version', got '$($metadata.version)'." }
+$executable = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    Join-Path $venv 'Scripts\skillspector.exe'
+} else { Join-Path $venv 'bin/skillspector' }
+$executable = [IO.Path]::GetFullPath($executable)
+if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Installed SkillSpector executable was not found: $executable" }
+$result = [ordered]@{
+    schemaVersion = 1
+    consoleEntryPoint = [string]$metadata.consoleEntryPoint
+    executablePath = $executable
+    executableSha256 = Get-FileSha256 -Path $executable
+    installedClosureSha256 = (Get-DirectoryClosureIdentity -Path $postInstallRoot).sha256
+}
+Write-Output ($result | ConvertTo-Json -Compress -Depth 5)
+'@
+    foreach ($key in $encodedPaths.Keys) {
+        $worker = $worker.Replace("%$($key.ToUpperInvariant())%", [string]$encodedPaths[$key])
+    }
+    $output = @(Invoke-BoundedPowerShellWorker -ScriptText $worker `
+        -AcquisitionStopwatch $AcquisitionStopwatch -AcquisitionLimitSeconds $AcquisitionLimitSeconds)
+    $result = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+    if ([int]$result.schemaVersion -ne 1 -or
+        [string]$result.executableSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$result.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Bounded installed SkillSpector verification returned invalid evidence.'
+    }
+    return $result
+}
+
 function Resolve-SkillSpector {
     param(
         [bool] $ShouldInstall,
         [Parameter(Mandatory = $true)] $ToolPolicy,
-        [string] $RequestedInstallRoot
+        [string] $RequestedInstallRoot,
+        [int] $AcquisitionLimitSeconds = 900
     )
 
+    $acquisitionStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $diagnosticInstallRoot = if ([string]::IsNullOrWhiteSpace($RequestedInstallRoot)) {
+        $base = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+        Join-Path $base 'standard-validation-tools'
+    } else { $RequestedInstallRoot }
+    $failureRoot = if ($ShouldInstall) {
+        Join-Path ([IO.Path]::GetFullPath($diagnosticInstallRoot)) ("skillspector-failure-{0}" -f $script:ResolverRunId)
+    } else { $null }
+    $dependencyResolutionPath = $null
+    $tag = $null
+    $digest = $null
+    $closureHelperSha256 = $null
+    trap {
+        if (-not [string]::IsNullOrWhiteSpace($failureRoot)) {
+            [void](New-Item -ItemType Directory -Path $failureRoot -Force -ErrorAction SilentlyContinue)
+            $safeError = [regex]::Replace([string]$_.Exception.Message, '(?i)\b(?:https?|file|git\+https?)://\S+', '<redacted-url>')
+            $safeError = [regex]::Replace($safeError, '(?i)\b(?:authorization|token|password|secret)\s*[:=]\s*\S+', '<redacted-credential>')
+            $failure = [ordered]@{
+                schemaVersion = 1
+                kind = 'diagnostic-only'
+                runId = $script:ResolverRunId
+                phase = 'skillspector-acquisition'
+                elapsedSeconds = [Math]::Round($acquisitionStopwatch.Elapsed.TotalSeconds, 3)
+                releaseTag = if ($null -eq $tag) { $null } else { [string]$tag }
+                rootAssetDigest = if ($null -eq $digest) { $null } else { [string]$digest }
+                resolverHelperSha256 = if ($null -eq $closureHelperSha256) { $null } else { [string]$closureHelperSha256 }
+                errorSummary = $safeError.Substring(0, [Math]::Min(2048, $safeError.Length))
+            }
+            [IO.File]::WriteAllText((Join-Path $failureRoot 'failure.json'), ($failure | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+        }
+        break
+    }
     $pythonCommand = Assert-Command -Name 'python'
     $closureHelperPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.py'))
     if (-not (Test-Path -LiteralPath $closureHelperPath -PathType Leaf)) {
@@ -3098,7 +3708,7 @@ function Resolve-SkillSpector {
     Assert-NoConflictingPipEnvironment -ApprovedIndex $approvedIndex
     Assert-NoConflictingPythonEnvironment
     $headers = Get-GitHubHeaders
-    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Method Get
+    $release = Invoke-BoundedGitHubGet -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
     if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) {
         throw 'GitHub did not return a stable SkillSpector release.'
     }
@@ -3109,11 +3719,11 @@ function Resolve-SkillSpector {
     }
     $version = [string]$Matches.version
 
-    $tagRef = Invoke-RestMethod -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/ref/tags/{0}" -f $tag) -Headers $headers -Method Get
+    $tagRef = Invoke-BoundedGitHubGet -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/ref/tags/{0}" -f $tag) -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
     $commitSha = [string]$tagRef.object.sha
     $objectType = [string]$tagRef.object.type
     if ($objectType -eq 'tag') {
-        $tagObject = Invoke-RestMethod -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/tags/{0}" -f $commitSha) -Headers $headers -Method Get
+        $tagObject = Invoke-BoundedGitHubGet -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/tags/{0}" -f $commitSha) -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
         $commitSha = [string]$tagObject.object.sha
         $objectType = [string]$tagObject.object.type
     }
@@ -3138,7 +3748,7 @@ function Resolve-SkillSpector {
     }
 
     $interpreterIsolation = [string]$ToolPolicy.pythonDistribution.interpreterIsolation
-    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("skillspector-{0}-{1}" -f $version, [guid]::NewGuid().ToString('N'))
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("ss-{0}" -f [guid]::NewGuid().ToString('N'))
     $wheelhouse = Join-Path $tempRoot 'wheelhouse'
     [void](New-Item -ItemType Directory -Path $wheelhouse -Force)
 
@@ -3152,8 +3762,12 @@ function Resolve-SkillSpector {
     $consoleEntryPoint = $null
     $installedMetadataVerification = $null
     try {
+        if ($ShouldInstall) {
+            $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
+            Assert-PythonWheelInstallPath -InstallPath $toolInstallPath
+        }
         $wheelPath = Join-Path $tempRoot ([string]$wheel.name)
-        Invoke-WebRequest -Uri $assetUri -Headers $headers -OutFile $wheelPath -UseBasicParsing
+        [void](Invoke-BoundedGitHubGet -Uri $assetUri -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds -OutFile $wheelPath)
 
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
         $expectedHash = $digest.Substring('sha256:'.Length)
@@ -3164,6 +3778,9 @@ function Resolve-SkillSpector {
         $wheelMetadata = Get-PythonWheelMetadata -WheelPath $wheelPath
         Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
         Assert-NoPythonDirectReferences -Metadata $wheelMetadata -WheelFileName ([string]$wheel.name)
+        if ($ShouldInstall) {
+            Assert-PythonWheelInstallPath -InstallPath $toolInstallPath -WheelPath $wheelPath
+        }
 
         # GitHub credentials are needed only for the authenticated release API/download calls above.
         # No resolver-managed Python or package-manager subprocess may inherit them.
@@ -3172,12 +3789,13 @@ function Resolve-SkillSpector {
         Remove-Item -LiteralPath 'Env:GH_TOKEN' -Force -ErrorAction SilentlyContinue
 
         if ($ShouldInstall) {
-            $toolInstallPath = New-RunOwnedInstallDirectory -Root $RequestedInstallRoot -ToolName 'skillspector'
             $venvPath = Join-Path $toolInstallPath 'venv'
+            $dependencyResolutionPath = Join-Path $tempRoot 'dependency-resolution'
+            $candidatePath = Join-Path $tempRoot 'verified-candidates'
             $installation = Invoke-WithApprovedPipEnvironment -ApprovedIndex $approvedIndex -Action {
                 # Keep interpreter entries as regular files so the signed
                 # installed closure can reject external/file symlinks.
-                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', '--copies', $venvPath))
+                [void](Invoke-IsolatedPythonCommand -PythonCommand $pythonCommand -Arguments @('-S', '-m', 'venv', '--copies', $venvPath) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
                 $venvPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                     Join-Path $venvPath 'Scripts\python.exe'
                 }
@@ -3188,8 +3806,6 @@ function Resolve-SkillSpector {
                     throw "SkillSpector isolated virtual environment Python was not created: $venvPython"
                 }
 
-                $dependencyResolutionPath = Join-Path $tempRoot 'dependency-resolution'
-                $candidatePath = Join-Path $tempRoot 'verified-candidates'
                 $resolutionEvidence = Resolve-PythonWheelClosureFromApprovedIndex `
                     -PythonCommand $venvPython `
                     -HelperPath $closureHelperPath `
@@ -3198,7 +3814,9 @@ function Resolve-SkillSpector {
                     -RootWheelSha256 $expectedHash `
                     -CandidatePath $candidatePath `
                     -WheelhousePath $wheelhouse `
-                    -WorkPath $dependencyResolutionPath
+                    -WorkPath $dependencyResolutionPath `
+                    -AcquisitionStopwatch $acquisitionStopwatch `
+                    -AcquisitionLimitSeconds $AcquisitionLimitSeconds
 
                 $wheelhouseRoot = Join-Path $wheelhouse ([string]$wheel.name)
                 if (-not (Test-Path -LiteralPath $wheelhouseRoot -PathType Leaf)) {
@@ -3215,6 +3833,8 @@ function Resolve-SkillSpector {
                 if ($rootEntry.Count -ne 1 -or [string]$rootEntry[0].version -cne $version -or [string]$rootEntry[0].sha256 -cne $expectedHash) {
                     throw 'SkillSpector root wheel is not correctly bound into the dependency closure.'
                 }
+                Assert-PythonWheelhouseInstallPaths -InstallPath $toolInstallPath `
+                    -WheelhousePath $wheelhouse -Manifest $manifest
                 $selectedEntries = @($resolutionEvidence.selectedEntries)
                 if ($selectedEntries.Count -ne @($manifest.entries).Count) {
                     throw "Offline backtracking selection count mismatch. Expected '$(@($manifest.entries).Count)', got '$($selectedEntries.Count)'."
@@ -3236,7 +3856,7 @@ function Resolve-SkillSpector {
                     '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
                     '--dry-run', '--ignore-installed', '--no-index', "--find-links=$wheelhouse",
                     '--only-binary=:all:', '--require-hashes', '--report', $planPath, '-r', $lockPath
-                ))
+                ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
                 if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
                     throw 'Offline SkillSpector dependency resolution did not produce an install plan.'
                 }
@@ -3259,32 +3879,21 @@ function Resolve-SkillSpector {
                     '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
                     '--no-index', "--find-links=$wheelhouse", '--require-hashes', '--no-deps', '--force-reinstall',
                     '-r', $lockPath
-                ))
+                ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
 
-                # Read the installed dist-info files directly. Starting the installed interpreter here
-                # would process site-packages .pth startup lines before the resolver has verified metadata.
-                $installedMetadata = Get-InstalledPythonDistributionMetadata `
-                    -VirtualEnvironmentPath $venvPath `
-                    -DistributionName 'skillspector'
-                if ([string]$installedMetadata.version -cne $version) {
-                    throw "Installed SkillSpector version mismatch. Expected '$version', got '$($installedMetadata.version)'."
-                }
-
-                $installedExecutablePath = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                    Join-Path $venvPath 'Scripts\skillspector.exe'
-                }
-                else {
-                    Join-Path $venvPath 'bin/skillspector'
-                }
-                $installedExecutablePath = [IO.Path]::GetFullPath($installedExecutablePath)
-                if (-not (Test-Path -LiteralPath $installedExecutablePath -PathType Leaf)) {
-                    throw "Installed SkillSpector executable was not found: $installedExecutablePath"
-                }
+                # Verify metadata and hash the installed closure in a bounded
+                # child without starting the unverified venv interpreter.
+                $installedVerification = Invoke-BoundedInstalledSkillSpectorVerification `
+                    -VirtualEnvironmentPath $venvPath -InstallPath $toolInstallPath `
+                    -ExpectedVersion $version -AcquisitionStopwatch $acquisitionStopwatch `
+                    -AcquisitionLimitSeconds $AcquisitionLimitSeconds
 
                 return [ordered]@{
                     manifest = $manifest
-                    executablePath = $installedExecutablePath
-                    consoleEntryPoint = [string]$installedMetadata.consoleEntryPoint
+                    executablePath = [string]$installedVerification.executablePath
+                    executableSha256 = [string]$installedVerification.executableSha256
+                    installedClosureSha256 = [string]$installedVerification.installedClosureSha256
+                    consoleEntryPoint = [string]$installedVerification.consoleEntryPoint
                     installedMetadataVerification = 'static-dist-info-metadata'
                     resolutionEvidence = $resolutionEvidence
                 }
@@ -3295,22 +3904,19 @@ function Resolve-SkillSpector {
             $consoleEntryPoint = [string]$installation.consoleEntryPoint
             $installedMetadataVerification = [string]$installation.installedMetadataVerification
             $installEnvironment = 'isolated-venv'
-            $executableSha256 = Get-FileSha256 -Path $executablePath
-            $installedClosure = Get-DirectoryClosureIdentity -Path $toolInstallPath
+            $executableSha256 = [string]$installation.executableSha256
+            $installedClosure = [ordered]@{ sha256 = [string]$installation.installedClosureSha256 }
             Add-ProcessPathValue -Name 'PATH' -Value (Split-Path -Parent $executablePath)
         }
-    }
-    catch {
-        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
-            Remove-Item -LiteralPath $toolInstallPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        throw
-    }
-    finally {
+        # Preserve diagnostic-only bytes before destructive cleanup. They also
+        # cover failures in cleanup, identity construction, or the final budget
+        # check; these files never constitute a successful tool receipt.
+        Save-SkillSpectorFailureEvidence -WorkPath $dependencyResolutionPath -DestinationPath $failureRoot
         if (Test-Path -LiteralPath $tempRoot) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
+                -LeafPattern '^ss-[0-9a-f]{32}$'
         }
-    }
+    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
 
     $identity = "github:NVIDIA/SkillSpector@$tag#commit=$commitSha#asset=$digest#metadata=skillspector@$version#rootDirectReferences=blocked#credentialIsolation=github-token-cleared-before-python#dependencyClosure=unresolved"
     $identityKind = 'release-commit-asset-metadata'
@@ -3320,7 +3926,7 @@ function Resolve-SkillSpector {
         $identityKind = 'release-commit-asset-metadata-dependency-closure-and-executable'
     }
 
-    return [ordered]@{
+    $resolvedResult = [ordered]@{
         resolvedVersion = $version
         resolvedIdentity = $identity
         identityKind = $identityKind
@@ -3352,6 +3958,31 @@ function Resolve-SkillSpector {
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $closure)
         installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
+    }
+    [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
+    return $resolvedResult
+    }
+    catch {
+        $acquisitionFailure = $_
+        try { Save-SkillSpectorFailureEvidence -WorkPath $dependencyResolutionPath -DestinationPath $failureRoot }
+        catch { Write-Warning ("Failure evidence preservation failed: {0}" -f $_.Exception.Message) }
+        if (-not [string]::IsNullOrWhiteSpace($toolInstallPath) -and (Test-Path -LiteralPath $toolInstallPath)) {
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $toolInstallPath -AllowedRoot $diagnosticInstallRoot `
+                    -LeafPattern '^ss-[0-9a-f]{12}$'
+            }
+            catch { Write-Warning ("Run-owned install cleanup failed: {0}" -f $_.Exception.Message) }
+        }
+        throw $acquisitionFailure
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            try {
+                Remove-BoundedRunOwnedDirectory -Path $tempRoot -AllowedRoot ([IO.Path]::GetTempPath()) `
+                    -LeafPattern '^ss-[0-9a-f]{32}$'
+            }
+            catch { Write-Warning ("Run-owned temporary cleanup failed: {0}" -f $_.Exception.Message) }
+        }
     }
 }
 
@@ -3400,7 +4031,7 @@ else {
                 -GoCommandPath $GoCommandPath
         }
         'skillspector' {
-            Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot
+            Resolve-SkillSpector -ShouldInstall ([bool]$Install) -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $InstallRoot -AcquisitionLimitSeconds $AcquisitionTimeoutSeconds
         }
     }
 

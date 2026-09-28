@@ -221,7 +221,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 177
+            ExpectedTotalCount = 179
             ExpectedSkippedCount = 2
             ShardPartitionCount = 4
             ShardPartitionIndex = 0
@@ -353,7 +353,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 137
+            ExpectedTotalCount = 151
             ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 1
@@ -504,7 +504,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 177
+            ExpectedTotalCount = 179
             ExpectedSkippedCount = 1
             ShardPartitionCount = 4
             ShardPartitionIndex = 0
@@ -636,7 +636,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 137
+            ExpectedTotalCount = 151
             ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 1

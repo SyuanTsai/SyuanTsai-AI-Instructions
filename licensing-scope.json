@@ -124,6 +124,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/validator-maintenance-producer.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".github/workflows/validator-maintenance-protected-consumer.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".gitignore",
       "license": "NOASSERTION"
     },
@@ -428,6 +436,18 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Assert-StandardValidatorMaintenanceInputs.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Assert-StandardValidatorMaintenanceReport.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Get-StandardValidatorMaintenanceEvidence.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Inspect-InstalledSemanticScanner.py",
       "license": "Apache-2.0"
     },
@@ -453,6 +473,14 @@
     },
     {
       "path": "scripts/Invoke-StandardValidation.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardValidatorMaintenanceProducer.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardValidatorMaintenanceProtectedConsumer.ps1",
       "license": "Apache-2.0"
     },
     {

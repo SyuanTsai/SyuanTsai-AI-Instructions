@@ -201,9 +201,9 @@ jobs:
         Assert-True $ps51OddBMatch.Success 'PowerShell 5.1 must run its second odd shard partition independently.'
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 177; Skipped = 2 }
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 2 }
                 @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 137; Skipped = 0 }
+                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
                 @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
@@ -238,9 +238,9 @@ jobs:
         Assert-True $ps7OddBMatch.Success 'PowerShell 7 must run its second odd shard partition independently.'
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 177; Skipped = 1 }
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 1 }
                 @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 137; Skipped = 0 }
+                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
                 @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
