@@ -95,6 +95,26 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
             capture_output=True, text=True, timeout=20,
         )
 
+    def shared_findings_digest(self, findings, *, expect_valid=True):
+        values = self.root / "shared-findings.json"
+        values.write_text(json.dumps(findings, ensure_ascii=False), encoding="utf-8")
+        checker = self.root / "shared-digest.ps1"
+        checker.write_text(
+            "param($ModulePath, $ValuePath)\nImport-Module $ModulePath -Force\n"
+            "$value = ConvertFrom-Json -InputObject (Get-Content -Raw -LiteralPath $ValuePath) -NoEnumerate\n"
+            "& (Get-Module StandardSemanticBridge) { param($value) "
+            "$normalized = @(Get-StandardSemanticBridgeCanonicalFindings -Findings $value); "
+            "Get-StandardSemanticBridgeArtifactSha256 -Artifact $normalized } $value\n",
+            encoding="utf-8")
+        result = subprocess.run(["pwsh", "-NoProfile", "-File", str(checker),
+                                 str(SCRIPT.parent / "StandardSemanticBridge.psm1"), str(values)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        if not expect_valid:
+            self.assertNotEqual(0, result.returncode, "Shared safe-path helper accepted unsafe findings.")
+            return result.stderr
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.strip()
+
     # Scenario: A complete synthetic ledger binds both consumer and producer candidate namespaces.
     # Purpose: Offline integration can verify all raw work without claiming a real semantic scan.
     def test_InterT10_verifies_complete_synthetic_bundle_with_dual_identity(self):
@@ -107,6 +127,125 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.assertEqual("BLOCKED", verified["ciAdmission"])
         self.assertEqual(3, verified["plannedWorkItemCount"])
         self.assertFalse(verified["releaseEligible"])
+
+    # Scenario: Every planned work item returns zero findings with complete raw coverage.
+    # Purpose: Successful fixture validity stays separate from consent, review, HRA and release.
+    def test_InterT12_zero_findings_complete_coverage_keeps_formal_gates_separate(self):
+        result = self.verify()
+        self.assertEqual(0, result.returncode, result.stderr)
+        verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual("VERIFIED_FIXTURE_ONLY", verified["semanticValidity"])
+        self.assertEqual("complete", verified["coverageStatus"])
+        self.assertEqual([], verified["normalizedFindings"])
+        self.assertEqual(digest(b"[]"), verified["normalizedFindingsSha256"])
+        self.assertEqual(3, len(verified["rawResultBindings"]))
+        schema = json.loads((SCRIPT.parents[1] / "tests" / "fixtures" /
+                             "routine-semantic-synthetic" / "verification.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(schema["properties"]), set(verified))
+        self.assertTrue(set(schema["required"]).issubset(verified))
+        for key in ("consentGranted", "egressAuthorized", "releaseEligible"):
+            self.assertIs(False, verified[key], key)
+        for key in ("aiReviewStatus", "dispositionStatus", "humanReleaseApprovalStatus"):
+            self.assertEqual("not-evaluated", verified[key], key)
+        self.assertEqual("unverified", verified["trustStatus"])
+        self.assertEqual("BLOCKED", verified["ciAdmission"])
+
+    # Scenario: A canonical finding belongs to one exact analyzer/path raw result.
+    # Purpose: Preserve raw association and schema-valid output without granting admission.
+    def test_InterT14_nonempty_findings_retain_exact_raw_result_binding(self):
+        bundle = copy.deepcopy(self.bundle)
+        work = bundle["workItems"][0]
+        finding = {"severity": "low", "fingerprint": "fixture-1", "ruleId": "fixture-rule",
+                   "message": "Synthetic finding.", "path": work["path"], "analyzerId": work["analyzerId"]}
+        work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+            json.dumps({"workItemId": work["id"], "findings": [finding]}))
+        result = self.verify(bundle)
+        self.assertEqual(0, result.returncode, result.stderr)
+        verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual([finding], verified["normalizedFindings"])
+        self.assertEqual(self.shared_findings_digest([finding]), verified["normalizedFindingsSha256"])
+        binding = verified["rawResultBindings"][0]
+        self.assertEqual(work["id"], binding["workItemId"])
+        self.assertEqual(1, binding["findingCount"])
+        for stem in ("prompt", "response", "rawGraph", "rawFindings"):
+            self.assertEqual(work[stem + "Sha256"], binding[stem + "Sha256"])
+        self.assertFalse(verified["releaseEligible"])
+        # Use PowerShell's real JSON Schema validator; no extra Python package is required.
+        schema = SCRIPT.parents[1] / "tests" / "fixtures" / "routine-semantic-synthetic" / "verification.schema.json"
+        checker = self.root / "check-schema.ps1"
+        checker.write_text("param($ResultPath, $SchemaPath)\n"
+                           "if (Test-Json -Json (Get-Content -Raw -LiteralPath $ResultPath) -SchemaFile $SchemaPath) { exit 0 }; exit 10\n",
+                           encoding="utf-8")
+        command = ["pwsh", "-NoProfile", "-File", str(checker), str(self.output_path), str(schema)]
+        accepted = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        verified["releaseEligible"] = True
+        self.output_path.write_text(json.dumps(verified), encoding="utf-8")
+        rejected = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(10, rejected.returncode, rejected.stderr)
+        for message in ('臺灣正體 "quoted" <tag> / \\ café', 'separators:\u0085\u2028\u2029'):
+            with self.subTest(message=message):
+                self.output_path.unlink()
+                variant = {**finding, "message": message, "path": finding["path"].replace("/", "\\")}
+                work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                    json.dumps({"workItemId": work["id"], "findings": [variant]}))
+                result = self.verify(bundle)
+                self.assertEqual(0, result.returncode, result.stderr)
+                verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+                normalized = {**variant, "path": finding["path"]}
+                self.assertEqual([normalized], verified["normalizedFindings"])
+                self.assertEqual(self.shared_findings_digest([variant]), verified["normalizedFindingsSha256"])
+
+    # Scenario: Correctly hashed raw findings contain malformed or out-of-work findings.
+    # Purpose: Raw digest validity alone cannot hide invalid normalized schema/type/scope.
+    def test_InterT16_rejects_malformed_or_unbound_normalized_findings(self):
+        first = self.bundle["workItems"][0]
+        valid = {"severity": "low", "fingerprint": "fixture-1", "ruleId": "fixture-rule",
+                 "message": "Synthetic finding.", "path": first["path"], "analyzerId": first["analyzerId"]}
+        invalid = [None, 1, "finding", [], {}, {**valid, "severity": "LOW"},
+                   {**valid, "message": True}, {**valid, "message": "bad\nmessage"},
+                   {**valid, "path": "skills/other/SKILL.md"},
+                   {**valid, "analyzerId": ANALYZERS[1]}, {**valid, "override": True}]
+        for finding in invalid:
+            with self.subTest(finding=finding):
+                self.output_path.unlink(missing_ok=True)
+                bundle = copy.deepcopy(self.bundle)
+                work = bundle["workItems"][0]
+                work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                    json.dumps({"workItemId": work["id"], "findings": [finding]}))
+                result = self.verify(bundle)
+                self.assertEqual(10, result.returncode, result.stderr)
+                self.assertFalse(self.output_path.exists())
+        for unsafe in ("skills/example/dir\\..\\SKILL.md", "skills/example//SKILL.md",
+                       "skills/example/./SKILL.md", "skills/example/\x1fSKILL.md"):
+            with self.subTest(bound_inventory_path=unsafe):
+                self.shared_findings_digest([{**valid, "path": unsafe}], expect_valid=False)
+                self.output_path.unlink(missing_ok=True)
+                bundle = copy.deepcopy(self.bundle)
+                producer = bundle["producerPlan"]
+                file = producer["sourceInventory"]["files"][0]
+                file["path"] = unsafe
+                text = "\n".join(("routine-semantic-git-inventory-v1", self.consumer["source"]["revision"],
+                                   f'{unsafe}\t{file["gitBlobSha1"]}\t{file["bytes"]}\t{file["sha256"]}'))
+                inventory_sha = digest(text.encode())
+                producer["sourceInventory"]["inputInventorySha256"] = inventory_sha
+                producer["decision"]["inputInventorySha256"] = inventory_sha
+                for work in bundle["workItems"]:
+                    work["path"] = unsafe
+                    work["id"] = digest(f'{work["analyzerId"]}\n{unsafe}\n{file["sha256"]}'.encode())
+                    work["rawGraphBase64"], work["rawGraphSha256"] = payload(json.dumps({
+                        "artifactType": "synthetic-raw-graph-v1", "workItemId": work["id"], "analyzerId": work["analyzerId"]}))
+                    finding = {**valid, "path": unsafe, "analyzerId": work["analyzerId"]}
+                    work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                        json.dumps({"workItemId": work["id"], "findings": [finding]}))
+                self.prepared_path.write_text(json.dumps(producer), encoding="utf-8")
+                try:
+                    result = self.verify(bundle)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn("INVENTORY_FILE_PATH", result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    self.prepared_path.write_text(json.dumps(self.producer), encoding="utf-8")
 
     # Scenario: The bundle changes either identity, the selected blob, or a raw payload hash.
     # Purpose: A caller cannot replay or mix candidate and work evidence.
@@ -135,7 +274,9 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
             else:
                 bundle["workItems"].pop()
             result = self.verify(bundle)
-            self.assertNotEqual(0, result.returncode, change)
+            self.assertEqual(10, result.returncode, change)
+            self.assertIn("ANALYZER_SET_INCOMPLETE" if change == "analyzer" else "WORK_COUNT_INCOMPLETE", result.stderr)
+            self.assertFalse(self.output_path.exists(), change)
 
     # Scenario: A second consumer plan with another run ID reuses the earlier bundle.
     # Purpose: The verifier rejects replay against another protected run.
@@ -155,6 +296,41 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("BLOCKED", json.loads(self.output_path.read_text(encoding="utf-8"))["ciAdmission"])
+
+    # Scenario: Each file passed to public Verify is independently missing or replaced.
+    # Purpose: Prove plan/prepared/bundle/output forwarding and fail-closed type validation.
+    def test_InterT55_public_verify_forwards_all_files_and_rejects_invalid_inputs(self):
+        self.bundle_path.write_text(json.dumps(self.bundle), encoding="utf-8")
+        command = ["pwsh", "-NoProfile", "-File", str(ENTRYPOINT), "-Mode", "Verify",
+                   "-PlanPath", str(self.plan_path), "-PreparedPath", str(self.prepared_path),
+                   "-BundlePath", str(self.bundle_path), "-OutputPath", str(self.output_path)]
+        for label, changed in (("plan", self.plan_path), ("prepared", self.prepared_path),
+                               ("bundle", self.bundle_path)):
+            with self.subTest(missing=label):
+                original = changed.read_bytes()
+                changed.unlink()
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn("MISSING_OR_UNSAFE", result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    changed.write_bytes(original)
+        for label, changed, value, code in (
+            ("plan-type", self.plan_path, {**self.consumer, "schemaVersion": True}, "CONSUMER_VERSION"),
+            ("bundle-type", self.bundle_path, {**self.bundle, "schemaVersion": True}, "BUNDLE_VERSION"),
+            ("prepared", self.prepared_path, {}, "PREPARED_PLAN_MISMATCH"),
+        ):
+            with self.subTest(substitution=label):
+                original = changed.read_bytes()
+                changed.write_text(json.dumps(value), encoding="utf-8")
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn(code, result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    changed.write_bytes(original)
 
     # Scenario: A signed-looking JSON bundle repeats a decoded key or drops raw graph bytes.
     # Purpose: JSON parser ambiguity and hidden raw-work omissions fail before a result is written.

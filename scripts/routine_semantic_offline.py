@@ -90,6 +90,41 @@ def raw_payload(item: dict[str, Any], stem: str) -> bytes:
     return data
 
 
+def canonical_path(value: Any, code: str) -> str:
+    # Match the bridge's safe relative path semantics before scope comparison.
+    require(type(value) is str and bool(value.strip()) and
+            re.search(r"[\x00-\x1f\x7f]", value) is None, code)
+    normalized = value.replace("\\", "/")
+    require(not normalized.startswith("/") and re.match(r"^[A-Za-z]:", normalized) is None and
+            all(part not in ("", ".", "..") for part in normalized.split("/")), code)
+    return normalized
+
+
+def normalized_finding(value: Any, analyzer: str, path: str) -> dict[str, str]:
+    # Use StandardSemanticBridge's canonical six-field finding shape. This is
+    # only fixture consistency validation, never a trusted evidence admission.
+    fields = ("severity", "fingerprint", "ruleId", "message", "path", "analyzerId")
+    finding = exact_keys(value, set(fields), "FINDING_FIELDS")
+    for name in fields:
+        scalar = finding[name]
+        require(type(scalar) is str and bool(scalar.strip()) and
+                re.search(r"[\x00-\x1f\x7f]", scalar) is None, "FINDING_SCALAR")
+    require(finding["severity"] in ("critical", "high", "medium", "low", "informational"),
+            "FINDING_SEVERITY")
+    finding_path = canonical_path(finding["path"], "FINDING_PATH")
+    require(finding["analyzerId"] == analyzer and finding_path == path, "FINDING_SCOPE")
+    return {name: finding_path if name == "path" else finding[name] for name in fields}
+
+
+def canonical_findings_bytes(findings: list[dict[str, str]]) -> bytes:
+    # All six property names are ASCII, so sort_keys matches bridge ordinal
+    # object ordering. Newtonsoft also escapes these three Unicode separators.
+    text = json.dumps(findings, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    for character in ("\u0085", "\u2028", "\u2029"):
+        text = text.replace(character, "\\u" + format(ord(character), "04x"))
+    return text.encode("utf-8")
+
+
 def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, Any], bundle: dict[str, Any], bundle_bytes: bytes) -> dict[str, Any]:
     require(consumer.get("schemaVersion") == 1 and type(consumer.get("schemaVersion")) is int, "CONSUMER_VERSION")
     require(consumer.get("artifactType") == "standard-validation-consumer-run-plan-v1", "CONSUMER_TYPE")
@@ -136,7 +171,8 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
     for item in files:
         exact_keys(item, {"path", "gitBlobSha1", "bytes", "sha256"}, "INVENTORY_FILE_FIELDS")
         path = item["path"]
-        require(type(path) is str and path.startswith("skills/") and path not in selected and ".." not in path.split("/") and "\x00" not in path, "INVENTORY_FILE_PATH")
+        require(canonical_path(path, "INVENTORY_FILE_PATH") == path and
+                path.startswith("skills/") and path not in selected, "INVENTORY_FILE_PATH")
         blob = hex_value(item["gitBlobSha1"], HEX40, "INVENTORY_BLOB_ID")
         file_sha = hex_value(item["sha256"], HEX64, "INVENTORY_FILE_SHA")
         size = item["bytes"]
@@ -154,6 +190,8 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
     work = bundle["workItems"]
     require(type(work) is list and len(work) == len(ANALYZERS) * len(selected), "WORK_COUNT_INCOMPLETE")
     seen: set[tuple[str, str]] = set()
+    normalized: list[dict[str, str]] = []
+    raw_bindings: list[dict[str, Any]] = []
     for item in work:
         exact_keys(item, {"id", "analyzerId", "path", "selectedBlobSha256", "promptBase64", "promptSha256", "responseBase64", "responseSha256", "rawGraphBase64", "rawGraphSha256", "rawFindingsBase64", "rawFindingsSha256"}, "WORK_FIELDS")
         analyzer = item["analyzerId"]
@@ -168,8 +206,17 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
         graph = strict_json_bytes(raw_payload(item, "rawGraph"), "RAW_GRAPH")
         findings = strict_json_bytes(raw_payload(item, "rawFindings"), "RAW_FINDINGS")
         require(graph.get("artifactType") == "synthetic-raw-graph-v1" and graph.get("workItemId") == expected_id and graph.get("analyzerId") == analyzer, "RAW_GRAPH_BINDING")
+        exact_keys(findings, {"workItemId", "findings"}, "RAW_FINDINGS_FIELDS")
         require(findings.get("workItemId") == expected_id and type(findings.get("findings")) is list, "RAW_FINDINGS_BINDING")
+        normalized.extend(normalized_finding(finding, analyzer, path) for finding in findings["findings"])
+        raw_bindings.append({"workItemId": expected_id, "analyzerId": analyzer, "path": path,
+                             **{stem + "Sha256": item[stem + "Sha256"]
+                                for stem in ("prompt", "response", "rawGraph", "rawFindings")},
+                             "findingCount": len(findings["findings"])})
     require(seen == {(analyzer, path) for analyzer in ANALYZERS for path in selected}, "WORK_COVERAGE_INCOMPLETE")
+    normalized.sort(key=lambda finding: "\x00".join(finding[name] for name in
+                    ("analyzerId", "ruleId", "fingerprint", "path", "severity", "message")).encode("utf-16-be"))
+    normalized_bytes = canonical_findings_bytes(normalized)
 
     return {
         "schemaVersion": 1,
@@ -181,9 +228,19 @@ def verify(consumer: dict[str, Any], consumer_bytes: bytes, prepared: dict[str, 
         "producerCandidateId": producer_id,
         "selectedBlobInventorySha256": inventory_sha,
         "receiptBundleSha256": sha256(bundle_bytes),
+        "semanticValidity": "VERIFIED_FIXTURE_ONLY",
+        "coverageStatus": "complete",
+        "normalizedFindings": normalized,
+        "normalizedFindingsSha256": sha256(normalized_bytes),
+        "rawResultBindings": raw_bindings,
         "authorizationStatus": "fixture-only",
+        "consentGranted": False,
+        "egressAuthorized": False,
         "scanStatus": "SYNTHETIC",
         "trustStatus": "unverified",
+        "aiReviewStatus": "not-evaluated",
+        "dispositionStatus": "not-evaluated",
+        "humanReleaseApprovalStatus": "not-evaluated",
         "ciAdmission": "BLOCKED",
         "plannedWorkItemCount": len(work),
         "successfulProviderCallCount": 0,
