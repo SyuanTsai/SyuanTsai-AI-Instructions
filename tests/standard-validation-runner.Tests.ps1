@@ -448,6 +448,7 @@ exit ([int]$LASTEXITCODE)
                                         [pscustomobject][ordered]@{
                                             ProcessId = [int]$_.ProcessId
                                             ParentProcessId = [int]$_.ParentProcessId
+                                            CreationDate = $_.CreationDate.ToUniversalTime()
                                         }
                                     })
                                 }
@@ -457,6 +458,7 @@ exit ([int]$LASTEXITCODE)
                                             [pscustomobject][ordered]@{
                                                 ProcessId = [int]$_.ProcessId
                                                 ParentProcessId = [int]$_.ParentProcessId
+                                                CreationDate = [System.Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToUniversalTime()
                                             }
                                         })
                                     }
@@ -487,8 +489,19 @@ exit ([int]$LASTEXITCODE)
                             for ($pass = 0; $pass -lt $relations.Count; $pass++) {
                                 $added = $false
                                 foreach ($relation in $relations) {
-                                    if ($descendantIds.Contains($relation.ParentProcessId) -and
-                                        $descendantIds.Add($relation.ProcessId)) {
+                                    if (-not $descendantIds.Contains($relation.ParentProcessId)) { continue }
+                                    if ($env:OS -eq 'Windows_NT') {
+                                        $parentBirth = if ($relation.ParentProcessId -eq $rootProcessId) {
+                                            $process.StartTime.ToUniversalTime()
+                                        }
+                                        else {
+                                            $parentRows = @($relations | Where-Object { $_.ProcessId -eq $relation.ParentProcessId })
+                                            if ($parentRows.Count -eq 1) { $parentRows[0].CreationDate } else { $null }
+                                        }
+                                        if ($relation.CreationDate -isnot [DateTime] -or $parentBirth -isnot [DateTime] -or
+                                            $relation.CreationDate -lt $parentBirth -or $relation.CreationDate -lt $process.StartTime.ToUniversalTime()) { continue }
+                                    }
+                                    if ($descendantIds.Add($relation.ProcessId)) {
                                         $added = $true
                                     }
                                 }
@@ -502,6 +515,13 @@ exit ([int]$LASTEXITCODE)
                                 try {
                                     $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
                                     [void]$ownedProcess.Handle
+                                    if ($env:OS -eq 'Windows_NT') {
+                                        $snapshot = @($relations | Where-Object { $_.ProcessId -eq $processId })
+                                        if ($snapshot.Count -ne 1 -or $ownedProcess.StartTime.ToUniversalTime() -lt $process.StartTime.ToUniversalTime() -or
+                                            [Math]::Abs(($ownedProcess.StartTime.ToUniversalTime() - $snapshot[0].CreationDate).TotalMilliseconds) -gt 1) {
+                                            throw 'Retained fixture PID identity changed or predates the owned root; termination refused.'
+                                        }
+                                    }
                                     $ownedDescendantProcesses.Add($ownedProcess)
                                     $ownedProcess = $null
                                 }
@@ -509,7 +529,7 @@ exit ([int]$LASTEXITCODE)
                                 catch { $cleanupErrors.Add("Descendant process $processId handle capture failed: $($_.Exception.Message)") }
                                 finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
                             }
-                            if ($null -ne $treeKillMethod) {
+                            if ($null -ne $treeKillMethod -and $env:OS -ne 'Windows_NT') {
                                 try { [void]$treeKillMethod.Invoke($process, @($true)) }
                                 catch { $cleanupErrors.Add("Process-tree termination failed: $($_.Exception.Message)") }
                             }
@@ -1756,6 +1776,90 @@ public sealed class StandardMaintenanceBodyFixtureV1 : IDisposable {
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
+        # Scenario: Windows reuses a terminated parent's PID for a newer owned child.
+        # Purpose: an older unrelated process must never enter descendant cleanup by stale ParentProcessId alone.
+        & {
+            param($ExecutorSource, $RunnerSource)
+            $birth = [DateTime]::UtcNow
+            $script:staleParentFixture = @(
+                [pscustomobject]@{ProcessId=100;ParentProcessId=1;CreationDate=$birth},
+                [pscustomobject]@{ProcessId=200;ParentProcessId=100;CreationDate=$birth.AddSeconds(1)},
+                [pscustomobject]@{ProcessId=300;ParentProcessId=200;CreationDate=$birth.AddSeconds(2)},
+                [pscustomobject]@{ProcessId=400;ParentProcessId=100;CreationDate=$birth.AddMinutes(-90)},
+                [pscustomobject]@{ProcessId=500;ParentProcessId=400;CreationDate=$birth.AddMinutes(-89)},
+                [pscustomobject]@{ProcessId=600;ParentProcessId=100;CreationDate=$null}
+            )
+            function Get-CimInstance { param($ClassName,$ErrorAction) return $script:staleParentFixture }
+            foreach($spec in @(@{Source=$ExecutorSource;Name='Get-PesterShardDescendantProcessIds'},@{Source=$RunnerSource;Name='Get-StandardValidationDescendantProcessIds'})) {
+                $ast = [System.Management.Automation.Language.Parser]::ParseInput($spec.Source,[ref]$null,[ref]$null)
+                $node = $ast.Find({param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq $spec.Name},$false)
+                . ([scriptblock]::Create($node.Extent.Text))
+                if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    Assert-Equal ((@(& $spec.Name -RootProcessId 100)|Sort-Object) -join ',') '200,300' 'A reused parent PID must not classify older unrelated processes as descendants.'
+                    $savedRelations=$script:staleParentFixture
+                    $script:staleParentFixture=@(
+                        [pscustomobject]@{ProcessId=100;ParentProcessId=501;CreationDate=$birth},
+                        [pscustomobject]@{ProcessId=501;ParentProcessId=500;CreationDate=$birth.AddSeconds(-1)},
+                        [pscustomobject]@{ProcessId=500;ParentProcessId=499;CreationDate=$birth.AddSeconds(-2)},
+                        [pscustomobject]@{ProcessId=499;ParentProcessId=100;CreationDate=$birth.AddSeconds(-3)}
+                    )
+                    Assert-Equal @(& $spec.Name -RootProcessId 100).Count 0 'A stale-parent cycle must never select an older ancestor.'
+                    $fixtureAst=[System.Management.Automation.Language.Parser]::ParseInput((Get-Content -LiteralPath (Join-Path $script:RepositoryRoot 'tests/standard-validation-runner.Tests.ps1') -Raw),[ref]$null,[ref]$null)
+                    $expansion=$fixtureAst.Find({param($x) $x -is [System.Management.Automation.Language.ForStatementAst] -and $x.Condition.Extent.Text -match '\$pass -lt \$relations.Count'},$true)
+                    $relations=$script:staleParentFixture
+                    $process=[pscustomobject]@{StartTime=$birth}
+                    $rootProcessId=100
+                    $descendantIds=New-Object 'System.Collections.Generic.HashSet[int]'
+                    [void]$descendantIds.Add(100)
+                    . ([scriptblock]::Create($expansion.Extent.Text))
+                    Assert-Equal $descendantIds.Count 1 'The actual fixture expansion loop must retain only its owned root in an ancestor cycle.'
+                    $relations=@(
+                        [pscustomobject]@{ProcessId=200;ParentProcessId=100;CreationDate=$birth.AddSeconds(5)},
+                        [pscustomobject]@{ProcessId=300;ParentProcessId=200;CreationDate=$birth.AddSeconds(2)},
+                        [pscustomobject]@{ProcessId=400;ParentProcessId=200;CreationDate=$null}
+                    )
+                    $descendantIds=New-Object 'System.Collections.Generic.HashSet[int]'
+                    [void]$descendantIds.Add(100)
+                    . ([scriptblock]::Create($expansion.Extent.Text))
+                    Assert-Equal ((@($descendantIds)|Sort-Object) -join ',') '100,200' 'Fixture cleanup must reject a stale intermediate-parent edge even when its child postdates the root.'
+                    $script:staleParentFixture=$savedRelations
+                }
+            }
+        } $shardExecutorSource $runnerSource
+        # Scenario: the host disappears before the child terminates, or a later cleanup error follows the first failure.
+        # Purpose: persist bounded phase/budget diagnostics independently of the terminal process report.
+        $progressAst = [System.Management.Automation.Language.Parser]::ParseInput($shardExecutorSource, [ref]$null, [ref]$null)
+        foreach ($progressName in @('Remove-PesterShardTerminalControlSequences', 'ConvertTo-PesterShardSanitizedDiagnosticText', 'Write-PesterShardProgress')) {
+            $progressFunction = $progressAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $progressName }, $false)
+            Assert-True ($null -ne $progressFunction) "The progress dependency '$progressName' must exist."
+            . ([scriptblock]::Create($progressFunction.Extent.Text))
+        }
+        $progressPath = Join-Path $TestDrive 'live-progress.jsonl'
+        $progressState = @{ count = 0; firstError = ''; runId = ('a' * 32); shardId = 'demo'; sourceSha256 = ('b' * 64) }
+        $progressArguments = @{ Path=$progressPath; State=$progressState; Paths=@('tests/demo.Tests.ps1'); Deadline=[DateTime]::UtcNow.AddSeconds(40); RootProcessId=$null; Process=$null; JobAssigned=$false }
+        Write-PesterShardProgress @progressArguments -Phase 'running' -ErrorText 'first supervisor failure'
+        $liveProgress = Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json
+        Assert-Equal $liveProgress.phase 'running' 'Progress must be durable before a terminal report exists.'
+        Assert-Equal $liveProgress.exitCode $null 'A running process must not invent an exit code.'
+        Assert-True ($liveProgress.remainingSeconds -gt 0 -and $liveProgress.remainingSeconds -le 40) 'Live evidence must preserve remaining shard budget.'
+        Write-PesterShardProgress @progressArguments -Phase 'cleanup' -ErrorText 'token=never-persist-this'
+        $lastProgress = (Get-Content -LiteralPath $progressPath | Select-Object -Last 1) | ConvertFrom-Json
+        Assert-Equal $lastProgress.firstError 'first supervisor failure' 'Cleanup errors must not erase the first failure.'
+        Assert-False ((Get-Content -LiteralPath $progressPath -Raw) -match 'never-persist-this') 'Progress must not retain raw sensitive error text.'
+        $sensitiveArguments = $progressArguments.Clone()
+        $sensitiveArguments.Path = Join-Path $TestDrive 'first-sensitive-progress.jsonl'
+        $sensitiveArguments.State = @{ count = 0; firstError = ''; runId = ('c' * 32); shardId = 'sensitive'; sourceSha256 = ('b' * 64) }
+        Write-PesterShardProgress @sensitiveArguments -Phase 'error' -ErrorText "token=never-persist-first`nsecret continuation"
+        $sensitiveText = Get-Content -LiteralPath $sensitiveArguments.Path -Raw
+        Assert-False ($sensitiveText -match 'never-persist-first|secret continuation') 'A sensitive first error and its continuation must be redacted with fresh state.'
+        Write-PesterShardProgress @progressArguments -Phase 'terminal' -ExitCode ([int]7)
+        $terminalProgress = (Get-Content -LiteralPath $progressPath | Select-Object -Last 1) | ConvertFrom-Json
+        Assert-Equal $terminalProgress.exitCode 7 'An observed terminal exit code must be retained.'
+        Assert-Equal $terminalProgress.runId ('a' * 32) 'Every progress row must bind the invocation identity.'
+        Assert-Equal $terminalProgress.sourceSha256 ('b' * 64) 'Every row must bind actual executor bytes separately from optional hosted revision.'
+        $progressState.count = 120
+        Write-PesterShardProgress @progressArguments -Phase 'heartbeat'
+        Assert-Equal $progressState.count 120 'Heartbeat records must reserve bounded room for terminal phases.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
         Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'
