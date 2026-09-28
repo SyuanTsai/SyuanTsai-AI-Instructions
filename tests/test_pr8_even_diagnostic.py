@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -67,7 +69,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
             for position in (1, 2, 3):
                 script = self.job["steps"][position]["run"]
                 for key, value in {"pester": "4.10.1", "runtime": "ps7",
-                                   "index": "0", "total": "182"}.items():
+                                   "index": "0", "total": "198"}.items():
                     script = script.replace("${{ matrix." + key + " }}", value)
                 path = Path(directory) / f"step-{position}.ps1"
                 path.write_text(script, encoding="utf-8")
@@ -96,19 +98,19 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertEqual(EXPECTED_FILES, len(names))
         self.assertEqual(EXPECTED_SHA, hashlib.sha256("\n".join(names).encode()).hexdigest())
         self.assertEqual(
-            [("ps51", "3.4.0", "0", "182"),
+            [("ps51", "3.4.0", "0", "198"),
              ("ps51", "3.4.0", "4", "40"),
-             ("ps7", "4.10.1", "0", "182"),
+             ("ps7", "4.10.1", "0", "198"),
              ("ps7", "4.10.1", "4", "40")],
             [(item["runtime"], item["pester"], item["index"], item["total"]) for item in self.matrix],
         )
         self.assertIn(EXPECTED_SHA, self.inventory_script)
-        for runtime, index, total in (("ps51", 0, 182), ("ps51", 4, 40), ("ps7", 0, 182), ("ps7", 4, 40)):
+        for runtime, index, total in (("ps51", 0, 198), ("ps51", 4, 40), ("ps7", 0, 198), ("ps7", 4, 40)):
             result = self.run_inventory(runtime, index, total)
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
             self.assertIn(f"index={index}/8 files=4 total={total} skipped=0", result.stdout)
         for changed in (names[:-1], names + ["tests/extra.Tests.ps1"], names + [names[0]], names[:-1] + ["tests/changed.Tests.ps1"]):
-            result = self.run_inventory("ps7", 0, 182, fake_git_names=changed)
+            result = self.run_inventory("ps7", 0, 198, fake_git_names=changed)
             self.assertNotEqual(0, result.returncode, result.stdout)
 
     @classmethod
@@ -123,6 +125,48 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         host = "powershell" if runtime == "ps51" else "pwsh"
         return subprocess.run([host, "-NoProfile", "-Command", script], cwd=ROOT,
                               capture_output=True, text=True, timeout=20)
+
+    # Scenario: Test contents change while the exact file roster stays unchanged.
+    # Purpose: Discover real Pester test cases so stale workflow counts cannot pass
+    # merely because its matrix and hardcoded per-file map agree with each other.
+    def test_InterT20_matches_actual_pester_discovery(self):
+        counts = {path: int(count) for path, count in re.findall(
+            r"'(tests/[^']+\.Tests\.ps1)'\s*=\s*(\d+)", self.inventory_script)}
+        self.assertEqual(8, len(counts))
+        paths = ",".join("'" + path + "'" for path in counts)
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "$module=Get-Module Pester -ListAvailable | Where-Object {$_.Version.Major -ge 5} | "
+            "Sort-Object Version -Descending | Select-Object -First 1;"
+            "if($null -eq $module){throw 'Pester 5 or later is required for discovery.'};"
+            "Import-Module $module.Path -Force;"
+            "$config=New-PesterConfiguration;"
+            f"$config.Run.Path=@({paths});"
+            "$config.Run.SkipRun=$true;$config.Run.PassThru=$true;"
+            "$config.Output.Verbosity='None';$result=Invoke-Pester -Configuration $config;"
+            "if($result.FailedCount -ne 0){throw 'Pester discovery failed.'};"
+            "$counts=[ordered]@{};foreach($path in $config.Run.Path.Value){"
+            "$full=[IO.Path]::GetFullPath($path);"
+            "$counts[$path]=@($result.Tests|Where-Object {$_.ScriptBlock.File -eq $full}).Count};"
+            "'DISCOVERY_JSON='+($counts|ConvertTo-Json -Compress)"
+        )
+        result = subprocess.run(["pwsh", "-NoProfile", "-Command", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("DISCOVERY_JSON="))
+        actual = json.loads(line.partition("=")[2])
+        self.assertEqual(actual, counts, "Workflow map drifted from actual Pester discovery")
+        ordered = ["tests/standard-validation-runner.Tests.ps1",
+                   "tests/syp101-production-smoke-contract.Tests.ps1"]
+        ordered += sorted("tests/" + path.name for path in (ROOT / "tests").glob("*.Tests.ps1")
+                          if "tests/" + path.name not in ordered)
+        for item in self.matrix:
+            selected = ordered[int(item["index"])::8]
+            self.assertEqual(sum(actual[path] for path in selected), int(item["total"]))
+        diagnostic = (ROOT / "scripts/Invoke-PesterEvenDiagnostic.ps1").read_text(encoding="utf-8")
+        for index in (0, 4):
+            total = sum(actual[path] for path in ordered[index::8])
+            self.assertRegex(diagnostic, rf"\$PartitionIndex -eq {index} -and \$ExpectedTotalCount -ne {total}\b")
 
 
 if __name__ == "__main__":

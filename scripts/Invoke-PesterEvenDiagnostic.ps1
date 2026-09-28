@@ -13,7 +13,7 @@ param(
     [int]$PartitionIndex,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet(182, 40)]
+    [ValidateSet(198, 40)]
     [int]$ExpectedTotalCount
 )
 
@@ -23,7 +23,7 @@ if (($Runtime -eq 'ps51' -and $PSVersionTable.PSVersion.Major -ne 5) -or
     ($Runtime -eq 'ps7' -and $PSVersionTable.PSVersion.Major -ne 7)) {
     throw "Diagnostic runtime $Runtime does not match the PowerShell host."
 }
-if (($PartitionIndex -eq 0 -and $ExpectedTotalCount -ne 182) -or
+if (($PartitionIndex -eq 0 -and $ExpectedTotalCount -ne 198) -or
     ($PartitionIndex -eq 4 -and $ExpectedTotalCount -ne 40)) {
     throw 'Diagnostic partition and expected count disagree.'
 }
