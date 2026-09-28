@@ -1926,7 +1926,7 @@ function Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation {
                 $stepHeader -notmatch '(?im)^[ \t]*(?:-\s+)?shell\s*:[^\r\n]*\b(?:pwsh|powershell)(?:\.exe)?\b') { continue }
             # A missing shell uses the runner default and still must not hide
             # PowerShell-style dynamic dispatch from the inventory.
-            if ($body -notmatch '(?m)(?:&|\.)\s*(?:\$|\(|["''])') { continue }
+            if ($body -notmatch '(?m)(?:&|\.\s)') { continue }
             $identity = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $body
             if (-not $rootOverride -and $jobDynamicCount -gt 0 -and
                 ($identity -ceq $expectedMaterializer -or $identity -ceq $expectedInvocation)) { continue }
@@ -1944,7 +1944,14 @@ function Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation {
                 $commandName = [string]$call.GetCommandName()
                 if ([string]::IsNullOrWhiteSpace($commandName)) { return $true }
                 if ($commandName -match '(?i)[/\\].*\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)$' -and
-                    $commandName.Replace('\', '/').TrimStart('.', '/') -cne $CanonicalRelativePath) { return $true }
+                    ($commandName.Replace('\', '/').TrimStart('.', '/') -cne $CanonicalRelativePath -or
+                        -not (Test-AuthorityConsumerCanonicalCommandInvocation -Command ([string]$call.Extent.Text) -CanonicalPattern (Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath)))) { return $true }
+                $commandText = $commandName
+                foreach ($argument in @($call.CommandElements | Select-Object -Skip 1)) {
+                    $argumentText = if ($argument -is [Management.Automation.Language.StringConstantExpressionAst]) { [string]$argument.Value } else { [string]$argument.Extent.Text }
+                    $commandText += ' ' + $argumentText
+                }
+                if ($commandText -match '^(?i)(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan))|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)\b') { return $true }
             }
         }
     }

@@ -3938,6 +3938,10 @@ jobs:
         $report = @(Get-AuthorityConsumerWorkflowJobs -Text $workflow) | Where-Object id -eq 'publish-head-required-checks'
         $unboundReport = ([string]$report.text).Replace('  publish-head-required-checks:', '  unbound-report:').Replace("HEAD_SHA: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'push' && github.sha || '' }}", 'HEAD_SHA: unbound')
         foreach ($unsafe in @(
+            ($workflow + "`n  duplicate:`n    steps:`n      - shell: pwsh`n        run: |`n          . './scripts/Validate.ps1'`n"),
+            ($workflow + "`n  duplicate:`n    steps:`n      - shell: pwsh`n        run: |`n          & './scripts/Validate.ps1'`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & Invoke-Pester`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & 'Invoke-Pester'`n"),
             ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & './tests/AlternateValidation.ps1'`n"),
             ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `"`$alternate`"`n"),
             ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `${alternate}`n"),
