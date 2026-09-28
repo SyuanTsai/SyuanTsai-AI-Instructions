@@ -29,6 +29,8 @@ if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
 # Windows PowerShell 5.1/7 entry point.  Keep the same kernel containment and
 # bounded-capture primitives as the trusted runner here.
 $script:PesterShardChildOutputQuotaCharacters = 1048576
+$script:PesterShardRunId = [guid]::NewGuid().ToString('N')
+$script:PesterShardExecutorSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     $null -eq ('PesterShardProcessControlNative' -as [type])) {
@@ -516,15 +518,21 @@ function Get-PesterShardDescendantProcessIds {
 
     $processes = @(
         Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
-            Select-Object -Property ProcessId, ParentProcessId
+            Select-Object -Property ProcessId, ParentProcessId, CreationDate
     )
+    $births = @{}
+    foreach ($entry in $processes) {
+        if ($entry.CreationDate -is [DateTime]) { $births[[int]$entry.ProcessId] = $entry.CreationDate.ToUniversalTime() }
+    }
     $frontier = @($RootProcessId)
     $descendants = New-Object 'System.Collections.Generic.List[int]'
     while ($frontier.Count -gt 0) {
         $next = New-Object 'System.Collections.Generic.List[int]'
         foreach ($process in $processes) {
             $processId = [int]$process.ProcessId
-            if (($frontier -contains [int]$process.ParentProcessId) -and
+            $parentId = [int]$process.ParentProcessId
+            if (($frontier -contains $parentId) -and $births.ContainsKey($parentId) -and
+                $births.ContainsKey($processId) -and $births[$processId] -ge $births[$parentId] -and
                 $processId -ne $RootProcessId -and -not $descendants.Contains($processId)) {
                 $descendants.Add($processId)
                 $next.Add($processId)
@@ -1419,6 +1427,53 @@ function Get-PesterShardCleanupTarget {
     }
 }
 
+function Write-PesterShardProgress {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][hashtable] $State,
+        [Parameter(Mandatory = $true)][ValidateSet('preflight', 'running', 'heartbeat', 'error', 'cleanup', 'terminal')][string] $Phase,
+        [Parameter(Mandatory = $true)][string[]] $Paths,
+        [AllowNull()][object] $Deadline,
+        [AllowNull()][object] $RootProcessId,
+        [System.Diagnostics.Process] $Process,
+        [bool] $JobAssigned,
+        [string] $ErrorText,
+        [AllowNull()][object] $ExitCode
+    )
+    # Reserve space for error/cleanup/terminal; diagnostic failure must not
+    # bypass the authoritative process cleanup in the caller.
+    if ($State.count -ge 128 -or ($Phase -eq 'heartbeat' -and $State.count -ge 120)) { return }
+    if ([string]::IsNullOrWhiteSpace([string]$State.firstError) -and -not [string]::IsNullOrWhiteSpace($ErrorText)) {
+        $boundedError = $ErrorText.Substring(0, [Math]::Min(4096, $ErrorText.Length))
+        $State.firstError = ConvertTo-PesterShardSanitizedDiagnosticText -Text $boundedError
+    }
+    $resources = [ordered]@{ workingSetBytes = $null; cpuSeconds = $null; handles = $null }
+    if ($null -ne $Process) {
+        try {
+            $Process.Refresh()
+            $resources.workingSetBytes = $Process.WorkingSet64
+            $resources.cpuSeconds = $Process.TotalProcessorTime.TotalSeconds
+            $resources.handles = $Process.HandleCount
+        } catch { }
+    }
+    $now = [DateTime]::UtcNow
+    $record = [ordered]@{
+        schemaVersion = 1; kind = 'diagnostic-only'; phase = $Phase; utc = $now.ToString('o')
+        sourceRevision = if ($env:GITHUB_SHA -match '^[0-9a-f]{40}$') { $env:GITHUB_SHA } else { $null }
+        sourceSha256 = $State.sourceSha256; runId = $State.runId; shardId = $State.shardId
+        powershellVersion = [string]$PSVersionTable.PSVersion; supervisorProcessId = $PID
+        rootProcessId = $RootProcessId; paths = @($Paths); jobAssignedBeforeRelease = $JobAssigned
+        remainingSeconds = if ($null -eq $Deadline) { $null } else { [Math]::Max(0, [Math]::Round(($Deadline - $now).TotalSeconds, 3)) }
+        resources = $resources; firstError = [string]$State.firstError
+        exitCode = if ($Phase -eq 'terminal' -and $ExitCode -is [int]) { $ExitCode } else { $null }
+    }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($record | ConvertTo-Json -Depth 6 -Compress) + [Environment]::NewLine)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    $State.count++
+    Write-Host "PESTER_SHARD_PROGRESS phase=$Phase root=$RootProcessId remaining=$($record.remainingSeconds) utc=$($record.utc)"
+}
+
 function Invoke-PesterShardProcess {
     param(
         [Parameter(Mandatory = $true)][string[]] $Paths,
@@ -1465,6 +1520,21 @@ function Invoke-PesterShardProcess {
     $windowsBootstrapReleasePath = $null
     $preflight = $null
     $deadline = $null
+    $progressState = @{ count = 0; firstError = ''; runId = $script:PesterShardRunId; shardId = [IO.Path]::GetFileNameWithoutExtension($ProcessEvidencePath); sourceSha256 = $script:PesterShardExecutorSha256 }
+    $progressPath = $ProcessEvidencePath + '.progress.jsonl'
+    $nextProgressAt = [DateTime]::UtcNow
+    $progressWriteErrors = New-Object 'System.Collections.Generic.List[string]'
+    # This local wrapper makes progress best-effort while retaining its first
+    # write failure in terminal evidence; containment remains fail-closed.
+    $writeProgress = {
+        param([string] $Phase)
+        try {
+            Write-PesterShardProgress -Path $progressPath -State $progressState -Phase $Phase -Paths $Paths `
+                -Deadline $deadline -RootProcessId $rootProcessId -Process $process -JobAssigned $jobObjectAssigned -ErrorText $exceptionText -ExitCode $exitCode
+        } catch {
+            if ($progressWriteErrors.Count -lt 4) { $progressWriteErrors.Add($_.Exception.Message) }
+        }
+    }
 
     try {
         if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
@@ -1474,6 +1544,7 @@ function Invoke-PesterShardProcess {
         else {
             $startedAt = [DateTime]::UtcNow.ToString('o')
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            & $writeProgress 'preflight'
             $launchCommand = $ChildPowerShell
             $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $EncodedChildScript)
             $launchEnvironment = Get-PesterShardChildEnvironment
@@ -1566,6 +1637,8 @@ function Invoke-PesterShardProcess {
                 $script:PesterShardChildOutputQuotaCharacters
             )
             $status = 'running'
+            & $writeProgress 'running'
+            $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
             try {
                 foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId)) {
                     if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
@@ -1579,6 +1652,10 @@ function Invoke-PesterShardProcess {
             }
             $captureFaultDetected = $false
             while (-not $process.HasExited) {
+                if ([DateTime]::UtcNow -ge $nextProgressAt) {
+                    & $writeProgress 'heartbeat'
+                    $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
+                }
                 try {
                     foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId)) {
                         if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
@@ -1642,6 +1719,8 @@ function Invoke-PesterShardProcess {
         elseif ($status -notin @('cancelled', 'timeout', 'failed')) { $status = 'failed' }
     }
     finally {
+        if (-not [string]::IsNullOrWhiteSpace($exceptionText)) { & $writeProgress 'error' }
+        & $writeProgress 'cleanup'
         $cleanupTarget = Get-PesterShardCleanupTarget `
             -Process $process `
             -ProcessStarted $processStarted `
@@ -1801,11 +1880,15 @@ function Invoke-PesterShardProcess {
             }
         }
         $finishedAt = [DateTime]::UtcNow.ToString('o')
+        & $writeProgress 'terminal'
         $resultExists = Test-Path -LiteralPath $ResultPath -PathType Leaf
         $diagnostic = [ordered]@{
             schemaVersion = 1
             kind = 'syp154-pester-shard-process'
             status = $status
+            progressPath = $progressPath
+            progressRecords = $progressState.count
+            progressWriteErrors = @($progressWriteErrors.ToArray())
             pesterVersion = $Version
             powershellVersion = [string]$PSVersionTable.PSVersion
             powershellEdition = [string]$PSVersionTable.PSEdition
