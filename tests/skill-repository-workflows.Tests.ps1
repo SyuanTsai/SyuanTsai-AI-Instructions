@@ -80,6 +80,153 @@ jobs:
         }
     }
 
+    # Scenario: Public documentation describes component paths beside one canonical command.
+    # Purpose: Inventory execution examples without treating a repository layout or prose as an alternate gate.
+    It 'UnitT05_accepts_component_prose_and_text_layout' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $root = Join-Path $TestDrive 'public-prose'
+        New-ConsumerEntryPointFixture -Root $root
+        Write-TestUtf8File -Path (Join-Path $root 'README.md') -Text @'
+Before merge, use the canonical validation command:
+```powershell
+pwsh -NoProfile -File ./scripts/Validate.ps1
+```
+The canonical validator calls `scripts/Test-Repository.ps1` as an internal diagnostic component, not an alternate release gate.
+```text
+scripts/Validate.ps1
+scripts/Test-Repository.ps1
+```
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy) 'Non-executable component descriptions must not declare an alternate gate.'
+    }
+
+    # Scenario: A public release document contains a real component invocation in different Markdown forms.
+    # Purpose: Preserve alternate-gate rejection for fenced, inline, and plain imperative commands.
+    It 'UnitT06_rejects_alternate_documented_commands_<Name>' -ForEach @(
+        @{Name='shell-fence'; Text="Before merge:`n``````powershell`npwsh -File ./scripts/check-domain.ps1`n```````n"},
+        @{Name='inline-command'; Text='Before merge, run `pwsh -File ./scripts/check-domain.ps1`.'},
+        @{Name='plain-imperative'; Text='Run ./scripts/check-domain.ps1 as the release gate.'},
+        @{Name='command-prefix'; Text='Before merge, run sudo pwsh -File ./scripts/check-domain.ps1.'},
+        @{Name='sentence-imperative'; Text='Before merge, run pwsh -File ./scripts/check-domain.ps1 as the release gate.'},
+        @{Name='text-shell-command'; Text="Before merge:`n``````text`npwsh -File ./scripts/check-domain.ps1`n```````n"},
+        @{Name='text-dynamic-dispatch'; Text=@'
+Before merge:
+```text
+$validator = './scripts/check-domain.ps1'
+& $validator
+```
+'@},
+        @{Name='unknown-fence'; Text="Before merge:`n``````unknown-shell`n./scripts/check-domain.ps1`n```````n"}
+    ) {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $root = Join-Path $TestDrive $Name
+        New-ConsumerEntryPointFixture -Root $root
+        Write-TestUtf8File -Path (Join-Path $root 'README.md') -Text $Text
+        $message = ''
+        try { Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy }
+        catch { $message = $_.Exception.Message }
+        Assert-Match $message 'alternate release gate' 'A real documented component execution must remain blocked.'
+    }
+
+    # Scenario: A public release example opens a shell fence without closing it.
+    # Purpose: Reject ambiguous Markdown rather than silently discard a potentially executable release instruction.
+    It 'UnitT07_rejects_unclosed_command_fences' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $root = Join-Path $TestDrive 'public-unclosed-fence'
+        New-ConsumerEntryPointFixture -Root $root
+        Write-TestUtf8File -Path (Join-Path $root 'README.md') -Text "``````powershell`npwsh -File ./scripts/Validate.ps1`n"
+        $message = ''
+        try { Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy }
+        catch { $message = $_.Exception.Message }
+        Assert-Match $message 'unclosed.*fence' 'An ambiguous executable fence must fail closed.'
+    }
+
+    # Scenario: Existing public commands delegate to the canonical validator and separately read source metadata.
+    # Purpose: Accept the complete reviewed behavior independently of helper name and safe repository metadata.
+    It 'UnitT08_accepts_complete_reviewed_public_helpers_<Variant>' -ForEach @(
+        @{Variant='original'}, @{Variant='other-metadata'}, @{Variant='crlf'}
+    ) {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $root = Join-Path $TestDrive "public-helpers-$Variant"
+        New-ConsumerEntryPointFixture -Root $root
+        $fixtures = Join-Path $PSScriptRoot 'fixtures/public-command-helpers'
+        $wrapper = [IO.File]::ReadAllText((Join-Path $fixtures 'canonical-wrapper.txt'))
+        $metadata = [IO.File]::ReadAllText((Join-Path $fixtures 'git-source-metadata.txt'))
+        if ($Variant -eq 'other-metadata') {
+            $metadata = $metadata.Replace('skills/example-skill', 'skills/another-skill').Replace('example-source', 'another-source').Replace('https://example.org/example/source.git', 'https://example.test/another/project.git')
+        }
+        if ($Variant -eq 'crlf') {
+            $wrapper = $wrapper.Replace("`r`n", "`n").Replace("`n", "`r`n")
+            $metadata = $metadata.Replace("`r`n", "`n").Replace("`n", "`r`n")
+        }
+        Write-TestUtf8File -Path (Join-Path $root 'scripts/preflight.ps1') -Text $wrapper
+        Write-TestUtf8File -Path (Join-Path $root 'scripts/source-info.ps1') -Text $metadata
+        Write-TestUtf8File -Path (Join-Path $root 'RELEASE.md') -Text @'
+Before merge, run `pwsh -NoLogo -NoProfile -File ./scripts/preflight.ps1`.
+Retain source metadata from `pwsh -File ./scripts/source-info.ps1 -Ref HEAD`.
+'@
+        Assert-True (Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy) 'Reviewed delegation and read-only metadata must preserve one canonical execution.'
+    }
+
+    # Scenario: A familiar public helper changes its dispatch, failure propagation, code or metadata.
+    # Purpose: Verify full-program inspection rather than a helper-name exemption or caller-provided proof.
+    It 'UnitT09_rejects_changed_or_opaque_public_helpers_<Mutation>' -ForEach @(
+        @{Mutation='missing-failure-check'}, @{Mutation='different-validator'},
+        @{Mutation='wrapper-publish'}, @{Mutation='metadata-write'},
+        @{Mutation='metadata-unsafe-path'}, @{Mutation='metadata-credential-url'},
+        @{Mutation='opaque-program'}, @{Mutation='extra-arguments'},
+        @{Mutation='duplicate-canonical'}, @{Mutation='ignored-failure'},
+        @{Mutation='outside-helper-path'}, @{Mutation='reparse-helper'},
+        @{Mutation='wrong-helper-parent'}, @{Mutation='return-newline'}
+    ) {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+        $root = Join-Path $TestDrive "public-helpers-$Mutation"
+        New-ConsumerEntryPointFixture -Root $root
+        $fixtures = Join-Path $PSScriptRoot 'fixtures/public-command-helpers'
+        $wrapper = [IO.File]::ReadAllText((Join-Path $fixtures 'canonical-wrapper.txt'))
+        $metadata = [IO.File]::ReadAllText((Join-Path $fixtures 'git-source-metadata.txt'))
+        $extra = ''
+        $publicPath = './scripts/preflight.ps1'
+        $additional = ''
+        switch ($Mutation) {
+            'missing-failure-check' { $wrapper = $wrapper.Replace("if (`$LASTEXITCODE -ne 0) { throw 'Canonical Standard v1 validation failed.' }", '') }
+            'different-validator' { $wrapper = $wrapper.Replace('scripts/Validate.ps1', 'scripts/check-domain.ps1') }
+            'return-newline' { $wrapper = $wrapper.Replace('return ([string]$mergeBaseOutput[0]).Trim()', ('return' + "`n" + '([string]$mergeBaseOutput[0]).Trim()')) }
+            'wrapper-publish' { $wrapper += "`ngh release create v1.0.0`n" }
+            'metadata-write' { $metadata += "`nSet-Content -Path VERSION -Value 1.0.0`n" }
+            'metadata-unsafe-path' { $metadata = $metadata.Replace('skills/example-skill', 'skills/../outside') }
+            'metadata-credential-url' { $metadata = $metadata.Replace('https://example.org/example/source.git', 'https://user:password@example.org/example/source.git') }
+            'opaque-program' { $wrapper = "Invoke-Pester -Path tests`n" }
+            'extra-arguments' { $extra = ' -SkipValidation' }
+            'duplicate-canonical' { $additional = "pwsh -File ./scripts/Validate.ps1`n" }
+            'ignored-failure' { $extra = ' || true' }
+            'outside-helper-path' { $publicPath = './../outside.ps1' }
+            'wrong-helper-parent' {
+                Write-TestUtf8File -Path (Join-Path $root 'scripts/nested/preflight.ps1') -Text $wrapper
+                $publicPath = './scripts/nested/preflight.ps1'
+            }
+            'reparse-helper' {
+                $target = Join-Path $TestDrive 'outside-reviewed-helper'
+                Write-TestUtf8File -Path (Join-Path $target 'preflight.ps1') -Text $wrapper
+                $linkType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+                [void](New-Item -ItemType $linkType -Path (Join-Path $root 'scripts/link') -Target $target)
+                $publicPath = './scripts/link/preflight.ps1'
+            }
+        }
+        Write-TestUtf8File -Path (Join-Path $root 'scripts/preflight.ps1') -Text $wrapper
+        Write-TestUtf8File -Path (Join-Path $root 'scripts/source-info.ps1') -Text $metadata
+        Write-TestUtf8File -Path (Join-Path $root 'RELEASE.md') -Text ("pwsh -File $publicPath$extra`npwsh -File ./scripts/source-info.ps1 -Ref HEAD`n$additional")
+        $message = ''
+        try { Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy }
+        catch { $message = $_.Exception.Message }
+        Assert-Match $message '^BLOCK:' 'Changed or opaque helpers must remain blocked.'
+    }
+
     # Scenario: A workflow checkout is changed back to a mutable tag or leaves its token in Git config.
     # Purpose: Bind every production and authority checkout to the reviewed action commit without ambient credentials.
     It 'UnitT10_pins_every_checkout_and_disables_persisted_credentials' {

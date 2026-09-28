@@ -327,6 +327,10 @@ Canonical entry **MUST**：
 
 Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 canonical entry 的 release path。
 
+Public command inventory **MUST** 檢查文件中的實際執行範例，包括 shell code fences、行內命令及直接執行指示；敘述中的檔案名稱與明確標記為 `text` 的目錄 inventory 不構成 command invocation，但 `text` 標記不得豁免其內的實際 shell 命令。未知 fence language 的內容仍須檢查，未閉合 fence **MUST** BLOCK。這個區分不得豁免實際執行的 component/helper、替代驗證或失敗抑制；未知 helper 仍依完整執行契約 fail closed。
+
+既有薄 wrapper **MAY** 被計為一次 canonical execution，但 authority **MUST** 靜態核對完整已審查的語法、canonical dispatch 及失敗傳遞。獨立純 Git source metadata helper **MAY** 保留，僅在完整已審查程式相符且不執行驗證或寫入時不計為 gate。完整 program identity 僅能正規化 canonical path 或 skill path、source ID、公開 HTTPS repository URL 等安全 inert literal；程式、參數流或 failure guard 改變 **MUST** 拒絕。Helper 名稱、caller hash 或標記均不足以放行，root 外、reparse、未知參數及 opaque helper **MUST** BLOCK。
+
 ### 8.2 Latest-stable tool and trusted-source policy
 
 中央 machine-readable policy 位於 `docs/standards/validation-toolchain.json`；中央 resolver / trust anchor 位於 `scripts/Resolve-StandardValidationTool.ps1`。

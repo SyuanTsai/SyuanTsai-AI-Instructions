@@ -2438,6 +2438,163 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
     }
 }
 
+function Get-AuthorityConsumerReviewedPublicHelperRole {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+
+    # Complete reviewed syntax identities; fixtures/public-command-helpers
+    # retains the readable programs. Names and caller-provided hashes are not proof.
+    $textLf = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $canonicalLiteral = "'" + $CanonicalRelativePath + "'"
+    $normalizations = @()
+    if ([regex]::Matches($textLf, [regex]::Escape($canonicalLiteral)).Count -eq 1) {
+        $normalizations += [pscustomobject]@{
+            text = $textLf.Replace($canonicalLiteral, "'__CANONICAL_VALIDATOR__'")
+            digest = '27d4ce8cdd21dd73b8110301f2510e04e79adcdd86b67763b9bb62cd914d30ba'
+            role = 'canonical-wrapper'
+        }
+    }
+    $metadata = $textLf
+    $slots = @(
+        @{ name='\$skillPath'; value='skills/[a-z][a-z0-9]*(?:-[a-z0-9]+)*'; marker='__SKILL_PATH__'; limit=135 },
+        @{ name='sourceId'; value='[a-z][a-z0-9]*(?:-[a-z0-9]+)*'; marker='__SOURCE_ID__'; limit=128 },
+        @{ name='repository'; value='https://[a-z0-9]+(?:[.-][a-z0-9]+)*(?:/[A-Za-z0-9_.-]+)+\.git'; marker='__SOURCE_REPOSITORY__'; limit=512 }
+    )
+    $safeMetadata = $true
+    foreach ($slot in $slots) {
+        $slotMatches = [regex]::Matches($metadata, '(?m)^[ \t]*' + $slot.name + '[ \t]*=[ \t]*''(?<value>[^''\r\n]*)''[ \t]*$')
+        if ($slotMatches.Count -ne 1 -or $slotMatches[0].Groups['value'].Value.Length -gt $slot.limit -or
+            $slotMatches[0].Groups['value'].Value -cnotmatch ('^' + $slot.value + '$')) { $safeMetadata = $false; break }
+        $value = $slotMatches[0].Groups['value']
+        $metadata = $metadata.Substring(0, $value.Index) + $slot.marker + $metadata.Substring($value.Index + $value.Length)
+    }
+    if ($safeMetadata) {
+        $normalizations += [pscustomobject]@{
+            text = $metadata
+            digest = 'c6938e3cc5d0eab49e44d08932660ab46e178f795aab207b401c245149a20726'
+            role = 'git-source-metadata'
+        }
+    }
+    foreach ($normalization in $normalizations) {
+        # Newlines and continuations carry PowerShell statement semantics.
+        # Normalize CRLF/LF only; never discard these tokens as formatting.
+        $tokens = $null; $parseErrors = $null
+        [void][Management.Automation.Language.Parser]::ParseInput($normalization.text, [ref]$tokens, [ref]$parseErrors)
+        if (@($parseErrors).Count -gt 0) { continue }
+        $identity = (@($tokens | Where-Object { $_.Kind -notin @('Comment', 'EndOfInput') } | ForEach-Object {
+            ([string]$_.Kind) + ':' + $_.Text
+        }) -join "`n")
+        if ([string]::IsNullOrEmpty($identity)) { continue }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $digest = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))) -replace '-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if ($digest -ceq $normalization.digest) { return $normalization.role }
+    }
+    return $null
+}
+
+function ConvertTo-AuthorityConsumerReviewedPublicCommands {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+
+    $commands = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $Text.Split("`n")) {
+        # Only this fixed File invocation shape is inspected. Operators,
+        # dynamic paths and extra arguments retain ordinary alternate-gate checks.
+        $call = [regex]::Match($line.Trim(), '^(?i:pwsh)(?: -NoLogo)?(?: -NoProfile)? -File (?<path>(?:\./)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.ps1)(?<args>(?: -Ref (?:HEAD|[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+))?)$')
+        if (-not $call.Success) { $commands.Add($line); continue }
+        $relative = $call.Groups['path'].Value
+        if ($relative.StartsWith('./', [StringComparison]::Ordinal)) { $relative = $relative.Substring(2) }
+        if ($relative -ceq $CanonicalRelativePath) { $commands.Add($line); continue }
+        if (@($relative.Split('/') | Where-Object { $_ -in @('.', '..', '') }).Count -gt 0) { throw 'BLOCK: public helper has an unsafe relative path.' }
+        $path = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
+        [void](Assert-AuthorityPathWithinRoot -Path $path -Root $RepositoryRoot -Context 'Public helper')
+        if (-not (Test-Path -LiteralPath $path)) { $commands.Add($line); continue }
+        $current = $RepositoryRoot
+        $parts = $relative.Split('/')
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $current = Join-Path $current $parts[$index]
+            if (-not (Test-Path -LiteralPath $current)) { throw 'BLOCK: public helper path does not exist.' }
+            $item = Get-Item -Force -LiteralPath $current -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                ($index -lt $parts.Count - 1 -and -not $item.PSIsContainer) -or
+                ($index -eq $parts.Count - 1 -and ($item.PSIsContainer -or $item -isnot [IO.FileInfo]))) {
+                throw 'BLOCK: public helper requires a regular non-reparse path.'
+            }
+        }
+        if ($item.Length -gt 262144) { throw 'BLOCK: public helper exceeds the bounded program size.' }
+        $role = Get-AuthorityConsumerReviewedPublicHelperRole -Text ([IO.File]::ReadAllText($path)) -CanonicalRelativePath $CanonicalRelativePath
+        if ($role -in @('canonical-wrapper', 'git-source-metadata') -and $parts.Count -ne 2) {
+            throw 'BLOCK: reviewed public helper script parent does not bind the inventory repository root.'
+        }
+        if ($role -ceq 'canonical-wrapper' -and $call.Groups['args'].Value.Length -eq 0) {
+            $commands.Add("pwsh -File ./$CanonicalRelativePath")
+        }
+        elseif ($role -ceq 'git-source-metadata') {
+            # Read-only metadata is neither an alternate validator nor a second execution.
+            continue
+        }
+        else { $commands.Add($line) }
+    }
+    return $commands.ToArray() -join "`n"
+}
+
+function Get-AuthorityConsumerPublicCommandText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    # Markdown prose is not an execution surface. Inventory explicit command
+    # examples while treating unknown fenced languages conservatively.
+    if ($Text.Length -gt 1048576) { throw 'BLOCK: public command documentation exceeds the bounded inventory size.' }
+    $commands = New-Object 'System.Collections.Generic.List[string]'
+    $fenceCharacter = ''
+    $fenceLength = 0
+    $isLayout = $false
+    $commandPrefix = '(?:&\s+|\.{1,2}[/\\]|(?:sudo|env|nohup|timeout|command|exec|call|pwsh|powershell(?:\.exe)?|python[0-9.]*|node|bash|sh|cmd(?:\.exe)?|Invoke-Pester|pytest|dotnet|make|just|task|cargo|mvn|gradle|npm|pnpm|yarn|pip|go|skillspector|skill-validator|skill-tools|gh|git|twine|docker|helm|semantic-release)\b)'
+    $commandStart = '(?i)^' + $commandPrefix
+    foreach ($line in $Text.Replace("`r`n", "`n").Replace("`r", "`n").Split("`n")) {
+        $marker = [regex]::Match($line, '^[ \t]*(?<fence>`{3,}|~{3,})(?<info>[^\r\n]*)$')
+        if ($fenceLength -gt 0) {
+            if ($marker.Success -and $marker.Groups['fence'].Value[0].ToString() -ceq $fenceCharacter -and
+                $marker.Groups['fence'].Value.Length -ge $fenceLength -and
+                [string]::IsNullOrWhiteSpace($marker.Groups['info'].Value)) {
+                $fenceCharacter = ''; $fenceLength = 0; $isLayout = $false
+            }
+            else {
+                $layoutLine = $line.Trim()
+                $isPathInventory = $isLayout -and $layoutLine -match '^[A-Za-z0-9_.\-/]+$' -and
+                    $layoutLine -notmatch '(^|/)\.{1,2}(/|$)' -and $layoutLine -notmatch $commandStart
+                if (-not $isPathInventory) { $commands.Add($line) }
+            }
+            continue
+        }
+        if ($marker.Success) {
+            $fenceCharacter = $marker.Groups['fence'].Value[0].ToString()
+            $fenceLength = $marker.Groups['fence'].Value.Length
+            $isLayout = $marker.Groups['info'].Value.Trim() -ceq 'text'
+            continue
+        }
+        $plain = [regex]::Replace($line.Trim(), '^(?:>\s*|[-*+]\s+|[0-9]+[.)]\s+)', '')
+        $plain = [regex]::Replace($plain, '^(?i)(?:run|execute|use)\s+', '')
+        if ($plain -match $commandStart) {
+            $commands.Add($plain)
+            continue
+        }
+        $imperative = [regex]::Match($plain, '(?i)\b(?:run|execute|invoke)\s+(?<command>' + $commandPrefix + '.*)$')
+        if ($imperative.Success) {
+            $commands.Add($imperative.Groups['command'].Value)
+            continue
+        }
+        foreach ($span in [regex]::Matches($line, '(?<delimiter>`+)(?<command>[^`\r\n]+)\k<delimiter>')) {
+            $inline = $span.Groups['command'].Value.Trim()
+            if ($inline -match $commandStart) { $commands.Add($inline) }
+        }
+    }
+    if ($fenceLength -gt 0) { throw 'BLOCK: public command documentation contains an unclosed code fence.' }
+    return $commands.ToArray() -join "`n"
+}
+
 function Assert-AuthorityConsumerEntryPointContract {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -2602,11 +2759,18 @@ function Assert-AuthorityConsumerEntryPointContract {
             throw "BLOCK: consumer entry-point public command '$publicRelativePath' is a reparse point."
         }
         $publicText = [System.IO.File]::ReadAllText($publicPath)
-        $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
-        $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicText -CanonicalRelativePath $canonicalRelative
-        $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicText
+        $publicCommandText = Get-AuthorityConsumerPublicCommandText -Text $publicText
+        if ([string]::IsNullOrWhiteSpace($publicCommandText)) { continue }
+        $publicCommandText = ConvertTo-AuthorityConsumerReviewedPublicCommands -Text $publicCommandText -RepositoryRoot $rootFull -CanonicalRelativePath $canonicalRelative
+        if ([string]::IsNullOrWhiteSpace($publicCommandText)) { continue }
+        $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicCommandText -CanonicalRelativePath $canonicalRelative
+        $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicCommandText -CanonicalRelativePath $canonicalRelative
+        $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicCommandText
+        if ($publicCanonicalCount -gt 1) {
+            throw "BLOCK: consumer entry-point contract found duplicate canonical executions in public command '$publicRelativePath'."
+        }
         if ($publicReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
-            (Test-AuthorityConsumerFailureSuppression -Text $publicText)) {
+            (Test-AuthorityConsumerFailureSuppression -Text $publicCommandText)) {
             throw "BLOCK: release-affecting public command '$publicRelativePath' suppresses canonical or release failure propagation."
         }
         $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
