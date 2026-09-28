@@ -1368,10 +1368,16 @@ public sealed class C245SlowTrickleStream : Stream {
     # Scenario: Acquisition succeeds, then temporary cleanup exhausts the budget.
     # Purpose: Preserve completed diagnostics and reclaim the install through the same failure path.
     It 'UnitT26v_retains_evidence_and_reclaims_install_after_a_tail_deadline' {
+        Set-StrictMode -Version Latest
         . $script:ResolverPath -PolicyPath $script:ToolchainPath -ValidatePolicyOnly | Out-Null
         $script:tailCleanup = (Get-Item Function:Remove-BoundedRunOwnedDirectory).ScriptBlock
         $script:tailExpired = $false
-        $script:tailBytes = [Text.Encoding]::UTF8.GetBytes('synthetic root wheel')
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $tailWheel = Join-Path $TestDrive 'tail-fixture.whl'
+        $tailArchive = [IO.Compression.ZipFile]::Open($tailWheel, [IO.Compression.ZipArchiveMode]::Create)
+        try { [void]$tailArchive.CreateEntry('skillspector/__init__.py') }
+        finally { $tailArchive.Dispose() }
+        $script:tailBytes = [IO.File]::ReadAllBytes($tailWheel)
         $hasher = [Security.Cryptography.SHA256]::Create()
         try { $script:tailHash = ([BitConverter]::ToString($hasher.ComputeHash($script:tailBytes))).Replace('-', '').ToLowerInvariant() }
         finally { $hasher.Dispose() }
@@ -1382,7 +1388,6 @@ public sealed class C245SlowTrickleStream : Stream {
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
         Mock Get-GitHubHeaders { @{} }
-        Mock Assert-PythonWheelInstallPath { }
         Mock Add-ProcessPathValue { }
         Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
         Mock Invoke-BoundedGitHubGet {
@@ -1401,7 +1406,7 @@ public sealed class C245SlowTrickleStream : Stream {
         Mock Invoke-WithApprovedPipEnvironment {
             [void](New-Item -ItemType Directory -Path $script:tailWork -Force)
             [IO.File]::WriteAllText((Join-Path $script:tailWork 'offline-backtracking-plan.json'), '{"fixture":"completed-plan"}')
-            [IO.File]::WriteAllText((Join-Path $script:tailWork 'candidate-inventory.json'), '{"schemaVersion":1,"entries":[{"file":"verified-candidate.whl"}],"rejectedCandidates":[]}')
+            [IO.File]::WriteAllText((Join-Path $script:tailWork 'candidate-inventory.json'), ('{"schemaVersion":1,"inventorySha256":"' + ('e' * 64) + '","entries":[{"file":"verified-candidate.whl"}],"rejectedCandidates":[]}'))
             $script:tailInstall = (Get-ChildItem -LiteralPath $script:tailRoot -Directory | Where-Object Name -match '^ss-[0-9a-f]{12}$').FullName
             @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='fixture:main'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
         }
