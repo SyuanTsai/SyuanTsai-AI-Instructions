@@ -22,22 +22,33 @@ def bridge(consumer: dict[str, Any], consumer_bytes: bytes,
            prepared: dict[str, Any], prepared_bytes: bytes,
            bundle: dict[str, Any], bundle_bytes: bytes,
            ledger: dict[str, Any], ledger_bytes: bytes) -> dict[str, Any]:
-    saved = strict_json_bytes(prepared_bytes, "PREPARED_PLAN")
-    _require(canonical(saved) == canonical(prepared), "PREPARED_PLAN_BYTES_MISMATCH")
+    for document, raw, code in ((consumer, consumer_bytes, "CONSUMER_PLAN"),
+                                (prepared, prepared_bytes, "PREPARED_PLAN"),
+                                (bundle, bundle_bytes, "BUNDLE"), (ledger, ledger_bytes, "LEDGER")):
+        saved = strict_json_bytes(raw, code)
+        _require(canonical(saved) == canonical(document), code + "_BYTES_MISMATCH")
     verified = verify_bundle(consumer, consumer_bytes, prepared, bundle, bundle_bytes)
     _require(verify_stub_ledger(ledger), "LEDGER_INVALID")
     _require(ledger["sourceRevision"] == verified["sourceRevision"], "LEDGER_REVISION_MISMATCH")
+    if "executionPlan" in prepared:
+        execution = prepared["executionPlan"]
+        _require(type(execution) is dict and
+                 execution.get("workManifestSha256") == ledger["preflightSha256"] and
+                 type(execution.get("plannedCalls")) is int and
+                 execution["plannedCalls"] == ledger["requestCount"], "PREPARED_WORK_MANIFEST_MISMATCH")
     work = bundle["workItems"]
     _require(len(ledger["calls"]) == len(work), "LEDGER_COVERAGE_INCOMPLETE")
-    by_id = {item["id"]: item for item in work}
-    _require(len(by_id) == len(work), "BUNDLE_WORK_DUPLICATE")
-    seen: set[str] = set()
+    by_work = {(item["analyzerId"], item["path"]): item for item in work}
+    _require(len(by_work) == len(work), "BUNDLE_WORK_DUPLICATE")
+    seen: set[tuple[str, str]] = set()
     bindings: list[dict[str, Any]] = []
     for call in ledger["calls"]:
-        work_id = call["callId"]
-        _require(work_id in by_id and work_id not in seen, "LEDGER_WORK_ID_UNKNOWN_OR_DUPLICATE")
-        seen.add(work_id)
-        item = by_id[work_id]
+        # Producer call IDs bind prompt bytes; bundle work IDs bind source bytes.
+        # Join the analyzer/source pair, then require all raw hashes and bytes.
+        key = (call["analyzerId"], call["sourcePath"])
+        _require(key in by_work and key not in seen, "LEDGER_WORK_ID_UNKNOWN_OR_DUPLICATE")
+        seen.add(key)
+        item = by_work[key]
         _require(call["analyzerId"] == item["analyzerId"] and
                  call["sourcePath"] == item["path"] and
                  call["sourceSha256"] == item["selectedBlobSha256"] and
@@ -50,12 +61,12 @@ def bridge(consumer: dict[str, Any], consumer_bytes: bytes,
                  call["promptBytes"] == len(prompt) and
                  call["rawResponseBase64"] == item["responseBase64"],
                  "LEDGER_RAW_BYTES_MISMATCH")
-        bindings.append({"workItemId": work_id, "sequence": call["sequence"],
+        bindings.append({"workItemId": item["id"], "callId": call["callId"], "sequence": call["sequence"],
                          "requestBodySha256": call["requestBodySha256"],
                          "rawResponseSha256": call["rawResponseSha256"],
                          "rawGraphSha256": item["rawGraphSha256"],
                          "rawFindingsSha256": item["rawFindingsSha256"]})
-    _require(seen == set(by_id), "LEDGER_WORK_COVERAGE_MISMATCH")
+    _require(seen == set(by_work), "LEDGER_WORK_COVERAGE_MISMATCH")
     return {"schemaVersion": 1,
             "artifactType": "routine-semantic-stub-bundle-bridge-v1",
             "consumerPlanSha256": sha256(consumer_bytes),

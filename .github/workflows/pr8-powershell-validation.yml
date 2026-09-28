@@ -959,5 +959,5 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -B -c "import sys; print(sys.version); raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
           if ($LASTEXITCODE -ne 0) { throw 'Offline fixtures require Python 3.10 or newer.' }
-          python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 54, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
+          python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 57, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
           if ($LASTEXITCODE -ne 0) { throw 'Offline routine semantic fixtures failed or skipped.' }

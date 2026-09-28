@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from routine_semantic_candidate import CandidateError, _require
+from routine_semantic_candidate import ANALYZERS, HEX40, HEX64, CandidateError, _require
 from routine_semantic_prompt_envelope import build_envelopes
 
 
@@ -153,6 +153,14 @@ def verify_stub_ledger(ledger: dict[str, Any]) -> bool:
              ledger.get("realProviderCalls") == 0 and ledger.get("scanExecuted") is False and
              ledger.get("ciAdmission") == "BLOCKED" and ledger.get("releaseEligible") is False,
              "STUB_LEDGER_STATUS")
+    integer_fields = ("maximumCalls", "requestCount", "realProviderCalls", "maximumOutputTokensPerCall",
+                      "maximumOutputTokensTotal", "requestBodyBytesTotal", "rawResponseBytesTotal")
+    _require(all(type(ledger.get(field)) is int and ledger[field] >= 0 for field in integer_fields),
+             "STUB_LEDGER_INTEGER_TYPE")
+    _require(type(ledger.get("sourceRevision")) is str and HEX40.fullmatch(ledger["sourceRevision"]) is not None
+             and all(type(ledger.get(field)) is str and HEX64.fullmatch(ledger[field]) is not None
+                     for field in ("sourceInventorySha256", "promptManifestSha256", "preflightSha256")),
+             "STUB_LEDGER_SOURCE_BINDING")
     calls = ledger.get("calls")
     _require(type(calls) is list and len(calls) == ledger.get("requestCount") and
              0 < len(calls) <= MAX_CALLS and ledger.get("maximumCalls") >= len(calls) and
@@ -163,6 +171,18 @@ def verify_stub_ledger(ledger: dict[str, Any]) -> bool:
         _require(type(item) is dict and item.get("sequence") == sequence and
                  type(item.get("callId")) is str and item["callId"] not in seen and
                  item.get("status") == "STUB_RESPONSE_ONLY", "STUB_LEDGER_ORDER")
+        _require(all(type(item.get(field)) is int and item[field] > 0
+                     for field in ("sequence", "promptBytes", "requestBodyBytes", "rawResponseBytes")),
+                 "STUB_LEDGER_INTEGER_TYPE")
+        path = item.get("sourcePath")
+        _require(type(item.get("analyzerId")) is str and item["analyzerId"] in ANALYZERS and
+                 type(path) is str and path.startswith("skills/") and len(path.split("/")) >= 3 and
+                 all(part not in ("", ".", "..") for part in path.split("/")) and
+                 "\\" not in path and "\x00" not in path and
+                 all(type(item.get(field)) is str and HEX64.fullmatch(item[field]) is not None
+                     for field in ("sourceSha256", "promptSha256")), "STUB_LEDGER_WORK_SCOPE")
+        expected_id = digest(f'{item["analyzerId"]}\n{path}\n{item["promptSha256"]}'.encode("utf-8"))
+        _require(item["callId"] == expected_id, "STUB_LEDGER_CALL_ID")
         seen.add(item["callId"])
         body = decode_base64(item.get("requestBodyBase64"), 1048576, "STUB_REQUEST")
         response = decode_base64(item.get("rawResponseBase64"), 65536, "STUB_RESPONSE")
@@ -171,6 +191,8 @@ def verify_stub_ledger(ledger: dict[str, Any]) -> bool:
                  item.get("rawResponseBytes") == len(response) and
                  item.get("rawResponseSha256") == digest(response), "STUB_LEDGER_HASH")
         inspect_body(body, model=ledger["requestedModel"], prompt_sha256=item["promptSha256"])
+        prompt = json.loads(body)["input"][0]["content"][0]["text"].encode("utf-8")
+        _require(item["promptBytes"] == len(prompt), "STUB_LEDGER_PROMPT_BYTES")
         expected_response = OfflineResponsesStub().respond(call_id=item["callId"], request_body=body)
         _require(response == expected_response, "STUB_RESPONSE_CHANGED")
         body_total += len(body)

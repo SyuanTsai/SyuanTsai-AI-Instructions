@@ -1,5 +1,6 @@
 """Exact outbound request bytes for an offline-only semantic scan candidate."""
 import hashlib
+import copy
 import json
 from pathlib import Path
 import base64
@@ -224,6 +225,23 @@ class PromptEnvelopeTests(unittest.TestCase):
                                       model="candidate-model", maximum_calls=3)
         self.assertEqual(result["requestCount"], 3)
         self.assertFalse(result["networkTransportPresent"])
+
+    def test_UnitT57_stub_ledger_rejects_noninteger_counts_sizes_and_sequence(self):
+        # Scenario: Valid producer evidence is mutated to float, bool, string, null or negative numeric fields.
+        # Purpose: JSON numeric coercion must not admit invalid budget, totals, byte counts or call sequence.
+        valid = invoke_stub_only(self.inventory, self.preflight, self.prompts, self.repo,
+                                 model="candidate-model", maximum_calls=3)
+        fields = ["maximumCalls", "requestCount", "realProviderCalls", "maximumOutputTokensPerCall",
+                  "maximumOutputTokensTotal", "requestBodyBytesTotal", "rawResponseBytesTotal"]
+        call_fields = ["sequence", "promptBytes", "requestBodyBytes", "rawResponseBytes"]
+        for field in fields + call_fields:
+            original = valid[field] if field in fields else valid["calls"][0][field]
+            for value in (float(original), float(original) + 0.5, True, False, str(original), None, -1):
+                changed = copy.deepcopy(valid)
+                target = changed if field in fields else changed["calls"][0]
+                target[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(CandidateError, "STUB_LEDGER"):
+                    verify_stub_ledger(changed)
 
     def test_InterT10_cli_writes_only_blocked_stub_ledger(self):
         # Scenario: The executable candidate CLI runs against immutable local fixture files.

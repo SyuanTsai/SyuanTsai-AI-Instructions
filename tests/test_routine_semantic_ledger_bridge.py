@@ -15,8 +15,12 @@ from routine_semantic_ledger_bridge import bridge  # noqa: E402
 from routine_semantic_provider_invocation import (  # noqa: E402
     DESTINATION, PURPOSE, DATA_CATEGORY, MAX_OUTPUT_TOKENS,
     OfflineResponsesStub, canonical, digest,
+    invoke_stub_only, verify_stub_ledger,
 )
 import test_routine_semantic_offline as fixture_module  # noqa: E402
+import test_routine_semantic_prompt_envelope as prompt_fixture_module  # noqa: E402
+from routine_semantic_offline import verify as verify_bundle  # noqa: E402
+from routine_semantic_prompt_envelope import build_envelopes  # noqa: E402
 
 
 class LedgerBridgeTests(unittest.TestCase):
@@ -39,10 +43,11 @@ class LedgerBridgeTests(unittest.TestCase):
                     "text": prompt.decode("utf-8")}]}],
                 "tools": [], "tool_choice": "none", "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "truncation": "disabled", "store": False})
-            response = OfflineResponsesStub().respond(call_id=item["id"], request_body=body)
+            call_id = digest(f'{item["analyzerId"]}\n{item["path"]}\n{item["promptSha256"]}'.encode())
+            response = OfflineResponsesStub().respond(call_id=call_id, request_body=body)
             item["responseBase64"] = base64.b64encode(response).decode("ascii")
             item["responseSha256"] = digest(response)
-            calls.append({"sequence": sequence, "callId": item["id"],
+            calls.append({"sequence": sequence, "callId": call_id,
                 "analyzerId": item["analyzerId"], "sourcePath": item["path"],
                 "sourceSha256": item["selectedBlobSha256"],
                 "promptSha256": item["promptSha256"], "promptBytes": len(prompt),
@@ -134,8 +139,139 @@ class LedgerBridgeTests(unittest.TestCase):
             self.convert(bundle=changed)
         changed = copy.deepcopy(self.ledger)
         changed["calls"][0]["sourcePath"] = "skills/other/SKILL.md"
-        with self.assertRaisesRegex(ValueError, "LEDGER_WORK_BINDING_MISMATCH"):
+        with self.assertRaisesRegex(ValueError, "STUB_LEDGER_CALL_ID"):
             self.convert(ledger=changed)
+
+    def test_InterT05_frozen_source_prepare_actual_producer_and_bridge_remain_blocked(self):
+        # Scenario: Real frozen Git blobs, signed fixture Prepare, envelope and unmodified stub producer feed the bridge.
+        # Purpose: Exercise both distinct identity namespaces without rekeying producer evidence to make a fixture pass.
+        frozen = prompt_fixture_module.PromptEnvelopeTests("test_UnitT10_three_exact_no_tool_request_bodies_stay_offline")
+        frozen.setUp()
+        self.addCleanup(frozen.doCleanups)
+        subprocess.run(["git", "-C", str(frozen.repo), "remote", "add", "origin", "https://example.test/repo.git"], check=True)
+        inventory = json.loads(frozen.inventory.read_bytes())
+        consumer = copy.deepcopy(self.consumer)
+        consumer["source"]["revision"] = inventory["candidate"]
+        plan_path = frozen.root / "consumer.json"
+        plan_path.write_bytes(canonical(consumer))
+        signing = frozen.root / "sign-fixture.ps1"
+        signing.write_text(r'''param([string]$Root)
+$ErrorActionPreference = 'Stop'
+$key = [Security.Cryptography.RSACryptoServiceProvider]::new(2048)
+try {
+    $now = [DateTime]::UtcNow
+    $grant = [ordered]@{
+        schemaVersion=1; grantType='routine-semantic-standing-grant-v1'; grantId='11111111-1111-4111-8111-111111111111'
+        repository='https://example.test/repo.git'; pathPrefixes=@('skills/'); dataCategories=@('skill-instructions')
+        provider='fixture-provider'; account='fixture-account'; modelFamily='fixture-model'; purpose='routine semantic review'
+        dataHandlingSha256=('a'*64); approvalEvidenceSha256=('b'*64); maxSourceBytes=2048; maxCalls=3
+        notBefore=$now.AddHours(-1).ToString('o'); expiresAt=$now.AddHours(1).ToString('o')
+    }
+    $registry = [ordered]@{
+        schemaVersion=1; registryType='routine-semantic-revocations-v1'; sequence=1
+        updatedAt=$now.AddMinutes(-1).ToString('o'); expiresAt=$now.AddMinutes(15).ToString('o'); revokedGrantIds=@()
+    }
+    foreach ($entry in @(@{Name='grant';Payload=$grant}, @{Name='revocations';Payload=$registry})) {
+        $raw = [Text.UTF8Encoding]::new($false).GetBytes(($entry.Payload | ConvertTo-Json -Depth 12 -Compress))
+        $envelope = @{schemaVersion=1;keyId='fixture';payloadBase64=[Convert]::ToBase64String($raw);signatureBase64=[Convert]::ToBase64String($key.SignData($raw,'SHA256'))}
+        [IO.File]::WriteAllText((Join-Path $Root ($entry.Name+'.json')), ($envelope | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    }
+    [IO.File]::WriteAllText((Join-Path $Root 'public.xml'), $key.ToXmlString($false), [Text.UTF8Encoding]::new($false))
+} finally { $key.Dispose() }
+''', encoding="utf-8")
+        signed = subprocess.run(["pwsh", "-NoProfile", "-File", str(signing), str(frozen.root)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(signed.returncode, 0, signed.stderr)
+        prepared_path = frozen.root / "prepared.json"
+        prepare = subprocess.run(["pwsh", "-NoProfile", "-File", str(ROOT / "scripts/Invoke-RoutineSemanticScan.ps1"),
+            "-Mode", "Prepare", "-PlanPath", str(plan_path), "-OutputPath", str(prepared_path),
+            "-SourceRoot", str(frozen.repo), "-GrantPath", str(frozen.root / "grant.json"),
+            "-RevocationPath", str(frozen.root / "revocations.json"), "-FixturePublicKeyPath", str(frozen.root / "public.xml"),
+            "-PathPrefixes", "skills/", "-DataCategory", "skill-instructions", "-Provider", "fixture-provider",
+            "-Account", "fixture-account", "-ModelFamily", "fixture-model", "-Purpose", "routine semantic review",
+            "-DataHandlingSha256", "a" * 64, "-ToolReceiptSha256", "f" * 64, "-PlannedCalls", "3",
+            "-MaximumBytes", "2048", "-WorkManifestPath", str(frozen.preflight), "-DevelopmentHarness"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(prepare.returncode, 0, prepare.stderr)
+        prepared_bytes = prepared_path.read_bytes()
+        prepared = json.loads(prepared_bytes)
+        self.assertEqual(prepared["executionPlan"]["workManifestSha256"], digest(frozen.preflight.read_bytes()))
+        envelope = build_envelopes(frozen.inventory, frozen.preflight, frozen.prompts, frozen.repo,
+                                   model="candidate-model", maximum_calls=3)
+        ledger = invoke_stub_only(frozen.inventory, frozen.preflight, frozen.prompts, frozen.repo,
+                                  model="candidate-model", maximum_calls=3)
+        self.assertTrue(verify_stub_ledger(ledger))
+        self.assertEqual([call["callId"] for call in ledger["calls"]], [item["callId"] for item in envelope["requests"]])
+        bundle = {"schemaVersion":1, "artifactType":"routine-semantic-synthetic-bundle-v1",
+                  "consumerPlanSha256":digest(plan_path.read_bytes()), "producerPlan":prepared,
+                  "requiredAnalyzerIds":list(fixture_module.ANALYZERS), "workItems":[]}
+        for call in ledger["calls"]:
+            work_id = digest(f'{call["analyzerId"]}\n{call["sourcePath"]}\n{call["sourceSha256"]}'.encode())
+            self.assertNotEqual(call["callId"], work_id)
+            request = json.loads(base64.b64decode(call["requestBodyBase64"]))
+            prompt = request["input"][0]["content"][0]["text"].encode()
+            graph = canonical({"artifactType":"synthetic-raw-graph-v1", "workItemId":work_id, "analyzerId":call["analyzerId"]})
+            findings = canonical({"workItemId":work_id, "findings":[]})
+            bundle["workItems"].append({"id":work_id, "analyzerId":call["analyzerId"], "path":call["sourcePath"],
+                "selectedBlobSha256":call["sourceSha256"], "promptBase64":base64.b64encode(prompt).decode("ascii"),
+                "promptSha256":call["promptSha256"], "responseBase64":call["rawResponseBase64"], "responseSha256":call["rawResponseSha256"],
+                "rawGraphBase64":base64.b64encode(graph).decode("ascii"), "rawGraphSha256":digest(graph),
+                "rawFindingsBase64":base64.b64encode(findings).decode("ascii"), "rawFindingsSha256":digest(findings)})
+        self.assertEqual(verify_bundle(consumer, plan_path.read_bytes(), prepared, bundle, canonical(bundle))["scanStatus"], "SYNTHETIC")
+        result = bridge(consumer, plan_path.read_bytes(), prepared, prepared_bytes, bundle, canonical(bundle), ledger, canonical(ledger))
+        self.assertEqual({(item["callId"], item["workItemId"]) for item in result["bindings"]},
+                         {(call["callId"], work["id"]) for call,work in zip(ledger["calls"], bundle["workItems"])})
+        self.assertEqual(result["scanStatus"], "SYNTHETIC")
+        self.assertEqual(result["ciAdmission"], "BLOCKED")
+        self.assertIs(result["releaseEligible"], False)
+        self.assertEqual(result["realProviderCalls"], 0)
+
+        changed = copy.deepcopy(ledger)
+        changed["preflightSha256"] = "0" * 64
+        self.assertTrue(verify_stub_ledger(changed))
+        with self.assertRaisesRegex(ValueError, "PREPARED_WORK_MANIFEST_MISMATCH"):
+            bridge(consumer, plan_path.read_bytes(), prepared, prepared_bytes, bundle, canonical(bundle), changed, canonical(changed))
+
+    def test_UnitT35_duplicate_work_call_alias_and_raw_document_substitution_reject(self):
+        # Scenario: Valid ledger calls repeat an analyzer/source pair with distinct prompt IDs, alias an ID, or substitute raw evidence.
+        # Purpose: The cross-namespace join must retain exact one-to-one coverage and raw-byte custody.
+        repeated = copy.deepcopy(self.ledger)
+        call = copy.deepcopy(repeated["calls"][0])
+        call["sequence"] = 2
+        body = json.loads(base64.b64decode(call["requestBodyBase64"]))
+        body["input"][0]["content"][0]["text"] += " additional prompt"
+        prompt = body["input"][0]["content"][0]["text"].encode()
+        body_bytes = canonical(body)
+        call["promptSha256"] = digest(prompt)
+        call["promptBytes"] = len(prompt)
+        call["callId"] = digest(f'{call["analyzerId"]}\n{call["sourcePath"]}\n{call["promptSha256"]}'.encode())
+        response = OfflineResponsesStub().respond(call_id=call["callId"], request_body=body_bytes)
+        for stem, raw in (("requestBody", body_bytes), ("rawResponse", response)):
+            call[stem + "Base64"] = base64.b64encode(raw).decode("ascii")
+            call[stem + "Sha256"] = digest(raw)
+            call[stem + "Bytes"] = len(raw)
+        repeated["calls"][1] = call
+        for stem in ("requestBody", "rawResponse"):
+            repeated[stem + "BytesTotal"] = sum(item[stem + "Bytes"] for item in repeated["calls"])
+        self.assertTrue(verify_stub_ledger(repeated))
+        with self.assertRaisesRegex(ValueError, "LEDGER_WORK_ID_UNKNOWN_OR_DUPLICATE"):
+            self.convert(ledger=repeated)
+        alias = copy.deepcopy(self.ledger)
+        alias["calls"][0]["callId"] = self.bundle["workItems"][0]["id"]
+        with self.assertRaisesRegex(ValueError, "STUB_LEDGER_CALL_ID"):
+            self.convert(ledger=alias)
+        wrong_source = copy.deepcopy(self.ledger)
+        wrong_source["calls"][0]["sourceSha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "LEDGER_WORK_BINDING_MISMATCH"):
+            self.convert(ledger=wrong_source)
+        documents = [self.consumer, self.prepared, self.bundle, self.ledger]
+        for index, code in ((0,"CONSUMER_PLAN"), (1,"PREPARED_PLAN"), (2,"BUNDLE"), (3,"LEDGER")):
+            raw = [canonical(item) for item in documents]
+            substituted = copy.deepcopy(documents[index])
+            substituted["schemaVersion"] = 2
+            raw[index] = canonical(substituted)
+            with self.subTest(code=code), self.assertRaisesRegex(ValueError, code + "_BYTES_MISMATCH"):
+                bridge(documents[0], raw[0], documents[1], raw[1], documents[2], raw[2], documents[3], raw[3])
 
     def test_InterT10_cli_writes_blocked_bridge_only(self):
         # Scenario: The CLI receives four valid fixture inputs and a new output path.
