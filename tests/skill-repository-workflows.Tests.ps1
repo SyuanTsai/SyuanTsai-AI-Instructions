@@ -405,7 +405,7 @@ ino: 1
         Assert-Match $routineJob 'persist-credentials:\s*false' 'The offline fixture checkout must not persist a Git token.'
         Assert-Match $routineJob 'sys\.version_info\s*>=\s*\(3,\s*10\)' 'The offline runner must check its minimum supported Python version.'
         Assert-Match $routineJob 'test_routine_semantic_\*\.py' 'The offline runner must discover every existing routine fixture module.'
-        Assert-Match $routineJob 'assertEqual\(suite\.countTestCases\(\),\s*57' 'The offline runner must reject missing or unexpected tests.'
+        Assert-Match $routineJob 'assertEqual\(suite\.countTestCases\(\),\s*61' 'The offline runner must reject missing or unexpected tests.'
         Assert-Match $routineJob 'len\(result\.skipped\)\s*==\s*0' 'The offline runner must reject skipped fixtures.'
         Assert-NotMatch $routineJob 'Install-Module|pip install|Invoke-WebRequest|workflow_dispatch' 'The offline job must use its existing runtime without provider or tool acquisition.'
 
