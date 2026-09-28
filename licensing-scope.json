@@ -104,6 +104,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/pr8-even-shard-diagnostic.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": ".github/workflows/pr8-powershell-validation.yml",
       "license": "Apache-2.0"
     },
@@ -180,19 +184,19 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/examples/skills-catalog-lock.example.json",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "catalog/examples/skills-catalog-lock-v2.example.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/examples/skills-catalog.example.json",
+      "path": "catalog/examples/skills-catalog-lock.example.json",
       "license": "Apache-2.0"
     },
     {
       "path": "catalog/examples/skills-catalog-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/skills-catalog.example.json",
       "license": "Apache-2.0"
     },
     {
@@ -224,11 +228,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-lock.schema.json",
+      "path": "catalog/schemas/skills-catalog-lock-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-lock-v2.schema.json",
+      "path": "catalog/schemas/skills-catalog-lock.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -236,11 +240,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog.schema.json",
+      "path": "catalog/schemas/skills-catalog-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-v2.schema.json",
+      "path": "catalog/schemas/skills-catalog.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -296,10 +300,6 @@
       "license": "NOASSERTION"
     },
     {
-      "path": "docs/standards/managed-skill-lifecycle.md",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "docs/standards/README.md",
       "license": "Apache-2.0"
     },
@@ -328,6 +328,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/managed-skill-lifecycle.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/pr12-source-merge-adoption.json",
       "license": "Apache-2.0"
     },
@@ -337,10 +341,6 @@
     },
     {
       "path": "docs/standards/schemas/managed-skill-lifecycle-v1.schema.json",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "docs/standards/schemas/validation-security-gate-v1.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -368,6 +368,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/validation-security-gate-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/skill-repository-review-matrix.md",
       "license": "Apache-2.0"
     },
@@ -388,11 +392,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "docs/standards/upstream-interoperability.md",
+      "path": "docs/standards/upstream-adapter.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "docs/standards/upstream-adapter.json",
+      "path": "docs/standards/upstream-interoperability.md",
       "license": "Apache-2.0"
     },
     {
@@ -429,6 +433,10 @@
     },
     {
       "path": "scripts/Invoke-FocusedLinuxContainment.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-PesterEvenDiagnostic.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -548,15 +556,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/routine_semantic_ledger_bridge.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/routine_semantic_offline.py",
       "license": "Apache-2.0"
     },
     {
       "path": "scripts/routine_semantic_prompt_envelope.py",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "scripts/routine_semantic_ledger_bridge.py",
       "license": "Apache-2.0"
     },
     {
@@ -812,6 +820,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/test_pr8_even_diagnostic.py",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/test_routine_semantic_candidate.py",
       "license": "Apache-2.0"
     },
@@ -824,11 +836,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/test_routine_semantic_offline.py",
+      "path": "tests/test_routine_semantic_ledger_bridge.py",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/test_routine_semantic_ledger_bridge.py",
+      "path": "tests/test_routine_semantic_offline.py",
       "license": "Apache-2.0"
     },
     {

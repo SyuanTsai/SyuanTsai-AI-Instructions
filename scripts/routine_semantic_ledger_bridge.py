@@ -14,14 +14,17 @@ import sys
 from typing import Any
 
 from routine_semantic_candidate import CandidateError, _require
-from routine_semantic_offline import read_json, sha256, verify as verify_bundle
+from routine_semantic_offline import read_json, sha256, strict_json_bytes, verify as verify_bundle
 from routine_semantic_provider_invocation import canonical, verify_stub_ledger
 
 
 def bridge(consumer: dict[str, Any], consumer_bytes: bytes,
+           prepared: dict[str, Any], prepared_bytes: bytes,
            bundle: dict[str, Any], bundle_bytes: bytes,
            ledger: dict[str, Any], ledger_bytes: bytes) -> dict[str, Any]:
-    verified = verify_bundle(consumer, consumer_bytes, bundle, bundle_bytes)
+    saved = strict_json_bytes(prepared_bytes, "PREPARED_PLAN")
+    _require(canonical(saved) == canonical(prepared), "PREPARED_PLAN_BYTES_MISMATCH")
+    verified = verify_bundle(consumer, consumer_bytes, prepared, bundle, bundle_bytes)
     _require(verify_stub_ledger(ledger), "LEDGER_INVALID")
     _require(ledger["sourceRevision"] == verified["sourceRevision"], "LEDGER_REVISION_MISMATCH")
     work = bundle["workItems"]
@@ -56,6 +59,7 @@ def bridge(consumer: dict[str, Any], consumer_bytes: bytes,
     return {"schemaVersion": 1,
             "artifactType": "routine-semantic-stub-bundle-bridge-v1",
             "consumerPlanSha256": sha256(consumer_bytes),
+            "preparedPlanSha256": sha256(prepared_bytes),
             "syntheticBundleSha256": sha256(bundle_bytes),
             "stubLedgerSha256": sha256(ledger_bytes),
             "sourceRevision": verified["sourceRevision"],
@@ -69,19 +73,21 @@ def bridge(consumer: dict[str, Any], consumer_bytes: bytes,
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--prepared", type=Path, required=True)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         _require(not args.output.exists() and not args.output.is_symlink(), "OUTPUT_EXISTS")
-        paths = [args.plan, args.bundle, args.ledger, args.output]
+        paths = [args.plan, args.prepared, args.bundle, args.ledger, args.output]
         _require(len({str(path.resolve(strict=False)) for path in paths}) == len(paths),
                  "INPUT_OUTPUT_PATH_COLLISION")
         consumer, consumer_bytes = read_json(args.plan, "PLAN")
+        prepared, prepared_bytes = read_json(args.prepared, "PREPARED_PLAN")
         bundle, bundle_bytes = read_json(args.bundle, "BUNDLE")
         ledger, ledger_bytes = read_json(args.ledger, "LEDGER")
-        result = bridge(consumer, consumer_bytes, bundle, bundle_bytes, ledger, ledger_bytes)
+        result = bridge(consumer, consumer_bytes, prepared, prepared_bytes, bundle, bundle_bytes, ledger, ledger_bytes)
         with args.output.open("xb") as stream:
             stream.write(canonical(result) + b"\n")
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:

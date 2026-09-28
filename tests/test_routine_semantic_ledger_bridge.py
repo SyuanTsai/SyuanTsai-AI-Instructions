@@ -26,7 +26,11 @@ class LedgerBridgeTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.consumer = self.fixture.consumer
+        self.prepared = copy.deepcopy(self.fixture.producer)
+        self.prepared["consumerBinding"]["consumerPlanSha256"] = digest(canonical(self.consumer))
         self.bundle = copy.deepcopy(self.fixture.bundle)
+        self.bundle["producerPlan"]["consumerBinding"]["consumerPlanSha256"] = digest(canonical(self.consumer))
+        self.bundle["consumerPlanSha256"] = digest(canonical(self.consumer))
         calls = []
         for sequence, item in enumerate(self.bundle["workItems"], 1):
             prompt = base64.b64decode(item["promptBase64"])
@@ -66,7 +70,7 @@ class LedgerBridgeTests(unittest.TestCase):
             "authorizationStatus": "not-evaluated", "trustStatus": "unverified",
             "ciAdmission": "BLOCKED", "releaseEligible": False}
 
-    def convert(self, *, bundle=None, ledger=None):
+    def convert(self, *, bundle=None, ledger=None, prepared=...):
         consumer_bytes = canonical(self.consumer)
         material = copy.deepcopy(bundle if bundle is not None else self.bundle)
         material["producerPlan"]["consumerBinding"]["consumerPlanSha256"] = digest(consumer_bytes)
@@ -74,7 +78,20 @@ class LedgerBridgeTests(unittest.TestCase):
         bundle_bytes = canonical(material)
         raw = copy.deepcopy(ledger if ledger is not None else self.ledger)
         ledger_bytes = canonical(raw)
-        return bridge(self.consumer, consumer_bytes, material, bundle_bytes, raw, ledger_bytes)
+        saved = copy.deepcopy(self.prepared if prepared is ... else prepared)
+        return bridge(self.consumer, consumer_bytes, saved, canonical(saved), material, bundle_bytes, raw, ledger_bytes)
+
+    def test_UnitT05_rejects_missing_substituted_or_inconsistent_prepared_plan(self):
+        # Scenario: The independent Prepare document is missing, substituted, or disagrees with its raw bytes.
+        # Purpose: Keep the ledger bridge on the same mandatory prepared-plan verification boundary.
+        changed = copy.deepcopy(self.prepared)
+        changed["decision"]["egressAuthorized"] = True
+        for saved in (None, changed):
+            with self.subTest(saved=saved), self.assertRaisesRegex(ValueError, "PREPARED"):
+                self.convert(prepared=saved)
+        with self.assertRaisesRegex(ValueError, "PREPARED_PLAN_BYTES_MISMATCH"):
+            bridge(self.consumer, canonical(self.consumer), self.prepared, canonical(changed),
+                   self.bundle, canonical(self.bundle), self.ledger, canonical(self.ledger))
 
     def test_UnitT10_exact_raw_request_response_work_binding_stays_blocked(self):
         # Scenario: Every stub call has one exact synthetic work item and raw byte match.
@@ -85,6 +102,7 @@ class LedgerBridgeTests(unittest.TestCase):
                          {x["id"] for x in self.bundle["workItems"]})
         self.assertEqual(result["scanStatus"], "SYNTHETIC")
         self.assertEqual(result["realProviderCalls"], 0)
+        self.assertEqual(result["preparedPlanSha256"], digest(canonical(self.prepared)))
         self.assertFalse(result["graphResponseBindingVerified"])
         self.assertEqual(result["ciAdmission"], "BLOCKED")
 
@@ -120,27 +138,51 @@ class LedgerBridgeTests(unittest.TestCase):
             self.convert(ledger=changed)
 
     def test_InterT10_cli_writes_blocked_bridge_only(self):
-        # Scenario: The CLI receives three valid fixture inputs and a new output path.
+        # Scenario: The CLI receives four valid fixture inputs and a new output path.
         # Purpose: Persist only a synthetic, untrusted bridge artifact.
         consumer_bytes = canonical(self.consumer)
         self.bundle["producerPlan"]["consumerBinding"]["consumerPlanSha256"] = digest(consumer_bytes)
         self.bundle["consumerPlanSha256"] = digest(consumer_bytes)
         plan = self.fixture.root / "bridge-plan.json"
+        prepared = self.fixture.root / "bridge-prepared.json"
         bundle = self.fixture.root / "bridge-bundle.json"
         ledger = self.fixture.root / "bridge-ledger.json"
         output = self.fixture.root / "bridge-output.json"
-        for path, value in ((plan, self.consumer), (bundle, self.bundle), (ledger, self.ledger)):
+        for path, value in ((plan, self.consumer), (prepared, self.prepared), (bundle, self.bundle), (ledger, self.ledger)):
             path.write_bytes(canonical(value))
         run = subprocess.run([sys.executable, str(ROOT / "scripts" / "routine_semantic_ledger_bridge.py"),
-            "--plan", str(plan), "--bundle", str(bundle), "--ledger", str(ledger),
+            "--plan", str(plan), "--prepared", str(prepared), "--bundle", str(bundle), "--ledger", str(ledger),
             "--output", str(output)], capture_output=True, text=True, timeout=20)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["ciAdmission"], "BLOCKED")
+
+    def test_InterT15_cli_rejects_absent_substituted_or_colliding_prepared_input(self):
+        # Scenario: A CLI caller omits Prepare, supplies a different saved decision, or aliases a bundle path.
+        # Purpose: Reject before create-only output instead of deriving Prepare from the bundle being checked.
+        plan = self.fixture.root / "missing-plan.json"
+        prepared = self.fixture.root / "wrong-prepared.json"
+        bundle = self.fixture.root / "missing-bundle.json"
+        ledger = self.fixture.root / "missing-ledger.json"
+        output = self.fixture.root / "missing-output.json"
+        changed = copy.deepcopy(self.prepared)
+        changed["decision"]["egressAuthorized"] = True
+        for path, value in ((plan, self.consumer), (prepared, changed), (bundle, self.bundle), (ledger, self.ledger)):
+            path.write_bytes(canonical(value))
+        command = [sys.executable, str(ROOT / "scripts" / "routine_semantic_ledger_bridge.py"),
+                   "--plan", str(plan), "--bundle", str(bundle), "--ledger", str(ledger), "--output", str(output)]
+        for extra, reason in (([], "--prepared"), (["--prepared", str(prepared)], "PREPARED_PLAN_MISMATCH"),
+                              (["--prepared", str(bundle)], "INPUT_OUTPUT_PATH_COLLISION")):
+            with self.subTest(extra=extra):
+                run = subprocess.run(command + extra, capture_output=True, text=True, timeout=20)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn(reason, run.stderr)
+                self.assertFalse(output.exists())
 
     def test_InterT20_cli_rejects_duplicate_ledger_key_without_output(self):
         # Scenario: A ledger repeats its schemaVersion JSON key.
         # Purpose: Refuse ambiguous raw evidence before writing a bridge artifact.
         plan = self.fixture.root / "duplicate-plan.json"
+        prepared = self.fixture.root / "duplicate-prepared.json"
         bundle = self.fixture.root / "duplicate-bundle.json"
         ledger = self.fixture.root / "duplicate-ledger.json"
         output = self.fixture.root / "duplicate-output.json"
@@ -148,12 +190,14 @@ class LedgerBridgeTests(unittest.TestCase):
         self.bundle["producerPlan"]["consumerBinding"]["consumerPlanSha256"] = digest(consumer_bytes)
         self.bundle["consumerPlanSha256"] = digest(consumer_bytes)
         plan.write_bytes(consumer_bytes)
+        prepared.write_bytes(canonical(self.prepared))
         bundle.write_bytes(canonical(self.bundle))
         ledger.write_bytes(b'{"schemaVersion":1,"schemaVersion":1}')
         run = subprocess.run([sys.executable, str(ROOT / "scripts" / "routine_semantic_ledger_bridge.py"),
-            "--plan", str(plan), "--bundle", str(bundle), "--ledger", str(ledger),
+            "--plan", str(plan), "--prepared", str(prepared), "--bundle", str(bundle), "--ledger", str(ledger),
             "--output", str(output)], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(run.returncode, 0)
+        self.assertIn("LEDGER_DUPLICATE_PROPERTY", run.stderr)
         self.assertFalse(output.exists())
 
 

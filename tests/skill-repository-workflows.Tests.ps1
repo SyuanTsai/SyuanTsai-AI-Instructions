@@ -7,7 +7,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 10
+            '.github/workflows/pr8-powershell-validation.yml' = 11
             '.github/workflows/standards-conformance.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
@@ -97,6 +97,14 @@ jobs:
         Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 2 'The dedicated Linux focused job and direct Linux composition step may import Pester in workflow scope; Windows full suites must stay behind the bounded executor.'
         Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 8 'All eight Windows Pester partitions must use the bounded executor.'
         Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 8 'Workflow logging must use discovery metadata without importing the module first.'
+        $diagnosticPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-even-shard-diagnostic.yml'
+        Assert-True (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) 'Manual even-shard diagnostic workflow must exist.'
+        $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $diagnosticPath
+        Assert-Match $diagnostic '(?m)^\s*workflow_dispatch:\s*$' 'Diagnostic must require explicit manual dispatch.'
+        Assert-NotMatch $diagnostic '(?m)^\s*(pull_request|push|schedule|workflow_run):\s*$' 'Diagnostic must not auto-run or replace a required check.'
+        Assert-Match $diagnostic 'timeout-minutes:\s*45' 'Diagnostic jobs must be bounded to 45 minutes.'
+        Assert-Match $diagnostic 'cancel-in-progress:\s*false' 'Diagnostic must not cancel another active run.'
+        Assert-Match $diagnostic 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' 'Normal failure evidence upload must use the reviewed immutable action.'
     }
 
     # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
@@ -193,10 +201,10 @@ jobs:
         Assert-True $ps51OddBMatch.Success 'PowerShell 5.1 must run its second odd shard partition independently.'
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 176; Skipped = 2 }
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 177; Skipped = 2 }
                 @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
                 @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 137; Skipped = 0 }
-                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 184; Skipped = 6 }
+                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 5.1 partition must run on Windows.'
@@ -230,10 +238,10 @@ jobs:
         Assert-True $ps7OddBMatch.Success 'PowerShell 7 must run its second odd shard partition independently.'
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 176; Skipped = 1 }
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 177; Skipped = 1 }
                 @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
                 @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 137; Skipped = 0 }
-                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 184; Skipped = 6 }
+                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 7 partition must run on Windows.'
@@ -385,6 +393,21 @@ ino: 1
         Assert-Match $summaryJob '(?i)(throw|exit\s+1)' 'The summary must return a failing status when either dependency is not successful.'
 
         Assert-Match $required 'powershell-7-unix-composition:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'The Linux composition job must depend on the dedicated focused job.'
+
+        # Scenario: An offline bridge API changes while only Pester files are discovered by the shared gate.
+        # Purpose: Run every routine Python fixture with a fixed count before admitting this engineering regression job.
+        $routineMatch = [regex]::Match($required, '(?ms)^  routine-semantic-offline:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        Assert-True $routineMatch.Success 'PR59 must execute its offline Python regression in CI.'
+        $routineJob = $routineMatch.Groups['block'].Value
+        Assert-Match $routineJob 'needs:\s*linux-callback-focused' 'The offline regression must retain the focused prerequisite.'
+        Assert-Match $routineJob 'runs-on:\s*windows-latest' 'The offline regression must exercise its existing Windows PowerShell entrypoints.'
+        Assert-Match $routineJob 'timeout-minutes:\s*10' 'The offline fixture job must have a fixed overall budget.'
+        Assert-Match $routineJob 'persist-credentials:\s*false' 'The offline fixture checkout must not persist a Git token.'
+        Assert-Match $routineJob 'sys\.version_info\s*>=\s*\(3,\s*10\)' 'The offline runner must check its minimum supported Python version.'
+        Assert-Match $routineJob 'test_routine_semantic_\*\.py' 'The offline runner must discover every existing routine fixture module.'
+        Assert-Match $routineJob 'assertEqual\(suite\.countTestCases\(\),\s*54' 'The offline runner must reject missing or unexpected tests.'
+        Assert-Match $routineJob 'len\(result\.skipped\)\s*==\s*0' 'The offline runner must reject skipped fixtures.'
+        Assert-NotMatch $routineJob 'Install-Module|pip install|Invoke-WebRequest|workflow_dispatch' 'The offline job must use its existing runtime without provider or tool acquisition.'
 
         $focusedStepIndex = $standards.IndexOf('Run required Unix callback containment boundary')
         $goSetupIndex = $standards.IndexOf('Set up approved Go runtime')
