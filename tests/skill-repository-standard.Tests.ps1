@@ -3787,6 +3787,188 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $errorMessage 'entry-point|canonical execution|event/candidate' 'The executable authority must reject a weakened entry-point contract.'
     }
 
+    # Scenario: Cleanup retains artifacts after a canonical/release job, without changing either command's exit behavior.
+    # Purpose: Scope failure suppression to authoritative commands rather than unrelated cleanup steps or jobs.
+    It 'UnitT96_scopes_workflow_failure_propagation_to_canonical_and_release_steps' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $workflow = @'
+on: push
+jobs:
+  canonical:
+    steps:
+      - run: ./scripts/Validate.ps1
+      - name: Retain diagnostics
+        if: ${{ always() }}
+        run: echo retained
+  release:
+    needs: canonical
+    steps:
+      - run: gh release create v1.0.0
+  cleanup:
+    if: ${{ always() }}
+    steps:
+      - run: echo cleanup
+'@
+        Assert-AuthorityConsumerReleaseFailurePropagation -WorkflowPath 'fixture.yml' -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1'
+        foreach ($unsafe in @(
+            $workflow.Replace('- run: ./scripts/Validate.ps1', "- continue-on-error: true`n        run: ./scripts/Validate.ps1"),
+            $workflow.Replace('- run: gh release create v1.0.0', "- if: `${{ always() }}`n        run: gh release create v1.0.0"),
+            $workflow.Replace('run: ./scripts/Validate.ps1', 'run: ./scripts/Validate.ps1 || true'),
+            $workflow.Replace('  canonical:', "  canonical:`n    continue-on-error: true"),
+            $workflow.Replace('  release:', "  release:`n    if: `${{ always() }}")
+        )) {
+            $failure = $null
+            try { Assert-AuthorityConsumerReleaseFailurePropagation -WorkflowPath 'fixture.yml' -Text $unsafe -CanonicalRelativePath 'scripts/Validate.ps1' }
+            catch { $failure = $_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) 'Canonical/release suppression must remain blocked.'
+        }
+    }
+
+    # Scenario: A head-bound check reporter derives success solely from every required dependency result.
+    # Purpose: Distinguish verified check-runs reporting from arbitrary API mutations and fake-success reports.
+    It 'UnitT97_recognizes_only_complete_head_bound_check_reporting' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $job = @'
+  report:
+    needs: [canonical]
+    if: ${{ always() }}
+    steps:
+      - shell: bash
+        env:
+          HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'push' && github.sha || '' }}
+          CANONICAL_RESULT: ${{ needs['canonical'].result }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Invalid head.' >&2
+            exit 1
+          fi
+          conclusion='failure'
+          if [[ "$CANONICAL_RESULT" == 'success' ]]; then
+            conclusion='success'
+          fi
+          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          for check_name in \
+            'required-check'; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
+              -f name="$check_name" \
+              -f head_sha="$HEAD_SHA" \
+              -f status=completed \
+              -f conclusion="$conclusion" \
+              -f details_url="$details_url" >/dev/null
+          done
+'@
+        Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job) 'Exact head/result-bound check reporting must be recognized.'
+        Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job.Replace("`r`n", "`n").Replace("`n", "`r`n")) 'CRLF check-report metadata must preserve the exact same head/result binding.'
+        Assert-True (Test-AuthorityConsumerHeadCheckReport -JobText $job.Replace('needs: [canonical]', "needs:`n      - canonical")) 'Multiline needs must preserve the same exact result binding.'
+        foreach ($unsafe in @(
+            $job.Replace('/check-runs', '/releases'),
+            $job.Replace('head_sha="$HEAD_SHA"', 'head_sha="unbound"'),
+            $job.Replace("conclusion='failure'", "conclusion='success'"),
+            $job.Replace('needs[''canonical''].result', '''success'''),
+            $job.Replace('gh api --method POST', 'HEAD_SHA=fake; gh api --method POST'),
+            $job.Replace('>/dev/null', '>/dev/null || true'),
+            $job.Replace('env:', "env:`n          BASH_ENV: malicious.sh"),
+            $job.Replace('    steps:', "    env:`n      BASH_ENV: malicious.sh`n    steps:"),
+            $job.Replace('- shell: bash', "- continue-on-error: true`n        shell: bash"),
+            $job.Replace('conclusion="$conclusion"', 'conclusion=success')
+        )) {
+            Assert-False (Test-AuthorityConsumerHeadCheckReport -JobText $unsafe) 'Wrong endpoint/head/result or swallowed API failure must remain unverified.'
+        }
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" -f conclusion=success') 'A bare unverified check-runs request must still fail closed.'
+    }
+
+    # Scenario: A supervisor materialized from event-bound Git blobs invokes the canonical path via a local PowerShell variable.
+    # Purpose: Count real dynamic execution once while rejecting changed provenance, path overwrite, inspection, and duplicate calls.
+    It 'UnitT98_counts_verified_base_owned_dynamic_canonical_invocations' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/PR41-protected-workflow.yml')
+        Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1') 1 'Reviewed dynamic canonical execution must count once.'
+        foreach ($unsafe in @(
+            $workflow.Replace("ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}", 'ref: ${{ github.sha }}'),
+            $workflow.Replace("          ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}`r`n", '').Replace("          ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}`n", ''),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', "PATH: `${{ github.workspace }}/bin:/usr/bin:/bin`n          TRUSTED_SUPERVISOR_COMMIT: `${{ github.sha }}"),
+            $workflow.Replace('        shell: pwsh', '        shell: candidate-shell {0}'),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', 'TRUSTED_SUPERVISOR_COMMIT: ${{ github.event.pull_request.head.sha }}'),
+            $workflow.Replace('      - name: Set up approved Go runtime', "      - shell: bash`n        run: echo 'exit 0' > `"`$RUNNER_TEMP/standard-v1-trusted-supervisor/scripts/Validate.ps1`"`n`n      - name: Set up approved Go runtime"),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', "GITHUB_ENV: ignored.env`n          TRUSTED_SUPERVISOR_COMMIT: `${{ github.sha }}"),
+            $workflow.Replace('      - name: Materialize protected validation supervisor', "      - if: false`n        name: Materialize protected validation supervisor"),
+            $workflow.Replace('      - name: Materialize protected validation supervisor', "      - shell: bash`n        run: echo candidate/bin >> `"`$GITHUB_PATH`"`n`n      - name: Materialize protected validation supervisor"),
+            $workflow.Replace('PUSH_BEFORE_SHA: ${{ github.event.before }}', 'push_before_sha: ${{ github.event.before }}'),
+            $workflow.Replace('        id: canonical-validation', "        id: canonical-validation`n        if: false"),
+            $workflow.Replace('    name: Darktide Translate Standard v1', "    name: Darktide Translate Standard v1`n    env:`n      TRUSTED_SUPERVISOR_ROOT: candidate"),
+            $workflow.Replace("Join-Path `$env:TRUSTED_SUPERVISOR_ROOT 'scripts/Validate.ps1'", "Join-Path `$env:GITHUB_WORKSPACE 'scripts/Validate.ps1'"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', '$trustedValidator = ''candidate.ps1''; & $trustedValidator @validatorArguments'),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "`$validatorArguments['RepositoryRoot']='other'; & `$trustedValidator @validatorArguments"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "Set-Variable trustedValidator 'candidate.ps1'; & `$trustedValidator @validatorArguments"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "Set-Item variable:trustedValidator 'candidate.ps1'; & `$trustedValidator @validatorArguments"),
+            $workflow.Replace('"STANDARD_GO_RUNTIME_VERSION=$($Matches.version)"', ('$Matches.version = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''MS4yLjMKVFJVU1RFRF9TVVBFUlZJU09SX1JPT1Q9Y2FuZGlkYXRl''))' + "`n          " + '"STANDARD_GO_RUNTIME_VERSION=$($Matches.version)"')),
+            $workflow.Replace('          cgroup_delegated="$cgroup_parent/delegated"', "          cgroup_delegated='injected'`n          cgroup_delegated=`"`$cgroup_parent/delegated`""),
+            $workflow.Replace('& $trustedValidator @validatorArguments', 'Get-Item $trustedValidator'),
+            $workflow.Replace('& $trustedValidator @validatorArguments', 'if ($false) { & $trustedValidator @validatorArguments }'),
+            $workflow.Replace('& $trustedValidator @validatorArguments', '& $trustedValidator @validatorArguments -RepositoryRoot candidate-other'),
+            $workflow.Replace(".Add('blob')", ".Add('commit')"),
+            $workflow.Replace('[IO.FileMode]::CreateNew', '[IO.FileMode]::Create'),
+            $workflow.Replace('& $trustedValidator @validatorArguments', 'echo ''& $trustedValidator @validatorArguments''')
+        )) {
+            Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $unsafe -CanonicalRelativePath 'scripts/Validate.ps1') 0 'Unknown or contaminated dynamic construction must not count as canonical.'
+        }
+        $duplicate = $workflow.Replace('& $trustedValidator @validatorArguments', "& `$trustedValidator @validatorArguments`n          & `$trustedValidator @validatorArguments")
+        Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $duplicate -CanonicalRelativePath 'scripts/Validate.ps1') 2 'Two actual canonical calls must remain visible to the once-only guard.'
+        $crlfSource = (Get-Content -Raw -LiteralPath $script:AuthorityGatePath).Replace("`r`n", "`n").Replace("`n", "`r`n")
+        . ([scriptblock]::Create($crlfSource)) -DefineFunctionsOnly
+        Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1') 1 'A CRLF checkout of the actual classifier must recognize the same reviewed construction.'
+    }
+
+    # Scenario: The full PR41 fixture uses a base-owned supervisor and one PR candidate, while mutations attempt bypass or duplicate routing.
+    # Purpose: Verify the actual entry-point contract rather than only individual classifiers.
+    It 'UnitT99_preserves_full_protected_PR_candidate_and_failure_propagation_semantics' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/PR41-protected-workflow.yml')
+        $root = Join-Path $TestDrive 'protected-fixture'
+        $inspection = $workflow + "`n  inspect:`n    steps:`n      - shell: pwsh`n        run: Write-Output '& `$alternate'`n"
+        Assert-False (Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand -Text $inspection -CanonicalRelativePath 'scripts/Validate.ps1') 'Printing a dynamic command is not an actual invocation.'
+        [void](New-Item -ItemType Directory -Path (Join-Path $root '.github/workflows') -Force)
+        [void](New-Item -ItemType Directory -Path (Join-Path $root 'scripts') -Force)
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Validate.ps1'), '# canonical fixture path')
+        $workflowPath = Join-Path $root '.github/workflows/protected.yml'
+        $policy = Get-Content -Raw $script:ValidationSecurityGatePath | ConvertFrom-Json
+        [IO.File]::WriteAllText($workflowPath, $workflow)
+        Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy
+        $report = @(Get-AuthorityConsumerWorkflowJobs -Text $workflow) | Where-Object id -eq 'publish-head-required-checks'
+        $unboundReport = ([string]$report.text).Replace('  publish-head-required-checks:', '  unbound-report:').Replace("HEAD_SHA: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'push' && github.sha || '' }}", 'HEAD_SHA: unbound')
+        foreach ($unsafe in @(
+            ($workflow + "`n  duplicate:`n    steps:`n      - shell: pwsh`n        run: |`n          . './scripts/Validate.ps1'`n"),
+            ($workflow + "`n  duplicate:`n    steps:`n      - shell: pwsh`n        run: |`n          & './scripts/Validate.ps1'`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & Invoke-Pester`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & 'Invoke-Pester'`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & './tests/AlternateValidation.ps1'`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `"`$alternate`"`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `${alternate}`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `$alternate`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          `$result = & `$alternate`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          . `$unknownValidator`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & (Join-Path `$env:GITHUB_WORKSPACE 'tests/AlternateValidation.ps1')`n"),
+            $workflow.Replace('& $windowsPowerShellPath @protectedContractArguments', "`$alternate = './tests/AlternateValidation.ps1'; & `$alternate"),
+            ($workflow + "`n" + $unboundReport),
+            ($workflow + "`n  unverified-dynamic:`n    steps:`n      - shell: pwsh`n        run: |`n          `$trustedValidator = './candidate.ps1'`n          & `$trustedValidator @validatorArguments`n"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "gh release create v1.0.0`n          & `$trustedValidator @validatorArguments"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "& `$trustedValidator @validatorArguments`n          gh release create v1.0.0"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', '& $trustedValidator @validatorArguments || true'),
+            $workflow.Replace('id: canonical-validation', "id: canonical-validation`n        continue-on-error: true"),
+            $workflow.Replace('  pull_request_target:', "  pull_request_target:`n  pull_request:"),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', 'TRUSTED_SUPERVISOR_COMMIT: ${{ github.event.pull_request.head.sha }}'),
+            $workflow.Replace("CANONICAL_RESULT: `${{ needs['canonical-validation'].result }}", "CANONICAL_RESULT: `${{ needs['upload-canonical-validation-evidence'].result }}"),
+            $workflow.Replace('& $trustedValidator @validatorArguments', "& `$trustedValidator @validatorArguments`n          ./tests/AlternateValidation.ps1")
+        )) {
+            [IO.File]::WriteAllText($workflowPath, $unsafe)
+            $failure = $null
+            try { Assert-AuthorityConsumerEntryPointContract -RepositoryRoot $root -CanonicalValidatorPath 'scripts/Validate.ps1' -Policy $policy }
+            catch { $failure = $_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) 'A full-workflow bypass must fail the entry-point contract.'
+        }
+    }
+
     # Scenario: PowerShell returns JSON integers as Int64 on some Linux/runtime combinations.
     # Purpose: Keep the upstream adapter report contract cross-platform without accepting coercive strings.
     It 'UnitT91_accepts_Int64_upstream_adapter_report_schema_version' {

@@ -1,3 +1,73 @@
+Describe 'Bounded offline acquisition fixtures' {
+    BeforeAll {
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
+        function Assert-OfflineCondition {
+            param([bool]$Condition, [string]$Message)
+            if (-not $Condition) { throw $Message }
+        }
+        function Assert-OfflineFailure {
+            param([scriptblock]$Action, [string]$Pattern)
+            $failure = $null
+            try { & $Action }
+            catch { $failure = $_.Exception.Message }
+            if ([string]$failure -notmatch $Pattern) { throw "Expected offline failure '$Pattern'; actual '$failure'." }
+        }
+    }
+
+    # Scenario: Acquisition spends its budget before a later download/worker phase starts.
+    # Purpose: Keep the deadline anchored at acquisition start rather than resetting for every phase.
+    It 'UnitT10_decrements_the_shared_acquisition_budget_from_start' {
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $initial = Get-RemainingAcquisitionSeconds -Stopwatch $watch -LimitSeconds 2
+        Start-Sleep -Milliseconds 1100
+        $remaining = Get-RemainingAcquisitionSeconds -Stopwatch $watch -LimitSeconds 2
+        Assert-OfflineCondition ($initial -eq 2) 'The initial budget must cover two seconds.'
+        Assert-OfflineCondition ($remaining -eq 1) 'The later phase must receive only the remaining second.'
+        Start-Sleep -Milliseconds 1000
+        Assert-OfflineFailure { Get-RemainingAcquisitionSeconds -Stopwatch $watch -LimitSeconds 2 } 'deadline exceeded'
+    }
+
+    # Scenario: An injected HTTP-like task never completes, while the acquisition cancellation timer expires.
+    # Purpose: Stop pending I/O promptly using the existing cancellation path without any real download.
+    It 'UnitT20_cancels_a_pending_offline_download_task' {
+        $pending = New-Object 'Threading.Tasks.TaskCompletionSource[int]'
+        $cancel = New-Object Threading.CancellationTokenSource
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $cancel.CancelAfter(200)
+            Assert-OfflineFailure { Wait-CancellableAcquisitionTask -Task $pending.Task -CancellationToken $cancel.Token -PendingMessage 'offline pending fixture' } 'canceled'
+            Assert-OfflineCondition ($watch.Elapsed.TotalSeconds -lt 3) 'Pending I/O cancellation must return within three seconds.'
+            Assert-OfflineCondition (-not $pending.Task.IsCompleted) 'Cancellation must not turn a pending download into completion.'
+        }
+        finally { $cancel.Dispose() }
+    }
+
+    # Scenario: A pip-like worker hangs beyond the shared one-second acquisition budget.
+    # Purpose: Exercise the actual bounded process launcher and retain the timeout as a failure.
+    It 'InterT30_terminates_only_the_bounded_hanging_worker' {
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        Assert-OfflineFailure { Invoke-BoundedPowerShellWorker -ScriptText 'Start-Sleep -Seconds 20' -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 1 } 'deadline'
+        Assert-OfflineCondition ($watch.Elapsed.TotalSeconds -lt 8) 'Worker timeout and cleanup must remain bounded.'
+        # The parent process survives the owned-worker timeout.
+        Assert-OfflineCondition (-not [Diagnostics.Process]::GetCurrentProcess().HasExited) 'The parent must survive the owned-worker timeout.'
+    }
+
+    # Scenario: Acquisition fails after writing a partial diagnostic-only inventory.
+    # Purpose: Preserve readable failure artifacts separately from successful acquisition evidence.
+    It 'UnitT40_preserves_partial_failure_artifacts' {
+        $work = Join-Path $TestDrive 'failed-work'
+        $saved = Join-Path $TestDrive 'failure-artifacts'
+        [void](New-Item -ItemType Directory -Path $work)
+        $diagnostic = '{"schemaVersion":1,"kind":"diagnostic-only","entries":[]}'
+        [IO.File]::WriteAllText((Join-Path $work 'candidate-inventory.failure.json'), $diagnostic)
+        [IO.File]::WriteAllText((Join-Path $work 'acquisition-diagnostics.jsonl'), '{"event":"deadline"}')
+        Save-SkillSpectorFailureEvidence -WorkPath $work -DestinationPath $saved
+        Assert-OfflineCondition ((Get-Content -Raw (Join-Path $saved 'candidate-inventory.failure.json')) -ceq $diagnostic) 'Partial inventory must retain its diagnostic-only bytes.'
+        Assert-OfflineCondition ((Get-Content -Raw (Join-Path $saved 'acquisition-diagnostics.jsonl')) -match 'deadline') 'Failure diagnostics must remain readable.'
+        Assert-OfflineCondition (-not (Test-Path (Join-Path $saved 'candidate-inventory.json'))) 'Failure evidence must not become a completed inventory.'
+    }
+}
+
 Describe 'Standard validation resolver hardening' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot

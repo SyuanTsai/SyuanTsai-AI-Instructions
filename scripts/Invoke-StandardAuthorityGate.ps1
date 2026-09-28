@@ -1198,6 +1198,464 @@ function Get-AuthorityConsumerWorkflowEvents {
     return $candidates.ToArray()
 }
 
+function Get-AuthorityConsumerBaseOwnedMaterializerTemplate {
+    # The recognized construction reads regular files from one event-bound
+    # Git commit. Compare complete syntax tokens, never a marker or variable
+    # name alone; comments/formatting do not create executable provenance.
+    return @'
+$ErrorActionPreference = 'Stop'
+          $trustedCommit = [string]$env:TRUSTED_SUPERVISOR_COMMIT
+          if ($trustedCommit -notmatch '^[0-9a-f]{40}$') {
+            throw 'The protected supervisor commit must be one lowercase full Git SHA.'
+          }
+          $trustedRoot = Join-Path $env:RUNNER_TEMP 'standard-v1-trusted-supervisor'
+          if (Test-Path -LiteralPath $trustedRoot) {
+            throw "The protected supervisor root already exists: $trustedRoot"
+          }
+          $trustedScriptsRoot = Join-Path $trustedRoot 'scripts'
+          [void](New-Item -ItemType Directory -Path $trustedScriptsRoot -Force)
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $defaultBranch = [string]$env:TRUSTED_DEFAULT_BRANCH
+            if ($defaultBranch -notmatch '^[A-Za-z0-9._/-]+$' -or
+                $defaultBranch -cmatch '(^|/)\.{1,2}(/|$)') {
+              throw 'The trusted default branch name is invalid.'
+            }
+            $defaultRef = "refs/remotes/origin/$defaultBranch"
+            $resolvedDefaultCommit = ((& $gitPath rev-parse --verify "$defaultRef^{commit}" 2>$null) | Select-Object -First 1).Trim()
+            if ($LASTEXITCODE -ne 0 -or $resolvedDefaultCommit -notmatch '^[0-9a-f]{40}$') {
+              throw 'The default branch trusted supervisor commit could not be resolved.'
+            }
+            $trustedCommit = $resolvedDefaultCommit
+          }
+          $files = @(
+            [pscustomobject]@{ RelativePath = 'scripts/Validate.ps1' },
+            [pscustomobject]@{ RelativePath = 'scripts/Test-Repository.ps1' }
+          )
+          foreach ($file in $files) {
+            $revision = "${trustedCommit}:$($file.RelativePath)"
+            $actualBlob = ((& $gitPath rev-parse $revision 2>$null) | Select-Object -First 1).Trim()
+            if ($LASTEXITCODE -ne 0 -or $actualBlob -notmatch '^[0-9a-f]{40}$') {
+              throw "The protected supervisor file '$($file.RelativePath)' is missing from the event-bound supervisor commit."
+            }
+            $destination = Join-Path $trustedRoot $file.RelativePath
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo.FileName = $gitPath
+            $process.StartInfo.UseShellExecute = $false
+            $process.StartInfo.RedirectStandardOutput = $true
+            $process.StartInfo.RedirectStandardError = $true
+            [void]$process.StartInfo.ArgumentList.Add('cat-file')
+            [void]$process.StartInfo.ArgumentList.Add('blob')
+            [void]$process.StartInfo.ArgumentList.Add($revision)
+            if (-not $process.Start()) { throw "Could not start Git to materialize '$($file.RelativePath)'." }
+            $stream = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            try { $process.StandardOutput.BaseStream.CopyTo($stream) }
+            finally { $stream.Dispose() }
+            $stderr = $process.StandardError.ReadToEnd()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) {
+              throw "Git could not materialize the protected supervisor '$($file.RelativePath)': $stderr"
+            }
+            $item = Get-Item -LiteralPath $destination -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Protected supervisor file '$($file.RelativePath)' is a reparse point."
+            }
+          }
+          $rootItem = Get-Item -LiteralPath $trustedRoot -Force
+          if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected supervisor root must be a regular non-reparse directory.'
+          }
+          "TRUSTED_SUPERVISOR_ROOT=$trustedRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRUSTED_SUPERVISOR_SHA=$trustedCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+'@
+}
+
+function Get-AuthorityConsumerBaseOwnedInvocationTemplate {
+    # Recognize the complete reviewed argument/source flow. A setter,
+    # reflection call, changed candidate root or hidden local dispatch makes
+    # this an unknown construction rather than a verified dynamic invocation.
+    return @'
+$ErrorActionPreference = 'Stop'
+          $validatorCgroup = [string]$env:CODEX_PESTER_VALIDATOR_CGROUP
+          if ($validatorCgroup -notmatch '^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+/delegated/trusted-validator$') {
+            throw 'The trusted canonical validator cgroup path is missing or invalid.'
+          }
+          $validatorPid = [string]$PID
+          $validatorPid | & sudo -n tee -- (Join-Path $validatorCgroup 'cgroup.procs') | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not place the trusted canonical validator inside its delegated cgroup.' }
+          $relativeValidatorCgroup = $validatorCgroup.Substring('/sys/fs/cgroup'.Length)
+          $currentCgroup = [IO.File]::ReadAllText("/proc/$PID/cgroup").Trim()
+          if ($currentCgroup -notmatch ("0::" + [regex]::Escape($relativeValidatorCgroup) + '$')) {
+            throw 'The trusted canonical validator did not enter its delegated cgroup.'
+          }
+          $repositoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          $gitArguments = @('-c', "safe.directory=$repositoryRoot", '-c', "core.worktree=$repositoryRoot")
+          $trustedTestCommit = [string]$env:TRUSTED_SUPERVISOR_SHA
+          if ($trustedTestCommit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The resolved trusted supervisor SHA is missing or invalid.'
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and
+              -not [string]::IsNullOrWhiteSpace($env:PULL_REQUEST_BASE_SHA) -and
+              $env:PULL_REQUEST_BASE_SHA -cne $trustedTestCommit) {
+            throw 'The manual base must match the resolved trusted supervisor SHA.'
+          }
+          $baseCandidate = if ($env:GITHUB_EVENT_NAME -in @('pull_request_target', 'workflow_dispatch')) {
+            $env:PULL_REQUEST_BASE_SHA
+          }
+          elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and
+              -not [string]::IsNullOrWhiteSpace($env:PUSH_BEFORE_SHA) -and
+              $env:PUSH_BEFORE_SHA -notmatch '^0+$') {
+            $env:PUSH_BEFORE_SHA
+          }
+          else {
+            ''
+          }
+          $candidateHead = ((& $gitPath @gitArguments -C $repositoryRoot rev-parse HEAD 2>$null) | Select-Object -First 1).Trim()
+          $baseCommit = ''
+          if ($baseCandidate -match '^[0-9a-f]{40}$' -and $candidateHead -match '^[0-9a-f]{40}$') {
+            & $gitPath @gitArguments -C $repositoryRoot merge-base --is-ancestor $baseCandidate $candidateHead 2>$null
+            $ancestryExitCode = $LASTEXITCODE
+            if ($ancestryExitCode -eq 0 -and $baseCandidate -cne $candidateHead) {
+              $baseCommit = $baseCandidate
+            }
+            else {
+              Write-Warning "The event base '$baseCandidate' is not a distinct ancestor of '$candidateHead'; running the validator without a comparison base."
+            }
+          }
+          elseif (-not [string]::IsNullOrWhiteSpace($baseCandidate)) {
+            Write-Warning 'The event base is not one full commit SHA; running the validator without a comparison base.'
+          }
+          $outputPath = Join-Path $env:RUNNER_TEMP 'darktide-translate-conformance-report.json'
+          $trustedValidator = Join-Path $env:TRUSTED_SUPERVISOR_ROOT 'scripts/Validate.ps1'
+          $validatorArguments = @{
+            RepositoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+            ArtifactsRoot = $env:RUNNER_TEMP
+            BaseCommit = $baseCommit
+            TrustedTestCommit = $trustedTestCommit
+            ExpectedGoRuntimeVersion = $env:STANDARD_GO_RUNTIME_VERSION
+            AcquisitionTimeoutSeconds = 900
+            OutputPath = $outputPath
+          }
+          $isBootstrapTransition =
+            (Test-Path -LiteralPath (Join-Path (Get-Location).Path 'catalog/skills-catalog.json') -PathType Leaf) -and
+            (-not (Test-Path -LiteralPath (Join-Path (Get-Location).Path 'catalog/source.json') -PathType Leaf)) -and
+            (-not (Test-Path -LiteralPath (Join-Path (Get-Location).Path 'config/standard-v1.json') -PathType Leaf))
+          if ($isBootstrapTransition) {
+
+
+            $validatorArguments['BootstrapTransition'] = $true
+          }
+          & $trustedValidator @validatorArguments
+'@
+}
+
+function Get-AuthorityConsumerPowerShellSyntaxIdentity {
+    param([Parameter(Mandatory = $true)][string] $Text)
+    $tokens = $null
+    $errors = $null
+    [void][Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if (@($errors).Count -gt 0) { return $null }
+    return (@($tokens | Where-Object { $_.Kind -notin @('Comment', 'NewLine', 'EndOfInput', 'LineContinuation') } | ForEach-Object {
+        ([string]$_.Kind) + ':' + $_.Text
+    }) -join "`n")
+}
+
+function Test-AuthorityConsumerDisjointEnvironmentExporter {
+    param([Parameter(Mandatory = $true)] $Step)
+
+    # Match the complete reviewed producer, including its value construction.
+    # A familiar output line alone cannot prove that its inputs are disjoint.
+    $goExporter = @'
+$ErrorActionPreference = 'Stop'
+$versionOutput = @(& go version)
+if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or
+    [string]$versionOutput[0] -notmatch '^go version go(?<version>[0-9]+\.[0-9]+\.[0-9]+) [^\s]+/[^\s]+$') {
+  throw "setup-go did not provide one stable Go runtime version. Evidence='$($versionOutput -join ' | ')'"
+}
+"STANDARD_GO_RUNTIME_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+'@
+    $cgroupExporter = @'
+set -euo pipefail
+cgroup_parent="/sys/fs/cgroup/codex-validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+if [[ ! "$cgroup_parent" =~ ^/sys/fs/cgroup/codex-validation-[0-9]+-[0-9]+$ ]]; then
+  echo 'The protected Pester cgroup path did not match the expected run-bound format.' >&2
+  exit 1
+fi
+controllers_path='/sys/fs/cgroup/cgroup.controllers'
+if [[ ! -r "$controllers_path" ]]; then
+  echo 'The runner does not expose a readable cgroup v2 controller list.' >&2
+  exit 1
+fi
+controllers="$(< "$controllers_path")"
+if [[ ! " $controllers " =~ [[:space:]]memory[[:space:]] ]]; then
+  echo 'The runner cgroup v2 hierarchy does not expose the memory controller.' >&2
+  exit 1
+fi
+if [[ ! " $controllers " =~ [[:space:]]cpu[[:space:]] ]]; then
+  echo 'The runner cgroup v2 hierarchy does not expose the CPU controller.' >&2
+  exit 1
+fi
+root_subtree_control='/sys/fs/cgroup/cgroup.subtree_control'
+if [[ ! -e "$root_subtree_control" ]]; then
+  echo 'The runner cgroup v2 hierarchy does not expose a root subtree control file.' >&2
+  exit 1
+fi
+root_controllers_to_enable='+cpu +memory'
+if [[ " $controllers " =~ [[:space:]]pids[[:space:]] ]]; then
+  root_controllers_to_enable+=' +pids'
+fi
+printf '%s\n' "$root_controllers_to_enable" | sudo -n tee "$root_subtree_control" >/dev/null
+if [[ -e "$cgroup_parent" ]]; then
+  echo "The delegated cgroup path already exists: $cgroup_parent" >&2
+  exit 1
+fi
+cgroup_delegated="$cgroup_parent/delegated"
+cgroup_supervisor="$cgroup_delegated/trusted-validator"
+cleanup_on_error() {
+  sudo -n rmdir -- "$cgroup_supervisor" 2>/dev/null || true
+  sudo -n rmdir -- "$cgroup_delegated" 2>/dev/null || true
+  sudo -n rmdir -- "$cgroup_parent" 2>/dev/null || true
+}
+trap cleanup_on_error ERR
+sudo -n install -d -m 0755 -o root -g root -- "$cgroup_parent"
+if [[ "$(sudo -n stat -c '%u:%g:%a' "$cgroup_parent")" != '0:0:755' ]]; then
+  echo 'The outer protected Pester cgroup boundary is not root-owned.' >&2
+  exit 1
+fi
+printf '%s\n' '2147483648' | sudo -n tee "$cgroup_parent/memory.max" >/dev/null
+if [[ "$(< "$cgroup_parent/memory.max")" != '2147483648' ]]; then
+  echo 'The outer protected Pester cgroup did not retain its aggregate memory limit.' >&2
+  exit 1
+fi
+if [[ -e "$cgroup_parent/pids.max" ]]; then
+  printf '%s\n' '256' | sudo -n tee "$cgroup_parent/pids.max" >/dev/null
+  if [[ "$(< "$cgroup_parent/pids.max")" != '256' ]]; then
+    echo 'The outer protected Pester cgroup did not retain its aggregate PID limit.' >&2
+    exit 1
+  fi
+fi
+controllers_to_enable='+cpu +memory'
+if [[ " $controllers " =~ [[:space:]]pids[[:space:]] ]]; then
+  controllers_to_enable+=' +pids'
+fi
+printf '%s\n' "$controllers_to_enable" | sudo -n tee "$cgroup_parent/cgroup.subtree_control" >/dev/null
+sudo -n mkdir -- "$cgroup_delegated"
+printf '%s\n' "$controllers_to_enable" | sudo -n tee "$cgroup_delegated/cgroup.subtree_control" >/dev/null
+for delegation_file in \
+  "$cgroup_delegated/cgroup.procs" \
+  "$cgroup_delegated/cgroup.threads" \
+  "$cgroup_delegated/cgroup.subtree_control"; do
+  sudo -n chown "$(id -u):$(id -g)" -- "$delegation_file"
+done
+sudo -n chown "$(id -u):$(id -g)" -- "$cgroup_delegated"
+sudo -n chmod 0755 -- "$cgroup_delegated"
+delegated_controls="$(< "$cgroup_delegated/cgroup.subtree_control")"
+if [[ ! " $delegated_controls " =~ [[:space:]]memory[[:space:]] || ! " $delegated_controls " =~ [[:space:]]cpu[[:space:]] ]]; then
+  echo 'The delegated cgroup root did not enable the memory and CPU controllers.' >&2
+  exit 1
+fi
+if [[ -w "$cgroup_parent/cgroup.procs" || ! -w "$cgroup_delegated" ]]; then
+  echo 'The delegated cgroup root is not writable by the validation runner.' >&2
+  exit 1
+fi
+mkdir -- "$cgroup_supervisor"
+if [[ ! -w "$cgroup_supervisor" ]]; then
+  echo 'The trusted validator cgroup is not writable by the validation runner.' >&2
+  exit 1
+fi
+printf 'CODEX_PESTER_CGROUP_ROOT=%s\nCODEX_PESTER_VALIDATOR_CGROUP=%s\n' \
+  "$cgroup_delegated" "$cgroup_supervisor" >> "$GITHUB_ENV"
+trap - ERR
+'@
+    if ([string]$Step.text -match '(?m)^[ \t]*shell:[ \t]*pwsh[ \t]*$') {
+        return (Get-AuthorityConsumerPowerShellSyntaxIdentity -Text ([string]$Step.executableText)) -ceq
+            (Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $goExporter)
+    }
+    if ([string]$Step.text -match '(?m)^[ \t]*shell:[ \t]*bash[ \t]*$') {
+        $actualLines = @(([string]$Step.executableText).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 })
+        $expectedLines = @($cgroupExporter.Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 })
+        return ($actualLines -join "`n") -ceq ($expectedLines -join "`n")
+    }
+    return $false
+}
+
+function Test-AuthorityConsumerBoundStepMetadata {
+    param([Parameter(Mandatory = $true)] $Step, [string] $Shell, [hashtable] $Environment = @{})
+
+    $header = ([regex]::Split([string]$Step.text, '(?m)^[ \t]*(?:-[ \t]+)?(?:run|uses):'))[0]
+    if ($header -match '(?m)^[ \t]*(?:-[ \t]+)?(?:if|"if"|''if''):' ) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($Shell) -and
+        $header -notmatch ('(?m)^[ \t]*shell:[ \t]*' + [regex]::Escape($Shell) + '[ \t]*$')) { return $false }
+    $envHeaders = @([regex]::Matches($header, '(?m)^(?<indent>[ \t]*)(?:env|"env"|''env''):[ \t]*$'))
+    if ($Environment.Count -eq 0) { return $envHeaders.Count -eq 0 -and $header -notmatch '(?m)^[ \t]*(?:env|"env"|''env''):' }
+    if ($envHeaders.Count -ne 1) { return $false }
+    $entry = $envHeaders[0]
+    $seen = @{}
+    foreach ($line in $header.Substring($entry.Index + $entry.Length).Replace("`r", '').Split("`n")) {
+        if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
+        if (([regex]::Match($line, '^[ \t]*')).Length -le $entry.Groups['indent'].Length) { break }
+        $value = [regex]::Match($line, '^[ \t]*(?<key>[A-Za-z_][A-Za-z0-9_]*):[ \t]*(?<value>[^\r\n]*)$')
+        if (-not $value.Success) { return $false }
+        $key = $value.Groups['key'].Value
+        if ($seen.ContainsKey($key) -or @($Environment.Keys) -cnotcontains $key -or
+            $value.Groups['value'].Value.Trim() -cne [string]$Environment[$key]) { return $false }
+        $seen[$key] = $true
+    }
+    return $seen.Count -eq $Environment.Count
+}
+
+function Test-AuthorityConsumerBaseOwnedCheckoutStep {
+    param([Parameter(Mandatory = $true)] $Step)
+
+    $expected = @'
+- name: Checkout immutable candidate
+uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+with:
+ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+fetch-depth: 0
+persist-credentials: false
+'@
+    $actual = @(([string]$Step.text).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 -and $_ -notmatch '^#' }) -join "`n"
+    return $actual -ceq $expected.Replace("`r", '')
+}
+
+function Test-AuthorityConsumerBaseOwnedIntermediateStep {
+    param([Parameter(Mandatory = $true)] $Step)
+
+    if (-not (Test-AuthorityConsumerBoundStepMetadata -Step $Step)) { return $false }
+    if (Test-AuthorityConsumerDisjointEnvironmentExporter -Step $Step) { return $true }
+    # The reviewed sequence has one pinned setup action and one fixed namespace
+    # probe. Any other intervening executable could rewrite supervisor files.
+    $setup = @'
+- name: Set up approved Go runtime
+uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+with:
+go-version: 'stable'
+check-latest: true
+cache: false
+'@
+    $namespace = @'
+- name: Enable unprivileged Linux user namespaces
+shell: bash
+run: |
+set -euo pipefail
+sudo -n sysctl -w kernel.unprivileged_userns_clone=1
+if sudo -n sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+fi
+if ! unshare --user --map-root-user --pid --fork --kill-child=SIGKILL -- true; then
+echo 'The hosted Linux runner could not establish the required unprivileged user/PID namespace.' >&2
+exit 1
+fi
+'@
+    $actual = @(([string]$Step.text).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 -and $_ -notmatch '^#' }) -join "`n"
+    return $actual -ceq $setup.Replace("`r", '') -or $actual -ceq $namespace.Replace("`r", '')
+}
+
+function Get-AuthorityConsumerVerifiedDynamicCanonicalCount {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
+    )
+    if ($CanonicalRelativePath -cne 'scripts/Validate.ps1') { return 0 }
+    $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
+    if ($workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):') { return 0 }
+    $expected = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedMaterializerTemplate)
+    $expectedInvocation = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedInvocationTemplate)
+    $count = 0
+    foreach ($job in @(Get-AuthorityConsumerWorkflowJobs -Text $Text)) {
+        $jobHeader = ([regex]::Split([string]$job.text, '(?m)^\s+steps\s*:'))[0]
+        if ($jobHeader -match '(?m)^[ \t]*(?:env|defaults|container|services|if|"env"|''env''|"defaults"|''defaults''|"container"|''container''|"services"|''services''|"if"|''if''):') { continue }
+        $steps = @(Get-AuthorityConsumerWorkflowExecutableSteps -Text ([string]$job.text))
+        $checkoutSeen = $false
+        $materializerObserved = $false
+        $materializerSeen = $false
+        foreach ($step in $steps) {
+            if (-not $checkoutSeen) {
+                if (-not (Test-AuthorityConsumerBaseOwnedCheckoutStep -Step $step)) { break }
+                $checkoutSeen = $true
+                continue
+            }
+            $executable = [string]$step.executableText
+            $identity = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $executable
+            if ($identity -ceq $expected -and
+                (Test-AuthorityConsumerBoundStepMetadata -Step $step -Shell 'pwsh' -Environment @{
+                    TRUSTED_SUPERVISOR_COMMIT = '${{ github.sha }}'
+                    TRUSTED_DEFAULT_BRANCH = '${{ github.event.repository.default_branch }}'
+                }) -and
+                @([regex]::Matches([string]$step.text, '(?m)^[ \t]*TRUSTED_SUPERVISOR_COMMIT:')).Count -eq 1 -and
+                @([regex]::Matches([string]$step.text, '(?m)^[ \t]*TRUSTED_DEFAULT_BRANCH:')).Count -eq 1 -and
+                [string]$step.text -match '(?m)^[ \t]*TRUSTED_SUPERVISOR_COMMIT:[ \t]*\$\{\{ github\.sha \}\}[ \t]*$' -and
+                [string]$step.text -match '(?m)^[ \t]*TRUSTED_DEFAULT_BRANCH:[ \t]*\$\{\{ github\.event\.repository\.default_branch \}\}[ \t]*$' -and
+                -not (Test-AuthorityConsumerFailureSuppression -Text ([string]$step.text))) {
+                if ($materializerObserved) { break }
+                $materializerObserved = $true
+                $materializerSeen = $true
+                continue
+            }
+            if (-not $materializerObserved) { break }
+            if ($executable -notmatch '(?i)\$trustedValidator\b') {
+                if ($materializerSeen -and -not (Test-AuthorityConsumerBaseOwnedIntermediateStep -Step $step)) { $materializerSeen = $false }
+                continue
+            }
+            if (-not $materializerSeen) { continue }
+            # Consume this materializer binding even when the attempted caller
+            # is unknown. A later familiar call cannot repair an intervening
+            # operation that may already have rewritten the protected files.
+            $materializerSeen = $false
+            if (-not (Test-AuthorityConsumerBoundStepMetadata -Step $step -Shell 'pwsh' -Environment @{
+                PULL_REQUEST_BASE_SHA = '${{ github.event_name == ''workflow_dispatch'' && github.event.inputs.base_sha || github.event.pull_request.base.sha }}'
+                PUSH_BEFORE_SHA = '${{ github.event.before }}'
+            })) { continue }
+            if ([string]$step.text -notmatch '(?m)^[ \t]*shell:[ \t]*pwsh[ \t]*$' -or
+                [string]$step.text -match '(?m)^[ \t]*(?:TRUSTED_SUPERVISOR_ROOT|TRUSTED_SUPERVISOR_SHA):') { continue }
+            if ($executable -notmatch '(?m)^\s*RepositoryRoot\s*=\s*\[IO\.Path\]::GetFullPath\(\(Get-Location\)\.Path\)\s*$') { continue }
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseInput($executable, [ref]$tokens, [ref]$errors)
+            if (@($errors).Count -gt 0) { continue }
+            $assignments = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ieq '$trustedValidator'
+            }, $true))
+            if ($assignments.Count -ne 1 -or $assignments[0].Operator -ne 'Equals' -or
+                $assignments[0].Parent -isnot [Management.Automation.Language.NamedBlockAst] -or
+                $assignments[0].Right.Extent.Text.Trim() -cne "Join-Path `$env:TRUSTED_SUPERVISOR_ROOT 'scripts/Validate.ps1'") { continue }
+            $references = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -ieq 'trustedValidator'
+            }, $true))
+            $calls = @()
+            $invalid = $false
+            foreach ($reference in $references) {
+                if ($reference -eq $assignments[0].Left) { continue }
+                $parent = $reference.Parent
+                if ($parent -isnot [Management.Automation.Language.CommandAst] -or
+                    $parent.InvocationOperator -ne 'Ampersand' -or $parent.CommandElements[0] -ne $reference -or
+                    $parent.Extent.Text.Trim() -cne '& $trustedValidator @validatorArguments' -or
+                    $parent.Parent -isnot [Management.Automation.Language.PipelineAst] -or
+                    $parent.Parent.Parent -isnot [Management.Automation.Language.NamedBlockAst] -or
+                    $reference.Extent.StartOffset -le $assignments[0].Extent.EndOffset) { $invalid = $true; break }
+                $calls += $parent
+            }
+            $rootReferences = @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.VariablePath.UserPath -ieq 'env:TRUSTED_SUPERVISOR_ROOT'
+            }, $true))
+            if (-not $invalid -and $rootReferences.Count -eq 1 -and $calls.Count -gt 0) {
+                $invocationText = $executable
+                foreach ($extra in @($calls | Sort-Object { $_.Extent.StartOffset } | Select-Object -Skip 1 | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+                    $invocationText = $invocationText.Remove($extra.Extent.StartOffset, $extra.Extent.EndOffset - $extra.Extent.StartOffset)
+                }
+                if ((Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $invocationText) -ceq $expectedInvocation) { $count += $calls.Count }
+            }
+        }
+    }
+    return $count
+}
+
 function Get-AuthorityConsumerCanonicalTokenPattern {
     param([Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
 
@@ -1263,6 +1721,271 @@ function Test-AuthorityConsumerCanonicalInvocation {
     return $count
 }
 
+function Get-AuthorityConsumerWorkflowCanonicalCount {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+    $executable = Get-AuthorityConsumerExecutableText -Text $Text
+    return (Test-AuthorityConsumerCanonicalInvocation -Text $executable -CanonicalRelativePath $CanonicalRelativePath) +
+        (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $Text -CanonicalRelativePath $CanonicalRelativePath)
+}
+
+function Get-AuthorityConsumerCanonicalCommandMatch {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath, [switch] $VerifiedDynamic)
+    $pattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    foreach ($line in [regex]::Matches($Text, '(?m)^[^\r\n]+')) {
+        foreach ($segment in [regex]::Matches($line.Value, '(?:^|;|&&|\|\|)\s*(?<command>.*?)(?=;|&&|\|\||$)')) {
+            $command = $segment.Groups['command'].Value.Trim()
+            if ([string]::IsNullOrWhiteSpace($command)) { continue }
+            if ((Test-AuthorityConsumerCanonicalCommandInvocation -Command $command -CanonicalPattern $pattern) -or
+                ($VerifiedDynamic -and $command -ceq '& $trustedValidator @validatorArguments')) {
+                $commandRegex = New-Object regex ([regex]::Escape($command))
+                return $commandRegex.Match($Text, ($line.Index + $segment.Groups['command'].Index))
+            }
+        }
+    }
+    return [regex]::Match('', '(?!)')
+}
+
+function Test-AuthorityConsumerReviewedWindowsCompatibilityJob {
+    param([Parameter(Mandatory = $true)][string] $JobText)
+
+    # This finite diagnostic construction checks candidate syntax and invokes
+    # only the compatibility contract materialized from the event-bound base.
+    # Compare the complete job (checkout, environment, materializer and call),
+    # never an interpreter variable name. Unknown jobs remain fail-closed.
+    $expected = @'
+repository-contract-windows-powershell:
+    name: repository-contract (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize protected Windows compatibility contract
+        shell: powershell
+        env:
+          TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}
+          TRUSTED_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $trustedCommit = [string]$env:TRUSTED_SUPERVISOR_COMMIT
+          if ($trustedCommit -notmatch '^[0-9a-f]{40}$') {
+            throw 'The protected supervisor commit must be one lowercase full Git SHA.'
+          }
+          $trustedRoot = Join-Path $env:RUNNER_TEMP 'standard-v1-trusted-windows-contract'
+          if (Test-Path -LiteralPath $trustedRoot) {
+            throw "The protected Windows contract root already exists: $trustedRoot"
+          }
+          [void](New-Item -ItemType Directory -Path $trustedRoot -Force)
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $defaultBranch = [string]$env:TRUSTED_DEFAULT_BRANCH
+            if ($defaultBranch -notmatch '^[A-Za-z0-9._/-]+$' -or
+                $defaultBranch -cmatch '(^|/)\.{1,2}(/|$)') {
+              throw 'The trusted default branch name is invalid.'
+            }
+            $defaultRef = "refs/remotes/origin/$defaultBranch"
+            $resolvedDefaultCommit = ((& $gitPath rev-parse --verify "$defaultRef^{commit}" 2>$null) | Select-Object -First 1).Trim()
+            if ($LASTEXITCODE -ne 0 -or $resolvedDefaultCommit -notmatch '^[0-9a-f]{40}$') {
+              throw 'The default branch trusted supervisor commit could not be resolved.'
+            }
+            $trustedCommit = $resolvedDefaultCommit
+          }
+          $relativePath = 'tests/validate-windows-powershell.ps1'
+          $revision = "${trustedCommit}:$relativePath"
+          $actualBlob = ((& $gitPath rev-parse $revision 2>$null) | Select-Object -First 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualBlob -notmatch '^[0-9a-f]{40}$') {
+            throw 'The protected Windows contract is missing from the event-bound supervisor commit.'
+          }
+          $destination = Join-Path $trustedRoot (Split-Path -Leaf $relativePath)
+          $process = [Diagnostics.Process]::new()
+          $process.StartInfo.FileName = $gitPath
+          $process.StartInfo.Arguments = "cat-file blob $revision"
+          $process.StartInfo.UseShellExecute = $false
+          $process.StartInfo.RedirectStandardOutput = $true
+          $process.StartInfo.RedirectStandardError = $true
+          if (-not $process.Start()) { throw 'Could not start Git to materialize the protected Windows contract.' }
+          $stream = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+          try { $process.StandardOutput.BaseStream.CopyTo($stream) }
+          finally { $stream.Dispose() }
+          $stderr = $process.StandardError.ReadToEnd()
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) { throw "Git could not materialize the protected Windows contract: $stderr" }
+          $item = Get-Item -LiteralPath $destination -Force
+          if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected Windows contract must be a regular non-reparse file.'
+          }
+          $rootItem = Get-Item -LiteralPath $trustedRoot -Force
+          if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected Windows contract root must be a regular non-reparse directory.'
+          }
+          "TRUSTED_WINDOWS_CONTRACT=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate Windows PowerShell compatibility
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $windowsPowerShellPath = [IO.Path]::GetFullPath((Join-Path $PSHOME 'powershell.exe'))
+          $windowsPowerShellItem = Get-Item -LiteralPath $windowsPowerShellPath -Force -ErrorAction Stop
+          if ($windowsPowerShellItem.PSIsContainer -or
+              ($windowsPowerShellItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The protected Windows PowerShell executable must be a regular non-reparse file.'
+          }
+          $protectedContractArguments = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $env:TRUSTED_WINDOWS_CONTRACT,
+            '-RepositoryRoot', (Get-Location).Path
+          )
+          & $windowsPowerShellPath @protectedContractArguments
+          $protectedContractExitCode = $LASTEXITCODE
+          if ($protectedContractExitCode -ne 0) {
+            throw 'The protected Windows PowerShell compatibility contract failed.'
+          }
+
+      - name: Parse candidate PowerShell trust-anchor files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          $trackedPsOutput = [string]((& $gitPath ls-files -z -- '*.ps1' '*.psm1') -join '')
+          if ($LASTEXITCODE -ne 0) { throw 'Git failed while enumerating candidate PowerShell trust-anchor files.' }
+          $trackedPsFiles = @($trackedPsOutput.Split([char]0) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })
+          foreach ($relativePath in $trackedPsFiles) {
+            if ([IO.Path]::IsPathRooted([string]$relativePath) -or
+                [string]$relativePath -cmatch '(^|/)\.{1,2}(/|$)' -or
+                [string]$relativePath -cmatch '[\x00\r\n]' -or
+                ([string]$relativePath).Contains('\')) {
+              throw "Candidate PowerShell path is unsafe: $relativePath"
+            }
+            $candidatePath = Join-Path (Get-Location).Path ([string]$relativePath)
+            if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+              throw "Candidate PowerShell trust-anchor file is missing: $relativePath"
+            }
+            $candidateItem = Get-Item -LiteralPath $candidatePath -Force
+            if (($candidateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Candidate PowerShell trust-anchor file is a reparse point: $relativePath"
+            }
+            $tokens = $null
+            $errors = $null
+            $candidateBytes = [IO.File]::ReadAllBytes($candidatePath)
+            $candidateOffset = if ($candidateBytes.Length -ge 3 -and
+                $candidateBytes[0] -eq 0xEF -and
+                $candidateBytes[1] -eq 0xBB -and
+                $candidateBytes[2] -eq 0xBF) {
+              3
+            }
+            else {
+              0
+            }
+            $candidateSource = [Text.UTF8Encoding]::new($false, $true).GetString(
+              $candidateBytes,
+              $candidateOffset,
+              $candidateBytes.Length - $candidateOffset
+            )
+            [Management.Automation.Language.Parser]::ParseInput(
+              $candidateSource,
+              $candidatePath,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if (@($errors).Count -gt 0) {
+              throw "Candidate PowerShell file does not parse under Windows PowerShell 5.1: $relativePath"
+            }
+          }
+          foreach ($requiredPath in @('scripts/Validate.ps1', 'scripts/Test-Repository.ps1')) {
+            if ($trackedPsFiles -cnotcontains $requiredPath) {
+              throw "Candidate trust-anchor file is not tracked: $requiredPath"
+            }
+          }
+'@
+    return $JobText.Replace("`r", '').Trim() -ceq $expected.Replace("`r", '').Trim()
+}
+
+function Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+
+    $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
+    $rootOverride = $workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):'
+    $expectedMaterializer = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedMaterializerTemplate)
+    $expectedInvocation = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedInvocationTemplate)
+    foreach ($job in @(Get-AuthorityConsumerWorkflowJobs -Text $Text)) {
+        if (-not $rootOverride -and (Test-AuthorityConsumerReviewedWindowsCompatibilityJob -JobText ([string]$job.text))) { continue }
+        $jobDynamicCount = Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text ("jobs:`n" + [string]$job.text) -CanonicalRelativePath $CanonicalRelativePath
+        foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text ([string]$job.text))) {
+            $body = [string]$step.executableText
+            $stepHeader = ([regex]::Split([string]$step.text, '(?m)^[ \t]*(?:-\s+)?run\s*:'))[0]
+            if ($stepHeader -match '(?m)^[ \t]*(?:-\s+)?shell\s*:' -and
+                $stepHeader -notmatch '(?im)^[ \t]*(?:-\s+)?shell\s*:[^\r\n]*\b(?:pwsh|powershell)(?:\.exe)?\b') { continue }
+            # A missing shell uses the runner default and still must not hide
+            # PowerShell-style dynamic dispatch from the inventory.
+            if ($body -notmatch '(?m)(?:&|\.\s)') { continue }
+            $identity = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $body
+            if (-not $rootOverride -and $jobDynamicCount -gt 0 -and
+                ($identity -ceq $expectedMaterializer -or $identity -ceq $expectedInvocation)) { continue }
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$tokens, [ref]$errors)
+            if (@($errors).Count -gt 0) { return $true }
+            foreach ($call in @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.InvocationOperator -in @(
+                    [Management.Automation.Language.TokenKind]::Ampersand,
+                    [Management.Automation.Language.TokenKind]::Dot
+                )
+            }, $true))) {
+                $commandName = [string]$call.GetCommandName()
+                if ([string]::IsNullOrWhiteSpace($commandName)) { return $true }
+                if ($commandName -match '(?i)[/\\].*\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)$' -and
+                    ($commandName.Replace('\', '/').TrimStart('.', '/') -cne $CanonicalRelativePath -or
+                        -not (Test-AuthorityConsumerCanonicalCommandInvocation -Command ([string]$call.Extent.Text) -CanonicalPattern (Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath)))) { return $true }
+                $commandText = $commandName
+                foreach ($argument in @($call.CommandElements | Select-Object -Skip 1)) {
+                    $argumentText = if ($argument -is [Management.Automation.Language.StringConstantExpressionAst]) { [string]$argument.Value } else { [string]$argument.Extent.Text }
+                    $commandText += ' ' + $argumentText
+                }
+                if ($commandText -match '^(?i)(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan))|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)\b') { return $true }
+            }
+        }
+    }
+    return $false
+}
+function Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+    if (Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation -Text $Text -CanonicalRelativePath $CanonicalRelativePath) { return $true }
+    $executable = Get-AuthorityConsumerExecutableText -Text $Text
+    $verifiedDynamic = Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $Text -CanonicalRelativePath $CanonicalRelativePath
+    $observedDynamicCalls = 0
+    $pathPattern = '(?i)(?:\.[/\\]|[A-Za-z0-9_.-]+[/\\])+[A-Za-z0-9_.-]+\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)'
+    foreach ($line in $executable.Replace("`r", '').Split("`n")) {
+        foreach ($segment in [regex]::Split($line, '(?:;|&&|\|\|)')) {
+            $command = ([string]$segment).Trim()
+            if ([string]::IsNullOrWhiteSpace($command) -or
+                $command -match '^(?i)(?:echo|printf|Write-Output|Write-Host|Get-Item|Get-FileHash|Test-Path|Select-String|cat|grep)\b' -or
+                $command -match '^(?:\$[A-Za-z_][A-Za-z0-9_]*\s*=|[A-Za-z_][A-Za-z0-9_]*=)') { continue }
+            if ($command -match '&\s*\$trustedValidator\b') {
+                if ($command -cne '& $trustedValidator @validatorArguments') { return $true }
+                $observedDynamicCalls++
+                continue
+            }
+            foreach ($path in [regex]::Matches($command, $pathPattern)) {
+                $invokes = Test-AuthorityConsumerCanonicalCommandInvocation -Command $command -CanonicalPattern ([regex]::Escape($path.Value))
+                if ($command -match ('^\.\s+' + [regex]::Escape($path.Value))) { $invokes = $true }
+                if ($invokes -and $path.Value.Replace('\', '/').TrimStart('.', '/') -cne $CanonicalRelativePath) { return $true }
+            }
+            if ($command -match '^(?i)(?:Invoke-Pester|pytest|dotnet\s+(?:test|tool\s+install)|(?:make|cargo|mvn|gradle)\s+(?:test|check|verify)|(?:npm|pnpm|yarn)\s+(?:(?:run\s+)?(?:install|ci|test|validate|lint|check|scan))|(?:pip|python\s+-m\s+pip)\s+install|go\s+install|skillspector|skill-validator|skill-tools)\b') { return $true }
+        }
+    }
+    return $observedDynamicCalls -ne $verifiedDynamic
+}
+
 function Test-AuthorityConsumerNonCanonicalValidationCommand {
     param(
         [Parameter(Mandatory = $true)][string] $Text,
@@ -1318,6 +2041,100 @@ function Test-AuthorityConsumerOpaqueReleaseHelper {
     return (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text).Success
 }
 
+function Test-AuthorityConsumerHeadCheckReport {
+    param([Parameter(Mandatory = $true)][string] $JobText)
+
+    $JobText = $JobText.Replace("`r`n", "`n").Replace("`r", "`n")
+    # This is a deliberately bounded shell grammar, not a name/endpoint
+    # exemption. Unknown command shapes keep the normal mutation guard.
+    $steps = @(Get-AuthorityConsumerWorkflowExecutableSteps -Text $JobText)
+    if ($steps.Count -ne 1) { return $false }
+    $step = $steps[0]
+    if ([string]$step.text -notmatch '(?m)^\s*(?:-\s+)?shell:\s*bash\s*$') { return $false }
+    if (Test-AuthorityConsumerFailureSuppression -Text ([string]$step.text)) { return $false }
+    # A shell startup hook or extra environment override can change the
+    # otherwise verified request before this script executes.
+    $environment = [regex]::Match([string]$step.text, '(?ms)^[ \t]*env:[ \t]*\r?\n(?<body>.*?)(?=^[ \t]*run:)')
+    if (-not $environment.Success) { return $false }
+    $environmentKeys = @([regex]::Matches($environment.Groups['body'].Value, '(?m)^[ \t]*(?<key>[A-Za-z_][A-Za-z0-9_]*):') | ForEach-Object { $_.Groups['key'].Value })
+    if (@($environmentKeys | Select-Object -Unique).Count -ne $environmentKeys.Count -or
+        @($environmentKeys | Where-Object { $_ -cne 'HEAD_SHA' -and $_ -cne 'GH_TOKEN' -and $_ -cnotmatch '^[A-Z][A-Z0-9_]*_RESULT$' }).Count -gt 0) { return $false }
+    $headExpression = '${{ github.event_name == ''pull_request_target'' && github.event.pull_request.head.sha || github.event_name == ''push'' && github.sha || '''' }}'
+    $heads = @([regex]::Matches([string]$step.text, '(?m)^\s*HEAD_SHA:\s*(?<value>[^\r\n]+)$'))
+    if ($heads.Count -ne 1 -or $heads[0].Groups['value'].Value.Trim() -cne $headExpression) { return $false }
+    $bindings = @([regex]::Matches([string]$step.text, '(?m)^\s*(?<variable>[A-Z][A-Z0-9_]*_RESULT):\s*\$\{\{\s*needs\[''(?<job>[A-Za-z0-9_.-]+)''\]\.result\s*\}\}\s*$'))
+    $resultDeclarations = @([regex]::Matches([string]$step.text, '(?m)^\s*[A-Z][A-Z0-9_]*_RESULT:'))
+    if ($bindings.Count -eq 0 -or $bindings.Count -ne $resultDeclarations.Count) { return $false }
+    $header = ([regex]::Split($JobText, '(?m)^\s+steps\s*:'))[0]
+    if ($header -match '(?m)^[ \t]*(?:env|defaults|container|services):' -or
+        @([regex]::Matches($header, '(?m)^[ \t]*needs:')).Count -ne 1) { return $false }
+    $needs = [regex]::Match($header, '(?m)^[ \t]*needs:[ \t]*(?<inline>[^\r\n]*)$')
+    if (-not $needs.Success) { return $false }
+    $dependencies = @()
+    if ($needs.Groups['inline'].Value.Trim() -match '^\[(?<items>[A-Za-z0-9_., -]+)\]$') {
+        $dependencies = @($Matches.items.Split(',') | ForEach-Object { $_.Trim() })
+    }
+    elseif ([string]::IsNullOrWhiteSpace($needs.Groups['inline'].Value)) {
+        $dependencies = @([regex]::Matches($header.Substring($needs.Index + $needs.Length), '(?m)^\s*-\s*(?<job>[A-Za-z0-9_.-]+)\s*$') | ForEach-Object { $_.Groups['job'].Value })
+    }
+    else { $dependencies = @($needs.Groups['inline'].Value.Trim()) }
+    $boundJobs = @($bindings | ForEach-Object { $_.Groups['job'].Value })
+    $variables = @($bindings | ForEach-Object { $_.Groups['variable'].Value })
+    if (@($variables | Select-Object -Unique).Count -ne $variables.Count -or
+        @($boundJobs | Select-Object -Unique).Count -ne $boundJobs.Count -or
+        @($dependencies | Select-Object -Unique).Count -ne $dependencies.Count -or
+        @(Compare-Object $dependencies $boundJobs -CaseSensitive).Count -gt 0 -or
+        $variables -cnotcontains 'CANONICAL_RESULT') { return $false }
+    $conditions = @($variables | ForEach-Object { '"$' + $_ + '" == ''success''' })
+    $expected = @(
+        'set -euo pipefail'
+        'if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then'
+        'echo ''%MESSAGE%'' >&2'
+        'exit 1'
+        'fi'
+        'conclusion=''failure'''
+        ('if [[ ' + ($conditions -join ' && ') + ' ]]; then')
+        'conclusion=''success'''
+        'fi'
+        'details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"'
+        'for check_name in \'
+        '%NAMES%'
+        'gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \'
+        '-f name="$check_name" \'
+        '-f head_sha="$HEAD_SHA" \'
+        '-f status=completed \'
+        '-f conclusion="$conclusion" \'
+        '-f details_url="$details_url" >/dev/null'
+        'done'
+    ) -join "`n"
+    $body = @(([string]$step.executableText).Replace("`r", '').Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 }) -join "`n"
+    $grammar = '\A' + [regex]::Escape($expected).Replace('%MESSAGE%', '[A-Za-z0-9 ._-]+').Replace('%NAMES%', '(?:''[A-Za-z0-9 ()_.-]+'' \\\n)*''[A-Za-z0-9 ()_.-]+''; do') + '\z'
+    return [regex]::IsMatch($body, $grammar)
+}
+
+function Get-AuthorityConsumerWorkflowReleaseExecutableText {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
+    $executable = Get-AuthorityConsumerExecutableText -Text $Text
+    $jobs = @(Get-AuthorityConsumerWorkflowJobs -Text $Text)
+    if ($jobs.Count -eq 0) { return $executable }
+    $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
+    if ($workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):') { return $executable }
+    $fragments = New-Object 'System.Collections.Generic.List[string]'
+    $canonicalJobs = @($jobs | Where-Object { (Get-AuthorityConsumerWorkflowCanonicalCount -Text ("jobs:`n" + [string]$_.text) -CanonicalRelativePath 'scripts/Validate.ps1') -eq 1 })
+    foreach ($job in $jobs) {
+        $jobExecutable = Get-AuthorityConsumerExecutableText -Text ([string]$job.text)
+        $canonicalBinding = [regex]::Match([string]$job.text, '(?m)^\s*CANONICAL_RESULT:\s*\$\{\{\s*needs\[''(?<job>[A-Za-z0-9_.-]+)''\]\.result\s*\}\}\s*$')
+        if ($canonicalJobs.Count -eq 1 -and $canonicalBinding.Success -and
+            $canonicalBinding.Groups['job'].Value -ceq [string]$canonicalJobs[0].id -and
+            (Test-AuthorityConsumerHeadCheckReport -JobText ([string]$job.text))) {
+            $jobExecutable = ' ' * $jobExecutable.Length
+        }
+        [void]$fragments.Add($jobExecutable)
+    }
+    return [string]::Join("`n", $fragments.ToArray())
+}
+
 function Get-AuthorityConsumerReleaseAffectingMatch {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -1363,9 +2180,9 @@ function Test-AuthorityConsumerFailureSuppression {
 
     $suppressionPatterns = @(
         '(?i)\|\|\s*(?:true|:|echo|printf|write-output|write-host|exit\s+0)\b',
-        '(?im)^\s*continue-on-error\s*:\s*(?!false\b)\S+',
-        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?(?:always|failure|cancelled)\s*\(\)',
-        '(?im)^\s*if\s*:\s*(?:\$\{\{\s*)?!\s*cancelled\s*\(\)'
+        '(?im)^\s*(?:-\s+)?continue-on-error\s*:\s*(?!false\b)\S+',
+        '(?im)^\s*(?:-\s+)?if\s*:\s*(?:\$\{\{\s*)?(?:always|failure|cancelled)\s*\(\)',
+        '(?im)^\s*(?:-\s+)?if\s*:\s*(?:\$\{\{\s*)?!\s*cancelled\s*\(\)'
     )
     foreach ($pattern in $suppressionPatterns) {
         if ([regex]::IsMatch($Text, $pattern)) { return $true }
@@ -1432,16 +2249,12 @@ function Assert-AuthorityConsumerSameStepReleaseSuccess {
         [Parameter(Mandatory = $true)][string] $JobId
     )
 
-    $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
+    $verifiedDynamic = (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text ("jobs:`n" + $JobText) -CanonicalRelativePath $CanonicalRelativePath) -gt 0
     foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text $JobText)) {
         $stepExecutableText = [string]$step.executableText
-        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation `
-            -Text $stepExecutableText `
-            -CanonicalRelativePath $CanonicalRelativePath
+        $canonicalMatch = Get-AuthorityConsumerCanonicalCommandMatch -Text $stepExecutableText -CanonicalRelativePath $CanonicalRelativePath -VerifiedDynamic:$verifiedDynamic
         $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $stepExecutableText
-        if ($canonicalCount -eq 0 -or -not $releaseMatch.Success) { continue }
-
-        $canonicalMatch = [regex]::Match($stepExecutableText, $canonicalPattern)
+        if (-not $canonicalMatch.Success -or -not $releaseMatch.Success) { continue }
         if (-not $canonicalMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
             throw "BLOCK: release-affecting workflow '$WorkflowPath' must execute the canonical validator before its same-step release command in job '$JobId'."
         }
@@ -1561,17 +2374,13 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
         [Parameter(Mandatory = $true)][string] $CanonicalRelativePath
     )
 
-    $executableText = Get-AuthorityConsumerExecutableText -Text $Text
+    $executableText = Get-AuthorityConsumerWorkflowReleaseExecutableText -Text $Text
     if (Test-AuthorityConsumerOpaqueReleaseHelper -Text $executableText) {
         throw "BLOCK: release-affecting workflow '$WorkflowPath' invokes an opaque local release helper; inspect the helper or fail closed."
     }
-    if (-not (Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText)) { return }
-    if (Test-AuthorityConsumerFailureSuppression -Text $Text) {
-        throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation."
-    }
-
     $jobs = @(Get-AuthorityConsumerWorkflowJobs -Text $Text)
     if ($jobs.Count -eq 0) {
+        if (-not (Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText)) { return }
         throw "BLOCK: release-affecting workflow '$WorkflowPath' has no structurally inspectable jobs for canonical failure propagation."
     }
     $canonicalPattern = Get-AuthorityConsumerCanonicalTokenPattern -CanonicalRelativePath $CanonicalRelativePath
@@ -1579,12 +2388,31 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
     $releaseJobs = @()
     foreach ($job in $jobs) {
         $jobExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$job.text)
-        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $jobExecutableText -CanonicalRelativePath $CanonicalRelativePath
-        $release = Test-AuthorityConsumerReleaseAffectingCommand -Text $jobExecutableText
+        $canonicalCount = Get-AuthorityConsumerWorkflowCanonicalCount -Text ("jobs:`n" + [string]$job.text) -CanonicalRelativePath $CanonicalRelativePath
+        $reportExempt = (Test-AuthorityConsumerHeadCheckReport -JobText ([string]$job.text)) -and -not $executableText.Contains($jobExecutableText)
+        $release = -not $reportExempt -and (Test-AuthorityConsumerReleaseAffectingCommand -Text $jobExecutableText)
+        if ($canonicalCount -gt 0 -or $release) {
+            # Conditions/continue-on-error on the authoritative job apply to
+            # every command. Step controls apply only to their own command;
+            # retention/cleanup after failure must not taint another step.
+            $jobHeader = ([regex]::Split([string]$job.text, '(?m)^\s+steps\s*:'))[0]
+            if (Test-AuthorityConsumerFailureSuppression -Text $jobHeader) {
+                throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation in job '$($job.id)'."
+            }
+            foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text ([string]$job.text))) {
+                $authoritativeStep = (Test-AuthorityConsumerCanonicalInvocation -Text ([string]$step.executableText) -CanonicalRelativePath $CanonicalRelativePath) -gt 0 -or
+                    (([string]$step.executableText -match '(?m)^\s*&\s*\$trustedValidator\b') -and $canonicalCount -gt 0) -or
+                    (-not $reportExempt -and (Test-AuthorityConsumerReleaseAffectingCommand -Text ([string]$step.executableText)))
+                if ($authoritativeStep -and (Test-AuthorityConsumerFailureSuppression -Text ([string]$step.text))) {
+                    throw "BLOCK: release-affecting workflow '$WorkflowPath' suppresses canonical or release failure propagation in an authoritative step of job '$($job.id)'."
+                }
+            }
+        }
         if ($canonicalCount -gt 0) { $canonicalJobs += $job }
         if ($release) { $releaseJobs += $job }
     }
-    if ($canonicalJobs.Count -ne 1 -or $releaseJobs.Count -eq 0) {
+    if ($releaseJobs.Count -eq 0) { return }
+    if ($canonicalJobs.Count -ne 1) {
         throw "BLOCK: release-affecting workflow '$WorkflowPath' must structurally bind its release job to exactly one canonical job."
     }
 
@@ -1597,7 +2425,8 @@ function Assert-AuthorityConsumerReleaseFailurePropagation {
             -JobId ([string]$releaseJob.id)
         $releaseExecutableText = Get-AuthorityConsumerExecutableText -Text ([string]$releaseJob.text)
         if ($releaseJob.id -ceq $canonicalJob.id) {
-            $canonicalMatch = [regex]::Match($releaseExecutableText, $canonicalPattern)
+            $verifiedDynamic = (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text ("jobs:`n" + [string]$releaseJob.text) -CanonicalRelativePath $CanonicalRelativePath) -gt 0
+            $canonicalMatch = Get-AuthorityConsumerCanonicalCommandMatch -Text $releaseExecutableText -CanonicalRelativePath $CanonicalRelativePath -VerifiedDynamic:$verifiedDynamic
             $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $releaseExecutableText
             if (-not $canonicalMatch.Success -or -not $releaseMatch.Success -or $releaseMatch.Index -lt $canonicalMatch.Index) {
                 throw "BLOCK: release-affecting workflow '$WorkflowPath' must run the canonical validator before its release command in job '$($releaseJob.id)'."
@@ -1667,15 +2496,15 @@ function Assert-AuthorityConsumerEntryPointContract {
         if ($isAuthorityRepository -and $authorityRolePaths -contains $relativePath) { continue }
         $text = [System.IO.File]::ReadAllText($workflowFile.FullName)
         $executableText = Get-AuthorityConsumerExecutableText -Text $text
-        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $executableText -CanonicalRelativePath $canonicalRelative
-        $nonCanonical = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $executableText -CanonicalRelativePath $canonicalRelative
-        $compatibility = Test-AuthorityConsumerCompatibilityLane `
+        $canonicalCount = Get-AuthorityConsumerWorkflowCanonicalCount -Text $text -CanonicalRelativePath $canonicalRelative
+        $nonCanonical = Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand -Text $text -CanonicalRelativePath $canonicalRelative
+        $compatibility = $canonicalCount -eq 0 -and (Test-AuthorityConsumerCompatibilityLane `
             -Text $text `
             -ExecutableText $executableText `
-            -CanonicalRelativePath $canonicalRelative
+            -CanonicalRelativePath $canonicalRelative)
         $compatibilityDeclared = Test-AuthorityConsumerCompatibilityMarker -Text $text
-        $releaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $executableText
-        if ($releaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) {
+        $releaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text (Get-AuthorityConsumerWorkflowReleaseExecutableText -Text $text)
+        if (($releaseAffecting -or $canonicalCount -gt 0) -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) {
             Assert-AuthorityConsumerReleaseFailurePropagation `
                 -WorkflowPath $relativePath `
                 -Text $text `
@@ -1706,10 +2535,17 @@ function Assert-AuthorityConsumerEntryPointContract {
             }
             foreach ($candidate in $candidates) {
                 $event = [string]$candidate.Event
+                if ($event -ceq 'pull_request_target' -and
+                    (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $text -CanonicalRelativePath $canonicalRelative) -eq 1) {
+                    # A proven base-owned supervisor validates the PR head as
+                    # data. It is the same logical PR candidate key, so two
+                    # PR trigger adapters cannot create a second execution.
+                    $event = 'pull_request'
+                }
                 if ($event -notin @('pull_request', 'push', 'workflow_dispatch')) {
                     throw "BLOCK: consumer entry-point contract found unsupported trigger '$event' in workflow '$relativePath'."
                 }
-                $candidateKey = [string]$candidate.CandidateKey
+                $candidateKey = if ([string]$candidate.Event -ceq 'pull_request_target' -and $event -ceq 'pull_request') { 'pull_request' } else { [string]$candidate.CandidateKey }
                 if ($eventOwners.ContainsKey($candidateKey)) {
                     throw "BLOCK: consumer entry-point contract found duplicate canonical execution for event/candidate '$candidateKey' in '$relativePath' and '$($eventOwners[$candidateKey])'."
                 }
