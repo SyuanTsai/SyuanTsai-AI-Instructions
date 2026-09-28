@@ -108,6 +108,86 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         self.assertEqual(3, verified["plannedWorkItemCount"])
         self.assertFalse(verified["releaseEligible"])
 
+    # Scenario: Every planned work item returns zero findings with complete raw coverage.
+    # Purpose: Successful fixture validity stays separate from consent, review, HRA and release.
+    def test_InterT12_zero_findings_complete_coverage_keeps_formal_gates_separate(self):
+        result = self.verify()
+        self.assertEqual(0, result.returncode, result.stderr)
+        verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual("VERIFIED_FIXTURE_ONLY", verified["semanticValidity"])
+        self.assertEqual("complete", verified["coverageStatus"])
+        self.assertEqual([], verified["normalizedFindings"])
+        self.assertEqual(digest(b"[]"), verified["normalizedFindingsSha256"])
+        self.assertEqual(3, len(verified["rawResultBindings"]))
+        schema = json.loads((SCRIPT.parents[1] / "tests" / "fixtures" /
+                             "routine-semantic-synthetic" / "verification.schema.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(schema["properties"]), set(verified))
+        self.assertTrue(set(schema["required"]).issubset(verified))
+        for key in ("consentGranted", "egressAuthorized", "releaseEligible"):
+            self.assertIs(False, verified[key], key)
+        for key in ("aiReviewStatus", "dispositionStatus", "humanReleaseApprovalStatus"):
+            self.assertEqual("not-evaluated", verified[key], key)
+        self.assertEqual("unverified", verified["trustStatus"])
+        self.assertEqual("BLOCKED", verified["ciAdmission"])
+
+    # Scenario: A canonical finding belongs to one exact analyzer/path raw result.
+    # Purpose: Preserve raw association and schema-valid output without granting admission.
+    def test_InterT14_nonempty_findings_retain_exact_raw_result_binding(self):
+        bundle = copy.deepcopy(self.bundle)
+        work = bundle["workItems"][0]
+        finding = {"severity": "low", "fingerprint": "fixture-1", "ruleId": "fixture-rule",
+                   "message": "Synthetic finding.", "path": work["path"], "analyzerId": work["analyzerId"]}
+        work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+            json.dumps({"workItemId": work["id"], "findings": [finding]}))
+        result = self.verify(bundle)
+        self.assertEqual(0, result.returncode, result.stderr)
+        verified = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual([finding], verified["normalizedFindings"])
+        canonical = {name: finding[name] for name in
+                     ("severity", "fingerprint", "ruleId", "message", "path", "analyzerId")}
+        self.assertEqual(digest(json.dumps([canonical], ensure_ascii=False, separators=(",", ":")).encode()),
+                         verified["normalizedFindingsSha256"])
+        binding = verified["rawResultBindings"][0]
+        self.assertEqual(work["id"], binding["workItemId"])
+        self.assertEqual(1, binding["findingCount"])
+        for stem in ("prompt", "response", "rawGraph", "rawFindings"):
+            self.assertEqual(work[stem + "Sha256"], binding[stem + "Sha256"])
+        self.assertFalse(verified["releaseEligible"])
+        # Use PowerShell's real JSON Schema validator; no extra Python package is required.
+        schema = SCRIPT.parents[1] / "tests" / "fixtures" / "routine-semantic-synthetic" / "verification.schema.json"
+        checker = self.root / "check-schema.ps1"
+        checker.write_text("param($ResultPath, $SchemaPath)\n"
+                           "if (Test-Json -Json (Get-Content -Raw -LiteralPath $ResultPath) -SchemaFile $SchemaPath) { exit 0 }; exit 10\n",
+                           encoding="utf-8")
+        command = ["pwsh", "-NoProfile", "-File", str(checker), str(self.output_path), str(schema)]
+        accepted = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        verified["releaseEligible"] = True
+        self.output_path.write_text(json.dumps(verified), encoding="utf-8")
+        rejected = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertEqual(10, rejected.returncode, rejected.stderr)
+
+    # Scenario: Correctly hashed raw findings contain malformed or out-of-work findings.
+    # Purpose: Raw digest validity alone cannot hide invalid normalized schema/type/scope.
+    def test_InterT16_rejects_malformed_or_unbound_normalized_findings(self):
+        first = self.bundle["workItems"][0]
+        valid = {"severity": "low", "fingerprint": "fixture-1", "ruleId": "fixture-rule",
+                 "message": "Synthetic finding.", "path": first["path"], "analyzerId": first["analyzerId"]}
+        invalid = [None, 1, "finding", [], {}, {**valid, "severity": "LOW"},
+                   {**valid, "message": True}, {**valid, "message": "bad\nmessage"},
+                   {**valid, "path": "skills/other/SKILL.md"},
+                   {**valid, "analyzerId": ANALYZERS[1]}, {**valid, "override": True}]
+        for finding in invalid:
+            with self.subTest(finding=finding):
+                self.output_path.unlink(missing_ok=True)
+                bundle = copy.deepcopy(self.bundle)
+                work = bundle["workItems"][0]
+                work["rawFindingsBase64"], work["rawFindingsSha256"] = payload(
+                    json.dumps({"workItemId": work["id"], "findings": [finding]}))
+                result = self.verify(bundle)
+                self.assertEqual(10, result.returncode, result.stderr)
+                self.assertFalse(self.output_path.exists())
+
     # Scenario: The bundle changes either identity, the selected blob, or a raw payload hash.
     # Purpose: A caller cannot replay or mix candidate and work evidence.
     def test_InterT20_rejects_candidate_blob_and_raw_hash_mismatch(self):
@@ -135,7 +215,9 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
             else:
                 bundle["workItems"].pop()
             result = self.verify(bundle)
-            self.assertNotEqual(0, result.returncode, change)
+            self.assertEqual(10, result.returncode, change)
+            self.assertIn("ANALYZER_SET_INCOMPLETE" if change == "analyzer" else "WORK_COUNT_INCOMPLETE", result.stderr)
+            self.assertFalse(self.output_path.exists(), change)
 
     # Scenario: A second consumer plan with another run ID reuses the earlier bundle.
     # Purpose: The verifier rejects replay against another protected run.
@@ -155,6 +237,41 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("BLOCKED", json.loads(self.output_path.read_text(encoding="utf-8"))["ciAdmission"])
+
+    # Scenario: Each file passed to public Verify is independently missing or replaced.
+    # Purpose: Prove plan/prepared/bundle/output forwarding and fail-closed type validation.
+    def test_InterT55_public_verify_forwards_all_files_and_rejects_invalid_inputs(self):
+        self.bundle_path.write_text(json.dumps(self.bundle), encoding="utf-8")
+        command = ["pwsh", "-NoProfile", "-File", str(ENTRYPOINT), "-Mode", "Verify",
+                   "-PlanPath", str(self.plan_path), "-PreparedPath", str(self.prepared_path),
+                   "-BundlePath", str(self.bundle_path), "-OutputPath", str(self.output_path)]
+        for label, changed in (("plan", self.plan_path), ("prepared", self.prepared_path),
+                               ("bundle", self.bundle_path)):
+            with self.subTest(missing=label):
+                original = changed.read_bytes()
+                changed.unlink()
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn("MISSING_OR_UNSAFE", result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    changed.write_bytes(original)
+        for label, changed, value, code in (
+            ("plan-type", self.plan_path, {**self.consumer, "schemaVersion": True}, "CONSUMER_VERSION"),
+            ("bundle-type", self.bundle_path, {**self.bundle, "schemaVersion": True}, "BUNDLE_VERSION"),
+            ("prepared", self.prepared_path, {}, "PREPARED_PLAN_MISMATCH"),
+        ):
+            with self.subTest(substitution=label):
+                original = changed.read_bytes()
+                changed.write_text(json.dumps(value), encoding="utf-8")
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(10, result.returncode, result.stderr)
+                    self.assertIn(code, result.stderr)
+                    self.assertFalse(self.output_path.exists())
+                finally:
+                    changed.write_bytes(original)
 
     # Scenario: A signed-looking JSON bundle repeats a decoded key or drops raw graph bytes.
     # Purpose: JSON parser ambiguity and hidden raw-work omissions fail before a result is written.

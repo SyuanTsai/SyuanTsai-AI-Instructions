@@ -5,7 +5,7 @@
   "description": "Only this blocked synthetic result is produced by the current central verifier. It is not a production scan receipt.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "artifactType", "sourceRevision", "candidateId", "candidateInventorySha256", "resolutionRunId", "producerCandidateId", "selectedBlobInventorySha256", "receiptBundleSha256", "authorizationStatus", "scanStatus", "trustStatus", "ciAdmission", "plannedWorkItemCount", "successfulProviderCallCount", "analyzers", "releaseEligible"],
+  "required": ["schemaVersion", "artifactType", "sourceRevision", "candidateId", "candidateInventorySha256", "resolutionRunId", "producerCandidateId", "selectedBlobInventorySha256", "receiptBundleSha256", "semanticValidity", "coverageStatus", "normalizedFindings", "normalizedFindingsSha256", "rawResultBindings", "authorizationStatus", "consentGranted", "egressAuthorized", "scanStatus", "trustStatus", "aiReviewStatus", "dispositionStatus", "humanReleaseApprovalStatus", "ciAdmission", "plannedWorkItemCount", "successfulProviderCallCount", "analyzers", "releaseEligible"],
   "properties": {
     "schemaVersion": {"const": 1},
     "artifactType": {"const": "routine-semantic-ci-verification-v1"},
@@ -16,9 +16,35 @@
     "producerCandidateId": {"$ref": "#/$defs/sha256"},
     "selectedBlobInventorySha256": {"$ref": "#/$defs/sha256"},
     "receiptBundleSha256": {"$ref": "#/$defs/sha256"},
+    "semanticValidity": {"const": "VERIFIED_FIXTURE_ONLY"},
+    "coverageStatus": {"const": "complete"},
+    "normalizedFindings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "normalizedFindingsSha256": {"$ref": "#/$defs/sha256"},
+    "rawResultBindings": {
+      "type": "array", "minItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["workItemId", "analyzerId", "path", "promptSha256", "responseSha256", "rawGraphSha256", "rawFindingsSha256", "findingCount"],
+        "properties": {
+          "workItemId": {"$ref": "#/$defs/sha256"},
+          "analyzerId": {"enum": ["semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"]},
+          "path": {"type": "string", "minLength": 1},
+          "promptSha256": {"$ref": "#/$defs/sha256"},
+          "responseSha256": {"$ref": "#/$defs/sha256"},
+          "rawGraphSha256": {"$ref": "#/$defs/sha256"},
+          "rawFindingsSha256": {"$ref": "#/$defs/sha256"},
+          "findingCount": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
     "authorizationStatus": {"const": "fixture-only"},
+    "consentGranted": {"const": false},
+    "egressAuthorized": {"const": false},
     "scanStatus": {"const": "SYNTHETIC"},
     "trustStatus": {"const": "unverified"},
+    "aiReviewStatus": {"const": "not-evaluated"},
+    "dispositionStatus": {"const": "not-evaluated"},
+    "humanReleaseApprovalStatus": {"const": "not-evaluated"},
     "ciAdmission": {"const": "BLOCKED"},
     "plannedWorkItemCount": {"type": "integer", "minimum": 3},
     "successfulProviderCallCount": {"const": 0},
@@ -36,5 +62,20 @@
     },
     "releaseEligible": {"const": false}
   },
-  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "scalar": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+    "finding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["severity", "fingerprint", "ruleId", "message", "path", "analyzerId"],
+      "properties": {
+        "severity": {"enum": ["critical", "high", "medium", "low", "informational"]},
+        "fingerprint": {"$ref": "#/$defs/scalar"},
+        "ruleId": {"$ref": "#/$defs/scalar"},
+        "message": {"$ref": "#/$defs/scalar"},
+        "path": {"$ref": "#/$defs/scalar"},
+        "analyzerId": {"enum": ["semantic_developer_intent", "semantic_quality_policy", "semantic_security_discovery"]}
+      }
+    }
+  }
 }
