@@ -15,8 +15,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/pr8-even-shard-diagnostic.yml"
-EXPECTED_FILES = 32
-EXPECTED_SHA = "242160f809b58b99b844c7228fce04c1c8ac876a30194544a9089c1f800b99ae"
+EXPECTED_FILES = 33
+EXPECTED_SHA = "c36a7ee43ac510303ec4f656fa61f43ab1e279aa609d134c873d48577904cb74"
 
 
 class EvenDiagnosticContractTests(unittest.TestCase):
@@ -55,7 +55,9 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         diagnostic = (ROOT / "scripts/Invoke-PesterEvenDiagnostic.ps1").read_text(encoding="utf-8")
         for marker in ("DIAGNOSTIC_PARTITION_START", "DIAGNOSTIC_PARTITION_END",
                        "DIAGNOSTIC_PARTITION_EXIT", "ShardPartitionCount = 8",
-                       "ExpectedFullShardCount = 32", "OuterTimeoutSeconds = 2400"):
+                       "ExpectedFullShardCount = 33", "OuterTimeoutSeconds = 2400",
+                       "ExpectedSkippedCount = $expectedSkippedCount",
+                       "$PartitionIndex -eq 4 -or $Runtime -eq 'ps51'"):
             self.assertIn(marker, diagnostic)
         executor = (ROOT / "scripts/Invoke-PesterShardProcess.ps1").read_text(encoding="utf-8")
         self.assertIn('Write-Host "Starting Pester shard $($shard.Name)"', executor)
@@ -69,7 +71,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
             for position in (1, 2, 3):
                 script = self.job["steps"][position]["run"]
                 for key, value in {"pester": "4.10.1", "runtime": "ps7",
-                                   "index": "0", "total": "198"}.items():
+                                   "index": "0", "total": "161"}.items():
                     script = script.replace("${{ matrix." + key + " }}", value)
                 path = Path(directory) / f"step-{position}.ps1"
                 path.write_text(script, encoding="utf-8")
@@ -98,19 +100,21 @@ class EvenDiagnosticContractTests(unittest.TestCase):
         self.assertEqual(EXPECTED_FILES, len(names))
         self.assertEqual(EXPECTED_SHA, hashlib.sha256("\n".join(names).encode()).hexdigest())
         self.assertEqual(
-            [("ps51", "3.4.0", "0", "198"),
-             ("ps51", "3.4.0", "4", "40"),
-             ("ps7", "4.10.1", "0", "198"),
-             ("ps7", "4.10.1", "4", "40")],
+            [("ps51", "3.4.0", "0", "161"),
+             ("ps51", "3.4.0", "4", "18"),
+             ("ps7", "4.10.1", "0", "161"),
+             ("ps7", "4.10.1", "4", "18")],
             [(item["runtime"], item["pester"], item["index"], item["total"]) for item in self.matrix],
         )
         self.assertIn(EXPECTED_SHA, self.inventory_script)
-        for runtime, index, total in (("ps51", 0, 198), ("ps51", 4, 40), ("ps7", 0, 198), ("ps7", 4, 40)):
+        for runtime, index, total in (("ps51", 0, 161), ("ps51", 4, 18), ("ps7", 0, 161), ("ps7", 4, 18)):
             result = self.run_inventory(runtime, index, total)
             self.assertEqual(0, result.returncode, result.stderr + result.stdout)
-            self.assertIn(f"index={index}/8 files=4 total={total} skipped=0", result.stdout)
+            files = 5 if index == 0 else 4
+            skipped = 1 if runtime == "ps51" or index == 4 else 0
+            self.assertIn(f"index={index}/8 files={files} total={total} skipped={skipped}", result.stdout)
         for changed in (names[:-1], names + ["tests/extra.Tests.ps1"], names + [names[0]], names[:-1] + ["tests/changed.Tests.ps1"]):
-            result = self.run_inventory("ps7", 0, 198, fake_git_names=changed)
+            result = self.run_inventory("ps7", 0, 161, fake_git_names=changed)
             self.assertNotEqual(0, result.returncode, result.stdout)
 
     @classmethod
@@ -132,7 +136,7 @@ class EvenDiagnosticContractTests(unittest.TestCase):
     def test_InterT20_matches_actual_pester_discovery(self):
         counts = {path: int(count) for path, count in re.findall(
             r"'(tests/[^']+\.Tests\.ps1)'\s*=\s*(\d+)", self.inventory_script)}
-        self.assertEqual(8, len(counts))
+        self.assertEqual(9, len(counts))
         paths = ",".join("'" + path + "'" for path in counts)
         script = (
             "$ErrorActionPreference='Stop';"

@@ -23,19 +23,19 @@ jobs:
           - runtime: ps51
             pester: 3.4.0
             index: 0
-            total: 198
+            total: 161
           - runtime: ps51
             pester: 3.4.0
             index: 4
-            total: 40
+            total: 18
           - runtime: ps7
             pester: 4.10.1
             index: 0
-            total: 198
+            total: 161
           - runtime: ps7
             pester: 4.10.1
             index: 4
-            total: 40
+            total: 18
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -47,8 +47,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Reviewed 32-file name inventory; content counts are discovery-checked.
-          $expectedInventorySha256 = '242160f809b58b99b844c7228fce04c1c8ac876a30194544a9089c1f800b99ae'
+          # Reviewed 33-file inventory including the routine semantic suite.
+          $expectedInventorySha256 = 'c36a7ee43ac510303ec4f656fa61f43ab1e279aa609d134c873d48577904cb74'
           [string[]]$tracked = @(git ls-tree -r --name-only HEAD -- tests |
             Where-Object { $_ -cmatch '^tests/[^/]+\.Tests\.ps1$' })
           if ($LASTEXITCODE -ne 0) { throw 'Git test inventory lookup failed.' }
@@ -56,7 +56,7 @@ jobs:
           [string[]]$present = @(Get-ChildItem -LiteralPath tests -Filter '*.Tests.ps1' -File |
             ForEach-Object { 'tests/' + $_.Name })
           [Array]::Sort($present, [StringComparer]::Ordinal)
-          if ($tracked.Count -ne 32 -or $present.Count -ne 32 -or
+          if ($tracked.Count -ne 33 -or $present.Count -ne 33 -or
               ($tracked -join "`n") -cne ($present -join "`n")) {
             throw 'Tracked and checked-out Pester file inventories differ.'
           }
@@ -69,7 +69,7 @@ jobs:
           if ($actualSha -cne $expectedInventorySha256) { throw 'Pester inventory changed from reviewed candidate.' }
           [string[]]$isolated = @('tests/standard-validation-runner.Tests.ps1', 'tests/syp101-production-smoke-contract.Tests.ps1')
           [string[]]$ordered = @($isolated) + @($tracked | Where-Object { $isolated -cnotcontains $_ })
-          if ($ordered.Count -ne 32 -or @($ordered | Select-Object -Unique).Count -ne 32) {
+          if ($ordered.Count -ne 33 -or @($ordered | Select-Object -Unique).Count -ne 33) {
             throw 'Pester shard ordering lost or duplicated a test file.'
           }
           $index = [int]'${{ matrix.index }}'
@@ -78,36 +78,39 @@ jobs:
             [string[]]@(
               'tests/standard-validation-runner.Tests.ps1',
               'tests/bootstrap-ai-instructions.Tests.ps1',
-              'tests/skill-repository-standard.Tests.ps1',
-              'tests/skills-source-routing.Tests.ps1'
+              'tests/safe-zip.Tests.ps1',
+              'tests/skills-source-retrieval.Tests.ps1',
+              'tests/update-ai-instructions.Tests.ps1'
             )
           }
           elseif ($index -eq 4) {
             [string[]]@(
               'tests/ai-instructions-contract.Tests.ps1',
               'tests/license-delivery.Tests.ps1',
-              'tests/skills-selection.Tests.ps1',
-              'tests/standard-semantic-preflight.Tests.ps1'
+              'tests/skills-catalog-source-host.Tests.ps1',
+              'tests/standard-semantic-inventory-probe.Tests.ps1'
             )
           }
           else { throw 'Unreviewed diagnostic partition index.' }
-          if ($selected.Count -ne 4 -or ($selected -join "`n") -cne ($expected -join "`n")) {
+          if ($selected.Count -ne $expected.Count -or ($selected -join "`n") -cne ($expected -join "`n")) {
             throw 'Diagnostic partition differs from reviewed exact shard assignment.'
           }
           $counts = @{
             'tests/standard-validation-runner.Tests.ps1' = 51
             'tests/bootstrap-ai-instructions.Tests.ps1' = 75
-            'tests/skill-repository-standard.Tests.ps1' = 61
-            'tests/skills-source-routing.Tests.ps1' = 11
+            'tests/safe-zip.Tests.ps1' = 3
+            'tests/skills-source-retrieval.Tests.ps1' = 5
+            'tests/update-ai-instructions.Tests.ps1' = 27
             'tests/ai-instructions-contract.Tests.ps1' = 6
             'tests/license-delivery.Tests.ps1' = 9
-            'tests/skills-selection.Tests.ps1' = 17
-            'tests/standard-semantic-preflight.Tests.ps1' = 8
+            'tests/skills-catalog-source-host.Tests.ps1' = 1
+            'tests/standard-semantic-inventory-probe.Tests.ps1' = 2
           }
           $total = 0
           foreach ($file in $selected) { $total += [int]$counts[$file] }
           if ($total -ne [int]'${{ matrix.total }}') { throw 'Diagnostic expected test count changed.' }
-          Write-Host "DIAGNOSTIC_PLAN runtime=${{ matrix.runtime }} index=$index/8 files=4 total=$total skipped=0 inventory=$actualSha"
+          $skipped = if ($index -eq 4 -or '${{ matrix.runtime }}' -eq 'ps51') { 1 } else { 0 }
+          Write-Host "DIAGNOSTIC_PLAN runtime=${{ matrix.runtime }} index=$index/8 files=$($selected.Count) total=$total skipped=$skipped inventory=$actualSha"
 
       - name: Run bounded diagnostic shards on Windows PowerShell 5.1
         if: matrix.runtime == 'ps51'

@@ -7,7 +7,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 10
+            '.github/workflows/pr8-powershell-validation.yml' = 11
             '.github/workflows/standards-conformance.yml' = 2
             '.github/workflows/syp101-production-smoke.yml' = 2
             '.github/workflows/syp86-production-lock.yml' = 2
@@ -201,16 +201,16 @@ jobs:
         Assert-True $ps51OddBMatch.Success 'PowerShell 5.1 must run its second odd shard partition independently.'
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 238; Skipped = 0 }
-                @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 188; Skipped = 6 }
-                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 124; Skipped = 5 }
-                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 91; Skipped = 2 }
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 2 }
+                @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
+                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
+                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 5.1 partition must run on Windows.'
             Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each partition must select its own shard index.'
             Assert-Match $partition.Block ('ShardPartitionCount\s*=\s*' + $partition.Count) 'Each PowerShell 5.1 job must select its intended partition count.'
-            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*32' 'Every partition must verify the complete shard inventory.'
+            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*33' 'Every partition must verify the complete shard inventory.'
             Assert-Match $partition.Block 'OuterTimeoutSeconds\s*=\s*2400' 'Every shard must retain its bounded timeout.'
             Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each partition must verify its fixed test count.'
             Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each partition must verify its fixed platform skip count.'
@@ -238,16 +238,16 @@ jobs:
         Assert-True $ps7OddBMatch.Success 'PowerShell 7 must run its second odd shard partition independently.'
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 238; Skipped = 0 }
-                @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 188; Skipped = 6 }
-                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 124; Skipped = 5 }
-                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 91; Skipped = 1 }
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 1 }
+                @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
+                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
+                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 7 partition must run on Windows.'
             Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each PowerShell 7 partition must select its own shard index.'
             Assert-Match $partition.Block ('ShardPartitionCount\s*=\s*' + $partition.Count) 'Each PowerShell 7 job must select its intended partition count.'
-            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*32' 'Every PowerShell 7 job must verify the complete shard inventory.'
+            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*33' 'Every PowerShell 7 job must verify the complete shard inventory.'
             Assert-Match $partition.Block 'OuterTimeoutSeconds\s*=\s*2400' 'Every shard must retain its bounded timeout.'
             Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each PowerShell 7 partition must verify its fixed test count.'
             Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each PowerShell 7 partition must verify its fixed platform skip count.'
@@ -276,17 +276,17 @@ jobs:
         }
         $bulk = @($testFiles | Where-Object { $isolated -cnotcontains $_ })
         $shardFiles = @($isolated) + @($bulk)
-        Assert-Equal $shardFiles.Count 32 'The actual Pester file inventory must contain 32 shards.'
+        Assert-Equal $shardFiles.Count 33 'The actual Pester file inventory must contain 33 shards.'
         $evenA = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 0) { $shardFiles[$index] } })
         $evenB = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 2) { $shardFiles[$index] } })
         $oddA = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 1) { $shardFiles[$index] } })
         $oddB = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 3) { $shardFiles[$index] } })
-        Assert-Equal $evenA.Count 8 'The first even job must select eight shards.'
+        Assert-Equal $evenA.Count 9 'The first even job must select nine shards.'
         Assert-Equal $evenB.Count 8 'The second even job must select eight shards.'
         Assert-Equal $oddA.Count 8 'The first odd job must select eight shards.'
         Assert-Equal $oddB.Count 8 'The second odd job must select eight shards.'
         $assigned = @($evenA) + @($evenB) + @($oddA) + @($oddB)
-        Assert-Equal @($assigned | Select-Object -Unique).Count 32 'Every discovered shard must be assigned exactly once.'
+        Assert-Equal @($assigned | Select-Object -Unique).Count 33 'Every discovered shard must be assigned exactly once.'
         [string[]]$assignedOrdinal = @($assigned)
         [Array]::Sort($assignedOrdinal, [StringComparer]::Ordinal)
         Assert-Equal ($assignedOrdinal -join '|') ($testFiles -join '|') 'The partition union must equal the full test file inventory.'
@@ -393,6 +393,21 @@ ino: 1
         Assert-Match $summaryJob '(?i)(throw|exit\s+1)' 'The summary must return a failing status when either dependency is not successful.'
 
         Assert-Match $required 'powershell-7-unix-composition:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'The Linux composition job must depend on the dedicated focused job.'
+
+        # Scenario: An offline bridge API changes while only Pester files are discovered by the shared gate.
+        # Purpose: Run every routine Python fixture with a fixed count before admitting this engineering regression job.
+        $routineMatch = [regex]::Match($required, '(?ms)^  routine-semantic-offline:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
+        Assert-True $routineMatch.Success 'PR59 must execute its offline Python regression in CI.'
+        $routineJob = $routineMatch.Groups['block'].Value
+        Assert-Match $routineJob 'needs:\s*linux-callback-focused' 'The offline regression must retain the focused prerequisite.'
+        Assert-Match $routineJob 'runs-on:\s*windows-latest' 'The offline regression must exercise its existing Windows PowerShell entrypoints.'
+        Assert-Match $routineJob 'timeout-minutes:\s*10' 'The offline fixture job must have a fixed overall budget.'
+        Assert-Match $routineJob 'persist-credentials:\s*false' 'The offline fixture checkout must not persist a Git token.'
+        Assert-Match $routineJob 'sys\.version_info\s*>=\s*\(3,\s*10\)' 'The offline runner must check its minimum supported Python version.'
+        Assert-Match $routineJob 'test_routine_semantic_\*\.py' 'The offline runner must discover every existing routine fixture module.'
+        Assert-Match $routineJob 'assertEqual\(suite\.countTestCases\(\),\s*57' 'The offline runner must reject missing or unexpected tests.'
+        Assert-Match $routineJob 'len\(result\.skipped\)\s*==\s*0' 'The offline runner must reject skipped fixtures.'
+        Assert-NotMatch $routineJob 'Install-Module|pip install|Invoke-WebRequest|workflow_dispatch' 'The offline job must use its existing runtime without provider or tool acquisition.'
 
         $focusedStepIndex = $standards.IndexOf('Run required Unix callback containment boundary')
         $goSetupIndex = $standards.IndexOf('Set up approved Go runtime')

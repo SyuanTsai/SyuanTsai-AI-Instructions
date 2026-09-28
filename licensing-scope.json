@@ -192,19 +192,19 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/examples/skills-catalog-lock.example.json",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "catalog/examples/skills-catalog-lock-v2.example.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/examples/skills-catalog.example.json",
+      "path": "catalog/examples/skills-catalog-lock.example.json",
       "license": "Apache-2.0"
     },
     {
       "path": "catalog/examples/skills-catalog-v2.example.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/examples/skills-catalog.example.json",
       "license": "Apache-2.0"
     },
     {
@@ -236,11 +236,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-lock.schema.json",
+      "path": "catalog/schemas/skills-catalog-lock-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-lock-v2.schema.json",
+      "path": "catalog/schemas/skills-catalog-lock.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -248,11 +248,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog.schema.json",
+      "path": "catalog/schemas/skills-catalog-v2.schema.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "catalog/schemas/skills-catalog-v2.schema.json",
+      "path": "catalog/schemas/skills-catalog.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -308,10 +308,6 @@
       "license": "NOASSERTION"
     },
     {
-      "path": "docs/standards/managed-skill-lifecycle.md",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "docs/standards/README.md",
       "license": "Apache-2.0"
     },
@@ -340,6 +336,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/managed-skill-lifecycle.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/pr12-source-merge-adoption.json",
       "license": "Apache-2.0"
     },
@@ -349,10 +349,6 @@
     },
     {
       "path": "docs/standards/schemas/managed-skill-lifecycle-v1.schema.json",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "docs/standards/schemas/validation-security-gate-v1.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -380,6 +376,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/validation-security-gate-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/skill-repository-review-matrix.md",
       "license": "Apache-2.0"
     },
@@ -400,11 +400,11 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "docs/standards/upstream-interoperability.md",
+      "path": "docs/standards/upstream-adapter.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "docs/standards/upstream-adapter.json",
+      "path": "docs/standards/upstream-interoperability.md",
       "license": "Apache-2.0"
     },
     {
@@ -464,6 +464,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-RoutineSemanticScan.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Invoke-StandardAuthorityGate.ps1",
       "license": "Apache-2.0"
     },
@@ -493,6 +497,10 @@
     },
     {
       "path": "scripts/Resolve-StandardValidationTool.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/RoutineSemanticScan.psm1",
       "license": "Apache-2.0"
     },
     {
@@ -553,6 +561,42 @@
     },
     {
       "path": "scripts/license-delivery.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_candidate.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_codex_provider.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_delivery.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_fake_graph.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_inactive_receipt.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_ledger_bridge.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_offline.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_prompt_envelope.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/routine_semantic_provider_invocation.py",
       "license": "Apache-2.0"
     },
     {
@@ -644,6 +688,26 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/routine-semantic-synthetic/bundle.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/consumer-plan.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/generate.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/synthetic-bundle.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/routine-semantic-synthetic/verification.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/semantic-raw-graph/alpha-skill/SKILL.md",
       "license": "Apache-2.0"
     },
@@ -693,6 +757,10 @@
     },
     {
       "path": "tests/production-skills-catalog.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/routine-semantic-scan.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -781,6 +849,30 @@
     },
     {
       "path": "tests/test_pr8_even_diagnostic.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_candidate.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_codex_provider.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_delivery.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_ledger_bridge.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_offline.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_routine_semantic_prompt_envelope.py",
       "license": "Apache-2.0"
     },
     {

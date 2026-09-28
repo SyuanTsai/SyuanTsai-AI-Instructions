@@ -13,7 +13,7 @@ param(
     [int]$PartitionIndex,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet(198, 40)]
+    [ValidateSet(161, 18)]
     [int]$ExpectedTotalCount
 )
 
@@ -23,8 +23,8 @@ if (($Runtime -eq 'ps51' -and $PSVersionTable.PSVersion.Major -ne 5) -or
     ($Runtime -eq 'ps7' -and $PSVersionTable.PSVersion.Major -ne 7)) {
     throw "Diagnostic runtime $Runtime does not match the PowerShell host."
 }
-if (($PartitionIndex -eq 0 -and $ExpectedTotalCount -ne 198) -or
-    ($PartitionIndex -eq 4 -and $ExpectedTotalCount -ne 40)) {
+if (($PartitionIndex -eq 0 -and $ExpectedTotalCount -ne 161) -or
+    ($PartitionIndex -eq 4 -and $ExpectedTotalCount -ne 18)) {
     throw 'Diagnostic partition and expected count disagree.'
 }
 
@@ -39,14 +39,15 @@ if ($null -eq $pester) {
 }
 if ($null -eq $pester) { throw "Pester $version is unavailable." }
 
+$expectedSkippedCount = if ($PartitionIndex -eq 4 -or $Runtime -eq 'ps51') { 1 } else { 0 }
 $parameters = @{
     PesterModulePath = [string]$pester.Path
     PesterVersion = $PesterVersion
     ExpectedTotalCount = $ExpectedTotalCount
-    ExpectedSkippedCount = 0
+    ExpectedSkippedCount = $expectedSkippedCount
     ShardPartitionCount = 8
     ShardPartitionIndex = $PartitionIndex
-    ExpectedFullShardCount = 32
+    ExpectedFullShardCount = 33
     OuterTimeoutSeconds = 2400
     TestRoot = './tests'
     EvidenceRoot = $env:RUNNER_TEMP

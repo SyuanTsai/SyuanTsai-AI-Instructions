@@ -221,11 +221,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 238
-            ExpectedSkippedCount = 0
+            ExpectedTotalCount = 179
+            ExpectedSkippedCount = 2
             ShardPartitionCount = 4
             ShardPartitionIndex = 0
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -287,11 +287,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 188
-            ExpectedSkippedCount = 6
+            ExpectedTotalCount = 139
+            ExpectedSkippedCount = 5
             ShardPartitionCount = 4
             ShardPartitionIndex = 2
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -353,11 +353,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 124
-            ExpectedSkippedCount = 5
+            ExpectedTotalCount = 151
+            ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 1
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -419,11 +419,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 91
-            ExpectedSkippedCount = 2
+            ExpectedTotalCount = 185
+            ExpectedSkippedCount = 6
             ShardPartitionCount = 4
             ShardPartitionIndex = 3
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -504,11 +504,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 238
-            ExpectedSkippedCount = 0
+            ExpectedTotalCount = 179
+            ExpectedSkippedCount = 1
             ShardPartitionCount = 4
             ShardPartitionIndex = 0
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -570,11 +570,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 188
-            ExpectedSkippedCount = 6
+            ExpectedTotalCount = 139
+            ExpectedSkippedCount = 5
             ShardPartitionCount = 4
             ShardPartitionIndex = 2
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -636,11 +636,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 124
-            ExpectedSkippedCount = 5
+            ExpectedTotalCount = 151
+            ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 1
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -702,11 +702,11 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 91
-            ExpectedSkippedCount = 1
+            ExpectedTotalCount = 185
+            ExpectedSkippedCount = 6
             ShardPartitionCount = 4
             ShardPartitionIndex = 3
-            ExpectedFullShardCount = 32
+            ExpectedFullShardCount = 33
             OuterTimeoutSeconds = 2400
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
@@ -940,3 +940,24 @@ jobs:
             if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
             if ([int]$result.PassedCount -ne [int]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
           }
+
+  routine-semantic-offline:
+    name: Routine semantic offline fixture regression (Windows)
+    needs: linux-callback-focused
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run all offline routine semantic fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -B -c "import sys; print(sys.version); raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Offline fixtures require Python 3.10 or newer.' }
+          python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 57, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Offline routine semantic fixtures failed or skipped.' }
