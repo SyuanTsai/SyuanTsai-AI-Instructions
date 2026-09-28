@@ -692,6 +692,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/public-command-helpers/canonical-wrapper.txt",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/public-command-helpers/git-source-metadata.txt",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/routine-semantic-synthetic/bundle.schema.json",
       "license": "Apache-2.0"
     },

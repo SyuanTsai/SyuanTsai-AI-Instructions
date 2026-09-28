@@ -44,20 +44,52 @@ $pester = Get-Module Pester -ListAvailable |
     Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
 if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
 Import-Module $pester.Path -Force
+# Execute the complete expanded suite while retaining the registered report's
+# eight workflow IDs. Additional source regressions do not grant CI admission.
+$publicCommandIds = @(
+    'UnitT05_accepts_component_prose_and_text_layout',
+    'UnitT06_rejects_alternate_documented_commands_shell-fence',
+    'UnitT06_rejects_alternate_documented_commands_inline-command',
+    'UnitT06_rejects_alternate_documented_commands_plain-imperative',
+    'UnitT06_rejects_alternate_documented_commands_command-prefix',
+    'UnitT06_rejects_alternate_documented_commands_sentence-imperative',
+    'UnitT06_rejects_alternate_documented_commands_text-shell-command',
+    'UnitT06_rejects_alternate_documented_commands_text-dynamic-dispatch',
+    'UnitT06_rejects_alternate_documented_commands_unknown-fence',
+    'UnitT07_rejects_unclosed_command_fences',
+    'UnitT08_accepts_complete_reviewed_public_helpers_original',
+    'UnitT08_accepts_complete_reviewed_public_helpers_other-metadata',
+    'UnitT08_accepts_complete_reviewed_public_helpers_crlf',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_missing-failure-check',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_different-validator',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_wrapper-publish',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_metadata-write',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_metadata-unsafe-path',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_metadata-credential-url',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_opaque-program',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_extra-arguments',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_duplicate-canonical',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_ignored-failure',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_outside-helper-path',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_reparse-helper',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_wrong-helper-parent',
+    'UnitT09_rejects_changed_or_opaque_public_helpers_return-newline'
+)
+$fullWorkflowIds = @($workflowIds) + @($publicCommandIds)
 $run = Invoke-Pester -Script $testPath -PassThru -Show Summary
-if ($null -eq $run -or $run.TotalCount -ne $workflowIds.Count -or
-    $run.PassedCount -ne $workflowIds.Count -or $run.FailedCount -ne 0 -or
+if ($null -eq $run -or $run.TotalCount -ne $fullWorkflowIds.Count -or
+    $run.PassedCount -ne $fullWorkflowIds.Count -or $run.FailedCount -ne 0 -or
     $run.SkippedCount -ne 0 -or $run.PendingCount -ne 0 -or
     $run.InconclusiveCount -ne 0) {
     throw 'Fixed workflow contract suite did not pass in full.'
 }
 $observed = @($run.TestResult | ForEach-Object { [string]$_.Name })
-if ($observed.Count -ne $workflowIds.Count -or
+if ($observed.Count -ne $fullWorkflowIds.Count -or
     ($observed | Sort-Object -CaseSensitive) -join "`n" -cne
-    (($workflowIds | Sort-Object -CaseSensitive) -join "`n")) {
+    (($fullWorkflowIds | Sort-Object -CaseSensitive) -join "`n")) {
     throw 'Pester test IDs differ from the fixed diagnostic inventory.'
 }
-$workflowResults = @($run.TestResult | ForEach-Object {
+$workflowResults = @($run.TestResult | Where-Object { $workflowIds -ccontains [string]$_.Name } | ForEach-Object {
     [ordered]@{ id = [string]$_.Name; result = [string]$_.Result }
 })
 $maintenanceIds = @(

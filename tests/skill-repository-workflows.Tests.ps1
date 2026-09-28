@@ -103,7 +103,7 @@ scripts/Test-Repository.ps1
 
     # Scenario: A public release document contains a real component invocation in different Markdown forms.
     # Purpose: Preserve alternate-gate rejection for fenced, inline, and plain imperative commands.
-    It 'UnitT06_rejects_alternate_documented_commands_<Name>' -ForEach @(
+    It 'UnitT06_rejects_alternate_documented_commands_<Name>' -TestCases @(
         @{Name='shell-fence'; Text="Before merge:`n``````powershell`npwsh -File ./scripts/check-domain.ps1`n```````n"},
         @{Name='inline-command'; Text='Before merge, run `pwsh -File ./scripts/check-domain.ps1`.'},
         @{Name='plain-imperative'; Text='Run ./scripts/check-domain.ps1 as the release gate.'},
@@ -119,6 +119,7 @@ $validator = './scripts/check-domain.ps1'
 '@},
         @{Name='unknown-fence'; Text="Before merge:`n``````unknown-shell`n./scripts/check-domain.ps1`n```````n"}
     ) {
+        param($Name, $Text)
         . $script:AuthorityGatePath -DefineFunctionsOnly
         $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $root = Join-Path $TestDrive $Name
@@ -146,9 +147,10 @@ $validator = './scripts/check-domain.ps1'
 
     # Scenario: Existing public commands delegate to the canonical validator and separately read source metadata.
     # Purpose: Accept the complete reviewed behavior independently of helper name and safe repository metadata.
-    It 'UnitT08_accepts_complete_reviewed_public_helpers_<Variant>' -ForEach @(
+    It 'UnitT08_accepts_complete_reviewed_public_helpers_<Variant>' -TestCases @(
         @{Variant='original'}, @{Variant='other-metadata'}, @{Variant='crlf'}
     ) {
+        param($Variant)
         . $script:AuthorityGatePath -DefineFunctionsOnly
         $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $root = Join-Path $TestDrive "public-helpers-$Variant"
@@ -174,7 +176,7 @@ Retain source metadata from `pwsh -File ./scripts/source-info.ps1 -Ref HEAD`.
 
     # Scenario: A familiar public helper changes its dispatch, failure propagation, code or metadata.
     # Purpose: Verify full-program inspection rather than a helper-name exemption or caller-provided proof.
-    It 'UnitT09_rejects_changed_or_opaque_public_helpers_<Mutation>' -ForEach @(
+    It 'UnitT09_rejects_changed_or_opaque_public_helpers_<Mutation>' -TestCases @(
         @{Mutation='missing-failure-check'}, @{Mutation='different-validator'},
         @{Mutation='wrapper-publish'}, @{Mutation='metadata-write'},
         @{Mutation='metadata-unsafe-path'}, @{Mutation='metadata-credential-url'},
@@ -183,6 +185,7 @@ Retain source metadata from `pwsh -File ./scripts/source-info.ps1 -Ref HEAD`.
         @{Mutation='outside-helper-path'}, @{Mutation='reparse-helper'},
         @{Mutation='wrong-helper-parent'}, @{Mutation='return-newline'}
     ) {
+        param($Mutation)
         . $script:AuthorityGatePath -DefineFunctionsOnly
         $policy = Get-Content -Raw -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $root = Join-Path $TestDrive "public-helpers-$Mutation"
@@ -349,7 +352,7 @@ Retain source metadata from `pwsh -File ./scripts/source-info.ps1 -Ref HEAD`.
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
         foreach ($partition in @(
                 @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 2 }
-                @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
+                @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 166; Skipped = 5 }
                 @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
                 @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
             )) {
@@ -386,7 +389,7 @@ Retain source metadata from `pwsh -File ./scripts/source-info.ps1 -Ref HEAD`.
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
         foreach ($partition in @(
                 @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 1 }
-                @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
+                @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 166; Skipped = 5 }
                 @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
                 @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
             )) {
