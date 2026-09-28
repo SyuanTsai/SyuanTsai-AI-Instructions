@@ -3885,6 +3885,10 @@ jobs:
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/PR41-protected-workflow.yml')
         Assert-Equal (Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1') 1 'Reviewed dynamic canonical execution must count once.'
         foreach ($unsafe in @(
+            $workflow.Replace("ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}", 'ref: ${{ github.sha }}'),
+            $workflow.Replace("          ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}`r`n", '').Replace("          ref: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}`n", ''),
+            $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', "PATH: `${{ github.workspace }}/bin:/usr/bin:/bin`n          TRUSTED_SUPERVISOR_COMMIT: `${{ github.sha }}"),
+            $workflow.Replace('        shell: pwsh', '        shell: candidate-shell {0}'),
             $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', 'TRUSTED_SUPERVISOR_COMMIT: ${{ github.event.pull_request.head.sha }}'),
             $workflow.Replace('      - name: Set up approved Go runtime', "      - shell: bash`n        run: echo 'exit 0' > `"`$RUNNER_TEMP/standard-v1-trusted-supervisor/scripts/Validate.ps1`"`n`n      - name: Set up approved Go runtime"),
             $workflow.Replace('TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}', "GITHUB_ENV: ignored.env`n          TRUSTED_SUPERVISOR_COMMIT: `${{ github.sha }}"),
@@ -3922,6 +3926,8 @@ jobs:
         . $script:AuthorityGatePath -DefineFunctionsOnly
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/PR41-protected-workflow.yml')
         $root = Join-Path $TestDrive 'protected-fixture'
+        $inspection = $workflow + "`n  inspect:`n    steps:`n      - shell: pwsh`n        run: Write-Output '& `$alternate'`n"
+        Assert-False (Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand -Text $inspection -CanonicalRelativePath 'scripts/Validate.ps1') 'Printing a dynamic command is not an actual invocation.'
         [void](New-Item -ItemType Directory -Path (Join-Path $root '.github/workflows') -Force)
         [void](New-Item -ItemType Directory -Path (Join-Path $root 'scripts') -Force)
         [IO.File]::WriteAllText((Join-Path $root 'scripts/Validate.ps1'), '# canonical fixture path')
@@ -3932,6 +3938,14 @@ jobs:
         $report = @(Get-AuthorityConsumerWorkflowJobs -Text $workflow) | Where-Object id -eq 'publish-head-required-checks'
         $unboundReport = ([string]$report.text).Replace('  publish-head-required-checks:', '  unbound-report:').Replace("HEAD_SHA: `${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'push' && github.sha || '' }}", 'HEAD_SHA: unbound')
         foreach ($unsafe in @(
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & './tests/AlternateValidation.ps1'`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `"`$alternate`"`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `${alternate}`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          & `$alternate`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          `$alternate = './tests/AlternateValidation.ps1'`n          `$result = & `$alternate`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          . `$unknownValidator`n"),
+            ($workflow + "`n  alternate:`n    steps:`n      - shell: pwsh`n        run: |`n          & (Join-Path `$env:GITHUB_WORKSPACE 'tests/AlternateValidation.ps1')`n"),
+            $workflow.Replace('& $windowsPowerShellPath @protectedContractArguments', "`$alternate = './tests/AlternateValidation.ps1'; & `$alternate"),
             ($workflow + "`n" + $unboundReport),
             ($workflow + "`n  unverified-dynamic:`n    steps:`n      - shell: pwsh`n        run: |`n          `$trustedValidator = './candidate.ps1'`n          & `$trustedValidator @validatorArguments`n"),
             $workflow.Replace('& $trustedValidator @validatorArguments', "gh release create v1.0.0`n          & `$trustedValidator @validatorArguments"),

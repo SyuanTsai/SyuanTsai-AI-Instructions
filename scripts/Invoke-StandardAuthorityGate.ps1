@@ -1745,8 +1745,214 @@ function Get-AuthorityConsumerCanonicalCommandMatch {
     return [regex]::Match('', '(?!)')
 }
 
+function Test-AuthorityConsumerReviewedWindowsCompatibilityJob {
+    param([Parameter(Mandatory = $true)][string] $JobText)
+
+    # This finite diagnostic construction checks candidate syntax and invokes
+    # only the compatibility contract materialized from the event-bound base.
+    # Compare the complete job (checkout, environment, materializer and call),
+    # never an interpreter variable name. Unknown jobs remain fail-closed.
+    $expected = @'
+repository-contract-windows-powershell:
+    name: repository-contract (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize protected Windows compatibility contract
+        shell: powershell
+        env:
+          TRUSTED_SUPERVISOR_COMMIT: ${{ github.sha }}
+          TRUSTED_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $trustedCommit = [string]$env:TRUSTED_SUPERVISOR_COMMIT
+          if ($trustedCommit -notmatch '^[0-9a-f]{40}$') {
+            throw 'The protected supervisor commit must be one lowercase full Git SHA.'
+          }
+          $trustedRoot = Join-Path $env:RUNNER_TEMP 'standard-v1-trusted-windows-contract'
+          if (Test-Path -LiteralPath $trustedRoot) {
+            throw "The protected Windows contract root already exists: $trustedRoot"
+          }
+          [void](New-Item -ItemType Directory -Path $trustedRoot -Force)
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $defaultBranch = [string]$env:TRUSTED_DEFAULT_BRANCH
+            if ($defaultBranch -notmatch '^[A-Za-z0-9._/-]+$' -or
+                $defaultBranch -cmatch '(^|/)\.{1,2}(/|$)') {
+              throw 'The trusted default branch name is invalid.'
+            }
+            $defaultRef = "refs/remotes/origin/$defaultBranch"
+            $resolvedDefaultCommit = ((& $gitPath rev-parse --verify "$defaultRef^{commit}" 2>$null) | Select-Object -First 1).Trim()
+            if ($LASTEXITCODE -ne 0 -or $resolvedDefaultCommit -notmatch '^[0-9a-f]{40}$') {
+              throw 'The default branch trusted supervisor commit could not be resolved.'
+            }
+            $trustedCommit = $resolvedDefaultCommit
+          }
+          $relativePath = 'tests/validate-windows-powershell.ps1'
+          $revision = "${trustedCommit}:$relativePath"
+          $actualBlob = ((& $gitPath rev-parse $revision 2>$null) | Select-Object -First 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualBlob -notmatch '^[0-9a-f]{40}$') {
+            throw 'The protected Windows contract is missing from the event-bound supervisor commit.'
+          }
+          $destination = Join-Path $trustedRoot (Split-Path -Leaf $relativePath)
+          $process = [Diagnostics.Process]::new()
+          $process.StartInfo.FileName = $gitPath
+          $process.StartInfo.Arguments = "cat-file blob $revision"
+          $process.StartInfo.UseShellExecute = $false
+          $process.StartInfo.RedirectStandardOutput = $true
+          $process.StartInfo.RedirectStandardError = $true
+          if (-not $process.Start()) { throw 'Could not start Git to materialize the protected Windows contract.' }
+          $stream = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+          try { $process.StandardOutput.BaseStream.CopyTo($stream) }
+          finally { $stream.Dispose() }
+          $stderr = $process.StandardError.ReadToEnd()
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) { throw "Git could not materialize the protected Windows contract: $stderr" }
+          $item = Get-Item -LiteralPath $destination -Force
+          if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected Windows contract must be a regular non-reparse file.'
+          }
+          $rootItem = Get-Item -LiteralPath $trustedRoot -Force
+          if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Protected Windows contract root must be a regular non-reparse directory.'
+          }
+          "TRUSTED_WINDOWS_CONTRACT=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate Windows PowerShell compatibility
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $windowsPowerShellPath = [IO.Path]::GetFullPath((Join-Path $PSHOME 'powershell.exe'))
+          $windowsPowerShellItem = Get-Item -LiteralPath $windowsPowerShellPath -Force -ErrorAction Stop
+          if ($windowsPowerShellItem.PSIsContainer -or
+              ($windowsPowerShellItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The protected Windows PowerShell executable must be a regular non-reparse file.'
+          }
+          $protectedContractArguments = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $env:TRUSTED_WINDOWS_CONTRACT,
+            '-RepositoryRoot', (Get-Location).Path
+          )
+          & $windowsPowerShellPath @protectedContractArguments
+          $protectedContractExitCode = $LASTEXITCODE
+          if ($protectedContractExitCode -ne 0) {
+            throw 'The protected Windows PowerShell compatibility contract failed.'
+          }
+
+      - name: Parse candidate PowerShell trust-anchor files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          $gitPath = [IO.Path]::GetFullPath([string]$gitCommand.Path)
+          $trackedPsOutput = [string]((& $gitPath ls-files -z -- '*.ps1' '*.psm1') -join '')
+          if ($LASTEXITCODE -ne 0) { throw 'Git failed while enumerating candidate PowerShell trust-anchor files.' }
+          $trackedPsFiles = @($trackedPsOutput.Split([char]0) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) })
+          foreach ($relativePath in $trackedPsFiles) {
+            if ([IO.Path]::IsPathRooted([string]$relativePath) -or
+                [string]$relativePath -cmatch '(^|/)\.{1,2}(/|$)' -or
+                [string]$relativePath -cmatch '[\x00\r\n]' -or
+                ([string]$relativePath).Contains('\')) {
+              throw "Candidate PowerShell path is unsafe: $relativePath"
+            }
+            $candidatePath = Join-Path (Get-Location).Path ([string]$relativePath)
+            if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+              throw "Candidate PowerShell trust-anchor file is missing: $relativePath"
+            }
+            $candidateItem = Get-Item -LiteralPath $candidatePath -Force
+            if (($candidateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Candidate PowerShell trust-anchor file is a reparse point: $relativePath"
+            }
+            $tokens = $null
+            $errors = $null
+            $candidateBytes = [IO.File]::ReadAllBytes($candidatePath)
+            $candidateOffset = if ($candidateBytes.Length -ge 3 -and
+                $candidateBytes[0] -eq 0xEF -and
+                $candidateBytes[1] -eq 0xBB -and
+                $candidateBytes[2] -eq 0xBF) {
+              3
+            }
+            else {
+              0
+            }
+            $candidateSource = [Text.UTF8Encoding]::new($false, $true).GetString(
+              $candidateBytes,
+              $candidateOffset,
+              $candidateBytes.Length - $candidateOffset
+            )
+            [Management.Automation.Language.Parser]::ParseInput(
+              $candidateSource,
+              $candidatePath,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if (@($errors).Count -gt 0) {
+              throw "Candidate PowerShell file does not parse under Windows PowerShell 5.1: $relativePath"
+            }
+          }
+          foreach ($requiredPath in @('scripts/Validate.ps1', 'scripts/Test-Repository.ps1')) {
+            if ($trackedPsFiles -cnotcontains $requiredPath) {
+              throw "Candidate trust-anchor file is not tracked: $requiredPath"
+            }
+          }
+'@
+    return $JobText.Replace("`r", '').Trim() -ceq $expected.Replace("`r", '').Trim()
+}
+
+function Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+
+    $workflowHeader = ([regex]::Split($Text, '(?m)^jobs\s*:'))[0]
+    $rootOverride = $workflowHeader -match '(?m)^[ \t]*(?:env|defaults|"env"|''env''|"defaults"|''defaults''):'
+    $expectedMaterializer = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedMaterializerTemplate)
+    $expectedInvocation = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text (Get-AuthorityConsumerBaseOwnedInvocationTemplate)
+    foreach ($job in @(Get-AuthorityConsumerWorkflowJobs -Text $Text)) {
+        if (-not $rootOverride -and (Test-AuthorityConsumerReviewedWindowsCompatibilityJob -JobText ([string]$job.text))) { continue }
+        $jobDynamicCount = Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text ("jobs:`n" + [string]$job.text) -CanonicalRelativePath $CanonicalRelativePath
+        foreach ($step in @(Get-AuthorityConsumerWorkflowExecutableSteps -Text ([string]$job.text))) {
+            $body = [string]$step.executableText
+            $stepHeader = ([regex]::Split([string]$step.text, '(?m)^[ \t]*(?:-\s+)?run\s*:'))[0]
+            if ($stepHeader -match '(?m)^[ \t]*(?:-\s+)?shell\s*:' -and
+                $stepHeader -notmatch '(?im)^[ \t]*(?:-\s+)?shell\s*:[^\r\n]*\b(?:pwsh|powershell)(?:\.exe)?\b') { continue }
+            # A missing shell uses the runner default and still must not hide
+            # PowerShell-style dynamic dispatch from the inventory.
+            if ($body -notmatch '(?m)(?:&|\.)\s*(?:\$|\(|["''])') { continue }
+            $identity = Get-AuthorityConsumerPowerShellSyntaxIdentity -Text $body
+            if (-not $rootOverride -and $jobDynamicCount -gt 0 -and
+                ($identity -ceq $expectedMaterializer -or $identity -ceq $expectedInvocation)) { continue }
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$tokens, [ref]$errors)
+            if (@($errors).Count -gt 0) { return $true }
+            foreach ($call in @($ast.FindAll({ param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.InvocationOperator -in @(
+                    [Management.Automation.Language.TokenKind]::Ampersand,
+                    [Management.Automation.Language.TokenKind]::Dot
+                )
+            }, $true))) {
+                $commandName = [string]$call.GetCommandName()
+                if ([string]::IsNullOrWhiteSpace($commandName)) { return $true }
+                if ($commandName -match '(?i)[/\\].*\.(?:ps1|psm1|py|js|sh|cmd|bat|exe)$' -and
+                    $commandName.Replace('\', '/').TrimStart('.', '/') -cne $CanonicalRelativePath) { return $true }
+            }
+        }
+    }
+    return $false
+}
 function Test-AuthorityConsumerWorkflowNonCanonicalValidationCommand {
     param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $CanonicalRelativePath)
+    if (Test-AuthorityConsumerWorkflowUnresolvedPowerShellInvocation -Text $Text -CanonicalRelativePath $CanonicalRelativePath) { return $true }
     $executable = Get-AuthorityConsumerExecutableText -Text $Text
     $verifiedDynamic = Get-AuthorityConsumerVerifiedDynamicCanonicalCount -Text $Text -CanonicalRelativePath $CanonicalRelativePath
     $observedDynamicCalls = 0
