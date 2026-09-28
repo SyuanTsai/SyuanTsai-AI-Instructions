@@ -203,8 +203,8 @@ jobs:
         foreach ($partition in @(
                 @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 2 }
                 @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
-                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
+                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
+                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 5.1 partition must run on Windows.'
@@ -240,8 +240,8 @@ jobs:
         foreach ($partition in @(
                 @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 1 }
                 @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 151; Skipped = 0 }
-                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 185; Skipped = 6 }
+                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
+                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
             )) {
             Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
             Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 7 partition must run on Windows.'
