@@ -160,11 +160,11 @@ class RoutineSemanticOfflineTests(unittest.TestCase):
                            "if (Test-Json -Json (Get-Content -Raw -LiteralPath $ResultPath) -SchemaFile $SchemaPath) { exit 0 }; exit 10\n",
                            encoding="utf-8")
         command = ["pwsh", "-NoProfile", "-File", str(checker), str(self.output_path), str(schema)]
-        accepted = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        accepted = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(0, accepted.returncode, accepted.stderr)
         verified["releaseEligible"] = True
         self.output_path.write_text(json.dumps(verified), encoding="utf-8")
-        rejected = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        rejected = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(10, rejected.returncode, rejected.stderr)
 
     # Scenario: Correctly hashed raw findings contain malformed or out-of-work findings.
