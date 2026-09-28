@@ -2810,7 +2810,7 @@ function Get-StandardValidationDescendantProcessIds {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         try {
             $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
-                    [pscustomobject]@{ ProcessId = [int]$_.ProcessId; ParentProcessId = [int]$_.ParentProcessId }
+                    [pscustomobject]@{ ProcessId = [int]$_.ProcessId; ParentProcessId = [int]$_.ParentProcessId; CreationDate = $_.CreationDate }
                 })
         }
         catch { $relations = @() }
@@ -2829,8 +2829,17 @@ function Get-StandardValidationDescendantProcessIds {
         }
     }
     $childrenByParent = @{}
+    $windowsBirths = @{}
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        foreach ($relation in @($relations)) {
+            if ($relation.CreationDate -is [DateTime]) { $windowsBirths[[int]$relation.ProcessId] = $relation.CreationDate.ToUniversalTime() }
+        }
+    }
     foreach ($relation in @($relations)) {
         $parent = [int]$relation.ParentProcessId
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            (-not $windowsBirths.ContainsKey($parent) -or -not $windowsBirths.ContainsKey([int]$relation.ProcessId) -or
+             $windowsBirths[[int]$relation.ProcessId] -lt $windowsBirths[$parent])) { continue }
         if (-not $childrenByParent.ContainsKey($parent)) { $childrenByParent[$parent] = New-Object 'System.Collections.Generic.List[int]' }
         [void]$childrenByParent[$parent].Add([int]$relation.ProcessId)
     }
@@ -2957,6 +2966,7 @@ function Stop-StandardValidationProcessTree {
     foreach ($processId in @($KnownProcessIds)) { [void]$known.Add([int]$processId) }
     foreach ($processId in @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)) { [void]$known.Add([int]$processId) }
     $cleanupAttempted = $false
+    $windowsJobTerminationSucceeded = ($JobHandle -eq [IntPtr]::Zero)
     $pidNamespaceLookupFailed = $false
     $pidNamespaceProcessIds = @()
     if ($PidNamespaceRequired -and [string]::IsNullOrWhiteSpace($PidNamespaceId)) {
@@ -3002,6 +3012,7 @@ function Stop-StandardValidationProcessTree {
         try {
             if ([StandardValidationProcessControlNative]::TryTerminateJobObject($JobHandle, 1)) {
                 $cleanupAttempted = $true
+                $windowsJobTerminationSucceeded = $true
             }
         }
         catch { }
@@ -3024,7 +3035,8 @@ function Stop-StandardValidationProcessTree {
         if ($null -ne $RootProcess) {
             try {
                 if (-not $RootProcess.HasExited) {
-                    $RootProcess.Kill($true)
+                    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $RootProcess.Kill() }
+                    else { $RootProcess.Kill($true) }
                     $cleanupAttempted = $true
                 }
             }
@@ -3034,7 +3046,9 @@ function Stop-StandardValidationProcessTree {
         }
     }
     catch { }
-    foreach ($processId in @($known | Where-Object { $_ -ne $RootProcessId } | Sort-Object -Descending)) {
+    # A Windows Job Object owns descendants even after reparenting. Retained
+    # numeric PIDs are diagnostic only and may have been reused outside it.
+    foreach ($processId in @($known | Where-Object { $_ -ne $RootProcessId -and $JobHandle -eq [IntPtr]::Zero } | Sort-Object -Descending)) {
         try {
             $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
             try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
@@ -3045,7 +3059,7 @@ function Stop-StandardValidationProcessTree {
     $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $WaitMilliseconds))
     do {
         $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
-        foreach ($processId in $remaining) {
+        foreach ($processId in @($remaining | Where-Object { $JobHandle -eq [IntPtr]::Zero })) {
             try {
                 $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
                 try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
@@ -3097,7 +3111,7 @@ function Stop-StandardValidationProcessTree {
             }
             catch { $processGroupAlive = $true }
         }
-        if (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
+        if ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
             -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
             -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0) { return $true }
         if ((Get-Date) -ge $deadline) { break }
@@ -3142,7 +3156,7 @@ function Stop-StandardValidationProcessTree {
             }
         }
     }
-    return (-not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
+    return ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
         -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
         -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0)
 }

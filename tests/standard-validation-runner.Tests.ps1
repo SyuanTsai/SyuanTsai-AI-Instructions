@@ -392,14 +392,19 @@ exit ([int]$LASTEXITCODE)
             $startInfo.CreateNoWindow = $true
             $startInfo.RedirectStandardOutput = $true
             $startInfo.RedirectStandardError = $true
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
+            # On Windows PowerShell 5.1 the first environment getter may return
+            # null while initializing its backing dictionary.
+            $childEnvironment = $startInfo.Environment
+            if ($null -eq $childEnvironment) { $childEnvironment = $startInfo.EnvironmentVariables }
+            if ($null -eq $childEnvironment) { throw 'Runner fixture child environment dictionary is unavailable.' }
+            $childEnvironment['SYP154_TEST_RUNNER_PATH'] = $script:RunnerPath
             $runnerArguments = @($arguments | Select-Object -Skip 3)
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
+            $childEnvironment['SYP154_TEST_RUNNER_ARGUMENTS_B64'] = @(
                 $runnerArguments | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$_)) }
             ) -join ';'
-            $startInfo.EnvironmentVariables['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
+            $childEnvironment['SYP154_TEST_RUNNER_ARGUMENT_COUNT'] = [string]$runnerArguments.Count
             foreach ($entry in $fixtureEnvironment.GetEnumerator()) {
-                $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+                $childEnvironment[[string]$entry.Key] = [string]$entry.Value
             }
             $process = New-Object Diagnostics.Process
             $process.StartInfo = $startInfo
@@ -443,6 +448,7 @@ exit ([int]$LASTEXITCODE)
                                         [pscustomobject][ordered]@{
                                             ProcessId = [int]$_.ProcessId
                                             ParentProcessId = [int]$_.ParentProcessId
+                                            CreationDate = $_.CreationDate.ToUniversalTime()
                                         }
                                     })
                                 }
@@ -452,6 +458,7 @@ exit ([int]$LASTEXITCODE)
                                             [pscustomobject][ordered]@{
                                                 ProcessId = [int]$_.ProcessId
                                                 ParentProcessId = [int]$_.ParentProcessId
+                                                CreationDate = [System.Management.ManagementDateTimeConverter]::ToDateTime($_.CreationDate).ToUniversalTime()
                                             }
                                         })
                                     }
@@ -482,8 +489,19 @@ exit ([int]$LASTEXITCODE)
                             for ($pass = 0; $pass -lt $relations.Count; $pass++) {
                                 $added = $false
                                 foreach ($relation in $relations) {
-                                    if ($descendantIds.Contains($relation.ParentProcessId) -and
-                                        $descendantIds.Add($relation.ProcessId)) {
+                                    if (-not $descendantIds.Contains($relation.ParentProcessId)) { continue }
+                                    if ($env:OS -eq 'Windows_NT') {
+                                        $parentBirth = if ($relation.ParentProcessId -eq $rootProcessId) {
+                                            $process.StartTime.ToUniversalTime()
+                                        }
+                                        else {
+                                            $parentRows = @($relations | Where-Object { $_.ProcessId -eq $relation.ParentProcessId })
+                                            if ($parentRows.Count -eq 1) { $parentRows[0].CreationDate } else { $null }
+                                        }
+                                        if ($relation.CreationDate -isnot [DateTime] -or $parentBirth -isnot [DateTime] -or
+                                            $relation.CreationDate -lt $parentBirth -or $relation.CreationDate -lt $process.StartTime.ToUniversalTime()) { continue }
+                                    }
+                                    if ($descendantIds.Add($relation.ProcessId)) {
                                         $added = $true
                                     }
                                 }
@@ -497,6 +515,13 @@ exit ([int]$LASTEXITCODE)
                                 try {
                                     $ownedProcess = [Diagnostics.Process]::GetProcessById([int]$processId)
                                     [void]$ownedProcess.Handle
+                                    if ($env:OS -eq 'Windows_NT') {
+                                        $snapshot = @($relations | Where-Object { $_.ProcessId -eq $processId })
+                                        if ($snapshot.Count -ne 1 -or $ownedProcess.StartTime.ToUniversalTime() -lt $process.StartTime.ToUniversalTime() -or
+                                            [Math]::Abs(($ownedProcess.StartTime.ToUniversalTime() - $snapshot[0].CreationDate).TotalMilliseconds) -gt 1) {
+                                            throw 'Retained fixture PID identity changed or predates the owned root; termination refused.'
+                                        }
+                                    }
                                     $ownedDescendantProcesses.Add($ownedProcess)
                                     $ownedProcess = $null
                                 }
@@ -504,7 +529,7 @@ exit ([int]$LASTEXITCODE)
                                 catch { $cleanupErrors.Add("Descendant process $processId handle capture failed: $($_.Exception.Message)") }
                                 finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
                             }
-                            if ($null -ne $treeKillMethod) {
+                            if ($null -ne $treeKillMethod -and $env:OS -ne 'Windows_NT') {
                                 try { [void]$treeKillMethod.Invoke($process, @($true)) }
                                 catch { $cleanupErrors.Add("Process-tree termination failed: $($_.Exception.Message)") }
                             }
@@ -1244,6 +1269,485 @@ exit ([int]$LASTEXITCODE)
         finally { Set-Item Function:\Get-StandardValidationPathComparison -Value $originalComparison }
     }
 
+    # Scenario: A maintenance test report names a different candidate than the protected event.
+    # Purpose: Maintenance success must not be promoted into an accepted candidate or release result.
+    It 'UnitT03_rejects_wrong_candidate_maintenance_report_from_protected_inputs' {
+        $verifierPath = Join-Path $script:RepositoryRoot 'scripts/Assert-StandardValidatorMaintenanceReport.ps1'
+        Assert-True (Test-Path -LiteralPath $verifierPath -PathType Leaf) 'Protected maintenance report verifier is missing.'
+        $resultsPath = Join-Path $TestDrive 'maintenance-results.json'
+        Write-TestUtf8File -Path $resultsPath -Text '{"tests":2,"failed":0}'
+        $resultsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resultsPath).Hash.ToLowerInvariant()
+        $reportPath = Join-Path $TestDrive 'maintenance-report.json'
+        $report = [ordered]@{
+            schemaVersion = 1
+            evidenceType = 'validator-maintenance-report-v1'
+            status = 'passed'
+            candidateRevision = ('a' * 40)
+            authorityRevision = ('b' * 40)
+            eventName = 'pull_request'
+            runId = ('c' * 32)
+            runAttempt = 2
+            resultsSha256 = $resultsSha256
+            tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+            releaseEligible = $false
+        }
+        Write-TestUtf8File -Path $reportPath -Text ($report | ConvertTo-Json -Depth 10 -Compress)
+        $inputs = @{
+            ReportPath = $reportPath
+            ResultsPath = $resultsPath
+            ExpectedReportSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $reportPath).Hash.ToLowerInvariant()
+            ExpectedResultsSha256 = $resultsSha256
+            ExpectedCandidateRevision = ('d' * 40)
+            ExpectedAuthorityRevision = ('b' * 40)
+            ExpectedEventName = 'pull_request'
+            ExpectedRunId = ('c' * 32)
+            ExpectedRunAttempt = 2
+            ExpectedTestIds = @('UnitT10', 'UnitT20')
+        }
+        $rejected = $false
+        try { [void](& $verifierPath @inputs) }
+        catch { $rejected = $_.Exception.Message -match 'candidate revision' }
+        Assert-True $rejected 'A wrong candidate report must be rejected using the independent protected event SHA.'
+        $inputs.ExpectedCandidateRevision = ('a' * 40)
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'authority'; key = 'ExpectedAuthorityRevision'; value = ('d' * 40) },
+            [pscustomobject]@{ name = 'event'; key = 'ExpectedEventName'; value = 'push' },
+            [pscustomobject]@{ name = 'run'; key = 'ExpectedRunId'; value = ('d' * 32) },
+            [pscustomobject]@{ name = 'attempt'; key = 'ExpectedRunAttempt'; value = 3 },
+            [pscustomobject]@{ name = 'report artifact'; key = 'ExpectedReportSha256'; value = ('0' * 64) },
+            [pscustomobject]@{ name = 'results artifact'; key = 'ExpectedResultsSha256'; value = ('0' * 64) },
+            [pscustomobject]@{ name = 'coverage'; key = 'ExpectedTestIds'; value = @('UnitT10', 'UnitT30') }
+        )) {
+            $wrongInputs = @{}
+            foreach ($key in $inputs.Keys) { $wrongInputs[$key] = $inputs[$key] }
+            $wrongInputs[$case.key] = $case.value
+            $rejected = $false
+            try { [void](& $verifierPath @wrongInputs) }
+            catch { $rejected = $true }
+            Assert-True $rejected "A wrong protected $($case.name) binding must be rejected."
+        }
+        $decision = & $verifierPath @inputs
+        Assert-Equal $decision.status 'verified-local-binding' 'A matching maintenance report may only bind its local evidence.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'A maintenance report must not grant CI admission.'
+        Assert-False $decision.releaseEligible 'A maintenance report must not grant release eligibility.'
+    }
+
+    # Scenario: Protected-side code receives saved workflow_run, run, PR and artifact snapshots plus a retained ZIP.
+    # Purpose: Bind independent identities and bytes before calling the existing report verifier; keep admission blocked.
+    It 'UnitT50_binds_injected_maintenance_metadata_and_rejects_cross_run_or_archive_drift' {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            Add-Type -AssemblyName System.IO.Compression
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+        }
+        $issuerPath = Join-Path $script:RepositoryRoot 'scripts/Assert-StandardValidatorMaintenanceInputs.ps1'
+        Assert-True (Test-Path -LiteralPath $issuerPath -PathType Leaf) 'Maintenance input issuer is missing.'
+        $repository = [ordered]@{ id = 730; full_name = 'owner/repo' }
+        $headRepository = [ordered]@{ id = 731; full_name = 'fork/repo' }
+        $runId = 123456
+        $runHead = 'b' * 40
+        $candidate = 'a' * 40
+        $authority = 'c' * 40
+        $fixtureIndex = 0
+        function New-MaintenanceIssuerFixture {
+            param([string] $Root)
+            [void](New-Item -ItemType Directory -Path $Root -Force)
+            $results = '{"tests":2,"failed":0}'
+            $resultsBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($results)
+            $hasher = [Security.Cryptography.SHA256]::Create()
+            try { $resultsSha = ([BitConverter]::ToString($hasher.ComputeHash($resultsBytes)) -replace '-', '').ToLowerInvariant() }
+            finally { $hasher.Dispose() }
+            $report = [ordered]@{
+                schemaVersion = 1; evidenceType = 'validator-maintenance-report-v1'; status = 'passed'
+                candidateRevision = $candidate; authorityRevision = $authority; eventName = 'pull_request'
+                runId = ('{0:x32}' -f $runId); runAttempt = 2; resultsSha256 = $resultsSha
+                tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+                releaseEligible = $false
+            }
+            $zipPath = Join-Path $Root 'artifact.zip'
+            $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($file in @(
+                    [pscustomobject]@{ name = 'report.json'; content = ($report | ConvertTo-Json -Depth 10 -Compress) },
+                    [pscustomobject]@{ name = 'results.json'; content = $results }
+                )) {
+                    $entry = $zip.CreateEntry($file.name)
+                    $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                    try { $writer.Write($file.content) } finally { $writer.Dispose() }
+                }
+            }
+            finally { $zip.Dispose() }
+            $eventRun = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = $runHead; workflow_id = 42
+                repository = $repository; event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @([ordered]@{ number = 7; head = [ordered]@{ sha = $candidate; repo = $headRepository } })
+            }
+            $run = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = $runHead; workflow_id = 42
+                repository = $repository; head_repository = $headRepository
+                event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @([ordered]@{ number = 7; head = [ordered]@{ sha = $candidate; repo = $headRepository } })
+            }
+            $pr = [ordered]@{
+                number = 7; base = [ordered]@{ repo = $repository }
+                head = [ordered]@{ sha = $candidate; repo = $headRepository }
+            }
+            $artifact = [ordered]@{
+                id = 99; name = "validator-maintenance-$runId-2"; expired = $false
+                size_in_bytes = (Get-Item -LiteralPath $zipPath).Length
+                digest = 'sha256:' + (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                workflow_run = [ordered]@{
+                    id = $runId; repository_id = 730; head_repository_id = 731; head_sha = $runHead
+                }
+            }
+            $paths = @{
+                EventPath = Join-Path $Root 'event.json'
+                RunMetadataPath = Join-Path $Root 'run.json'
+                PullRequestMetadataPath = Join-Path $Root 'pr.json'
+                ArtifactsMetadataPath = Join-Path $Root 'artifacts.json'
+                ArtifactZipPath = $zipPath
+                ExpectedRepositoryFullName = 'owner/repo'; ExpectedRepositoryId = 730
+                ExpectedWorkflowId = 42; ExpectedAuthorityRevision = $authority
+                ExpectedTestIds = @('UnitT10', 'UnitT20')
+                OutputRoot = Join-Path $Root 'extracted'
+            }
+            Write-TestUtf8File $paths.EventPath (([ordered]@{ action = 'completed'; repository = $repository; workflow_run = $eventRun }) | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.RunMetadataPath ($run | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.PullRequestMetadataPath ($pr | ConvertTo-Json -Depth 10 -Compress)
+            Write-TestUtf8File $paths.ArtifactsMetadataPath (([ordered]@{ total_count = 1; artifacts = @($artifact) }) | ConvertTo-Json -Depth 10 -Compress)
+            return $paths
+        }
+        function Set-MaintenanceFixtureJson {
+            param([string] $Path, [scriptblock] $Change)
+            $value = ConvertFrom-Json -InputObject (Get-Content -Raw -LiteralPath $Path -Encoding UTF8)
+            & $Change $value
+            Write-TestUtf8File $Path ($value | ConvertTo-Json -Depth 15 -Compress)
+        }
+        function Assert-MaintenanceRejected {
+            param([hashtable] $Inputs, [string] $Context, [string] $Pattern)
+            $failure = ''
+            try { [void](& $issuerPath @Inputs) } catch { $failure = [string]$_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) "$Context must be rejected."
+            Assert-Match $failure $Pattern "$Context must fail at its intended binding."
+        }
+        $good = New-MaintenanceIssuerFixture (Join-Path $TestDrive 'maintenance-issuer-good')
+        $decision = & $issuerPath @good
+        Assert-Equal $decision.status 'injected-metadata-binding' 'The saved snapshots may establish only diagnostic bindings.'
+        Assert-Equal $decision.verifierStatus 'verified-local-binding' 'The issuer must invoke the existing report verifier.'
+        Assert-Equal $decision.candidateRevision $candidate 'The PR head, rather than the run merge SHA, is the candidate.'
+        Assert-Equal $decision.runHeadSha $runHead 'The producing run head SHA remains separately bound.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'Saved metadata must never grant formal CI admission.'
+        Assert-False $decision.releaseEligible 'Saved metadata must never grant release eligibility.'
+
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'missing artifact'; pattern = 'Expected one unique maintenance artifact'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts = @(); $x.total_count = 0 } } },
+            [pscustomobject]@{ name = 'duplicate artifact'; pattern = 'Expected one unique maintenance artifact'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts = @($x.artifacts[0], $x.artifacts[0]); $x.total_count = 2 } } },
+            [pscustomobject]@{ name = 'run id'; pattern = 'run id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.id = 123457 } } },
+            [pscustomobject]@{ name = 'run attempt'; pattern = 'run attempt differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.run_attempt = 3 } } },
+            [pscustomobject]@{ name = 'repository'; pattern = 'event repository id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.EventPath { param($x) $x.repository.id = 999 } } },
+            [pscustomobject]@{ name = 'head SHA'; pattern = 'artifact run head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts[0].workflow_run.head_sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'PR head advanced after run'; pattern = 'frozen PR head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.PullRequestMetadataPath { param($x) $x.head.sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'missing frozen PR head'; pattern = 'missing head'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.pull_requests[0].PSObject.Properties.Remove('head') } } },
+            [pscustomobject]@{ name = 'stale event PR head'; pattern = 'event run frozen PR head SHA differs'; change = { param($p) Set-MaintenanceFixtureJson $p.EventPath { param($x) $x.workflow_run.pull_requests[0].head.sha = 'f' * 40 } } },
+            [pscustomobject]@{ name = 'mixed frozen head repository'; pattern = 'frozen PR head repository id differs'; change = { param($p) Set-MaintenanceFixtureJson $p.RunMetadataPath { param($x) $x.pull_requests[0].head.repo.id = 999 } } },
+            [pscustomobject]@{ name = 'archive digest'; pattern = 'artifact digest differs'; change = { param($p) Set-MaintenanceFixtureJson $p.ArtifactsMetadataPath { param($x) $x.artifacts[0].digest = 'sha256:' + ('0' * 64) } } }
+        )) {
+            $fixtureIndex++
+            $bad = New-MaintenanceIssuerFixture (Join-Path $TestDrive "maintenance-issuer-bad-$fixtureIndex")
+            & $case.change $bad
+            Assert-MaintenanceRejected $bad $case.name $case.pattern
+        }
+        foreach ($case in @(
+            [pscustomobject]@{ name = 'result bytes drift'; extra = $null; results = '{"tests":2,"failed":1}'; pattern = 'result binding differs' },
+            [pscustomobject]@{ name = 'ZIP traversal'; extra = '../escape.ps1'; results = $null; pattern = 'unsafe archive entry' },
+            [pscustomobject]@{ name = 'extra executable'; extra = 'run.ps1'; results = $null; pattern = 'exactly two files' }
+        )) {
+            $fixtureIndex++
+            $bad = New-MaintenanceIssuerFixture (Join-Path $TestDrive "maintenance-issuer-bad-$fixtureIndex")
+            $zip = [IO.Compression.ZipFile]::Open($bad.ArtifactZipPath, [IO.Compression.ZipArchiveMode]::Update)
+            try {
+                if ($null -ne $case.results) {
+                    $old = $zip.GetEntry('results.json')
+                    $old.Delete()
+                    $entry = $zip.CreateEntry('results.json')
+                    $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding($false)))
+                    try { $writer.Write($case.results) } finally { $writer.Dispose() }
+                }
+                else {
+                    if ($case.name -eq 'ZIP traversal') { $zip.GetEntry('results.json').Delete() }
+                    [void]$zip.CreateEntry($case.extra)
+                }
+            }
+            finally { $zip.Dispose() }
+            Set-MaintenanceFixtureJson $bad.ArtifactsMetadataPath {
+                param($x)
+                $x.artifacts[0].size_in_bytes = (Get-Item -LiteralPath $bad.ArtifactZipPath).Length
+                $x.artifacts[0].digest = 'sha256:' + (Get-FileHash -LiteralPath $bad.ArtifactZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            Assert-MaintenanceRejected $bad $case.name $case.pattern
+        }
+        # Scenario: A protected caller injects fixed-path GitHub responses and an artifact redirect.
+        # Purpose: Retain bounded diagnostic bytes, keep the token off storage, and call the existing issuer.
+        $acquirerPath = Join-Path $script:RepositoryRoot 'scripts/Get-StandardValidatorMaintenanceEvidence.ps1'
+        Assert-True (Test-Path -LiteralPath $acquirerPath -PathType Leaf) 'Protected maintenance acquisition candidate is missing.'
+        $root = Join-Path $TestDrive 'maintenance-acquisition'
+        [void](New-Item -ItemType Directory -Path $root -Force)
+        $repo = [ordered]@{ id = 730; full_name = 'owner/repo' }
+        $headRepo = [ordered]@{ id = 731; full_name = 'fork/repo' }
+        $runId = 123456
+        $headLink = [ordered]@{ number = 7; head = [ordered]@{ sha = ('a' * 40); repo = $headRepo } }
+        $run = [ordered]@{
+            id = $runId; run_attempt = 2; head_sha = ('b' * 40); workflow_id = 42
+            repository = $repo; head_repository = $headRepo; event = 'pull_request'
+            status = 'completed'; conclusion = 'success'; pull_requests = @($headLink)
+        }
+        $event = [ordered]@{
+            action = 'completed'; repository = $repo
+            workflow_run = [ordered]@{
+                id = $runId; run_attempt = 2; head_sha = ('b' * 40); workflow_id = 42
+                repository = $repo; event = 'pull_request'; status = 'completed'; conclusion = 'success'
+                pull_requests = @($headLink)
+            }
+        }
+        $eventPath = Join-Path $root 'event.json'
+        Write-TestUtf8File $eventPath ($event | ConvertTo-Json -Depth 15 -Compress)
+        $pr = [ordered]@{ number = 7; base = [ordered]@{ repo = $repo }; head = [ordered]@{ sha = ('a' * 40); repo = $headRepo } }
+        $results = '{"tests":2,"failed":0}'
+        $resultsSha = [Security.Cryptography.SHA256]::Create()
+        try { $resultsShaText = ([BitConverter]::ToString($resultsSha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($results))) -replace '-', '').ToLowerInvariant() }
+        finally { $resultsSha.Dispose() }
+        $report = [ordered]@{
+            schemaVersion = 1; evidenceType = 'validator-maintenance-report-v1'; status = 'passed'
+            candidateRevision = ('a' * 40); authorityRevision = ('c' * 40)
+            eventName = 'pull_request'; runId = ('{0:x32}' -f $runId); runAttempt = 2
+            resultsSha256 = $resultsShaText
+            tests = @([ordered]@{ id = 'UnitT10'; status = 'passed' }, [ordered]@{ id = 'UnitT20'; status = 'passed' })
+            releaseEligible = $false
+        }
+        $zipPath = Join-Path $root 'source.zip'
+        $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($file in @(
+                [pscustomobject]@{ name = 'report.json'; text = ($report | ConvertTo-Json -Depth 10 -Compress) },
+                [pscustomobject]@{ name = 'results.json'; text = $results }
+            )) {
+                $writer = New-Object IO.StreamWriter($zip.CreateEntry($file.name).Open(), (New-Object Text.UTF8Encoding($false)))
+                try { $writer.Write($file.text) } finally { $writer.Dispose() }
+            }
+        }
+        finally { $zip.Dispose() }
+        $zipBytes = [IO.File]::ReadAllBytes($zipPath)
+        $artifact = [ordered]@{
+            id = 99; name = 'validator-maintenance-123456-2'; expired = $false
+            size_in_bytes = $zipBytes.Length
+            digest = 'sha256:' + (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            workflow_run = [ordered]@{ id = $runId; repository_id = 730; head_repository_id = 731; head_sha = ('b' * 40) }
+        }
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        $responses = @{
+            'https://api.github.com/repos/owner/repo/actions/runs/123456' = $utf8.GetBytes(($run | ConvertTo-Json -Depth 15 -Compress))
+            'https://api.github.com/repos/owner/repo/pulls/7' = $utf8.GetBytes(($pr | ConvertTo-Json -Depth 15 -Compress))
+            'https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100' = $utf8.GetBytes((([ordered]@{ total_count = 1; artifacts = @($artifact) }) | ConvertTo-Json -Depth 15 -Compress))
+        }
+        $transportState = [pscustomobject]@{
+            ZipBytes = $zipBytes
+            Responses = $responses
+            Calls = (New-Object 'System.Collections.Generic.List[object]')
+            Redirect = 'https://fixture.blob.core.windows.net/retained.zip'
+        }
+        $transport = {
+            param($Uri, $Headers, $MaximumBytes)
+            $transportState.Calls.Add([pscustomobject]@{
+                uri = $Uri; hasAuthorization = $Headers.ContainsKey('Authorization'); maximumBytes = $MaximumBytes
+            })
+            if ($Uri -ceq 'https://api.github.com/repos/owner/repo/actions/artifacts/99/zip') {
+                return [pscustomobject]@{ StatusCode = 302; Body = [byte[]]@(); Location = $transportState.Redirect }
+            }
+            if ($Uri -ceq $transportState.Redirect) {
+                return [pscustomobject]@{ StatusCode = 200; Body = $transportState.ZipBytes; Location = $null }
+            }
+            if ($transportState.Responses.ContainsKey($Uri)) {
+                return [pscustomobject]@{ StatusCode = 200; Body = $transportState.Responses[$Uri]; Location = $null }
+            }
+            throw 'Unexpected injected transport URL.'
+        }.GetNewClosure()
+        $inputs = @{
+            EventPath = $eventPath; RepositoryFullName = 'owner/repo'; RepositoryId = 730
+            WorkflowId = 42; RunId = $runId; RunAttempt = 2; PullRequestNumber = 7
+            AuthorityRevision = ('c' * 40); TestIds = @('UnitT10', 'UnitT20')
+            AccessToken = (ConvertTo-SecureString 'fixture-secret' -AsPlainText -Force)
+            OutputRoot = Join-Path $root 'evidence'; Transport = $transport
+        }
+        $decision = & $acquirerPath @inputs
+        Assert-Equal $decision.status 'diagnostic-acquisition-binding' 'Only diagnostic acquisition is established.'
+        Assert-Equal $decision.transportKind 'injected' 'The test transport must be identified as injected diagnostic input.'
+        Assert-Equal $decision.verifierStatus 'verified-local-binding' 'The existing report verifier must run.'
+        Assert-Equal $decision.ciAdmission 'BLOCKED' 'Acquisition must not grant CI admission.'
+        Assert-Equal $transportState.Calls.Count 5 'Only three fixed metadata endpoints, one fixed artifact endpoint, and one storage URL may be fetched.'
+        foreach ($call in @($transportState.Calls | Select-Object -First 4)) {
+            Assert-True $call.hasAuthorization 'Only the fixed GitHub API requests may receive the token.'
+        }
+        Assert-False $transportState.Calls[4].hasAuthorization 'The artifact redirect must never receive the API token.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $inputs.OutputRoot 'artifact.zip') -PathType Leaf) 'Retained artifact bytes are missing.'
+        foreach ($pair in @(
+            [pscustomobject]@{ name = 'run.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/actions/runs/123456'] },
+            [pscustomobject]@{ name = 'pr.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/pulls/7'] },
+            [pscustomobject]@{ name = 'artifacts.json'; bytes = $transportState.Responses['https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100'] },
+            [pscustomobject]@{ name = 'artifact.zip'; bytes = $transportState.ZipBytes }
+        )) {
+            $retained = [IO.File]::ReadAllBytes((Join-Path $inputs.OutputRoot $pair.name))
+            Assert-Equal ([Convert]::ToBase64String($retained)) ([Convert]::ToBase64String($pair.bytes)) 'Diagnostic evidence must retain exact response bytes.'
+        }
+        foreach ($name in @('event.json', 'run.json', 'pr.json', 'artifacts.json')) {
+            Assert-False ((Get-Content -Raw -LiteralPath (Join-Path $inputs.OutputRoot $name) -Encoding UTF8) -match 'fixture-secret') 'Diagnostic evidence must not persist the token.'
+        }
+        # Scenario: a protected workflow_run caller derives run and PR identity from its saved event.
+        # Purpose: candidate data cannot choose acquisition IDs, and the call path remains diagnostic only.
+        $consumerPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidatorMaintenanceProtectedConsumer.ps1'
+        Assert-True (Test-Path -LiteralPath $consumerPath -PathType Leaf) 'Protected maintenance consumer entry point is missing.'
+        $consumerInputs = @{
+            EventName = 'workflow_run'; EventPath = $eventPath
+            RepositoryFullName = 'owner/repo'; RepositoryId = 730; WorkflowId = 42
+            AuthorityRevision = ('c' * 40); TestIds = @('UnitT10', 'UnitT20')
+            AccessToken = $inputs.AccessToken; OutputRoot = Join-Path $root 'consumer-evidence'
+            Transport = $transport
+        }
+        $consumer = & $consumerPath @consumerInputs
+        Assert-Equal $consumer.status 'protected-consumer-diagnostic' 'The consumer may only return a diagnostic binding.'
+        Assert-Equal $consumer.runId $runId 'The consumer must derive the run ID from the saved event.'
+        Assert-Equal $consumer.pullRequestNumber 7 'The consumer must derive the sole PR from the saved event.'
+        Assert-Equal $consumer.ciAdmission 'BLOCKED' 'The protected consumer does not grant CI admission.'
+        $badConsumer = @{}; foreach ($key in $consumerInputs.Keys) { $badConsumer[$key] = $consumerInputs[$key] }
+        $badConsumer.EventName = 'pull_request'
+        $badConsumer.OutputRoot = Join-Path $root 'bad-consumer-event'
+        $rejected = $false
+        try { [void](& $consumerPath @badConsumer) } catch { $rejected = $_.Exception.Message -match 'requires a workflow_run event' }
+        Assert-True $rejected 'A non-workflow_run invocation must stop before acquisition.'
+        $rejected = $false
+        try { [void](& $acquirerPath @inputs) } catch { $rejected = $_.Exception.Message -match 'must be new' }
+        Assert-True $rejected 'A diagnostic output root must be create-only.'
+        $bad = @{}; foreach ($key in $inputs.Keys) { $bad[$key] = $inputs[$key] }
+        $bad.OutputRoot = Join-Path $root 'bad-redirect'
+        $transportState.Redirect = 'https://attacker.example/zip'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'redirect host' }
+        Assert-True $rejected 'An unapproved redirect host must be rejected before any storage request.'
+        $transportState.Redirect = 'https://fixture.blob.core.windows.net/retained.zip'
+        $runUri = 'https://api.github.com/repos/owner/repo/actions/runs/123456'
+        $savedRunBytes = $transportState.Responses[$runUri]
+        $wrongRun = ConvertFrom-Json -InputObject $utf8.GetString($savedRunBytes)
+        $wrongRun.id = 123457
+        $transportState.Responses[$runUri] = $utf8.GetBytes(($wrongRun | ConvertTo-Json -Depth 15 -Compress))
+        $bad.OutputRoot = Join-Path $root 'bad-run'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'API run id' }
+        Assert-True $rejected 'A fetched run from another run ID must be rejected before artifact download.'
+        $transportState.Responses[$runUri] = $savedRunBytes
+        $listingUri = 'https://api.github.com/repos/owner/repo/actions/runs/123456/artifacts?per_page=100'
+        $savedListingBytes = $transportState.Responses[$listingUri]
+        $wrongListing = ConvertFrom-Json -InputObject $utf8.GetString($savedListingBytes)
+        $wrongListing.artifacts[0].name = 'validator-maintenance-123456-3'
+        $transportState.Responses[$listingUri] = $utf8.GetBytes(($wrongListing | ConvertTo-Json -Depth 15 -Compress))
+        $bad.OutputRoot = Join-Path $root 'bad-attempt'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'run-attempt maintenance artifact' }
+        Assert-True $rejected 'An artifact from another attempt must be rejected.'
+        $transportState.Responses[$listingUri] = $savedListingBytes
+        $transportState.ZipBytes = New-Object byte[] 4194305
+        $bad.OutputRoot = Join-Path $root 'bad-size'
+        $rejected = $false
+        try { [void](& $acquirerPath @bad) } catch { $rejected = $_.Exception.Message -match 'oversized evidence' }
+        Assert-True $rejected 'An injected ZIP beyond the download quota must be rejected before persistence.'
+
+        # Scenario: a real loopback HTTP peer completes headers, then stalls or sends a slow body.
+        # Purpose: the default transport must bound the entire body with one deadline on PS5.1 and PS7.
+        if (-not ('StandardMaintenanceBodyFixtureV1' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+public sealed class StandardMaintenanceBodyFixtureV1 : IDisposable {
+    private readonly TcpListener listener;
+    private readonly Thread worker;
+    private readonly string mode;
+    private TcpClient client;
+    public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
+    public bool WorkerAlive { get { return worker.IsAlive; } }
+    public bool Accepted { get; private set; }
+    public StandardMaintenanceBodyFixtureV1(string mode) {
+        this.mode = mode;
+        listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        worker = new Thread(Serve);
+        worker.IsBackground = true;
+        worker.Start();
+    }
+    private void Serve() {
+        try {
+            client = listener.AcceptTcpClient();
+            Accepted = true;
+            using (NetworkStream stream = client.GetStream()) {
+                int tail = 0;
+                while (true) {
+                    int next = stream.ReadByte();
+                    if (next < 0) return;
+                    tail = (tail << 8) | next;
+                    if (tail == 0x0d0a0d0a) break;
+                }
+                byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n");
+                stream.Write(header, 0, header.Length);
+                stream.Flush();
+                if (mode == "stall") {
+                    Thread.Sleep(3000);
+                } else {
+                    for (int i = 0; i < 12; i++) {
+                        stream.WriteByte((byte)'x');
+                        stream.Flush();
+                        Thread.Sleep(300);
+                    }
+                }
+            }
+        } catch (SocketException) { } catch (System.IO.IOException) { } catch (ObjectDisposedException) { }
+    }
+    public void Dispose() {
+        listener.Stop();
+        if (client != null) client.Close();
+        if (!worker.Join(4000)) throw new Exception("Loopback worker did not stop.");
+    }
+}
+'@
+        }
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($acquirerPath, [ref]$tokens, [ref]$errors)
+        Assert-Equal @($errors).Count 0 'The acquisition script must parse before a real HTTP deadline probe.'
+        $transportDefinition = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-MaintenanceAcquisitionDefaultTransport'
+        }, $true)
+        Assert-True ($null -ne $transportDefinition) 'The default HTTP transport must exist.'
+        Invoke-Expression $transportDefinition.Extent.Text
+        foreach ($mode in @('stall', 'trickle')) {
+            $fixture = New-Object StandardMaintenanceBodyFixtureV1($mode)
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $blocked = $false
+            try {
+                try {
+                    [void](Invoke-MaintenanceAcquisitionDefaultTransport `
+                        -Uri "http://127.0.0.1:$($fixture.Port)/body" -Headers @{} `
+                        -MaximumBytes 1024 -DeadlineMilliseconds 700)
+                }
+                catch { $blocked = $_.Exception.Message -match '^BLOCKED\|' }
+                $watch.Stop()
+                Assert-True $fixture.Accepted "$mode fixture must receive the real HTTP request."
+                Assert-True $blocked "$mode body must fail closed at the deadline."
+                Assert-True ($watch.ElapsedMilliseconds -le 2000) "$mode body exceeded the absolute deadline."
+            }
+            finally { $fixture.Dispose() }
+            Assert-False $fixture.WorkerAlive "$mode fixture worker must be cleaned up."
+        }
+    }
+
     # Scenario: Supervisor setup, Process.Start, or cleanup fails before or after child output capture begins.
     # Purpose: Preserve the original failure and close supervisor-owned resources without trusting an unstarted process object.
     It 'UnitT04_preserves_supervisor_diagnostics_and_prestart_cleanup' {
@@ -1272,6 +1776,90 @@ exit ([int]$LASTEXITCODE)
         $runnerSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RunnerPath
         Assert-Match $runnerSource 'Merge-StandardValidationProcessStderr[\s\S]*-Existing "The owned Windows job object could not be closed safely \(handle=' 'Job-object close failure must be passed as the first diagnostic before child stderr.'
         $shardExecutorSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
+        # Scenario: Windows reuses a terminated parent's PID for a newer owned child.
+        # Purpose: an older unrelated process must never enter descendant cleanup by stale ParentProcessId alone.
+        & {
+            param($ExecutorSource, $RunnerSource)
+            $birth = [DateTime]::UtcNow
+            $script:staleParentFixture = @(
+                [pscustomobject]@{ProcessId=100;ParentProcessId=1;CreationDate=$birth},
+                [pscustomobject]@{ProcessId=200;ParentProcessId=100;CreationDate=$birth.AddSeconds(1)},
+                [pscustomobject]@{ProcessId=300;ParentProcessId=200;CreationDate=$birth.AddSeconds(2)},
+                [pscustomobject]@{ProcessId=400;ParentProcessId=100;CreationDate=$birth.AddMinutes(-90)},
+                [pscustomobject]@{ProcessId=500;ParentProcessId=400;CreationDate=$birth.AddMinutes(-89)},
+                [pscustomobject]@{ProcessId=600;ParentProcessId=100;CreationDate=$null}
+            )
+            function Get-CimInstance { param($ClassName,$ErrorAction) return $script:staleParentFixture }
+            foreach($spec in @(@{Source=$ExecutorSource;Name='Get-PesterShardDescendantProcessIds'},@{Source=$RunnerSource;Name='Get-StandardValidationDescendantProcessIds'})) {
+                $ast = [System.Management.Automation.Language.Parser]::ParseInput($spec.Source,[ref]$null,[ref]$null)
+                $node = $ast.Find({param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -ceq $spec.Name},$false)
+                . ([scriptblock]::Create($node.Extent.Text))
+                if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    Assert-Equal ((@(& $spec.Name -RootProcessId 100)|Sort-Object) -join ',') '200,300' 'A reused parent PID must not classify older unrelated processes as descendants.'
+                    $savedRelations=$script:staleParentFixture
+                    $script:staleParentFixture=@(
+                        [pscustomobject]@{ProcessId=100;ParentProcessId=501;CreationDate=$birth},
+                        [pscustomobject]@{ProcessId=501;ParentProcessId=500;CreationDate=$birth.AddSeconds(-1)},
+                        [pscustomobject]@{ProcessId=500;ParentProcessId=499;CreationDate=$birth.AddSeconds(-2)},
+                        [pscustomobject]@{ProcessId=499;ParentProcessId=100;CreationDate=$birth.AddSeconds(-3)}
+                    )
+                    Assert-Equal @(& $spec.Name -RootProcessId 100).Count 0 'A stale-parent cycle must never select an older ancestor.'
+                    $fixtureAst=[System.Management.Automation.Language.Parser]::ParseInput((Get-Content -LiteralPath (Join-Path $script:RepositoryRoot 'tests/standard-validation-runner.Tests.ps1') -Raw),[ref]$null,[ref]$null)
+                    $expansion=$fixtureAst.Find({param($x) $x -is [System.Management.Automation.Language.ForStatementAst] -and $x.Condition.Extent.Text -match '\$pass -lt \$relations.Count'},$true)
+                    $relations=$script:staleParentFixture
+                    $process=[pscustomobject]@{StartTime=$birth}
+                    $rootProcessId=100
+                    $descendantIds=New-Object 'System.Collections.Generic.HashSet[int]'
+                    [void]$descendantIds.Add(100)
+                    . ([scriptblock]::Create($expansion.Extent.Text))
+                    Assert-Equal $descendantIds.Count 1 'The actual fixture expansion loop must retain only its owned root in an ancestor cycle.'
+                    $relations=@(
+                        [pscustomobject]@{ProcessId=200;ParentProcessId=100;CreationDate=$birth.AddSeconds(5)},
+                        [pscustomobject]@{ProcessId=300;ParentProcessId=200;CreationDate=$birth.AddSeconds(2)},
+                        [pscustomobject]@{ProcessId=400;ParentProcessId=200;CreationDate=$null}
+                    )
+                    $descendantIds=New-Object 'System.Collections.Generic.HashSet[int]'
+                    [void]$descendantIds.Add(100)
+                    . ([scriptblock]::Create($expansion.Extent.Text))
+                    Assert-Equal ((@($descendantIds)|Sort-Object) -join ',') '100,200' 'Fixture cleanup must reject a stale intermediate-parent edge even when its child postdates the root.'
+                    $script:staleParentFixture=$savedRelations
+                }
+            }
+        } $shardExecutorSource $runnerSource
+        # Scenario: the host disappears before the child terminates, or a later cleanup error follows the first failure.
+        # Purpose: persist bounded phase/budget diagnostics independently of the terminal process report.
+        $progressAst = [System.Management.Automation.Language.Parser]::ParseInput($shardExecutorSource, [ref]$null, [ref]$null)
+        foreach ($progressName in @('Remove-PesterShardTerminalControlSequences', 'ConvertTo-PesterShardSanitizedDiagnosticText', 'Write-PesterShardProgress')) {
+            $progressFunction = $progressAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $progressName }, $false)
+            Assert-True ($null -ne $progressFunction) "The progress dependency '$progressName' must exist."
+            . ([scriptblock]::Create($progressFunction.Extent.Text))
+        }
+        $progressPath = Join-Path $TestDrive 'live-progress.jsonl'
+        $progressState = @{ count = 0; firstError = ''; runId = ('a' * 32); shardId = 'demo'; sourceSha256 = ('b' * 64) }
+        $progressArguments = @{ Path=$progressPath; State=$progressState; Paths=@('tests/demo.Tests.ps1'); Deadline=[DateTime]::UtcNow.AddSeconds(40); RootProcessId=$null; Process=$null; JobAssigned=$false }
+        Write-PesterShardProgress @progressArguments -Phase 'running' -ErrorText 'first supervisor failure'
+        $liveProgress = Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json
+        Assert-Equal $liveProgress.phase 'running' 'Progress must be durable before a terminal report exists.'
+        Assert-Equal $liveProgress.exitCode $null 'A running process must not invent an exit code.'
+        Assert-True ($liveProgress.remainingSeconds -gt 0 -and $liveProgress.remainingSeconds -le 40) 'Live evidence must preserve remaining shard budget.'
+        Write-PesterShardProgress @progressArguments -Phase 'cleanup' -ErrorText 'token=never-persist-this'
+        $lastProgress = (Get-Content -LiteralPath $progressPath | Select-Object -Last 1) | ConvertFrom-Json
+        Assert-Equal $lastProgress.firstError 'first supervisor failure' 'Cleanup errors must not erase the first failure.'
+        Assert-False ((Get-Content -LiteralPath $progressPath -Raw) -match 'never-persist-this') 'Progress must not retain raw sensitive error text.'
+        $sensitiveArguments = $progressArguments.Clone()
+        $sensitiveArguments.Path = Join-Path $TestDrive 'first-sensitive-progress.jsonl'
+        $sensitiveArguments.State = @{ count = 0; firstError = ''; runId = ('c' * 32); shardId = 'sensitive'; sourceSha256 = ('b' * 64) }
+        Write-PesterShardProgress @sensitiveArguments -Phase 'error' -ErrorText "token=never-persist-first`nsecret continuation"
+        $sensitiveText = Get-Content -LiteralPath $sensitiveArguments.Path -Raw
+        Assert-False ($sensitiveText -match 'never-persist-first|secret continuation') 'A sensitive first error and its continuation must be redacted with fresh state.'
+        Write-PesterShardProgress @progressArguments -Phase 'terminal' -ExitCode ([int]7)
+        $terminalProgress = (Get-Content -LiteralPath $progressPath | Select-Object -Last 1) | ConvertFrom-Json
+        Assert-Equal $terminalProgress.exitCode 7 'An observed terminal exit code must be retained.'
+        Assert-Equal $terminalProgress.runId ('a' * 32) 'Every progress row must bind the invocation identity.'
+        Assert-Equal $terminalProgress.sourceSha256 ('b' * 64) 'Every row must bind actual executor bytes separately from optional hosted revision.'
+        $progressState.count = 120
+        Write-PesterShardProgress @progressArguments -Phase 'heartbeat'
+        Assert-Equal $progressState.count 120 'Heartbeat records must reserve bounded room for terminal phases.'
         Assert-True (([regex]::Matches($shardExecutorSource, 'Get-PesterShardDescendantProcessIds -RootProcessId')).Count -ge 2) 'The shard executor must retain descendant identities while the child is alive.'
         Assert-Match $shardExecutorSource '\$paths\s*=\s*ConvertFrom-Json\s+-InputObject' 'The shard executor must preserve a multi-file shard path array on Windows PowerShell.'
         Assert-True ($shardExecutorSource -match '\$ownsCancellationPath\s+-and[\s\S]{0,240}Remove-Item\s+-LiteralPath \$CancellationPath') 'The shard executor may delete only a runner-owned cancellation marker.'

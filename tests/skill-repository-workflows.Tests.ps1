@@ -201,7 +201,7 @@ jobs:
         Assert-True $ps51OddBMatch.Success 'PowerShell 5.1 must run its second odd shard partition independently.'
         Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 222; Skipped = 0 }
+                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 238; Skipped = 0 }
                 @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 188; Skipped = 6 }
                 @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 124; Skipped = 5 }
                 @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 91; Skipped = 2 }
@@ -238,7 +238,7 @@ jobs:
         Assert-True $ps7OddBMatch.Success 'PowerShell 7 must run its second odd shard partition independently.'
         Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
         foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 222; Skipped = 0 }
+                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 238; Skipped = 0 }
                 @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 188; Skipped = 6 }
                 @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 124; Skipped = 5 }
                 @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 91; Skipped = 1 }

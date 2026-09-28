@@ -221,7 +221,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedTotalCount = 222
+            ExpectedTotalCount = 238
             ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 0
@@ -504,7 +504,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedTotalCount = 222
+            ExpectedTotalCount = 238
             ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 0

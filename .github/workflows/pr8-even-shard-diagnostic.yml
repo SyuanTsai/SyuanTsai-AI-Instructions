@@ -23,7 +23,7 @@ jobs:
           - runtime: ps51
             pester: 3.4.0
             index: 0
-            total: 182
+            total: 198
           - runtime: ps51
             pester: 3.4.0
             index: 4
@@ -31,7 +31,7 @@ jobs:
           - runtime: ps7
             pester: 4.10.1
             index: 0
-            total: 182
+            total: 198
           - runtime: ps7
             pester: 4.10.1
             index: 4
@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Reviewed 32-file name inventory at the PR58 diagnostic candidate.
+          # Reviewed 32-file name inventory; content counts are discovery-checked.
           $expectedInventorySha256 = '242160f809b58b99b844c7228fce04c1c8ac876a30194544a9089c1f800b99ae'
           [string[]]$tracked = @(git ls-tree -r --name-only HEAD -- tests |
             Where-Object { $_ -cmatch '^tests/[^/]+\.Tests\.ps1$' })
@@ -95,9 +95,9 @@ jobs:
             throw 'Diagnostic partition differs from reviewed exact shard assignment.'
           }
           $counts = @{
-            'tests/standard-validation-runner.Tests.ps1' = 49
+            'tests/standard-validation-runner.Tests.ps1' = 51
             'tests/bootstrap-ai-instructions.Tests.ps1' = 75
-            'tests/skill-repository-standard.Tests.ps1' = 47
+            'tests/skill-repository-standard.Tests.ps1' = 61
             'tests/skills-source-routing.Tests.ps1' = 11
             'tests/ai-instructions-contract.Tests.ps1' = 6
             'tests/license-delivery.Tests.ps1' = 9
