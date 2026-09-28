@@ -75,9 +75,9 @@ $configuration.Filter.FullName = @($maintenanceIds | ForEach-Object { "*$_" })
 $configuration.Run.PassThru = $true
 $configuration.Output.Verbosity = 'Minimal'
 $maintenance = Invoke-Pester -Configuration $configuration
-if ($null -eq $maintenance -or $maintenance.TotalCount -ne 46 -or
+if ($null -eq $maintenance -or $maintenance.TotalCount -ne 51 -or
     $maintenance.PassedCount -ne $maintenanceIds.Count -or
-    $maintenance.NotRunCount -ne 44 -or $maintenance.FailedCount -ne 0 -or
+    $maintenance.NotRunCount -ne 49 -or $maintenance.FailedCount -ne 0 -or
     $maintenance.SkippedCount -ne 0) {
     throw 'Fixed maintenance behavior tests did not pass in full.'
 }

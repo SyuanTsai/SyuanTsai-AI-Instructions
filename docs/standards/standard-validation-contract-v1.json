@@ -60,6 +60,7 @@
       "argument": "-SupervisorLaunchBindingPath",
       "evidenceType": "validation-launch-binding",
       "attestation": "trusted-supervisor-validation-launch-v1",
+      "producerHelper": "scripts/Invoke-StandardValidation.ps1::New-StandardValidationSupervisorLaunchBinding; requires a trusted signer callback; verifies against the immutable authority trust anchor before create-only output; development fixture keys are never production authority",
       "ordering": "trusted supervisor signs the binding, passes its resolutionRunId to the resolver before receipt creation, then passes the binding path to the central runner",
       "bindingSnapshot": "runner reads, hashes, and parses one retained launch-binding byte snapshot; evidence registration must match that authenticated snapshot hash",
       "adapterSnapshot": "runner reads adapter bytes once, computes adapterSha256 from those bytes, parses those same bytes, authenticates the snapshot hash against the signed binding, and fails closed if the adapter path changes during handoff",
