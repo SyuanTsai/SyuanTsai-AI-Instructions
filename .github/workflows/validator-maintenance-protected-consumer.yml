@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         env:
           ACCESS_TOKEN: ${{ github.token }}
-          PRODUCER_WORKFLOW_ID: '0' # Replace with reviewed numeric ID after producer registration.
+          PRODUCER_WORKFLOW_ID: '368289188' # Existing registered producer; diagnostic evidence only.
         run: |
           $ErrorActionPreference = 'Stop'
           $checkedOut = (& git rev-parse HEAD).Trim()

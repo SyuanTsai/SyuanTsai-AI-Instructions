@@ -604,6 +604,20 @@ ino: 1
     # Scenario: A consumer adds a renamed workflow, hook, release command, or duplicate trigger adapter around a component script.
     # Purpose: Enforce the central entry-point inventory contract while allowing non-authoritative components and status-only compatibility jobs.
     It 'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles' {
+        # Scenario: default-branch code reads one registered producer's diagnostic artifact.
+        # Purpose: bind the numeric selector while retaining the non-admitting data-only boundary.
+        $maintenanceConsumer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/validator-maintenance-protected-consumer.yml')
+        $maintenanceProducer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/validator-maintenance-producer.yml')
+        Assert-Match $maintenanceConsumer "PRODUCER_WORKFLOW_ID:\s*'368289188'" 'The diagnostic consumer must select the registered existing producer ID.'
+        Assert-Match $maintenanceConsumer 'ref:\s*\$\{\{\s*github\.sha\s*\}\}' 'Only default-branch event code may execute.'
+        Assert-Match $maintenanceConsumer 'actions:\s*read' 'Diagnostic acquisition must keep Actions read-only.'
+        Assert-Match $maintenanceConsumer '-RepositoryId\s+1245177039' 'The registered producer must stay in the fixed repository.'
+        foreach ($workflow in @($maintenanceConsumer, $maintenanceProducer)) {
+            Assert-Match $workflow "-AuthorityRevision\s+'e69c453888db93e2d2697ea7f0b11df13cd1b8d2'" 'Diagnostic authority labels must not silently move to the executing main.'
+            Assert-Match $workflow "ciAdmission\s+-cne\s+'BLOCKED'" 'Diagnostic data must never grant admission.'
+            Assert-Match $workflow 'releaseEligible\s+-ne\s*\$false' 'Diagnostic data must never grant release eligibility.'
+            Assert-False ($workflow -match '(?m)^\s*(actions|contents|pull-requests):\s*write') 'Producer registration must not expand token permissions.'
+        }
         $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
         . $script:AuthorityGatePath -DefineFunctionsOnly
