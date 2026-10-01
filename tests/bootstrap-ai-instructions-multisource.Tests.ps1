@@ -5,7 +5,7 @@ Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisiti
 
 function Invoke-TestGit {
     param([string]$Repository,[string[]]$Arguments)
-    $output=& git -C $Repository @Arguments 2>&1
+    $output=& git -c core.autocrlf=false -C $Repository @Arguments 2>&1
     if($LASTEXITCODE-ne0){throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"}
     return $output
 }

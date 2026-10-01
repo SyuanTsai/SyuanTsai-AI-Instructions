@@ -7,24 +7,19 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 11
-            '.github/workflows/standards-conformance.yml' = 2
-            '.github/workflows/syp101-production-smoke.yml' = 2
-            '.github/workflows/syp86-production-lock.yml' = 2
+            '.github/workflows/pr8-powershell-validation.yml' = 1
+            '.github/workflows/standards-conformance.yml' = 1
+            '.github/workflows/syp101-production-smoke.yml' = 1
+            '.github/workflows/syp86-production-lock.yml' = 1
+            '.github/workflows/validator-maintenance-producer.yml' = 1
         }
         $script:AuthorityTests = @(
             'skill-repository-standard.Tests.ps1'
             'skill-repository-workflows.Tests.ps1'
-            'standard-validation-resolver-hardening.Tests.ps1'
-            'standard-validation-runner.Tests.ps1'
-            'source-merge-exception-draft.Tests.ps1'
+            'standard-authority-entry-preflight.Tests.ps1'
+            'standard-entry-point-binding.Tests.ps1'
+            'standard-core-pester-adapter.Tests.ps1'
         )
-        $script:AuthorityWorkflowDependencies = @(
-            'pr8-powershell-validation.yml'
-            'syp101-production-smoke.yml'
-            'syp86-production-lock.yml'
-        )
-
         function Assert-True {
             param([bool] $Condition, [string] $Message)
             if (-not $Condition) { throw $Message }
@@ -48,6 +43,28 @@ Describe 'Agent Skill authority workflow contract' {
         function Assert-NotMatch {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
+
+        function Get-PesterExecutorFunction {
+            param([Parameter(Mandatory = $true)][string] $Name)
+
+            $executorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($executorPath, [ref]$tokens, [ref]$parseErrors)
+            if (@($parseErrors).Count -gt 0) { throw "Could not parse the Pester shard executor: $($parseErrors[0].Message)" }
+            $functions = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+                Where-Object { $_.Name -ceq $Name })
+            if ($functions.Count -ne 1) { throw "Expected exactly one executor function named '$Name'; found $($functions.Count)." }
+            return [scriptblock]::Create($functions[0].Extent.Text)
+        }
+
+        function Assert-Throws {
+            param([Parameter(Mandatory = $true)][scriptblock] $Action, [Parameter(Mandatory = $true)][string] $Message)
+
+            $threw = $false
+            try { & $Action | Out-Null } catch { $threw = $true }
+            if (-not $threw) { throw $Message }
         }
 
         function Write-TestUtf8File {
@@ -94,396 +111,272 @@ jobs:
         }
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
-        Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 2 'The dedicated Linux focused job and direct Linux composition step may import Pester in workflow scope; Windows full suites must stay behind the bounded executor.'
-        Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 8 'All eight Windows Pester partitions must use the bounded executor.'
-        Assert-Equal ([regex]::Matches($required, 'Executing Pester \$\(\$pester\.Version\) through the bounded shard executor\.')).Count 8 'Workflow logging must use discovery metadata without importing the module first.'
-        $diagnosticPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-even-shard-diagnostic.yml'
-        Assert-True (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) 'Manual even-shard diagnostic workflow must exist.'
-        $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $diagnosticPath
-        Assert-Match $diagnostic '(?m)^\s*workflow_dispatch:\s*$' 'Diagnostic must require explicit manual dispatch.'
-        Assert-NotMatch $diagnostic '(?m)^\s*(pull_request|push|schedule|workflow_run):\s*$' 'Diagnostic must not auto-run or replace a required check.'
-        Assert-Match $diagnostic 'timeout-minutes:\s*45' 'Diagnostic jobs must be bounded to 45 minutes.'
-        Assert-Match $diagnostic 'cancel-in-progress:\s*false' 'Diagnostic must not cancel another active run.'
-        Assert-Match $diagnostic 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' 'Normal failure evidence upload must use the reviewed immutable action.'
+        Assert-Equal ([regex]::Matches($required, 'Import-Module \$pester\.Path -Force')).Count 0 'Core must leave module execution inside the bounded child executor.'
+        Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must run the retained Pester difference through the bounded executor once.'
+        Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Core must select the complete non-authority difference.'
     }
 
-    # Scenario: PR-controlled focused tests could mutate the checkout later consumed by the authority gate.
-    # Purpose: Isolate the six-case Linux boundary suite from a fresh authority checkout and preserve one required summary status.
-    It 'UnitT15_runs_linux_callback_containment_before_full_suites_and_authority_gate' {
-        $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
-        $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
-        $focusedHelperPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-FocusedLinuxContainment.ps1'
-        $semanticTestsPath = Join-Path $script:RepositoryRoot 'tests/standard-semantic-bridge.Tests.ps1'
-        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
-        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
-        $focusedHelper = Get-Content -Raw -Encoding UTF8 -LiteralPath $focusedHelperPath
-        $semanticTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $semanticTestsPath
-        $focusedDescribe = 'Unix callback containment boundary'
+    # Scenario: The required workflow fans the suite across retired runtimes and duplicate platforms.
+    # Purpose: Keep one Windows Core job, one Windows Install Smoke job, and verified PowerShell provenance.
+    It 'UnitT15_ordinary_workflows_use_verified_Windows_PowerShell_only' {
+        $workflowDirectory = Join-Path $script:RepositoryRoot '.github/workflows'
+        $workflowPaths = @(Get-ChildItem -LiteralPath $workflowDirectory -File |
+            Where-Object { $_.Extension -in @('.yml', '.yaml') } |
+            ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') })
+        $expectedWorkflowPaths = @(
+            '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/standards-conformance.yml',
+            '.github/workflows/syp101-production-smoke.yml',
+            '.github/workflows/syp86-production-lock.yml',
+            '.github/workflows/validator-maintenance-producer.yml'
+        )
+        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'R4 must retain exactly the five registered active workflow files.'
+        Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
+        $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
+        $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($relativePath in $workflowPaths) {
+            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot $relativePath)
+            if ([regex]::IsMatch($workflow, '(?m)^  pull_request:\s*$')) {
+                $pullRequestWorkflows.Add($relativePath)
+                $jobsBlock = [regex]::Match($workflow, '(?ms)^jobs:\r?\n(?<block>.*)\z')
+                Assert-True $jobsBlock.Success "Workflow '$relativePath' must define its jobs block."
+                $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
+                Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
+                $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
+            }
+            Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|runs-on:\s*ubuntu-latest|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 or Linux CI lane."
+            Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
+            Assert-NotMatch $workflow 'Get-Module Pester -ListAvailable -Name Pester' "Workflow '$relativePath' must not pass Pester both positionally and through -Name."
+            Assert-Match $workflow 'runs-on:\s*windows-latest' "Workflow '$relativePath' must run on Windows."
+            Assert-Match $workflow "version = '7\.6\.6'" "Workflow '$relativePath' must pin the reviewed latest stable PowerShell release."
+            Assert-Match $workflow '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860' "Workflow '$relativePath' must verify the reviewed PowerShell ZIP SHA256."
+            Assert-Match $workflow 'Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256' "Workflow '$relativePath' must hash the archive before use."
+            Assert-Match $workflow 'Expand-Archive -LiteralPath \$archivePath' "Workflow '$relativePath' must use the verified portable archive."
+            Assert-Match $workflow 'GITHUB_PATH' "Workflow '$relativePath' must put portable pwsh first for later steps."
+            Assert-Match $workflow 'MainModule\.FileName' "Workflow '$relativePath' must verify the actual shell process executable."
+            Assert-Match $workflow '\$PSHOME' "Workflow '$relativePath' must verify the active PowerShell home."
+            Assert-Match $workflow '\$PSVersionTable\.PSVersion' "Workflow '$relativePath' must verify the active runtime version."
+        }
+        Assert-Equal $pullRequestWorkflows.Count 2 'Exactly the Core and Install Smoke workflows may run for ordinary pull requests.'
+        $expectedPullRequestWorkflows = @(
+            '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/syp101-production-smoke.yml'
+        )
+        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'No Linux, SYP86, Standards, or maintenance workflow may add an ordinary pull-request job.'
+        $expectedPullRequestJobNames = @('windows-core', 'windows-install-smoke')
+        Assert-Equal (($pullRequestJobNames.ToArray() | Sort-Object) -join '|') (($expectedPullRequestJobNames | Sort-Object) -join '|') 'Ordinary pull-request CI must aggregate to exactly Windows Core and Windows Install Smoke.'
 
-        Assert-Match $required ([regex]::Escape($focusedDescribe)) 'PowerShell Regression must run the Unix callback containment Describe.'
-        Assert-Match $standards ([regex]::Escape($focusedDescribe)) 'Standards Conformance must run the Unix callback containment Describe.'
-        $describeMarker = "Describe '$focusedDescribe' -Tags LinuxContainment"
-        Assert-Equal ([regex]::Matches($semanticTests, [regex]::Escape($describeMarker))).Count 1 'The semantic bridge tests must define one focused containment Describe.'
-        $describeStart = $semanticTests.IndexOf($describeMarker)
-        $nextDescribe = $semanticTests.IndexOf("`nDescribe ", $describeStart + $describeMarker.Length)
-        $focusedTests = if ($nextDescribe -ge 0) {
-            $semanticTests.Substring($describeStart, $nextDescribe - $describeStart)
-        }
-        else {
-            $semanticTests.Substring($describeStart)
-        }
-        $focusedItMatches = [regex]::Matches($focusedTests, "(?m)^\s*It\s+'([^']+)'")
-        Assert-Equal $focusedItMatches.Count 6 'The focused containment Describe must contain exactly six independent It cases.'
-        $focusedItNames = ($focusedItMatches | ForEach-Object { $_.Groups[1].Value }) -join "`n"
-        foreach ($caseMarker in @('normal', 'timeout', 'setsid', 'late', 'secret', 'procfs')) {
-            Assert-Match $focusedItNames $caseMarker "The focused containment It names must include the '$caseMarker' case."
-        }
-        foreach ($workflow in @($required, $standards)) {
-            $setupMarker = 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu'
-            $setupIndex = $workflow.IndexOf($setupMarker)
-            $probeIndex = $workflow.IndexOf('Probe Linux PID namespace containment capability')
-            Assert-True ($setupIndex -ge 0) 'Every Linux focused workflow must configure user namespace sysctls on hosted Ubuntu.'
-            Assert-True ($setupIndex -lt $probeIndex) 'Hosted user namespace setup must run before the exact PID namespace capability probe.'
-            Assert-Match $workflow 'RUNNER_ENVIRONMENT.*github-hosted' 'User namespace sysctl setup must be limited to GitHub-hosted runners.'
-            Assert-Match $workflow 'kernel\.apparmor_restrict_unprivileged_userns' 'Hosted setup must inspect and verify the AppArmor user namespace gate when available.'
-            Assert-Match $workflow 'sudo -n sysctl -w "\$apparmor_key=0"' 'Hosted setup may clear the AppArmor gate only through non-interactive sudo.'
-            Assert-Match $workflow 'apparmor_before"\s*==\s*''1''' 'Hosted setup may clear the AppArmor gate only when its recorded value is one.'
-            Assert-Match $workflow 'kernel\.unprivileged_userns_clone' 'Hosted setup must inspect and verify userns_clone when available.'
-            Assert-Match $workflow 'sudo -n sysctl -w "\$userns_clone_key=1"' 'Hosted setup may enable userns_clone only through non-interactive sudo.'
-            Assert-Match $workflow 'userns_clone_before"\s*==\s*''0''' 'Hosted setup may enable userns_clone only when its recorded value is zero.'
-            Assert-Match $workflow ([regex]::Escape('apparmor_after="$(sysctl -n "$apparmor_key")"')) 'Hosted setup must reread the AppArmor gate after any conditional change.'
-            Assert-Match $workflow ([regex]::Escape('userns_clone_after="$(sysctl -n "$userns_clone_key")"')) 'Hosted setup must reread userns_clone after any conditional change.'
-            Assert-Match $workflow 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' 'The exact private-procfs namespace preflight must remain after hosted setup.'
-            Assert-Match $workflow 'Probe Linux PID namespace containment capability' 'Every Linux focused workflow must probe PID namespace support before callback tests.'
-            Assert-Match $workflow 'exact probe command: \$unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c' 'Every Linux preflight must log the exact command used to create the PID namespace and mount a private procfs.'
-            Assert-Match $workflow 'exec 9</proc/self/mountinfo' 'The namespace probe must open the visible procfs mount before reading its mount identity.'
-            Assert-Match $workflow '/proc/self/fdinfo/9' 'The namespace probe must use the opened procfs descriptor identity instead of choosing a stacked mountinfo row.'
-            Assert-Match $workflow 'parent procfs mount ID' 'The namespace probe must record the parent visible procfs mount identity.'
-            Assert-Match $workflow 'private procfs mount ID' 'The namespace probe must record the child visible procfs mount identity.'
-            Assert-Match $workflow 'probe_proc_mount_id.*parent_proc_mount_id' 'The namespace probe must reject a child whose visible procfs mount is not private.'
-            Assert-True $workflow.Contains('probe_namespace="${probe_output%%$''\n''*}"') 'The namespace preflight must consume captured output without a head pipeline that can trigger SIGPIPE under pipefail.'
-            Assert-NotMatch $workflow 'awk .*\$5 == "/proc".*print \$1' 'The namespace preflight must not select the first /proc row when mountinfo contains stacked procfs mounts.'
-            Assert-Match $workflow 'uname -a' 'The Linux capability probe must record kernel/runtime identity.'
-            Assert-Match $workflow '/proc/self/ns/pid' 'The Linux capability probe must record the parent PID namespace identity.'
-            Assert-Match $workflow 'namespace probe exit' 'The Linux capability probe must record its exit status.'
-            Assert-Match $workflow 'namespace probe result' 'The Linux capability probe must record its namespace result.'
-            Assert-True ($workflow.IndexOf('Probe Linux PID namespace containment capability') -lt $workflow.IndexOf("Run required Unix callback containment boundary")) 'The Linux capability probe must fail before focused callback tests.'
-        }
-
-        Assert-Match $standards '& ./scripts/Invoke-FocusedLinuxContainment\.ps1' 'Standards Conformance must run the dedicated focused containment helper.'
-        Assert-NotMatch $standards 'Install-Module\s+Pester' 'Standards Conformance must resolve Pester through the central resolver.'
-        Assert-Match $focusedHelper 'Resolve-StandardValidationTool\.ps1' 'The focused helper must use the approved central tool resolver.'
-        Assert-Match $focusedHelper '-ToolName pester -Install' 'The focused helper must install the latest stable Pester through the central resolver.'
-        Assert-Match $focusedHelper 'ConvertFrom-Json' 'The focused helper must consume the resolver receipt.'
-        Assert-Match $focusedHelper '\$modulePath\s*=\s*\[IO\.Path\]::GetFullPath\(\[string\]\$receipt\.modulePath\)' 'The focused helper must use the module path identified by the resolver receipt.'
-        Assert-Match $focusedHelper 'Import-Module\s+-Name\s+\$modulePath' 'The focused helper must import the Pester module identified by the resolver receipt.'
-        Assert-Match $focusedHelper 'Invoke-Pester -Path \$testPath -TagFilter ''LinuxContainment'' -PassThru' 'The focused helper must select the tagged containment cases only.'
-        Assert-Match $focusedHelper '\[int64\]\$selectedCountFromDiscovery\s*-ne\s*6' 'The Pester 6 focused gate must require exactly six discovered selected tests.'
-        Assert-Match $focusedHelper '\[int64\]\$selectedCount\s*-ne\s*6' 'The Pester 6 focused gate must require exactly six selected test results.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.PassedCount\s*-ne\s*6' 'The Pester 6 focused gate must require six passed tests.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.FailedCount\s*-ne\s*0' 'The focused boundary gate must reject failed tests.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.SkippedCount\s*-ne\s*0' 'The focused boundary gate must reject skipped tests.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.PendingCount\s*-ne\s*0' 'The focused boundary gate must reject pending tests.'
-        Assert-Match $focusedHelper '\[int64\]\$counts\.InconclusiveCount\s*-ne\s*0' 'The focused boundary gate must reject inconclusive tests.'
-        Assert-Match $focusedHelper 'NotRunCount' 'The focused gate must account for Pester results where TotalCount includes unselected tests.'
-        Assert-Match $focusedHelper '\$selectedCountFromDiscovery\s*=\s*\[int64\]\$counts\.TotalCount\s*-\s*\[int64\]\$counts\.NotRunCount' 'The focused gate must subtract Pester 6 NotRun cases from TotalCount to determine the selected count.'
-
-        Assert-Match $required '\[int64\]\$result\.TotalCount\s*-ne\s*6' 'PR8 required focused job must select exactly six Linux containment tests.'
-        Assert-Match $required '\[int\]\$result\.PassedCount\s*-ne\s*6' 'PR8 required focused job must require six passing Linux containment tests.'
-        $ps51EvenMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-even:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps51EvenBMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-even-b:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps51OddMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-odd:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps51OddBMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51-odd-b:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps51SummaryMatch = [regex]::Match($required, '(?ms)^  windows-powershell-51:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        Assert-True $ps51EvenMatch.Success 'PowerShell 5.1 must run its even shard partition independently.'
-        Assert-True $ps51EvenBMatch.Success 'PowerShell 5.1 must run its second even shard partition independently.'
-        Assert-True $ps51OddMatch.Success 'PowerShell 5.1 must run its odd shard partition independently.'
-        Assert-True $ps51OddBMatch.Success 'PowerShell 5.1 must run its second odd shard partition independently.'
-        Assert-True $ps51SummaryMatch.Success 'The original required PowerShell 5.1 context must summarize all four partitions.'
-        foreach ($partition in @(
-                @{ Block = $ps51EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 2 }
-                @{ Block = $ps51EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps51OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
-                @{ Block = $ps51OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
-            )) {
-            Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 5.1 partition must retain the focused prerequisite.'
-            Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 5.1 partition must run on Windows.'
-            Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each partition must select its own shard index.'
-            Assert-Match $partition.Block ('ShardPartitionCount\s*=\s*' + $partition.Count) 'Each PowerShell 5.1 job must select its intended partition count.'
-            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*33' 'Every partition must verify the complete shard inventory.'
-            Assert-Match $partition.Block 'OuterTimeoutSeconds\s*=\s*2400' 'Every shard must retain its bounded timeout.'
-            Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each partition must verify its fixed test count.'
-            Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each partition must verify its fixed platform skip count.'
-        }
-        $ps51Summary = $ps51SummaryMatch.Groups['block'].Value
-        Assert-Match $ps51Summary 'name:\s*Pester \(Windows PowerShell 5\.1\)' 'The branch-required PowerShell 5.1 check name must remain stable.'
-        Assert-Match $ps51Summary 'needs:\s*\[windows-powershell-51-even, windows-powershell-51-even-b, windows-powershell-51-odd, windows-powershell-51-odd-b\]' 'The required summary must depend on all four complete partitions.'
-        Assert-Match $ps51Summary 'if:\s*\$\{\{\s*always\(\)\s*\}\}' 'The required summary must run and fail when any partition is skipped or fails.'
-        Assert-Match $ps51Summary 'EVEN_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-even''\]\.result\s*\}\}' 'The required summary must read the even job result through a valid expression.'
-        Assert-Match $ps51Summary 'EVEN_B_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-even-b''\]\.result\s*\}\}' 'The required summary must read the second even job result through a valid expression.'
-        Assert-Match $ps51Summary 'ODD_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-odd''\]\.result\s*\}\}' 'The required summary must read the odd job result through a valid expression.'
-        Assert-Match $ps51Summary 'ODD_B_RESULT:\s*\$\{\{\s*needs\[''windows-powershell-51-odd-b''\]\.result\s*\}\}' 'The required summary must read the second odd job result through a valid expression.'
-        Assert-Match $ps51Summary 'EVEN_RESULT.*-cne.*success' 'The required summary must reject a non-success even partition.'
-        Assert-Match $ps51Summary 'EVEN_B_RESULT.*-cne.*success' 'The required summary must reject a non-success second even partition.'
-        Assert-Match $ps51Summary 'ODD_RESULT.*-cne.*success' 'The required summary must reject a non-success odd partition.'
-        Assert-Match $ps51Summary 'ODD_B_RESULT.*-cne.*success' 'The required summary must reject a non-success second odd partition.'
-        $ps7EvenMatch = [regex]::Match($required, '(?ms)^  powershell-7-even:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps7EvenBMatch = [regex]::Match($required, '(?ms)^  powershell-7-even-b:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps7OddMatch = [regex]::Match($required, '(?ms)^  powershell-7-odd:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps7OddBMatch = [regex]::Match($required, '(?ms)^  powershell-7-odd-b:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $ps7SummaryMatch = [regex]::Match($required, '(?ms)^  powershell-7:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        Assert-True $ps7EvenMatch.Success 'PowerShell 7 must run its even shard partition independently.'
-        Assert-True $ps7EvenBMatch.Success 'PowerShell 7 must run its second even shard partition independently.'
-        Assert-True $ps7OddMatch.Success 'PowerShell 7 must run its odd shard partition independently.'
-        Assert-True $ps7OddBMatch.Success 'PowerShell 7 must run its second odd shard partition independently.'
-        Assert-True $ps7SummaryMatch.Success 'The original required PowerShell 7 context must summarize all four partitions.'
-        foreach ($partition in @(
-                @{ Block = $ps7EvenMatch.Groups['block'].Value; Index = 0; Count = 4; Total = 179; Skipped = 1 }
-                @{ Block = $ps7EvenBMatch.Groups['block'].Value; Index = 2; Count = 4; Total = 139; Skipped = 5 }
-                @{ Block = $ps7OddMatch.Groups['block'].Value; Index = 1; Count = 4; Total = 155; Skipped = 0 }
-                @{ Block = $ps7OddBMatch.Groups['block'].Value; Index = 3; Count = 4; Total = 189; Skipped = 6 }
-            )) {
-            Assert-Match $partition.Block 'needs:\s*linux-callback-focused' 'Each PowerShell 7 partition must retain the focused prerequisite.'
-            Assert-Match $partition.Block 'runs-on:\s*windows-latest' 'Each PowerShell 7 partition must run on Windows.'
-            Assert-Match $partition.Block ('ShardPartitionIndex\s*=\s*' + $partition.Index) 'Each PowerShell 7 partition must select its own shard index.'
-            Assert-Match $partition.Block ('ShardPartitionCount\s*=\s*' + $partition.Count) 'Each PowerShell 7 job must select its intended partition count.'
-            Assert-Match $partition.Block 'ExpectedFullShardCount\s*=\s*33' 'Every PowerShell 7 job must verify the complete shard inventory.'
-            Assert-Match $partition.Block 'OuterTimeoutSeconds\s*=\s*2400' 'Every shard must retain its bounded timeout.'
-            Assert-Match $partition.Block ('ExpectedTotalCount\s*=\s*' + $partition.Total) 'Each PowerShell 7 partition must verify its fixed test count.'
-            Assert-Match $partition.Block ('ExpectedSkippedCount\s*=\s*' + $partition.Skipped) 'Each PowerShell 7 partition must verify its fixed platform skip count.'
-        }
-        $ps7Summary = $ps7SummaryMatch.Groups['block'].Value
-        Assert-Match $ps7Summary 'name:\s*Pester \(PowerShell 7\)' 'The branch-required PowerShell 7 check name must remain stable.'
-        Assert-Match $ps7Summary 'needs:\s*\[powershell-7-even, powershell-7-even-b, powershell-7-odd, powershell-7-odd-b\]' 'The required PowerShell 7 summary must depend on all four complete partitions.'
-        Assert-Match $ps7Summary 'if:\s*\$\{\{\s*always\(\)\s*\}\}' 'The required PowerShell 7 summary must fail when any partition is skipped or fails.'
-        Assert-Match $ps7Summary 'EVEN_RESULT:\s*\$\{\{\s*needs\[''powershell-7-even''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the even job result.'
-        Assert-Match $ps7Summary 'EVEN_B_RESULT:\s*\$\{\{\s*needs\[''powershell-7-even-b''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the second even job result.'
-        Assert-Match $ps7Summary 'ODD_RESULT:\s*\$\{\{\s*needs\[''powershell-7-odd''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the odd job result.'
-        Assert-Match $ps7Summary 'ODD_B_RESULT:\s*\$\{\{\s*needs\[''powershell-7-odd-b''\]\.result\s*\}\}' 'The PowerShell 7 summary must read the second odd job result.'
-        Assert-Match $ps7Summary 'EVEN_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success even partition.'
-        Assert-Match $ps7Summary 'EVEN_B_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success second even partition.'
-        Assert-Match $ps7Summary 'ODD_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success odd partition.'
-        Assert-Match $ps7Summary 'ODD_B_RESULT.*-cne.*success' 'The PowerShell 7 summary must reject a non-success second odd partition.'
-
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+        $smoke = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/syp101-production-smoke.yml')
         $executor = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1')
-        Assert-Match $executor '\(\$index % \$ShardPartitionCount\)\s*-eq\s*\$ShardPartitionIndex' 'The executor must select shards by modulo index.'
-        $testFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot 'tests') -Filter '*.Tests.ps1' -File |
-                ForEach-Object { [string]$_.Name })
-        [Array]::Sort($testFiles, [StringComparer]::Ordinal)
-        $isolated = @('standard-validation-runner.Tests.ps1', 'syp101-production-smoke-contract.Tests.ps1')
-        foreach ($name in $isolated) {
-            Assert-Equal @($testFiles | Where-Object { $_ -ceq $name }).Count 1 "The isolated shard '$name' must exist exactly once."
+        $coreJobsBlock = [regex]::Match($required, '(?ms)^jobs:\r?\n(?<block>.*)\z')
+        $smokeJobsBlock = [regex]::Match($smoke, '(?ms)^jobs:\r?\n(?<block>.*)\z')
+        Assert-True $coreJobsBlock.Success 'PowerShell Regression must define its jobs block.'
+        Assert-True $smokeJobsBlock.Success 'SYP101 must define its jobs block.'
+        $coreJobs = [regex]::Matches($coreJobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
+        $smokeJobs = [regex]::Matches($smokeJobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
+        Assert-Equal $coreJobs.Count 1 'PowerShell Regression must have one retained normal CI job.'
+        Assert-Equal $coreJobs[0].Groups[1].Value 'windows-core' 'The sole PowerShell Regression job must be Windows Core.'
+        Assert-Equal $smokeJobs.Count 1 'SYP101 must have one retained normal CI job.'
+        Assert-Equal $smokeJobs[0].Groups[1].Value 'windows-install-smoke' 'The sole SYP101 job must be Windows Install Smoke.'
+        Assert-NotMatch $required '(?m)^\s+needs:' 'Windows Core must not depend on a retired job.'
+        Assert-NotMatch $smoke '(?m)^\s+needs:' 'Windows Install Smoke must not depend on a retired job.'
+        Assert-Match $required 'timeout-minutes:\s*180' 'The sequential Core suite must have a bounded job-level timeout.'
+        Assert-Match $required 'PesterVersion = ''4\.10\.1''' 'The retained suite must use the established Pester 4.10.1 engine.'
+        Assert-Match $required '\$pester = Get-Module -ListAvailable -Name Pester' 'Core must discover the installed Pester module with a valid parameter binding.'
+        Assert-Equal ([regex]::Matches($required, '& \./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must use the existing bounded executor exactly once.'
+        Assert-Equal ([regex]::Matches($required, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must execute the authority gate exactly once.'
+        Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Core must pass the dynamically discovered non-authority difference to the bounded executor.'
+        Assert-Match $required 'ShardPartitionCount = 1' 'Core must execute the retained difference as one bounded schedule.'
+        Assert-Match $required 'ExpectedSkippedCount = 5' 'Core must bind the five intentional Windows skips from the Unix-only source acquisition fixtures to the real Pester summary.'
+        Assert-Match $executor "ValidateSet\('4\.10\.1'\)" 'The bounded executor must retire the Pester 3.4/Windows PowerShell 5.1 lane.'
+        Assert-Match $executor 'requires Windows PowerShell 7' 'The bounded executor must fail closed outside Windows PowerShell 7.'
+        Assert-Match $executor 'MainModule\.FileName' 'The bounded child must inherit the verified runner executable.'
+        Assert-NotMatch $executor 'PlatformID\]::Unix|PesterShardLinux|/proc|Pester 3\.4\.0|Windows PowerShell 5\.1' 'The bounded executor must not retain retired Unix process or legacy Pester paths.'
+        Assert-NotMatch $required 'Run cross-platform composition and acquisition tests' 'Source composition and acquisition must not run a second time outside full Core discovery.'
+        foreach ($authorityTest in $script:AuthorityTests) {
+            Assert-Match $required ([regex]::Escape("'tests/$authorityTest'")) "Core must exclude the authority-only test '$authorityTest' from its second execution."
         }
-        $bulk = @($testFiles | Where-Object { $isolated -cnotcontains $_ })
-        $shardFiles = @($isolated) + @($bulk)
-        Assert-Equal $shardFiles.Count 33 'The actual Pester file inventory must contain 33 shards.'
-        $evenA = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 0) { $shardFiles[$index] } })
-        $evenB = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 2) { $shardFiles[$index] } })
-        $oddA = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 1) { $shardFiles[$index] } })
-        $oddB = @(for ($index = 0; $index -lt $shardFiles.Count; $index++) { if (($index % 4) -eq 3) { $shardFiles[$index] } })
-        Assert-Equal $evenA.Count 9 'The first even job must select nine shards.'
-        Assert-Equal $evenB.Count 8 'The second even job must select eight shards.'
-        Assert-Equal $oddA.Count 8 'The first odd job must select eight shards.'
-        Assert-Equal $oddB.Count 8 'The second odd job must select eight shards.'
-        $assigned = @($evenA) + @($evenB) + @($oddA) + @($oddB)
-        Assert-Equal @($assigned | Select-Object -Unique).Count 33 'Every discovered shard must be assigned exactly once.'
-        [string[]]$assignedOrdinal = @($assigned)
-        [Array]::Sort($assignedOrdinal, [StringComparer]::Ordinal)
-        Assert-Equal ($assignedOrdinal -join '|') ($testFiles -join '|') 'The partition union must equal the full test file inventory.'
+        Assert-Match $required 'Run offline routine semantic fixtures once' 'Core must retain offline semantic fixtures in the single Windows job.'
+        Assert-Match $required "pattern='test_routine_semantic_\*\.py'" 'Core must keep exact offline fixture discovery.'
+        Assert-Match $required 'Exact offline fixture count changed' 'Core must keep its fixture coverage count assertion.'
+        Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
+        Assert-Match $smoke 'test-syp101-production-smoke\.ps1' 'Install Smoke must keep the real pinned-archive installation and idempotence exercise.'
+    }
+    # Scenario: A new discovered Pester file is added while the isolated-file set remains stable.
+    # Purpose: Prove the pure planner assigns every path exactly once, preserves exact coverage across logical partitions, and rejects duplicate or missing inventory entries.
+    It 'UnitT16_plans_dynamic_inventory_with_exact_four_partition_coverage' {
+        $plannerScript = Get-PesterExecutorFunction -Name 'New-PesterShardPlan'
+        . $plannerScript
 
-        $standardsJobsMatch = [regex]::Match($standards, '(?ms)^jobs:\r?\n(?<block>.*)\z')
-        Assert-True $standardsJobsMatch.Success 'Standards Conformance must define its workflow jobs block.'
-        $standardsJobs = $standardsJobsMatch.Groups['block'].Value
-        $standardsJobIds = [regex]::Matches($standardsJobs, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
-        Assert-Equal $standardsJobIds.Count 3 'Standards Conformance must isolate focused tests, authority validation, and the required summary into three jobs.'
-        $standardsJobNames = @($standardsJobIds | ForEach-Object { $_.Groups[1].Value })
-        foreach ($jobName in @('linux-callback-focused', 'authority-gate', 'latest-stable-authority-regression')) {
-            Assert-True ($standardsJobNames -contains $jobName) "Standards Conformance must define the '$jobName' job boundary."
+        $isolatedNames = @('standard-validation-runner.Tests.ps1', 'syp101-production-smoke-contract.Tests.ps1')
+        $newBindingTest = Join-Path 'inventory-root' 'standard-entry-point-binding.Tests.ps1'
+        $allTestPaths = @(
+            (Join-Path 'inventory-root' 'standard-validation-runner.Tests.ps1')
+            (Join-Path 'inventory-root' 'syp101-production-smoke-contract.Tests.ps1')
+            (Join-Path 'inventory-root' 'bulk-alpha.Tests.ps1')
+            (Join-Path 'inventory-root' 'bulk-omega.Tests.ps1')
+            $newBindingTest
+        )
+        $plan = @(New-PesterShardPlan -AllTestPaths $allTestPaths -IsolatedTestFileNames $isolatedNames -BulkShardSize 1)
+        $plannedPaths = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($shard in $plan) { foreach ($path in @($shard.Paths)) { $plannedPaths.Add([string]$path) } }
+        Assert-Equal $plannedPaths.Count $allTestPaths.Count 'The isolated and bulk plan must include each discovered path.'
+        Assert-Equal @($plannedPaths.ToArray() | Select-Object -Unique).Count $allTestPaths.Count 'A path must appear in exactly one shard.'
+        Assert-Equal @($plannedPaths.ToArray() | Where-Object { $_ -ceq $newBindingTest }).Count 1 'The added binding test must be planned exactly once.'
+        [string[]]$plannedOrdinal = @($plannedPaths.ToArray())
+        [Array]::Sort($plannedOrdinal, [StringComparer]::Ordinal)
+        [string[]]$discoveredOrdinal = @($allTestPaths)
+        [Array]::Sort($discoveredOrdinal, [StringComparer]::Ordinal)
+        Assert-Equal ($plannedOrdinal -join '|') ($discoveredOrdinal -join '|') 'The planner union must equal complete discovery.'
+
+        $partitionedPaths = New-Object 'System.Collections.Generic.List[string]'
+        for ($partitionIndex = 0; $partitionIndex -lt 4; $partitionIndex++) {
+            for ($shardIndex = 0; $shardIndex -lt $plan.Count; $shardIndex++) {
+                if (($shardIndex % 4) -eq $partitionIndex) {
+                    foreach ($path in @($plan[$shardIndex].Paths)) { $partitionedPaths.Add([string]$path) }
+                }
+            }
         }
-        $focusedJobMatch = [regex]::Match($standards, '(?ms)^  linux-callback-focused:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $authorityJobMatch = [regex]::Match($standards, '(?ms)^  authority-gate:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $summaryJobMatch = [regex]::Match($standards, '(?ms)^  latest-stable-authority-regression:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        $compositionJobMatch = [regex]::Match($required, '(?ms)^  powershell-7-unix-composition:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        Assert-True $focusedJobMatch.Success 'Standards Conformance must define an isolated focused containment job.'
-        Assert-True $authorityJobMatch.Success 'Standards Conformance must define an independent canonical authority job.'
-        Assert-True $summaryJobMatch.Success 'Standards Conformance must preserve its required summary job.'
-        Assert-True $compositionJobMatch.Success 'PowerShell Regression must define an independent Linux composition job.'
-        $focusedJob = $focusedJobMatch.Groups['block'].Value
-        $authorityJob = $authorityJobMatch.Groups['block'].Value
-        $summaryJob = $summaryJobMatch.Groups['block'].Value
-        $compositionJob = $compositionJobMatch.Groups['block'].Value
-        $stackedProcMountInfoFixture = @'
-70 43 0:123 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
-80 70 0:123 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
-'@
-        $oldFirstProcMountId = [string](($stackedProcMountInfoFixture -split '\r?\n')[0] -split '\s+')[0]
-        $visibleProcMountFdInfoFixture = @'
-pos: 0
-flags: 0100000
-mnt_id: 80
-ino: 1
-'@
-        $visibleProcMountFdInfoFixture = $visibleProcMountFdInfoFixture -replace '\r?\n', "`r`n"
-        $visibleProcMountId = [regex]::Match($visibleProcMountFdInfoFixture, '(?m)^mnt_id:\s*(?<id>[0-9]+)\r?$').Groups['id'].Value
-        Assert-Equal $oldFirstProcMountId '70' 'The previous first-row mountinfo probe selects the underlying procfs in a stacked mount fixture.'
-        Assert-Equal $visibleProcMountId '80' 'fdinfo for a descriptor opened on /proc/mountinfo identifies the visible top procfs mount in a stacked fixture.'
-        Assert-False ($oldFirstProcMountId -eq $visibleProcMountId) 'The stacked procfs fixture must distinguish the old first-entry probe from the visible-mount probe.'
-        foreach ($job in @(@{ Name = 'focused'; Block = $focusedJob }, @{ Name = 'authority'; Block = $authorityJob })) {
-            Assert-Equal ([regex]::Matches($job.Block, '(?m)^\s+uses:\s*actions/checkout@[0-9a-f]{40}\b')).Count 1 "The $($job.Name) job must perform its own pinned checkout."
-            Assert-Match $job.Block 'persist-credentials:\s*false' "The $($job.Name) job checkout must not persist Git credentials."
-        }
-        Assert-NotMatch $summaryJob 'actions/checkout@' 'The required summary job must not check out or inspect mutable source files.'
-        Assert-NotMatch $standards 'upload-artifact|download-artifact|artifact:' 'Standards Conformance must not transfer workspace state between jobs.'
-        Assert-Match $standards '(?m)^permissions:\s*\r?\n\s+contents:\s*read\s*$' 'Standards Conformance must retain read-only repository permissions.'
-        Assert-NotMatch $focusedJob '(?m)^\s+needs:' 'The focused job must be independently runnable.'
-        Assert-Match $focusedJob 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu' 'The focused job must configure hosted Linux namespace support.'
-        Assert-Match $focusedJob 'Probe Linux PID namespace containment capability' 'The focused job must retain the exact namespace capability preflight.'
-        Assert-Match $focusedJob '& ./scripts/Invoke-FocusedLinuxContainment\.ps1' 'Only the focused job must run the tagged containment helper.'
-        Assert-NotMatch $focusedJob 'Invoke-StandardAuthorityGate\.ps1|Run canonical Standard v1 authority gate|setup-go@' 'The focused job must not run the authority gate or its Go runtime setup.'
-        Assert-Match $authorityJob 'Set up approved Go runtime' 'The authority job must set up the approved Go runtime after its fresh checkout.'
-        Assert-Match $authorityJob 'Run canonical Standard v1 authority gate' 'The authority job must execute the canonical authority gate.'
-        Assert-Match $authorityJob 'Check whitespace in the event range' 'The authority job must retain the event-range whitespace check.'
-        Assert-NotMatch $authorityJob 'Invoke-FocusedLinuxContainment\.ps1' 'The authority job must not run PR-controlled focused tests in its fresh authority checkout.'
-        Assert-Match $authorityJob '(?m)^\s+needs:\s*linux-callback-focused\s*$' 'The authority job must wait for the focused job while using its own runner and checkout.'
-        foreach ($job in @(
-            @{ Name = 'authority'; Block = $authorityJob; Suite = 'Run canonical Standard v1 authority gate' },
-            @{ Name = 'composition'; Block = $compositionJob; Suite = 'Run required Standard v1 authority gate' }
-        )) {
-            $setupMarker = 'Enable unprivileged user namespaces on GitHub-hosted Ubuntu'
-            $probeMarker = 'Probe Linux PID namespace containment capability'
-            $setupIndex = $job.Block.IndexOf($setupMarker)
-            $probeIndex = $job.Block.IndexOf($probeMarker)
-            $checkoutIndex = $job.Block.IndexOf('name: Checkout')
-            $suiteIndex = $job.Block.IndexOf($job.Suite)
-            Assert-True ($setupIndex -ge 0) "The fresh $($job.Name) Linux runner must configure user namespaces locally."
-            Assert-True ($probeIndex -gt $setupIndex) "The fresh $($job.Name) Linux runner must probe after its local namespace setup."
-            Assert-True ($checkoutIndex -gt $probeIndex) "The $($job.Name) namespace preflight must run before checkout and before any PR-controlled repository code."
-            Assert-True ($suiteIndex -gt $checkoutIndex) "The $($job.Name) complete suite must run only after its own runner preflight and checkout."
-            $preCheckout = $job.Block.Substring(0, $checkoutIndex)
-            Assert-NotMatch $preCheckout '\./scripts/|Invoke-StandardAuthorityGate\.ps1|Invoke-Pester|tests/' "The $($job.Name) preflight must not execute PR-controlled repository code before checkout."
-            Assert-Match $job.Block 'RUNNER_ENVIRONMENT.*github-hosted' "The $($job.Name) user namespace setup must be restricted to hosted runners."
-            Assert-Match $job.Block 'kernel\.apparmor_restrict_unprivileged_userns' "The $($job.Name) setup must inspect and verify the AppArmor user namespace gate."
-            Assert-Match $job.Block 'sudo -n sysctl -w "\$apparmor_key=0"' "The $($job.Name) setup may clear the AppArmor gate only with non-interactive sudo."
-            Assert-Match $job.Block 'apparmor_after="\$\(sysctl -n "\$apparmor_key"\)"' "The $($job.Name) setup must reread the AppArmor gate after a conditional change."
-            Assert-Match $job.Block 'kernel\.unprivileged_userns_clone' "The $($job.Name) setup must inspect and verify userns_clone when available."
-            Assert-Match $job.Block 'sudo -n sysctl -w "\$userns_clone_key=1"' "The $($job.Name) setup may enable userns_clone only with non-interactive sudo."
-            Assert-Match $job.Block 'userns_clone_after="\$\(sysctl -n "\$userns_clone_key"\)"' "The $($job.Name) setup must reread userns_clone after a conditional change."
-            Assert-Match $job.Block 'exact probe arguments: --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc' "The $($job.Name) runner must probe the reviewed PID namespace and private procfs arguments."
-            Assert-Match $job.Block 'exact probe command: \$unshare_path --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc -- sh -c' "The $($job.Name) runner must log the exact command used for its PID namespace and private procfs probe."
-            Assert-Match $job.Block '\$probe_command' "The $($job.Name) probe log must identify the actual child command text."
-            Assert-Match $job.Block 'parent procfs mount ID' "The $($job.Name) probe must record the parent's procfs mount identity."
-            Assert-Match $job.Block 'private procfs mount ID' "The $($job.Name) probe must record the child's procfs mount identity."
-            Assert-Match $job.Block 'probe_proc_mount_id.*parent_proc_mount_id' "The $($job.Name) probe must reject a child that did not mount a private procfs."
-            Assert-Match $job.Block 'parent_proc_mount_id="\$\(awk .*mnt_id:.*fdinfo/9\)"' "The $($job.Name) probe must get the parent mount ID from its opened visible procfs descriptor."
-            Assert-Match $job.Block 'probe_command=.*fdinfo/9' "The $($job.Name) probe must get the child mount ID from its opened visible procfs descriptor."
-            Assert-Match $job.Block '/proc/self/fdinfo/9' "The $($job.Name) probe must resolve the visible procfs mount from its opened mountinfo descriptor."
-            Assert-NotMatch $job.Block 'awk .*\$5 == "/proc".*print \$1' "The $($job.Name) probe must not select the first stacked /proc row."
-            Assert-Match $job.Block 'namespace probe stderr' "The $($job.Name) probe must retain stderr when namespace creation fails."
-            Assert-Match $job.Block 'namespace probe exit' "The $($job.Name) probe must record its exit status."
-            Assert-Match $job.Block 'namespace probe result' "The $($job.Name) probe must record its child PID namespace identity."
-        }
-        Assert-Match $compositionJob '(?m)^\s+needs:\s*linux-callback-focused\s*$' 'The Linux composition job must preserve its focused-job dependency and run on a fresh, separately provisioned runner.'
-        Assert-Match $summaryJob '(?m)^\s+name:\s*Standard v1 \(latest stable tooling\)\s*$' 'The required status job must keep its established display name.'
-        Assert-Match $summaryJob '(?m)^\s+needs:\s*\r?\n\s+- linux-callback-focused\s*\r?\n\s+- authority-gate\s*$' 'The required status job must wait for both independent jobs.'
-        Assert-Match $summaryJob '(?m)^\s+if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$' 'The required status job must run even when a dependency fails or is skipped.'
-        Assert-Match $summaryJob 'FOCUSED_RESULT:\s*\$\{\{\s*needs\.linux-callback-focused\.result\s*\}\}' 'The summary must bind the focused job result.'
-        Assert-Match $summaryJob 'AUTHORITY_RESULT:\s*\$\{\{\s*needs\.authority-gate\.result\s*\}\}' 'The summary must bind the authority job result.'
-        Assert-Match $summaryJob '\$env:FOCUSED_RESULT\s*-ne\s*''success''' 'The summary must fail unless the focused job result is success, including skipped or cancelled.'
-        Assert-Match $summaryJob '\$env:AUTHORITY_RESULT\s*-ne\s*''success''' 'The summary must fail unless the authority job result is success, including skipped or cancelled.'
-        Assert-Match $summaryJob '(?i)(throw|exit\s+1)' 'The summary must return a failing status when either dependency is not successful.'
+        Assert-Equal $partitionedPaths.Count $allTestPaths.Count 'The four partitions must retain the complete file inventory.'
+        Assert-Equal @($partitionedPaths.ToArray() | Select-Object -Unique).Count $allTestPaths.Count 'The four partitions must assign each discovered file exactly once.'
+        [string[]]$partitionedOrdinal = @($partitionedPaths.ToArray())
+        [Array]::Sort($partitionedOrdinal, [StringComparer]::Ordinal)
+        Assert-Equal ($partitionedOrdinal -join '|') ($discoveredOrdinal -join '|') 'The four-partition union must equal complete discovery.'
+        Assert-Equal @($partitionedPaths.ToArray() | Where-Object { $_ -ceq $newBindingTest }).Count 1 'The added binding test must appear in exactly one runtime partition.'
 
-        Assert-Match $required 'powershell-7-unix-composition:[\s\S]*?needs:\s*[^\r\n]*linux-callback-focused' 'The Linux composition job must depend on the dedicated focused job.'
-
-        # Scenario: An offline bridge API changes while only Pester files are discovered by the shared gate.
-        # Purpose: Run every routine Python fixture with a fixed count before admitting this engineering regression job.
-        $routineMatch = [regex]::Match($required, '(?ms)^  routine-semantic-offline:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)')
-        Assert-True $routineMatch.Success 'PR59 must execute its offline Python regression in CI.'
-        $routineJob = $routineMatch.Groups['block'].Value
-        Assert-Match $routineJob 'needs:\s*linux-callback-focused' 'The offline regression must retain the focused prerequisite.'
-        Assert-Match $routineJob 'runs-on:\s*windows-latest' 'The offline regression must exercise its existing Windows PowerShell entrypoints.'
-        Assert-Match $routineJob 'timeout-minutes:\s*10' 'The offline fixture job must have a fixed overall budget.'
-        Assert-Match $routineJob 'persist-credentials:\s*false' 'The offline fixture checkout must not persist a Git token.'
-        Assert-Match $routineJob 'sys\.version_info\s*>=\s*\(3,\s*10\)' 'The offline runner must check its minimum supported Python version.'
-        Assert-Match $routineJob 'test_routine_semantic_\*\.py' 'The offline runner must discover every existing routine fixture module.'
-        Assert-Match $routineJob 'assertEqual\(suite\.countTestCases\(\),\s*61' 'The offline runner must reject missing or unexpected tests.'
-        Assert-Match $routineJob 'len\(result\.skipped\)\s*==\s*0' 'The offline runner must reject skipped fixtures.'
-        Assert-NotMatch $routineJob 'Install-Module|pip install|Invoke-WebRequest|workflow_dispatch' 'The offline job must use its existing runtime without provider or tool acquisition.'
-
-        $focusedStepIndex = $standards.IndexOf('Run required Unix callback containment boundary')
-        $goSetupIndex = $standards.IndexOf('Set up approved Go runtime')
-        $authorityGateIndex = $standards.IndexOf('Run canonical Standard v1 authority gate')
-        Assert-True ($focusedStepIndex -ge 0) 'Standards Conformance must define the Linux focused boundary step.'
-        Assert-True ($goSetupIndex -ge 0) 'Standards Conformance must retain approved Go setup.'
-        Assert-True ($authorityGateIndex -ge 0) 'Standards Conformance must retain the canonical authority gate.'
-        Assert-True ($focusedStepIndex -lt $goSetupIndex) 'Standards Conformance must run Linux focused cases before Go setup.'
-        Assert-True ($focusedStepIndex -lt $authorityGateIndex) 'Standards Conformance must run Linux focused cases before the authority gate.'
+        $duplicatePaths = @($allTestPaths) + @($allTestPaths[2])
+        Assert-Throws { New-PesterShardPlan -AllTestPaths $duplicatePaths -IsolatedTestFileNames $isolatedNames -BulkShardSize 1 } 'The planner must reject a duplicate discovered path.'
+        $missingIsolatedPaths = @($allTestPaths | Where-Object { (Split-Path -Leaf $_) -cne $isolatedNames[1] })
+        Assert-Throws { New-PesterShardPlan -AllTestPaths $missingIsolatedPaths -IsolatedTestFileNames $isolatedNames -BulkShardSize 1 } 'The planner must reject a missing isolated test file.'
     }
 
-    # Scenario: An authority suite or the Ruleset-required bridge changes without running the complete shared gate.
-    # Purpose: Keep both workflow evidence surfaces bound to one gate and all authority regressions.
-    It 'UnitT20_runs_dedicated_authority_CI_for_every_authority_file_and_bridge_change' {
-        $standardsPath = Join-Path $script:RepositoryRoot '.github\workflows\standards-conformance.yml'
-        $requiredPath = Join-Path $script:RepositoryRoot '.github\workflows\pr8-powershell-validation.yml'
-        $gatePath = Join-Path $script:RepositoryRoot 'scripts\Invoke-StandardAuthorityGate.ps1'
-        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
-        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
-        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
+    # Scenario: Pester returns shard and aggregate summaries that may be empty, malformed, failed, pending, or skipped.
+    # Purpose: Accept truthful typed counts including platform skips, while refusing empty or incomplete results and a fully skipped aggregate.
+    It 'UnitT17_rejects_empty_or_untruthful_summary_counts' {
+        $assertCountsScript = Get-PesterExecutorFunction -Name 'Assert-PesterShardResultCounts'
+        . $assertCountsScript
 
-        foreach ($workflow in @($standards, $required)) {
-            Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal' 'An unapproved proposal must not route a required source check.'
-            Assert-NotMatch $workflow 'sourceMergeDecision|pr12-source-merge-adoption' 'The central regression workflows cannot publish General source checks from their own jobs.'
+        $validSummary = [pscustomobject][ordered]@{
+            TotalCount = [int]3
+            PassedCount = [int]2
+            FailedCount = [int]0
+            SkippedCount = [int]1
+            PendingCount = [int]0
+            InconclusiveCount = [int]0
+        }
+        Assert-PesterShardResultCounts -Summary $validSummary -Context 'shard'
+        $allSkippedSummary = [pscustomobject][ordered]@{
+            TotalCount = [int]2
+            PassedCount = [int]0
+            FailedCount = [int]0
+            SkippedCount = [int]2
+            PendingCount = [int]0
+            InconclusiveCount = [int]0
+        }
+        Assert-PesterShardResultCounts -Summary $allSkippedSummary -Context 'shard'
+        Assert-Throws { Assert-PesterShardResultCounts -Summary $allSkippedSummary -Context 'aggregate' } 'An aggregate with no passed tests must be rejected.'
+
+        $zeroSummary = [pscustomobject]@{ TotalCount = 0; PassedCount = 0; FailedCount = 0; SkippedCount = 0; PendingCount = 0; InconclusiveCount = 0 }
+        Assert-Throws { Assert-PesterShardResultCounts -Summary $zeroSummary -Context 'shard' } 'A zero-test result must be rejected.'
+        $stringSummary = [pscustomobject]@{ TotalCount = '1'; PassedCount = 1; FailedCount = 0; SkippedCount = 0; PendingCount = 0; InconclusiveCount = 0 }
+        Assert-Throws { Assert-PesterShardResultCounts -Summary $stringSummary -Context 'shard' } 'A string count must be rejected.'
+        $negativeSummary = [pscustomobject]@{ TotalCount = 1; PassedCount = 2; FailedCount = 0; SkippedCount = -1; PendingCount = 0; InconclusiveCount = 0 }
+        Assert-Throws { Assert-PesterShardResultCounts -Summary $negativeSummary -Context 'shard' } 'A negative result count must be rejected.'
+        foreach ($field in @('FailedCount', 'PendingCount', 'InconclusiveCount')) {
+            $badSummary = [ordered]@{ TotalCount = 1; PassedCount = 1; FailedCount = 0; SkippedCount = 0; PendingCount = 0; InconclusiveCount = 0 }
+            $badSummary[$field] = [int]1
+            Assert-Throws { Assert-PesterShardResultCounts -Summary ([pscustomobject]$badSummary) -Context 'shard' } "A nonzero $field must be rejected."
+        }
+        $incompleteSummary = [pscustomobject]@{ TotalCount = 2; PassedCount = 1; FailedCount = 0; SkippedCount = 0; PendingCount = 0; InconclusiveCount = 0 }
+        Assert-Throws { Assert-PesterShardResultCounts -Summary $incompleteSummary -Context 'shard' } 'Counts that do not cover total results must be rejected.'
+    }
+
+    # Scenario: Multiple workflows can silently add normal pull-request CI, duplicate the authority gate, or reuse an outdated platform lane.
+    # Purpose: Keep exactly Core and Install Smoke automatic while retaining Windows-only manual and push diagnostics.
+    It 'UnitT20_keeps_two_Windows_PR_jobs_and_single_authority_gate' {
+        $paths = [ordered]@{
+            Core = '.github/workflows/pr8-powershell-validation.yml'
+            Standards = '.github/workflows/standards-conformance.yml'
+            Smoke = '.github/workflows/syp101-production-smoke.yml'
+            Lock = '.github/workflows/syp86-production-lock.yml'
+            Maintenance = '.github/workflows/validator-maintenance-producer.yml'
+        }
+        $workflows = [ordered]@{}
+        foreach ($entry in $paths.GetEnumerator()) {
+            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot $entry.Value)
+            $workflows[$entry.Key] = $workflow
+            Assert-Match $workflow 'permissions:\s*contents:\s*read' "$($entry.Key) workflow must use read-only repository permissions."
+            Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal|sourceMergeDecision|pr12-source-merge-adoption' "$($entry.Key) workflow must not route or publish unrelated source-adoption contexts."
+            Assert-NotMatch $workflow 'actions/setup-go|STANDARD_GO_RUNTIME_VERSION|STANDARD_GO_COMMAND_PATH|GITHUB_TOKEN' "$($entry.Key) workflow must not restore retired external resolver dependencies."
         }
 
-        foreach ($workflow in @($standards, $required)) {
-            $setupPattern = "actions/setup-go@$($script:SetupGoSha)\s+# v7\.0\.0"
-            Assert-Equal ([regex]::Matches($workflow, $setupPattern)).Count 1 'Each authority workflow must use the reviewed immutable setup-go v7.0.0 commit exactly once.'
-            Assert-Match $workflow "go-version:\s*'stable'" 'Each authority workflow must provision the latest stable Go runtime.'
-            Assert-Match $workflow 'check-latest:\s*true' 'Authority Go setup must check for the latest stable runtime.'
-            Assert-NotMatch $workflow "go-version:\s*'[0-9]+\.[0-9]+\.[0-9]+'" 'Authority workflows must not pin a Go patch version.'
-            Assert-Match $workflow 'cache:\s*false' 'Authority Go setup must not restore a cross-run module or build cache.'
-            Assert-NotMatch $workflow 'actions/setup-go@v[0-9]+' 'Authority workflows must not use a mutable setup-go tag.'
-            Assert-Match $workflow 'STANDARD_GO_RUNTIME_VERSION=\$\(\$Matches\.version\)' 'Authority workflows must capture the exact Go runtime resolved by setup-go.'
-            Assert-Match $workflow '& ./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'Authority workflows must pass the setup-go resolved runtime into the shared gate.'
-            Assert-True ($workflow.IndexOf('actions/setup-go@') -lt $workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=')) 'The approved Go runtime must be provisioned before its version is captured.'
-            Assert-True ($workflow.IndexOf('STANDARD_GO_RUNTIME_VERSION=') -lt $workflow.IndexOf('& ./scripts/Invoke-StandardAuthorityGate.ps1')) 'The resolved Go runtime must be captured before the authority gate starts.'
+        $coreEvents = [regex]::Match($workflows.Core, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        $smokeEvents = [regex]::Match($workflows.Smoke, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        $standardsEvents = [regex]::Match($workflows.Standards, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        $lockEvents = [regex]::Match($workflows.Lock, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        $maintenanceEvents = [regex]::Match($workflows.Maintenance, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        foreach ($pair in @(@{ Name='Core'; Events=$coreEvents }, @{ Name='Smoke'; Events=$smokeEvents })) {
+            $pullRequest = [regex]::Match($pair.Events, '(?ms)^  pull_request:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
+            $push = [regex]::Match($pair.Events, '(?ms)^  push:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
+            Assert-True $pullRequest.Success "$($pair.Name) must run on ordinary pull requests."
+            Assert-True $push.Success "$($pair.Name) must run on its configured push branches."
+            Assert-Match $pullRequest.Groups['block'].Value '(?m)^\s*branches:\s*$' "$($pair.Name) pull requests must remain branch scoped."
+            Assert-Match $pullRequest.Groups['block'].Value '(?m)^\s*-\s*main\s*$' "$($pair.Name) must cover main pull requests."
+            Assert-NotMatch $pullRequest.Groups['block'].Value '(?m)^\s+paths(-ignore)?:\s*$' "$($pair.Name) must not filter the ordinary PR check."
+            Assert-Match $workflows[$pair.Name] 'runs-on:\s*windows-latest' "$($pair.Name) must use Windows."
         }
+        foreach ($entry in @(@{ Name='Standards'; Events=$standardsEvents }, @{ Name='Maintenance'; Events=$maintenanceEvents })) {
+            $triggers = [regex]::Matches($entry.Events, '(?m)^  ([a-z_]+):\s*$')
+            Assert-Equal $triggers.Count 1 "$($entry.Name) diagnostic must have exactly one manual trigger."
+            Assert-Equal $triggers[0].Groups[1].Value 'workflow_dispatch' "$($entry.Name) diagnostic must be manual and outside ordinary PR CI."
+        }
+        $lockTriggers = [regex]::Matches($lockEvents, '(?m)^  ([a-z_]+):\s*$')
+        $expectedLockTriggers = @('push', 'workflow_dispatch')
+        Assert-Equal $lockTriggers.Count $expectedLockTriggers.Count 'SYP86 lock diagnostic must retain a push filter and manual trigger.'
+        Assert-Equal (($lockTriggers | ForEach-Object { $_.Groups[1].Value } | Sort-Object) -join '|') (($expectedLockTriggers | Sort-Object) -join '|') 'SYP86 lock diagnostic may run only on path-filtered push or manual dispatch.'
+        Assert-Match $lockEvents '(?ms)^  push:\r?\n.*?^    paths:\s*$' 'SYP86 lock diagnostics may remain path-filtered on push.'
+        Assert-NotMatch $workflows.Lock '(?m)^  pull_request:\s*$' 'SYP86 lock must not add an ordinary PR job.'
+        Assert-NotMatch $workflows.Maintenance '(?m)^  (pull_request|workflow_run|push|schedule):\s*$' 'Validator maintenance must remain an explicit manual diagnostic producer.'
 
-        foreach ($workflowName in $script:AuthorityWorkflowDependencies) {
-            $pattern = "'\.github/workflows/{0}'" -f [regex]::Escape($workflowName)
-            Assert-Equal ([regex]::Matches($standards, $pattern)).Count 2 "Push and pull-request path filters must both include authority workflow '$workflowName'."
-        }
-        Assert-Equal ([regex]::Matches($standards, "'scripts/Invoke-FocusedLinuxContainment\.ps1'")).Count 2 'Push and pull-request path filters must both include the focused Linux containment helper.'
-        Assert-Equal ([regex]::Matches($standards, 'Invoke-StandardAuthorityGate\.ps1')).Count 3 'Dedicated CI must watch and invoke the shared authority gate.'
-        Assert-Equal ([regex]::Matches($required, 'Invoke-StandardAuthorityGate\.ps1')).Count 1 'Required Composition CI must invoke the shared authority gate.'
+        Assert-Equal ([regex]::Matches($workflows.Standards, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Manual Standards diagnostics must retain one real authority gate.'
+        Assert-Equal ([regex]::Matches($workflows.Core, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must invoke the authority gate exactly once.'
+        Assert-Equal ([regex]::Matches($workflows.Smoke, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 0 'Install Smoke must not duplicate the authority gate.'
+        Assert-Equal ([regex]::Matches($workflows.Lock, 'update-skills-catalog-lock\.ps1 -Check')).Count 1 'The path-filtered SYP86 diagnostic must validate the lock once.'
+        Assert-Equal ([regex]::Matches($workflows.Smoke, 'update-skills-catalog-lock\.ps1 -Check')).Count 1 'Install Smoke must absorb the production lock check once.'
+        Assert-Equal ([regex]::Matches($workflows.Smoke, 'test-syp101-production-smoke\.ps1')).Count 1 'Install Smoke must retain the pinned-archive installation and idempotence test once.'
+        Assert-Match $workflows.Core 'Run the Standard v1 authority gate' 'Windows Core must execute the true authority gate.'
+        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
         foreach ($testName in $script:AuthorityTests) {
-            Assert-Equal ([regex]::Matches($standards, [regex]::Escape($testName))).Count 2 "Dedicated authority workflow must watch '$testName' for push and pull request events."
-            Assert-Equal ([regex]::Matches($gate, [regex]::Escape($testName))).Count 1 "Shared authority gate must execute '$testName'."
+            Assert-Equal ([regex]::Matches($gate, [regex]::Escape($testName))).Count 1 "Shared authority gate must execute '$testName' exactly once."
         }
-        Assert-Match $gate 'ExpectedGoRuntimeVersion = \$env:STANDARD_GO_RUNTIME_VERSION' 'The shared authority gate must require the setup-go resolved runtime when invoked directly.'
-        Assert-Match $gate '-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion' 'The shared authority gate must pass the resolved runtime into the resolver.'
-        Assert-Match $gate '-GoCommandPath \$goCommandPath' 'The shared authority gate must pass the run-resolved Go executable path into the resolver.'
-        Assert-Match $gate 'skill-validator receipt Go runtime.*does not match the setup-go run-resolved latest stable runtime' 'The shared authority gate must bind the resolver receipt to setup-go evidence.'
+        $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
+        Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|tenStageCompletionClaim' 'Normal authority gate must not require retired external dependencies.'
+        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'Normal authority gate must execute the exact retained Pester paths.'
+        Assert-Match $normalMain 'Get-AuthorityEntryPreflight @bindingParameters' 'Normal authority gate must rebind actual source hashes after execution.'
     }
 
-    # Scenario: A main push or pull request is checked against a fixed branch range that can be empty or incomplete.
-    # Purpose: Make whitespace validation cover the actual event range, including a repository's root commit.
-    It 'UnitT30_checks_the_actual_event_commit_range_instead_of_an_empty_main_range' {
+    # Scenario: A pull request, push, or manual diagnostic is checked against an empty or unrelated revision range.
+    # Purpose: Bind automatic whitespace checks to the event range and manual checks to the selected commit.
+    It 'UnitT30_checks_the_actual_event_commit_range_and_manual_commit' {
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
-        foreach ($path in @($standardsPath, $requiredPath)) {
-            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $path
-            Assert-Match $workflow 'PULL_REQUEST_BASE_SHA' "Workflow '$path' must bind the pull-request base SHA."
-            Assert-Match $workflow 'PUSH_BEFORE_SHA' "Workflow '$path' must bind the pre-push SHA."
-            Assert-Match $workflow 'GITHUB_EVENT_NAME' "Workflow '$path' must select the commit range by event type."
-            Assert-Match $workflow 'git diff --check "\$PULL_REQUEST_BASE_SHA\.\.\.HEAD"' "Workflow '$path' must check the pull-request merge-base range."
-            Assert-Match $workflow 'git diff --check "\$PUSH_BEFORE_SHA\.\.HEAD"' "Workflow '$path' must check the exact push range."
-            Assert-Match $workflow 'git diff-tree --check --root -r HEAD' "Workflow '$path' must support a root-commit fallback."
-            Assert-NotMatch $workflow 'git diff --check origin/main\.\.\.HEAD' "Workflow '$path' must not use a range that becomes empty on a main-branch push."
-        }
+        $standards = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardsPath
+        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
+        Assert-Match $required 'PULL_REQUEST_BASE_SHA:\s*\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\}\}' 'Core must bind the pull-request base SHA.'
+        Assert-Match $required 'PUSH_BEFORE_SHA:\s*\$\{\{\s*github\.event\.before\s*\}\}' 'Core must bind the pre-push SHA.'
+        Assert-Match $required 'GITHUB_EVENT_NAME' 'Core must select the commit range by event type.'
+        Assert-Match $required 'git diff --check "\$env:PULL_REQUEST_BASE_SHA\.\.\.HEAD"' 'Core must check the pull-request merge-base range.'
+        Assert-Match $required 'git diff --check "\$env:PUSH_BEFORE_SHA\.\.HEAD"' 'Core must check the exact push range.'
+        Assert-Match $required 'git diff-tree --check --root -r HEAD' 'Core must support a root-commit fallback.'
+        Assert-NotMatch $required 'git diff --check origin/main\.\.\.HEAD' 'Core must not use a range that becomes empty on a main-branch push.'
+        Assert-Match $standards 'git diff --check ''HEAD\^\.\.HEAD''' 'Manual Standards diagnostics must check the selected commit against its parent.'
+        Assert-Match $standards 'git diff-tree --check --root -r HEAD' 'Manual Standards diagnostics must support a root commit.'
+        Assert-NotMatch $standards '(?m)^\s*(PULL_REQUEST_BASE_SHA|PUSH_BEFORE_SHA):' 'Manual Standards diagnostics must not depend on pull-request or push event payloads.'
     }
 
-    # Scenario: The managed lifecycle contract changes without reaching the required authority workflow or its regression gate.
-    # Purpose: Keep SYP-194 lifecycle semantics on the same central Standard CI path as every other authority change.
+    # Scenario: The managed lifecycle contract changes while the manual diagnostic is the only workflow naming its files.
+    # Purpose: Keep SYP-194 lifecycle semantics inside the required main Composition authority execution.
     It 'UnitT40_routes_managed_lifecycle_changes_through_the_central_authority_gate' {
         $standardsPath = Join-Path $script:RepositoryRoot 'docs/standards/managed-skill-lifecycle.md'
         $schemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/managed-skill-lifecycle-v1.schema.json'
@@ -497,16 +390,16 @@ ino: 1
         $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
 
-        Assert-Match $standardWorkflow "'docs/standards/\*\*'" 'Dedicated authority workflow must watch the complete central standards directory.'
-        foreach ($workflow in @($standardWorkflow, $requiredWorkflow)) {
-            Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared authority gate.'
-        }
+        Assert-Match $standardWorkflow '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance remains available for manual authority diagnosis.'
+        Assert-NotMatch $standardWorkflow '(?m)^  (push|pull_request):\s*$' 'Standards Conformance must not duplicate ordinary automatic authority execution.'
+        Assert-Match $requiredWorkflow 'Run the Standard v1 authority gate' 'Windows Core must execute the authority gate for managed lifecycle changes.'
+        Assert-NotMatch $requiredWorkflow '(?ms)^on:.*?^  paths(-ignore)?:\s*$' 'Windows Core must run without automatic event path filters.'
         Assert-Match $standardTests 'UnitT70_binds_managed_lifecycle_to_the_central_standard_authority' 'The workflow gate must execute lifecycle-specific authority regression.'
     }
 
-    # Scenario: An upstream interoperability decision changes without reaching the required authority workflow or regression gate.
-    # Purpose: Keep SYP-193 Plugin/Agent Skills boundary changes under the same central Standard CI semantics.
-    It 'UnitT50_routes_upstream_interoperability_changes_through_the_central_authority_gate' {
+    # Scenario: Upstream adapter changes remain visible to source-contract regressions after the optional package validator leaves the ordinary gate.
+    # Purpose: Preserve source and workflow coverage without restoring external tool execution to the authority gate.
+    It 'UnitT50_keeps_upstream_interoperability_source_regressions_in_authority_ci' {
         $upstreamPath = Join-Path $script:RepositoryRoot 'docs/standards/upstream-interoperability.md'
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
         $requiredPath = Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'
@@ -525,11 +418,17 @@ ino: 1
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
-        Assert-Match $standards "'docs/standards/\*\*'" 'Dedicated authority workflow must watch the upstream interoperability record.'
-        foreach ($workflow in @($standards, $required)) {
-            Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Every authority workflow must execute the shared gate for upstream changes.'
-            Assert-Match $workflow 'scripts/Validate-UpstreamAdapter\.ps1' 'Every authority workflow must trigger when the upstream adapter validator changes.'
+        Assert-Match $standards '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance remains an explicit manual diagnostic.'
+        Assert-NotMatch $standards '(?m)^  (push|pull_request):\s*$' 'Standards Conformance must not rerun automatically for the same event.'
+        Assert-Match $required 'Run the Standard v1 authority gate' 'Windows Core must execute the shared gate for upstream changes.'
+        foreach ($sourceTestName in @('skills-source-composition.Tests.ps1', 'skills-source-acquisition.Tests.ps1')) {
+            $sourceTestPath = Join-Path $script:RepositoryRoot "tests/$sourceTestName"
+            Assert-True (Test-Path -LiteralPath $sourceTestPath -PathType Leaf) "Core source regression '$sourceTestName' must remain present."
+            Assert-False ($script:AuthorityTests -contains $sourceTestName) "Core source regression '$sourceTestName' must run in the complete non-authority difference rather than be duplicated by the shared authority gate."
         }
+        Assert-Match $required 'Get-ChildItem -LiteralPath \$testRoot -Filter ''\*\.Tests\.ps1'' -File -Recurse' 'Windows Core must discover every retained Pester test file once.'
+        Assert-Match $required '\$authorityFullPaths -notcontains \$_.FullName' 'Windows Core must exclude only the exact shared authority test paths from its full discovery.'
+        Assert-NotMatch $required '(?ms)^on:.*?^  paths(-ignore)?:\s*$' 'Windows Core must cover ordinary events without path filtering.'
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
         Assert-Match $standardTests 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' 'The workflow gate must execute the executable adapter regression.'
         foreach ($caseId in @(
@@ -555,13 +454,14 @@ ino: 1
             Assert-Match $standardTests ([regex]::Escape($caseId)) "The upstream authority regression must retain negative case '$caseId'."
         }
         Assert-Match $upstream 'SYP-192 Gate 1' 'The upstream decision must bind Plugin conformance to Gate 1.'
-        Assert-Match $gate 'Validate-UpstreamAdapter\.ps1' 'The authority gate must execute the upstream adapter validator.'
-        Assert-Match $gate 'upstream-adapter\.json' 'The authority gate must load the upstream adapter policy.'
+        $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
+        Assert-Match $normalMain 'tests/skill-repository-standard\.Tests\.ps1' 'The ordinary authority gate must retain upstream interoperability source regressions.'
+        Assert-NotMatch $normalMain 'Validate-UpstreamAdapter\.ps1|upstream-adapter\.json' 'The ordinary authority gate must not invoke the external adapter validator or load its policy.'
     }
 
-    # Scenario: The canonical validation/security policy changes without reaching both authority workflows and its executable gate.
-    # Purpose: Keep SYP-192 stage order and fail-closed semantics under the same merge-blocking authority path.
-    It 'UnitT60_routes_validation_security_gate_changes_through_the_central_authority_gate' {
+    # Scenario: The canonical validation/security policy changes while the ordinary gate remains source-focused.
+    # Purpose: Validate the policy as data and keep consumer-stage regressions distinct from ordinary gate execution.
+    It 'UnitT60_checks_validation_security_policy_without_restoring_external_gate_chain' {
         $policyPath = Join-Path $script:RepositoryRoot 'docs/standards/validation-security-gate.json'
         $schemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/validation-security-gate-v1.schema.json'
         $standardsPath = Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml'
@@ -575,48 +475,57 @@ ino: 1
         $required = Get-Content -Raw -Encoding UTF8 -LiteralPath $requiredPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $gatePath
         $standardTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardTestsPath
+        . $gatePath -DefineFunctionsOnly
 
-        Assert-Match $standards 'docs/standards/\*\*' 'Dedicated authority workflow must watch the central validation/security policy.'
-        Assert-Match $standards 'scripts/StandardSemanticBridge\.psm1' 'Dedicated authority workflow must watch the semantic bridge implementation.'
-        Assert-Match $standards 'tests/standard-semantic-bridge\.Tests\.ps1' 'Dedicated authority workflow must watch the semantic bridge behavior suite.'
-        foreach ($workflow in @($standards, $required)) {
-            Assert-Match $workflow 'Invoke-StandardAuthorityGate\.ps1' 'Authority workflows must execute the shared gate for validation/security changes.'
-        }
-        Assert-Match $gate 'validation-security-gate\.json' 'Shared authority gate must load the canonical validation/security policy.'
-        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Shared authority gate must enforce the canonical validation/security policy.'
-        Assert-Match $gate 'semanticPreflight' 'Shared authority gate must enforce the semantic preflight policy.'
-        Assert-Match $gate 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Shared authority gate must enforce the semantic provider-input binding.'
-        Assert-Match $gate 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Shared authority gate must enforce the separate provider-text inventory binding.'
-        Assert-Match $gate 'standard-semantic-inventory-probe\.Tests\.ps1' 'Shared authority gate must execute semantic inventory behavior regressions.'
-        Assert-Match $gate 'standard-semantic-preflight\.Tests\.ps1' 'Shared authority gate must execute semantic preflight behavior regressions.'
-        Assert-Match $gate 'standard-semantic-raw-graph\.Tests\.ps1' 'Shared authority gate must execute raw-graph behavior regressions.'
-        Assert-Match $gate 'standard-semantic-bridge\.Tests\.ps1' 'Shared authority gate must execute semantic bridge behavior regressions.'
-        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared authority gate must supply the frozen SkillSpector Python to semantic behavior suites.'
-        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+        Assert-Match $standards '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance remains available as a manual authority diagnostic.'
+        Assert-NotMatch $standards '(?m)^  (push|pull_request):\s*$' 'Standards Conformance must not repeat the automatic required gate.'
+        Assert-Match $required 'Run the Standard v1 authority gate' 'Windows Core must execute the authority gate for policy and semantic contract changes.'
+        Assert-NotMatch $required '(?ms)^on:.*?^  paths(-ignore)?:\s*$' 'Required Composition must run on main events without path filtering.'
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $policyPath | ConvertFrom-Json
+        Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
+        $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
+        Assert-NotMatch $normalMain 'validation-security-gate\.json|Assert-AuthorityValidationSecurityGate|semanticPreflight|llm-input-equals-strict-utf8-decoding-of-verified-source-bytes|full-byte-manifest-plus-authenticated-provider-text-subset|standard-semantic-(inventory-probe|preflight|raw-graph)\.Advanced\.ps1|standard-semantic-bridge\.Tests\.ps1|STANDARD_AUTHORITY_PYTHON|one-successful-provider-call-per-planned-work-item' 'The ordinary authority gate must not run policy-controlled external or semantic stages.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Advanced.ps1','standard-semantic-raw-graph.Advanced.ps1')) {
             $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
             Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must use isolated Python startup."
         }
-        Assert-Match $gate 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Shared authority gate must enforce per-work provider-call binding.'
-        Assert-Match $gate 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Shared authority gate must enforce scanner JSON property-collision handling.'
         Assert-Match $standardTests 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' 'The workflow gate must execute SYP-192 validation/security regression.'
     }
 
     # Scenario: A consumer adds a renamed workflow, hook, release command, or duplicate trigger adapter around a component script.
-    # Purpose: Enforce the central entry-point inventory contract while allowing non-authoritative components and status-only compatibility jobs.
+    # Purpose: Enforce the central entry-point inventory while keeping the unmatched maintenance consumer retired and its manual producer non-admitting.
     It 'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles' {
-        # Scenario: default-branch code reads one registered producer's diagnostic artifact.
-        # Purpose: bind the numeric selector while retaining the non-admitting data-only boundary.
-        $maintenanceConsumer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/validator-maintenance-protected-consumer.yml')
+        $maintenanceConsumerPath = Join-Path $script:RepositoryRoot '.github/workflows/validator-maintenance-protected-consumer.yml'
         $maintenanceProducer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/validator-maintenance-producer.yml')
-        Assert-Match $maintenanceConsumer "PRODUCER_WORKFLOW_ID:\s*'368289188'" 'The diagnostic consumer must select the registered existing producer ID.'
-        Assert-Match $maintenanceConsumer 'ref:\s*\$\{\{\s*github\.sha\s*\}\}' 'Only default-branch event code may execute.'
-        Assert-Match $maintenanceConsumer 'actions:\s*read' 'Diagnostic acquisition must keep Actions read-only.'
-        Assert-Match $maintenanceConsumer '-RepositoryId\s+1245177039' 'The registered producer must stay in the fixed repository.'
-        foreach ($workflow in @($maintenanceConsumer, $maintenanceProducer)) {
-            Assert-Match $workflow "-AuthorityRevision\s+'e69c453888db93e2d2697ea7f0b11df13cd1b8d2'" 'Diagnostic authority labels must not silently move to the executing main.'
-            Assert-Match $workflow "ciAdmission\s+-cne\s+'BLOCKED'" 'Diagnostic data must never grant admission.'
-            Assert-Match $workflow 'releaseEligible\s+-ne\s*\$false' 'Diagnostic data must never grant release eligibility.'
-            Assert-False ($workflow -match '(?m)^\s*(actions|contents|pull-requests):\s*write') 'Producer registration must not expand token permissions.'
+        Assert-False (Test-Path -LiteralPath $maintenanceConsumerPath) 'The automatic protected consumer must be retired because workflow_run cannot pair its PR-bound producer identity with a manual diagnostic run.'
+        Assert-Match $maintenanceProducer '(?m)^  workflow_dispatch:\s*$' 'The maintenance producer must remain manually dispatchable.'
+        Assert-NotMatch $maintenanceProducer '(?m)^  (pull_request|workflow_run|push|schedule):\s*$' 'The maintenance producer must not run as normal CI or an automatic consumer input.'
+        Assert-Match $maintenanceProducer 'CANDIDATE_REVISION:\s*\$\{\{\s*github\.sha\s*\}\}' 'The manual producer must bind candidate evidence to the actual workflow-dispatch checkout.'
+        Assert-Match $maintenanceProducer '-CandidateRevision \$env:CANDIDATE_REVISION' 'The producer must pass the checked-out candidate revision.'
+        Assert-Match $maintenanceProducer '-EventName \$env:GITHUB_EVENT_NAME' 'The producer must report the real workflow-dispatch event name.'
+        Assert-Match $maintenanceProducer "ciAdmission\s+-cne\s+'BLOCKED'" 'Diagnostic data must never grant CI admission.'
+        Assert-Match $maintenanceProducer 'releaseEligible\s+-ne\s*\$false' 'Diagnostic data must never grant release eligibility.'
+        Assert-False ($maintenanceProducer -match '(?m)^\s*(actions|contents|pull-requests):\s*write') 'The diagnostic producer must use no write permissions.'
+        $producerScript = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidatorMaintenanceProducer.ps1')
+        Assert-Match $producerScript "ValidateSet\('workflow_dispatch'\).*EventName" 'The producer script must accept only the real manual diagnostic event.'
+        Assert-Match $producerScript 'eventName = \$EventName' 'The diagnostic report must record the supplied event name.'
+        Assert-Match $producerScript 'ciAdmission = ''BLOCKED''' 'The producer result must remain explicitly non-admitting.'
+        Assert-Match $producerScript 'releaseEligible = \$false' 'The producer result must remain ineligible for release.'
+        $workflowTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
+        $maintenanceTestText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'tests/standard-validation-runner.Tests.ps1')
+        foreach ($inventory in @(
+            @{ Name='workflow'; Pattern='(?ms)^\$workflowIds = @\((.*?)^\)'; Source=$workflowTestText },
+            @{ Name='maintenance'; Pattern='(?ms)^\$maintenanceIds = @\((.*?)^\)'; Source=$maintenanceTestText }
+        )) {
+            $inventoryMatch = [regex]::Match($producerScript, $inventory.Pattern)
+            Assert-True $inventoryMatch.Success "Producer must declare its exact $($inventory.Name) diagnostic test inventory."
+            $ids = @([regex]::Matches($inventoryMatch.Groups[1].Value, "'([^']+)'\s*,?\s*") | ForEach-Object { [string]$_.Groups[1].Value })
+            Assert-True ($ids.Count -gt 0) "Producer $($inventory.Name) test inventory must not be empty."
+            Assert-Equal @($ids | Select-Object -Unique).Count $ids.Count "Producer $($inventory.Name) test inventory must not contain duplicate IDs."
+            foreach ($id in $ids) {
+                $escapedId = [regex]::Escape($id)
+                Assert-Equal ([regex]::Matches($inventory.Source, "(?m)^\s*It '$escapedId'\s*\{")).Count 1 "Producer $($inventory.Name) ID '$id' must match exactly one actual Pester test."
+            }
         }
         $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $authorityGate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
@@ -1047,5 +956,144 @@ jobs:
             Assert-True (Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $role.path) -PathType Leaf) "Authority workflow role '$($role.path)' must remain present."
         }
         Assert-Match $authorityGate 'standards-conformance\.yml|pr8-powershell-validation\.yml|syp86-production-lock\.yml|syp101-production-smoke\.yml' 'The authority gate contract must retain the explicit four-workflow role surface.'
+    }
+
+    # Scenario: Canonical release validation is documented beside optional hook setup and repository/API diagnostics.
+    # Purpose: Keep non-admitting setup and diagnostic commands from becoming alternate release gates.
+    It 'UnitT71_accepts_markdown_setup_and_diagnostics_outside_release_admission' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $root = Join-Path $TestDrive 'entry-point-markdown-setup-diagnostics'
+        New-ConsumerEntryPointFixture -Root $root
+        Write-TestUtf8File -Path (Join-Path $root 'README.md') -Text @'
+## Repository validation
+Run the canonical source gate:
+```powershell
+pwsh -File ./scripts/Validate.ps1
+```
+### Optional pre-push setup
+Enable the optional hook:
+```powershell
+pwsh -File ./scripts/Set-PrePushHook.ps1 -Mode Enable
+```
+Disable the optional hook:
+```powershell
+pwsh -File ./scripts/Set-PrePushHook.ps1 -Mode Disable
+```
+Inspect repository and API diagnostics:
+```powershell
+pwsh -File ./tests/validate-repository.ps1
+pwsh -File ./tests/validate-api-access.ps1
+```
+'@
+
+        Assert-True (Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $root `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json)) `
+            'Optional hook setup and repository/API diagnostics must not be inferred as release gates.'
+    }
+
+    # Scenario: README places the canonical command under Diagnostics and a release command under Release.
+    # Purpose: Require each release command section to document its own canonical validation dependency.
+    It 'UnitT72_rejects_release_command_with_only_an_unrelated_canonical_section' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $root = Join-Path $TestDrive 'entry-point-markdown-unrelated-canonical'
+        New-ConsumerEntryPointFixture -Root $root
+        Write-TestUtf8File -Path (Join-Path $root 'README.md') -Text @'
+## Diagnostics
+```powershell
+pwsh -File ./scripts/Validate.ps1
+```
+## Release
+```powershell
+gh release create v1.0.0
+```
+'@
+
+        $errorMessage = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $root `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy (Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json) | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'without exactly one canonical' 'A canonical command in another Markdown section must not authorize a release command.'
+    }
+
+    # Scenario: A consumer workflow replaces its canonical validator invocation with a component check.
+    # Purpose: Preserve executable workflow enforcement independently from Markdown documentation consistency.
+    It 'UnitT73_rejects_workflow_replacement_of_the_canonical_validator' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $root = Join-Path $TestDrive 'entry-point-workflow-canonical-replaced'
+        New-ConsumerEntryPointFixture -Root $root
+        $workflowPath = Join-Path $root '.github/workflows/validate.yml'
+        $workflow = [IO.File]::ReadAllText($workflowPath).Replace('./scripts/Validate.ps1', './scripts/check-domain.ps1')
+        Write-TestUtf8File -Path $workflowPath -Text $workflow
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
+
+        $errorMessage = $null
+        try {
+            Assert-AuthorityConsumerEntryPointContract `
+                -RepositoryRoot $root `
+                -CanonicalValidatorPath 'scripts/Validate.ps1' `
+                -Policy $policy | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'alternate|non-canonical|bypass|canonical' 'A workflow that replaces the canonical validator with another check must fail closed.'
+    }
+
+    # Scenario: A fenced PowerShell release example contains a comment that begins with a Markdown heading marker.
+    # Purpose: Keep literal code comments inside their section so the canonical validator remains documented with the release command.
+    It 'UnitT74_accepts_release_example_with_fenced_comment' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $text = @'
+## Release
+```powershell
+pwsh -File ./scripts/Validate.ps1
+# Publish after validation
+gh release create v1.0.0
+```
+'@
+
+        $sections = @(Get-AuthorityMarkdownCommandSections -Text $text)
+        Assert-Equal $sections.Count 1 'A heading-looking fenced comment must not create a second Markdown section.'
+        Assert-AuthorityConsumerPublicCommandDocumentation `
+            -Text $text `
+            -PublicRelativePath 'README.md' `
+            -CanonicalRelativePath 'scripts/Validate.ps1' `
+            -RequiresFailurePropagation $true
+    }
+
+    # Scenario: README uses Setext headings to separate canonical diagnostics from a release command.
+    # Purpose: Keep canonical validation in Diagnostics from authorizing an unrelated Release section.
+    It 'UnitT75_rejects_release_command_with_only_an_unrelated_setext_canonical_section' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+        $text = @'
+Diagnostics
+===========
+```powershell
+pwsh -File ./scripts/Validate.ps1
+```
+Release
+ =======
+```powershell
+gh release create v1.0.0
+```
+'@
+
+        $sections = @(Get-AuthorityMarkdownCommandSections -Text $text)
+        Assert-Equal $sections.Count 2 'Setext headings must delimit independent Markdown command sections.'
+
+        $errorMessage = $null
+        try {
+            Assert-AuthorityConsumerPublicCommandDocumentation `
+                -Text $text `
+                -PublicRelativePath 'README.md' `
+                -CanonicalRelativePath 'scripts/Validate.ps1' `
+                -RequiresFailurePropagation $true
+        }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'without exactly one canonical' 'A canonical command in another Setext section must not authorize a release command.'
     }
 }

@@ -104,10 +104,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": ".github/workflows/pr8-even-shard-diagnostic.yml",
-      "license": "Apache-2.0"
-    },
-    {
       "path": ".github/workflows/pr8-powershell-validation.yml",
       "license": "Apache-2.0"
     },
@@ -125,10 +121,6 @@
     },
     {
       "path": ".github/workflows/validator-maintenance-producer.yml",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": ".github/workflows/validator-maintenance-protected-consumer.yml",
       "license": "Apache-2.0"
     },
     {
@@ -360,6 +352,22 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/standard-core-adapter-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-core-evidence-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-entry-binding-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-entry-result-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json",
       "license": "Apache-2.0"
     },
@@ -385,6 +393,10 @@
     },
     {
       "path": "docs/standards/skill-repository-standard.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/standard-core-validation-v2.json",
       "license": "Apache-2.0"
     },
     {
@@ -456,10 +468,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "scripts/Invoke-PesterEvenDiagnostic.ps1",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "scripts/Invoke-PesterShardProcess.ps1",
       "license": "Apache-2.0"
     },
@@ -504,7 +512,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/StandardEntryPointContract.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/StandardSemanticBridge.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Test-StandardEntryPointResult.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -820,6 +836,18 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/standard-authority-entry-preflight.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-core-pester-adapter.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-entry-point-binding.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/standard-semantic-assertions.ps1",
       "license": "Apache-2.0"
     },
@@ -828,15 +856,15 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-inventory-probe.Tests.ps1",
+      "path": "tests/standard-semantic-inventory-probe.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-preflight.Tests.ps1",
+      "path": "tests/standard-semantic-preflight.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-raw-graph.Tests.ps1",
+      "path": "tests/standard-semantic-raw-graph.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -849,10 +877,6 @@
     },
     {
       "path": "tests/syp101-production-smoke-contract.Tests.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "tests/test_pr8_even_diagnostic.py",
       "license": "Apache-2.0"
     },
     {

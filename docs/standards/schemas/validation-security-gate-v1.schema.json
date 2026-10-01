@@ -385,6 +385,7 @@
       "required": [
         "canonicalExecution",
         "releaseAffectingSurfaces",
+        "publicCommandDocumentation",
         "componentScripts",
         "compatibilityLane",
         "triggerAdapters",
@@ -414,6 +415,17 @@
             "alternateGateAction": { "const": "BLOCK" },
             "requiresFailurePropagation": { "const": true },
             "forbiddenFailureSuppression": { "const": ["|| true", "|| :", "continue-on-error: true", "if: always()"] }
+          }
+        },
+        "publicCommandDocumentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "commandScope", "unrelatedCanonicalAuthorizesRelease", "setupAndDiagnosticsAreReleaseGates"],
+          "properties": {
+            "mode": { "const": "consistency-only" },
+            "commandScope": { "const": "local-markdown-command-section" },
+            "unrelatedCanonicalAuthorizesRelease": { "const": false },
+            "setupAndDiagnosticsAreReleaseGates": { "const": false }
           }
         },
         "componentScripts": {

@@ -166,11 +166,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 }
             }
 
+            $enumProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'enum'
+            if ($null -ne $enumProperty) {
+                $enumMatches = $false
+                foreach ($enumValue in @($enumProperty.Value)) {
+                    if ($null -eq $enumValue) {
+                        if ($null -eq $Value) { $enumMatches = $true; break }
+                    }
+                    elseif ($enumValue -is [string]) {
+                        if ($Value -is [string] -and [string]$Value -ceq [string]$enumValue) { $enumMatches = $true; break }
+                    }
+                    elseif ($enumValue -is [int] -or $enumValue -is [long] -or $enumValue -is [double] -or $enumValue -is [decimal]) {
+                        if (($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) -and
+                            [decimal]$Value -eq [decimal]$enumValue) {
+                            $enumMatches = $true
+                            break
+                        }
+                    }
+                    elseif ($enumValue -is [bool] -and $Value -is [bool] -and $Value -eq $enumValue) {
+                        $enumMatches = $true
+                        break
+                    }
+                }
+                if (-not $enumMatches) { return $false }
+            }
+
             $typeProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'type'
             $type = if ($null -ne $typeProperty) { [string]$typeProperty.Value } else { '' }
-            if ($type -ceq 'object') {
-                $isObject = $null -ne $Value -and $Value -isnot [string] -and $Value -isnot [array] -and
-                    ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject])
+            $isObject = $null -ne $Value -and $Value -isnot [string] -and $Value -isnot [array] -and
+                ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject])
+            $isArray = $Value -is [array]
+            if ($type -ceq 'object' -or ($type -ceq '' -and $isObject)) {
                 if (-not $isObject) { return $false }
 
                 $actualNames = @($Value.PSObject.Properties | ForEach-Object { [string]$_.Name })
@@ -203,7 +229,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     }
                 }
             }
-            elseif ($type -ceq 'array') {
+            elseif ($type -ceq 'array' -or ($type -ceq '' -and $isArray)) {
                 if ($Value -isnot [array]) { return $false }
                 $items = @($Value)
                 $minItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'minItems'
@@ -268,6 +294,9 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     $uri = $null
                     if (-not [Uri]::TryCreate($text, [UriKind]::Absolute, [ref]$uri)) { return $false }
                 }
+            }
+            elseif ($type -ceq 'null') {
+                if ($null -ne $Value) { return $false }
             }
 
             return $true
@@ -1586,75 +1615,58 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $gate 'New-AuthorityRunOwnedToolRoot' 'Authority gate must allocate its formal tool root through the short-path helper.'
     }
 
-    It 'UnitT27_requires_authority_CI_to_use_the_central_tool_resolver' {
+    It 'UnitT27_requires_ordinary_gate_to_execute_retained_checks_without_external_tooling' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
         $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RequiredPowerShellWorkflowPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $bindingOnlyIndex = $gate.IndexOf('if ($BindingOnly) {')
 
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
-        Assert-Match $workflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Standards workflow must execute the shared authority gate with setup-go runtime evidence.'
-        Assert-Match $workflow "'scripts/Resolve-PythonWheelClosure\.py'" 'Python helper changes must trigger the standalone authority workflow.'
-        Assert-NotMatch $workflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Standards workflow must not maintain a divergent inline resolver sequence.'
-        Assert-NotMatch $workflow 'Install-Module\s+Pester' 'Workflow must not bypass the central resolver with direct Pester installation.'
+        foreach ($workflowText in @($workflow, $requiredWorkflow)) {
+            Assert-NotMatch $workflowText 'actions/setup-go|STANDARD_GO_RUNTIME_VERSION|STANDARD_GO_COMMAND_PATH|GITHUB_TOKEN' 'Ordinary authority workflows must not set up Go or pass external release credentials.'
+            Assert-Match $workflowText "persist-credentials:\s*false" 'Authority checkout credentials must remain disabled.'
+            Assert-Match $workflowText 'Install-Module Pester -RequiredVersion 4\.10\.1 -Scope CurrentUser -Force -SkipPublisherCheck' 'Each ordinary authority workflow must provision the pinned Pester version when absent.'
+            Assert-Match $workflowText '-CandidateRoot \$candidateRoot -AuthorityRoot \$candidateRoot -CandidateRevision \$revision -AuthorityRevision \$revision -EventName \$env:GITHUB_EVENT_NAME -ResultArtifact ''[^'']+\.json''' 'Each ordinary workflow must pass both roots, full revision identities, event name, and a checkout-external relative result name.'
+        }
 
-        Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
-        Assert-Match $requiredWorkflow '(?ms)^permissions:\r?\n  contents: read\r?\n\r?\njobs:' 'Required workflow token permissions must be explicitly read-only.'
-        Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
-        Assert-Match $requiredWorkflow '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1 -ArtifactsRoot \$env:RUNNER_TEMP -ExpectedGoRuntimeVersion \$env:STANDARD_GO_RUNTIME_VERSION -GoCommandPath \$env:STANDARD_GO_COMMAND_PATH\s*$' 'Required context must execute the same shared authority gate with setup-go runtime evidence.'
-        Assert-NotMatch $requiredWorkflow '(?m)^\s*& .*Resolve-StandardValidationTool\.ps1' 'Required context must not maintain a divergent inline resolver sequence.'
+        Assert-Match $workflow 'Run canonical Standard v1 authority gate' 'Standards workflow must execute the shared authority gate.'
+        Assert-Match $requiredWorkflow 'name:\s*Windows Core' 'The Windows Core automatic authority job must remain present.'
+        Assert-Match $requiredWorkflow 'Run the Standard v1 authority gate' 'Windows Core must execute the authority gate.'
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
-        Assert-Match $gate 'tests/standard-validation-resolver-hardening\.Tests\.ps1' 'Shared gate must run the resolver-hardening authority regression.'
+        Assert-Match $gate 'tests/standard-authority-entry-preflight\.Tests\.ps1' 'Shared gate must run the entry preflight contract.'
+        Assert-Match $gate 'tests/standard-entry-point-binding\.Tests\.ps1' 'Shared gate must run the binding contract.'
+        Assert-Match $gate 'tests/standard-core-pester-adapter\.Tests\.ps1' 'Shared gate must run the bounded Pester adapter contract.'
 
-        $expectedGateSources = [ordered]@{
-            'skillspector' = 'NVIDIA/SkillSpector'
-            'skill-validator' = 'github.com/agent-ecosystem/skill-validator/cmd/skill-validator'
-            'skill-tools' = 'npm:skill-tools'
-            'pester' = 'PowerShellGallery:Pester'
-        }
-        foreach ($entry in $expectedGateSources.GetEnumerator()) {
-            Assert-Match $gate ("'{0}'\s*=\s*'{1}'" -f [regex]::Escape([string]$entry.Key), [regex]::Escape([string]$entry.Value)) ("Shared gate must freeze {0} from its approved source." -f $entry.Key)
-        }
-        Assert-Match $gate "(?s)trustedGoRuntimeVersion'.*?-Expected 'latest-stable'" 'Shared gate must bind the policy receipt to the latest stable Go runtime rule.'
-        Assert-Match $gate '\$skillValidatorRuntimeVersion' 'Shared gate must validate the stable Go runtime selected for the run.'
-        Assert-Match $gate 'skillValidatorRuntimeIdentityPattern' 'Shared gate must require the selected Go runtime in the resolved identity.'
-        Assert-Match $gate '(?m)^\s*& \$resolverPath -ValidatePolicyOnly -RunId \$runId -OutputPath \$policyReceiptPath \| Out-Host\s*$' 'Shared gate must validate policy before tool resolution.'
-        Assert-Match $gate '(?ms)^\s*& \$resolverPath `\r?\n\s+-ToolName \$entry\.Key `\r?\n\s+-Install `\r?\n\s+-InstallRoot \$installRoot `\r?\n\s+-RunId \$runId `\r?\n\s+-ExpectedGoRuntimeVersion \$expectedGoRuntimeVersion `\r?\n\s+-GoCommandPath \$goCommandPath `\r?\n\s+-OutputPath \$receiptPath \| Out-Host\s*$' 'Shared gate must install the complete frozen toolset through the resolver with run-bound setup-go runtime evidence.'
-        Assert-Match $gate '(?ms)\$receipts\[\$entry\.Key\] = \$receipt\r?\n\s+if \(\$entry\.Key -ceq ''skillspector''\) \{\r?\n\s+Remove-Item -LiteralPath ''Env:GITHUB_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+Remove-Item -LiteralPath ''Env:GH_TOKEN'' -Force -ErrorAction SilentlyContinue\r?\n\s+\}' 'Shared gate must remove GitHub release-resolution credentials immediately after SkillSpector installation and before resolving another tool.'
-        Assert-Match $gate 'SkillSpector static scan' 'Shared gate must execute the resolved SkillSpector static scanner.'
-        Assert-Match $gate 'skill-validator package validation' 'Shared gate must execute the resolved skill-validator.'
-        Assert-Match $gate ([regex]::Escape("-Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', `$upstreamAdapterSkillRoot)")) 'Shared gate must explicitly validate the declared bundled Skill with the Standard-required agents metadata directory.'
-        Assert-Match $gate "skillValidatorMode='structure-json-allow-agents-bundled-skill\+authority-input-inventory'" 'Authority evidence must record the native validator mode and complete input binding.'
-        Assert-Match $gate 'skill-validator-coverage\.json' 'Authority evidence must persist the validator input inventory independently of token statistics.'
-        Assert-Match $gate '-Command \$skillToolsNode' 'Shared gate must invoke the frozen Node runtime for skill-tools.'
-        Assert-Match $gate '-Arguments @\(\$skillToolsEntryPoint, ''check'', \$upstreamAdapterSkillRoot' 'Shared gate must pass the frozen skill-tools entry point and check command against the declared bundled Skill without a wrapper re-resolution.'
-        Assert-Match $gate 'Assert-AuthorityExactPathInventory' 'Shared gate must bind package-tool reports to the exact adapter Skill inventory.'
-        Assert-Match $gate 'Assert-AuthoritySkillToolsCoverageEnvelope' 'Shared gate must validate a separate exact skill-tools input coverage envelope instead of treating SARIF findings as complete inventory.'
-        Assert-Match $gate 'skill-tools-coverage\.json' 'Authority evidence must persist the skill-tools exact input coverage envelope.'
-        Assert-Match $gate '-ExpectedFixtureRoot \$upstreamAdapterSkillRoot' 'Shared gate must bind package-tool reports to the same adapter Skill root.'
-        Assert-Match $gate 'Import-Module \$pesterModulePath -Force' 'Shared gate must import the frozen Pester module by exact path.'
-        Assert-Match $gate 'credentialIsolation=github-token-cleared-before-python' 'Shared gate must verify that resolver-managed Python did not inherit GitHub credentials.'
-        Assert-Match $gate 'installedMetadataVerification=static-dist-info-metadata' 'Shared gate must verify static installed metadata inspection.'
-        Assert-Match $gate 'resolutionRounds=\$\(\$skillSpectorReceipt\.resolutionRounds\)' 'Shared gate must bind resolution rounds into the resolver identity.'
-        Assert-Match $gate 'consoleEntryPoint=\$\(\$skillSpectorReceipt\.consoleEntryPoint\)' 'Shared gate must bind the static console entry point into the resolver identity.'
-        Assert-Match $gate 'Invoke-Pester -Path \$authorityTestPaths -PassThru' 'Shared gate must execute the complete authority regression inventory through frozen Pester.'
-        foreach ($semanticSuite in @('standard-semantic-bridge.Tests.ps1','standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
-            Assert-Match $gate ([regex]::Escape($semanticSuite)) "Shared gate must execute semantic behavior suite '$semanticSuite'."
-        }
-        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Shared gate must bind semantic Python tests to the frozen SkillSpector environment.'
-        Assert-Match $gate ([regex]::Escape("[Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')")) 'Shared gate must snapshot the caller SkillSpector version environment before semantic tests.'
-        Assert-Match $gate ([regex]::Escape("[Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]`$skillSpectorReceipt.resolvedVersion,'Process')")) 'Shared gate must bind semantic tests to the resolved SkillSpector receipt version.'
-        Assert-Match $gate ([regex]::Escape("[Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',`$priorAuthoritySkillSpectorVersion,'Process')")) 'Shared gate must restore the caller SkillSpector version environment after semantic tests.'
-        $inventoryProbe = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot 'standard-semantic-inventory-probe.Tests.ps1')
-        Assert-Match $inventoryProbe ([regex]::Escape("GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')")) 'Installed scanner probe must consume the gate-bound SkillSpector version.'
-        Assert-Match $inventoryProbe 'IsNullOrWhiteSpace\(\$script:FrozenSkillSpectorVersion\)' 'Installed scanner probe must fail closed when the gate-bound SkillSpector version is missing.'
-        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
-            $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
-            Assert-Match $suiteText '& \$script:Python -I -B' "Semantic suite '$isolatedPythonSuite' must start Python in isolated mode."
-        }
-        Assert-Match $gate '(?ms)^\s*Assert-AuthorityPesterResult\s+`\r?\n\s+-Result \$authorityResult\s+`\r?\n\s+-MinimumTotalCount 55\s+`\r?\n\s+-PesterMajorVersion' 'Shared gate must validate the expanded combined authority inventory with the resolved Pester result shape.'
+        $normalMain = $gate.Substring($bindingOnlyIndex)
+        Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|validation-security-gate\.json|upstream-adapter\.json|tenStageCompletionClaim' 'Ordinary gate main must not depend on Go, resolvers, providers, fixtures, scanners, or the ten-stage runner.'
+        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The normal main must really execute the retained TestPaths with strict Pester 4 results.'
+        Assert-Match $normalMain 'Import-PowerShellDataFile -LiteralPath \$pesterManifestPath' 'The ordinary gate must inspect the exact pinned Pester manifest before importing it.'
+        Assert-Match $normalMain '\$pesterManifest\.ContainsKey\(''RootModule''\)' 'The ordinary gate must check whether the Pester manifest declares RootModule before reading it.'
+        Assert-Match $normalMain '\$pesterManifest\[''RootModule''\]' 'The ordinary gate must select RootModule through the verified manifest hashtable indexer.'
+        Assert-Match $normalMain '\$pesterManifest\.ContainsKey\(''ModuleToProcess''\)' 'The ordinary gate must check whether the Pester manifest declares ModuleToProcess before reading it.'
+        Assert-Match $normalMain '\$pesterManifest\[''ModuleToProcess''\]' 'The ordinary gate must select ModuleToProcess through the verified manifest hashtable indexer.'
+        Assert-Match $normalMain '\$loadedPester\.Path' 'The loaded Pester path must be checked against its declared root module.'
+        Assert-Match $normalMain '\$loadedPester\.ModuleBase' 'The loaded Pester module base must be checked against the selected installation.'
+        Assert-Match $normalMain 'pesterRootModuleSha256|pesterManifestSha256' 'The imported Pester files must retain their verified file hashes.'
+        Assert-Match $normalMain 'Assert-AuthorityPesterResult -Result \$pesterResult -PesterMajorVersion 4' 'The normal main must reject zero, failed, skipped, pending, or incomplete Pester results.'
+        Assert-Match $normalMain 'Get-AuthorityEntryPreflight @bindingParameters' 'The normal main must rebind current source identity after the retained tests run.'
+        Assert-Match $normalMain 'Assert-StandardEntryPointResult' 'The normal main must validate the executed result against the candidate binding.'
+        Assert-Match $normalMain '\[IO\.FileMode\]::CreateNew' 'The result writer must create a unique temporary file without overwriting.'
+        Assert-Match $normalMain '\[IO\.File\]::Move\(\$temporaryResultPath, \$resultPath, \$false\)' 'The result writer must publish with a no-overwrite move.'
+        Assert-NotMatch $normalMain '\bMinimumTotalCount\b' 'The gate must not impose a fixed test-count prerequisite.'
 
+        $observedTestPaths = @([regex]::Matches($normalMain, "tests/[^']+\.Tests\.ps1") | ForEach-Object { $_.Value })
+        $expectedTestPaths = @(
+            'tests/skill-repository-standard.Tests.ps1',
+            'tests/skill-repository-workflows.Tests.ps1',
+            'tests/standard-authority-entry-preflight.Tests.ps1',
+            'tests/standard-entry-point-binding.Tests.ps1',
+            'tests/standard-core-pester-adapter.Tests.ps1'
+        )
+        Assert-Equal ($observedTestPaths -join '|') ($expectedTestPaths -join '|') 'The ordinary gate must execute exactly the five retained TestPaths in the packet order.'
+        Assert-NotMatch $normalMain 'GITHUB_TOKEN|GH_TOKEN' 'The ordinary gate must not receive external resolver credentials.'
         # Scenario: External validators return clean-looking reports for a different package, incomplete inventory, or downgraded findings.
         # Purpose: Bind every report to this exact fixture and interpret native report severity without PowerShell coercion.
         $reportFixture = New-TestAuthorityFixture -Root (Join-Path $TestDrive 'standard-validation-fixture')
@@ -1830,27 +1842,25 @@ public sealed class C245NonCooperativeStream : Stream {
         }
     }
 
-    # Scenario: Pester returns a normal all-passed authority result or discovers fewer tests than the reviewed inventory.
-    # Purpose: Prove the shared gate accepts the controlled baseline and rejects zero/partial discovery.
-    It 'UnitT27a_validates_the_complete_authority_Pester_inventory' {
+    # Scenario: Pester returns one all-passed authority test or discovers zero tests.
+    # Purpose: Prove any positive discovery count can pass while zero discovery still fails closed.
+    It 'UnitT27a_accepts_one_passed_test_and_rejects_zero_discovery' {
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
         $clean = [pscustomobject][ordered]@{
-            TotalCount=35; PassedCount=35; FailedCount=0; Result='Passed'
+            TotalCount=1; PassedCount=1; FailedCount=0; Result='Passed'
             FailedBlocksCount=0; FailedContainersCount=0; SkippedCount=0
             NotRunCount=0; InconclusiveCount=0; Errors=@()
         }
-        Assert-AuthorityPesterResult -Result $clean -MinimumTotalCount 35 -PesterMajorVersion 6
+        Assert-AuthorityPesterResult -Result $clean -PesterMajorVersion 6
 
-        foreach ($total in @(0,34)) {
-            $partial = $clean.PSObject.Copy()
-            $partial.TotalCount = $total
-            $partial.PassedCount = $total
-            $errorMessage = $null
-            try { Assert-AuthorityPesterResult -Result $partial -MinimumTotalCount 35 -PesterMajorVersion 6 }
-            catch { $errorMessage = $_.Exception.Message }
-            Assert-Match $errorMessage 'discovered only' 'Zero or partial authority-test discovery must fail closed.'
-        }
+        $empty = $clean.PSObject.Copy()
+        $empty.TotalCount = 0
+        $empty.PassedCount = 0
+        $errorMessage = $null
+        try { Assert-AuthorityPesterResult -Result $empty -PesterMajorVersion 6 }
+        catch { $errorMessage = $_.Exception.Message }
+        Assert-Match $errorMessage 'discovered zero authority tests' 'Zero authority-test discovery must fail closed.'
     }
 
     # Scenario: Pester reports every test passed while discovery/container metadata still records a framework failure.
@@ -1868,13 +1878,13 @@ public sealed class C245NonCooperativeStream : Stream {
         )
         foreach ($case in $cases) {
             $result = [pscustomobject][ordered]@{
-                TotalCount=35; PassedCount=35; FailedCount=0; Result='Passed'
+                TotalCount=1; PassedCount=1; FailedCount=0; Result='Passed'
                 FailedBlocksCount=0; FailedContainersCount=0; SkippedCount=0
                 NotRunCount=0; InconclusiveCount=0; Errors=@()
             }
             $result.($case.Name) = $case.Value
             $errorMessage = $null
-            try { Assert-AuthorityPesterResult -Result $result -MinimumTotalCount 35 -PesterMajorVersion 6 }
+            try { Assert-AuthorityPesterResult -Result $result -PesterMajorVersion 6 }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Pester $($case.Name) must fail closed."
         }
@@ -2107,19 +2117,19 @@ public sealed class C245NonCooperativeStream : Stream {
 
         $newPester6Result = {
             [pscustomobject][ordered]@{
-                TotalCount=35; PassedCount=35; FailedCount=0; Result='Passed'
+                TotalCount=1; PassedCount=1; FailedCount=0; Result='Passed'
                 FailedBlocksCount=0; FailedContainersCount=0; SkippedCount=0
                 NotRunCount=0; InconclusiveCount=0; Errors=@()
             }
         }
         $newPester4Result = {
             [pscustomobject][ordered]@{
-                TotalCount=35; PassedCount=35; FailedCount=0
+                TotalCount=1; PassedCount=1; FailedCount=0
                 SkippedCount=0; PendingCount=0; InconclusiveCount=0
             }
         }
-        Assert-AuthorityPesterResult -Result (& $newPester6Result) -MinimumTotalCount 35 -PesterMajorVersion 6
-        Assert-AuthorityPesterResult -Result (& $newPester4Result) -MinimumTotalCount 35 -PesterMajorVersion 4
+        Assert-AuthorityPesterResult -Result (& $newPester6Result) -PesterMajorVersion 6
+        Assert-AuthorityPesterResult -Result (& $newPester4Result) -PesterMajorVersion 4
 
         foreach ($versionCase in @(
             @{ Major=6; Factory=$newPester6Result; Required=@('Result','FailedBlocksCount','FailedContainersCount','SkippedCount','NotRunCount','InconclusiveCount') },
@@ -2129,18 +2139,18 @@ public sealed class C245NonCooperativeStream : Stream {
                 $result = & $versionCase.Factory
                 $result.PSObject.Properties.Remove([string]$name)
                 $errorMessage = $null
-                try { Assert-AuthorityPesterResult -Result $result -MinimumTotalCount 35 -PesterMajorVersion ([int]$versionCase.Major) }
+                try { Assert-AuthorityPesterResult -Result $result -PesterMajorVersion ([int]$versionCase.Major) }
                 catch { $errorMessage = $_.Exception.Message }
                 Assert-Match $errorMessage ("missing required property '{0}'" -f [regex]::Escape([string]$name)) "Pester $($versionCase.Major) must require $name."
             }
         }
 
         foreach ($case in @(
-            @{ Major=6; Factory=$newPester6Result; Name='TotalCount'; Value='35'; Pattern='TotalCount.*non-negative integer' },
+            @{ Major=6; Factory=$newPester6Result; Name='TotalCount'; Value='1'; Pattern='TotalCount.*non-negative integer' },
             @{ Major=6; Factory=$newPester6Result; Name='TotalCount'; Value=$false; Pattern='TotalCount.*non-negative integer' },
             @{ Major=6; Factory=$newPester6Result; Name='Result'; Value=@('Passed'); Pattern='status must be the exact string' },
             @{ Major=6; Factory=$newPester6Result; Name='FailedBlocksCount'; Value='0'; Pattern='FailedBlocksCount.*non-negative integer' },
-            @{ Major=4; Factory=$newPester4Result; Name='PassedCount'; Value='35'; Pattern='PassedCount.*non-negative integer' },
+            @{ Major=4; Factory=$newPester4Result; Name='PassedCount'; Value='1'; Pattern='PassedCount.*non-negative integer' },
             @{ Major=4; Factory=$newPester4Result; Name='PendingCount'; Value='0'; Pattern='PendingCount.*non-negative integer' },
             @{ Major=6; Factory=$newPester6Result; Name='Errors'; Value='one error'; Pattern='Errors must be an array' },
             @{ Major=6; Factory=$newPester6Result; Name='Errors'; Value=$null; Pattern='Errors must be an array' },
@@ -2149,7 +2159,7 @@ public sealed class C245NonCooperativeStream : Stream {
             $result = & $case.Factory
             $result.([string]$case.Name) = $case.Value
             $errorMessage = $null
-            try { Assert-AuthorityPesterResult -Result $result -MinimumTotalCount 35 -PesterMajorVersion ([int]$case.Major) }
+            try { Assert-AuthorityPesterResult -Result $result -PesterMajorVersion ([int]$case.Major) }
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Pester $($case.Major) coercion '$($case.Name)' must fail closed."
         }
@@ -3265,8 +3275,8 @@ public sealed class C245NonCooperativeStream : Stream {
         }
     }
 
-    # Scenario: Validation and security stages are reordered or severity handling is weakened in a local copy.
-    # Purpose: Bind SYP-192's exact canonical sequence and fail-closed semantics to the central Standard and executable gate.
+    # Scenario: Validation and security policy semantics are weakened, or the ordinary authority gate claims the retired lifecycle chain.
+    # Purpose: Bind SYP-192's policy contract to its validator while keeping the ordinary gate's retained Pester boundary explicit.
     It 'UnitT90_binds_canonical_validation_security_order_and_fail_closed_severity' {
         Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Canonical validation/security gate policy is missing.'
         Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGateSchemaPath -PathType Leaf) 'Canonical validation/security gate schema is missing.'
@@ -3407,18 +3417,11 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $standard 'releaseEligible=false' 'Normative Standard must keep the local v2 bridge ineligible for release.'
         Assert-Match $standard 'protected trust anchor.*trusted-supervisor authorization' 'Normative Standard must keep production v2 fail-closed pending protected authority.'
         Assert-Match $matrix 'Canonical validation / security gate' 'Cross-repository matrix must record the SYP-192 gate boundary.'
-        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must validate the canonical validation/security policy.'
-        Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the central validation/security policy.'
-        $upstreamAdapterIndex = $gate.IndexOf("Context 'upstream adapter validation'")
-        $packageValidationIndex = $gate.IndexOf("Context 'skill-validator package validation'")
-        $skillToolsPackageIndex = $gate.IndexOf("Context 'skill-tools package validation'")
-        $skillSpectorStaticIndex = $gate.IndexOf("Context 'SkillSpector static scan'")
-        $repositoryTestsIndex = $gate.IndexOf('Invoke-Pester -Path $authorityTestPaths')
-        Assert-True ($upstreamAdapterIndex -ge 0 -and $packageValidationIndex -ge 0 -and $skillToolsPackageIndex -ge 0 -and $skillSpectorStaticIndex -ge 0 -and $repositoryTestsIndex -ge 0) 'Authority gate must contain every executable canonical stage marker.'
-        Assert-True ($upstreamAdapterIndex -lt $skillSpectorStaticIndex) 'Upstream adapter validation must execute before SkillSpector Static.'
-        Assert-True ($packageValidationIndex -lt $skillSpectorStaticIndex) 'Package Validation must execute before SkillSpector Static.'
-        Assert-True ($skillToolsPackageIndex -lt $skillSpectorStaticIndex) 'skill-tools package validation must execute before SkillSpector Static.'
-        Assert-True ($skillSpectorStaticIndex -lt $repositoryTestsIndex) 'SkillSpector Static must execute before Repository Tests.'
+        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'The canonical policy validator must remain available to the retained policy regression checks.'
+        $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
+        Assert-NotMatch $normalMain 'validation-security-gate\.json|Assert-AuthorityValidationSecurityGate|Context ''upstream adapter validation''|Context ''skill-validator package validation''|Context ''skill-tools package validation''|Context ''SkillSpector static scan''|tenStageCompletionClaim' 'The ordinary gate must not run policy-controlled providers, package validators, scanners, or the ten-stage lifecycle.'
+        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The ordinary gate must execute its retained Pester checks with strict result handling.'
+        Assert-Match $normalMain "name = 'Standard v1 authority gate'" 'The ordinary result must claim only the retained Standard v1 authority gate check.'
     }
 
     # Scenario: The central policy, v1 runner contract, v1 evidence schema, and new v2 schema expose the same local-only bridge boundary.
@@ -3472,9 +3475,9 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-False (Test-AuthorityJsonSchemaValue -Value $invalidReference -Schema $evidenceSchema.properties.semanticBridgeV2 -RootSchema $evidenceSchema) 'A v2 reference descriptor that claims release eligibility must fail closed.'
     }
 
-    # Scenario: The central runner contract changes without a versioned adapter/evidence boundary.
-    # Purpose: Keep consumer declarations thin and make the production runner's barrier semantics machine-readable.
-    It 'UnitT94_binds_the_central_runner_to_versioned_adapter_evidence_and_barriers' {
+    # Scenario: The ordinary runner defaults to v2 while the historical full lifecycle remains available only through explicit v1 modes.
+    # Purpose: Bind the v2 core boundary and evidence schema while retaining direct coverage for the v1 advanced contract.
+    It 'UnitT94_preserves_v1_advanced_contract_and_binds_v2_default_core' {
         foreach ($path in @($script:StandardValidationAdapterSchemaPath, $script:StandardValidationEvidenceSchemaPath, $script:StandardValidationContractPath)) {
             Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Missing central runner contract file '$path'."
             $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
@@ -3492,6 +3495,124 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $runner 'toolRole\s*=\s*if \(\$test\.kind -ceq ''pester''\)' 'Repository-test typed records must derive role from the validated adapter dispatch kind.'
         Assert-Match $runner 'SemanticConsent' 'Central runner must expose explicit semantic consent.'
         Assert-Match $runner 'CompleteLifecycle' 'Central runner must keep release lifecycle evidence separate from validation-only runs.'
+
+        $coreContractPath = Join-Path $script:StandardsRoot 'standard-core-validation-v2.json'
+        $coreAdapterSchemaPath = Join-Path $script:StandardsRoot 'schemas/standard-core-adapter-v2.schema.json'
+        $coreEvidenceSchemaPath = Join-Path $script:StandardsRoot 'schemas/standard-core-evidence-v2.schema.json'
+        foreach ($path in @($coreContractPath, $coreAdapterSchemaPath, $coreEvidenceSchemaPath)) {
+            Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "Missing ordinary core contract file '$path'."
+            $null = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        }
+        $coreContract = Get-Content -Raw -Encoding UTF8 -LiteralPath $coreContractPath | ConvertFrom-Json
+        $coreAdapterSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $coreAdapterSchemaPath | ConvertFrom-Json
+        $coreEvidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $coreEvidenceSchemaPath | ConvertFrom-Json
+        Assert-Equal $coreContract.contract 'standard-core-validation-v2' 'Ordinary core contract identity changed.'
+        Assert-Equal $coreContract.ordinaryCli.defaultMode 'core-v2' 'The ordinary CLI must default to the v2 core.'
+        Assert-Equal (@($coreContract.ordinaryCli.eventNames) -join ',') 'local,pre-push,pull_request,push,workflow_dispatch' 'Core event values must match the v2 evidence schema.'
+        Assert-False ([bool]$coreContract.releaseEligible) 'Core validation must remain release-ineligible.'
+        Assert-Match $runner 'if \(-not \$DevelopmentHarness -and -not \$CompleteLifecycle\)' 'The runner must route the ordinary invocation through v2 before entering legacy gates.'
+        Assert-Match $runner 'Ordinary core mode accepts only standard-core-adapter-v2' 'An ordinary v1 adapter must fail with a versioned mode error.'
+        $coreStart = $runner.IndexOf('function Invoke-StandardCoreValidationRun', [StringComparison]::Ordinal)
+        $coreEnd = if ($coreStart -ge 0) { $runner.IndexOf('function Invoke-StandardValidationRun', $coreStart, [StringComparison]::Ordinal) } else { -1 }
+        Assert-True ($coreStart -ge 0 -and $coreEnd -gt $coreStart) 'The ordinary core runner function boundary must remain explicit.'
+        $coreRunner = $runner.Substring($coreStart, $coreEnd - $coreStart)
+        Assert-Match $coreRunner 'Get-StandardCoreTrackedInventory' 'The ordinary core must bind candidate files through Git tracked inventory.'
+        Assert-Match $coreRunner 'Copy-StandardCoreTrackedSnapshot' 'The ordinary core must copy only its verified tracked inventory.'
+        Assert-Match $coreRunner 'Get-StandardValidationSkillSet -CandidateRoot \$snapshotRoot' 'Active Skills must be discovered from the verified tracked-only snapshot.'
+        Assert-False ($coreRunner -match 'Get-StandardValidationInventory|Copy-StandardValidationSnapshot') 'The ordinary core must not use recursive whole-root inventory or copy helpers.'
+        Assert-Match $coreRunner "EventName -cnotin @\('local', 'pre-push', 'pull_request', 'push', 'workflow_dispatch'\)" 'Core preflight must reject event names outside the evidence enum.'
+        $coreEvidenceWriteAt = $coreRunner.IndexOf('Write-StandardValidationJsonReserved -Path $outputFull', [StringComparison]::Ordinal)
+        Assert-True ($coreEvidenceWriteAt -ge 0) 'The core must reserve and publish its final evidence exactly once.'
+        $coreLockReleaseAt = $coreRunner.IndexOf('$lockStream.Dispose()', $coreEvidenceWriteAt, [StringComparison]::Ordinal)
+        Assert-True ($coreLockReleaseAt -gt $coreEvidenceWriteAt) 'The owned execution lock must remain held through final evidence publication.'
+        Assert-False ($coreRunner.Substring($coreLockReleaseAt) -match '\$state\s*=') 'Post-publication lock cleanup must not change the state already written to evidence.'
+
+        $coreAdapter = [pscustomobject][ordered]@{
+            schemaVersion = 2
+            adapter = 'standard-core-adapter-v2'
+            skillsRoot = 'skills'
+            activeSkills = @('alpha')
+            checks = @([pscustomobject][ordered]@{
+                    id = 'repo-tests'; kind = 'general'; executable = (Join-Path $PSHOME 'pwsh.exe')
+                    executableSha256 = '0' * 64; arguments = @('-NoLogo')
+                })
+        }
+        Assert-AuthoritySchemaInstance -Value $coreAdapter -Schema $coreAdapterSchema -SchemaPath $coreAdapterSchemaPath -Expected $true -Message 'A minimal ordinary v2 adapter must be schema-valid.'
+        $coreAdapterWithLegacySlot = Copy-TestJsonObject -Value $coreAdapter
+        Add-Member -InputObject $coreAdapterWithLegacySlot -MemberType NoteProperty -Name externalScanner -Value ([pscustomobject]@{ command = 'unexpected' })
+        Assert-AuthoritySchemaInstance -Value $coreAdapterWithLegacySlot -Schema $coreAdapterSchema -SchemaPath $coreAdapterSchemaPath -Expected $false -Message 'A v2 adapter must reject legacy external-tool slots.'
+
+        $coreNow = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $coreRunId = 'a' * 32
+        $coreEvidence = [pscustomobject][ordered]@{
+            schemaVersion = 2; evidence = 'standard-core-validation-evidence-v2'; generatedAt = $coreNow
+            runId = $coreRunId; state = 'PASS'; exitCode = 0; releaseEligible = $false; contentMode = 'development'
+            candidate = [pscustomobject][ordered]@{
+                repository = 'https://example.com/example/skills.git'; sourceRevision = 'b' * 40; baseRevision = 'c' * 40
+                contentSha256 = 'd' * 64; inventory = @([pscustomobject][ordered]@{ path = 'skills/alpha/SKILL.md'; sha256 = 'e' * 64; length = 1 })
+                activeSkills = @('alpha'); contentMode = 'development'; eventName = 'local'
+            }
+            authority = [pscustomobject][ordered]@{
+                repository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision = 'f' * 40
+                runnerSha256 = '1' * 64; contractSha256 = '2' * 64; contentMode = 'development'
+            }
+            adapter = [pscustomobject][ordered]@{ schemaVersion = 2; identity = 'standard-core-adapter-v2'; sha256 = '3' * 64 }
+            checks = @([pscustomobject][ordered]@{
+                    id = 'repo-tests'; kind = 'general'; executableSha256 = '4' * 64; argumentsSha256 = '5' * 64
+                    processId = 123; startedAt = $coreNow; endedAt = $coreNow; exitCode = 0; status = 'passed'; cleanedUp = $true
+                    stdoutPath = 'C:\core-artifacts\runs\raw\stdout.txt'; stdoutSha256 = '6' * 64
+                    stderrPath = 'C:\core-artifacts\runs\raw\stderr.txt'; stderrSha256 = '7' * 64; testCounts = $null
+                })
+            artifacts = [pscustomobject][ordered]@{
+                runId = $coreRunId; root = 'C:\core-artifacts'; outputPath = 'C:\core-artifacts\result.json'
+                runRoot = 'C:\core-artifacts\runs\a'; snapshotRoot = 'C:\core-artifacts\runs\a\candidate'
+            }
+            failure = $null
+        }
+        Assert-AuthoritySchemaInstance -Value $coreEvidence -Schema $coreEvidenceSchema -SchemaPath $coreEvidenceSchemaPath -Expected $true -Message 'A v2 PASS record with an executed and cleaned check must be schema-valid.'
+        foreach ($mutation in @(
+                @{ Name = 'nonzero-pass-exit'; Field = 'exitCode'; Value = 20 },
+                @{ Name = 'nonpassed-check'; Field = 'status'; Value = 'failed' },
+                @{ Name = 'unclean-pass-check'; Field = 'cleanedUp'; Value = $false }
+            )) {
+            $invalidCoreEvidence = Copy-TestJsonObject -Value $coreEvidence
+            $invalidCoreEvidence.checks[0] | Add-Member -NotePropertyName ([string]$mutation.Field) -NotePropertyValue $mutation.Value -Force
+            Assert-AuthoritySchemaInstance -Value $invalidCoreEvidence -Schema $coreEvidenceSchema -SchemaPath $coreEvidenceSchemaPath -Expected $false -Message "A v2 PASS record with '$($mutation.Name)' must fail schema validation."
+        }
+        $invalidCoreEvidence = Copy-TestJsonObject -Value $coreEvidence
+        $invalidCoreEvidence.checks[0].stdoutSha256 = 'not-a-sha256'
+        Assert-AuthoritySchemaInstance -Value $invalidCoreEvidence -Schema $coreEvidenceSchema -SchemaPath $coreEvidenceSchemaPath -Expected $false -Message 'A v2 PASS check without a valid stdout raw hash must fail schema validation.'
+        $invalidCoreEvidence = Copy-TestJsonObject -Value $coreEvidence
+        $invalidCoreEvidence.checks[0].PSObject.Properties.Remove('stderrSha256')
+        Assert-AuthoritySchemaInstance -Value $invalidCoreEvidence -Schema $coreEvidenceSchema -SchemaPath $coreEvidenceSchemaPath -Expected $false -Message 'A v2 PASS check without a stderr raw hash must fail schema validation.'
+        $invalidCoreEvidence = Copy-TestJsonObject -Value $coreEvidence
+        $invalidCoreEvidence.candidate.eventName = 'manual'
+        Assert-AuthoritySchemaInstance -Value $invalidCoreEvidence -Schema $coreEvidenceSchema -SchemaPath $coreEvidenceSchemaPath -Expected $false -Message 'A v2 candidate event outside the core allowlist must fail schema validation.'
+
+        $invalidEventCandidateRoot = Join-Path $TestDrive 'invalid-event-candidate'
+        $invalidEventAdapterPath = Join-Path $TestDrive 'invalid-event-adapter.json'
+        $invalidEventArtifactsRoot = Join-Path $TestDrive 'invalid-event-artifacts'
+        . $runnerPath `
+            -CandidateRoot $invalidEventCandidateRoot `
+            -AdapterPath $invalidEventAdapterPath `
+            -ArtifactsRoot $invalidEventArtifactsRoot `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'local' `
+            -DefineFunctionsOnly
+        $invalidEventEvidence = Invoke-StandardValidationRun `
+            -CandidateRoot $invalidEventCandidateRoot `
+            -AdapterPath $invalidEventAdapterPath `
+            -ArtifactsRoot $invalidEventArtifactsRoot `
+            -SourceRepository 'https://example.com/example/skills.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName 'manual'
+        Assert-Equal $invalidEventEvidence.state 'INVALID' 'The core must reject unsupported event names before producing candidate evidence.'
+        Assert-Equal $invalidEventEvidence.exitCode 30 'Unsupported events must use INVALID=30.'
+        Assert-False ([bool]$invalidEventEvidence.releaseEligible) 'Unsupported event evidence must remain release-ineligible.'
+        Assert-False (Test-Path -LiteralPath $invalidEventArtifactsRoot) 'Unsupported events must fail preflight without creating an artifacts root.'
 
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationEvidenceSchemaPath | ConvertFrom-Json
         Assert-True (@($evidenceSchema.allOf).Count -ge 6) 'Validation evidence schema must declare all terminal-state consistency rules.'
@@ -3683,6 +3804,7 @@ public sealed class C245NonCooperativeStream : Stream {
         $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $schema = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGateSchemaPath | ConvertFrom-Json
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $validationContract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
         $index = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:IndexPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
@@ -3693,7 +3815,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-AuthorityValidationSecurityGate -Policy $policy | Out-Null
 
         $contract = $policy.entryPointContract
-        Assert-ExactPropertySet $contract @('canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts', 'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles') 'Entry-point contract property set changed.'
+        Assert-ExactPropertySet $contract @('canonicalExecution', 'releaseAffectingSurfaces', 'publicCommandDocumentation', 'componentScripts', 'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles') 'Entry-point contract property set changed.'
         Assert-Equal $contract.canonicalExecution.maxPerEventCandidate 1 'A consumer must have at most one canonical execution per event/candidate.'
         Assert-Equal $contract.canonicalExecution.route 'canonical-validator' 'All release-affecting consumer surfaces must route to the canonical validator.'
         Assert-True ([bool]$contract.canonicalExecution.sameCandidateBinding) 'Trigger adapters must bind the same event candidate.'
@@ -3705,6 +3827,11 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Equal $contract.releaseAffectingSurfaces.alternateGateAction 'BLOCK' 'Consumer alternate gates must block closed.'
         Assert-True ([bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation) 'Release-affecting surfaces must preserve canonical failure propagation.'
         Assert-ExactStringSequence $contract.releaseAffectingSurfaces.forbiddenFailureSuppression @('|| true', '|| :', 'continue-on-error: true', 'if: always()') 'Release-affecting surfaces must reject failure suppression.'
+        Assert-ExactPropertySet $contract.publicCommandDocumentation @('mode', 'commandScope', 'unrelatedCanonicalAuthorizesRelease', 'setupAndDiagnosticsAreReleaseGates') 'Public command documentation policy shape changed.'
+        Assert-Equal $contract.publicCommandDocumentation.mode 'consistency-only' 'Public command Markdown must remain a consistency check.'
+        Assert-Equal $contract.publicCommandDocumentation.commandScope 'local-markdown-command-section' 'Public command consistency must stay within a local Markdown command section.'
+        Assert-False ([bool]$contract.publicCommandDocumentation.unrelatedCanonicalAuthorizesRelease) 'A canonical command in an unrelated section must not authorize a release command.'
+        Assert-False ([bool]$contract.publicCommandDocumentation.setupAndDiagnosticsAreReleaseGates) 'Setup and diagnostics must not become release gates.'
         Assert-True ([bool]$contract.componentScripts.mayExist) 'Component/diagnostic scripts must remain allowed.'
         Assert-False ([bool]$contract.componentScripts.mayBeTopLevelReleaseGate) 'Component scripts must not become public release gates.'
         Assert-True ([bool]$contract.compatibilityLane.allowed) 'Compatibility lanes must remain available for explicit legacy coverage.'
@@ -3728,9 +3855,9 @@ public sealed class C245NonCooperativeStream : Stream {
         ) 'The authority workflow exception inventory must preserve all four workflow paths.'
         Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.role }) @(
             'canonical-authority-regression',
-            'compatibility-and-linux-composition-bridge',
+            'windows-core-authority',
             'production-lock-contract',
-            'production-smoke-contract'
+            'windows-install-smoke'
         ) 'The authority workflow exception roles must remain explicit and ordered.'
         foreach ($role in $roles) {
             Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be treated as a consumer alternate gate."
@@ -3738,12 +3865,50 @@ public sealed class C245NonCooperativeStream : Stream {
 
         Assert-Match $standard 'one canonical validation execution per event/candidate' 'Normative Standard must prohibit duplicate canonical validation execution.'
         Assert-Match $standard 'workflow.*hook.*public' 'Normative Standard must define the release-affecting entry-point inventory.'
+        Assert-Match $standard 'Public command Markdown.*local Markdown section' 'Normative Standard must scope public command documentation consistency to a local Markdown section.'
         Assert-Match $standard 'component.*MUST NOT.*release path' 'Normative Standard must keep component scripts non-authoritative.'
         Assert-Match $standard 'compatibility.*needs.*canonical|compatibility.*canonical.*result' 'Normative Standard must constrain compatibility lanes to the canonical result.'
         Assert-Match $index 'entry-point|canonical validation execution' 'Standards index must expose the entry-point contract.'
         Assert-Match $matrix 'entry-point|alternate gate|canonical validation execution' 'Review matrix must record the entry-point boundary.'
         Assert-Match $gate 'Assert-AuthorityConsumerEntryPointContract' 'The executable authority must expose the consumer entry-point contract checker.'
         Assert-Match $gate 'Get-AuthorityConsumerReleaseAffectingMatch -Text \$releaseExecutableText' 'Release ordering must use the same release-surface matcher as release detection.'
+
+        Assert-ExactPropertySet $validationContract.entryPointContract @('policyPath', 'publicCommandDocumentationPolicyPath', 'documentationSemantics', 'executionBinding') 'Standard validation contract must link the prior entry-point fields and the versioned execution binding without defining another policy.'
+        Assert-Equal $validationContract.entryPointContract.policyPath 'docs/standards/validation-security-gate.json#/entryPointContract' 'Standard validation contract must link to the canonical entry-point policy.'
+        Assert-Equal $validationContract.entryPointContract.publicCommandDocumentationPolicyPath 'docs/standards/validation-security-gate.json#/entryPointContract/publicCommandDocumentation' 'Standard validation contract must link to the canonical public command documentation policy.'
+        Assert-Equal $validationContract.entryPointContract.documentationSemantics 'consistency-only within each local Markdown command section; an unrelated canonical command does not authorize a release command; setup and diagnostics are not release gates' 'Standard validation contract must summarize the canonical documentation semantics.'
+
+        $executionBinding = $validationContract.entryPointContract.executionBinding
+        Assert-ExactPropertySet $executionBinding @('schemaVersion', 'bindingSchemaPath', 'resultSchemaPath', 'modulePath', 'commandPath', 'publicFunctions', 'bindingFields', 'inputInventoryRoots', 'resultSemantics', 'platformArtifactTrustBoundary', 'fixtureQualification', 'gatePreflightCommandPath', 'gatePreflightSemantics') 'Execution binding contract shape must remain explicit and versioned.'
+        Assert-Equal $executionBinding.schemaVersion 1 'Execution binding contract must remain schema version 1.'
+        Assert-Equal $executionBinding.bindingSchemaPath 'docs/standards/schemas/standard-entry-binding-v1.schema.json' 'Binding schema path must match the implementation contract.'
+        Assert-Equal $executionBinding.resultSchemaPath 'docs/standards/schemas/standard-entry-result-v1.schema.json' 'Result schema path must match the implementation contract.'
+        Assert-Equal $executionBinding.modulePath 'scripts/StandardEntryPointContract.psm1' 'Binding module path must match the implementation contract.'
+        Assert-Equal $executionBinding.commandPath 'scripts/Test-StandardEntryPointResult.ps1' 'Result command path must match the implementation contract.'
+        Assert-ExactStringSequence $executionBinding.publicFunctions @('Get-StandardEntryPointRuntime', 'New-StandardEntryPointBinding', 'Assert-StandardEntryPointBinding', 'Assert-StandardEntryPointResult') 'Only the fixed binding/result API must be public.'
+        Assert-ExactStringSequence $executionBinding.bindingFields @('schemaVersion', 'entryId', 'eventName', 'candidateRevision', 'authorityRevision', 'runtime', 'configSha256', 'requiredChecks', 'resultArtifact', 'contentMode', 'inputFileManifest') 'The binding field inventory must remain exact.'
+        Assert-ExactStringSequence $executionBinding.inputInventoryRoots @('scripts/', 'tests/', 'docs/standards/', '.github/workflows/') 'The bound input inventory roots must remain exact.'
+        Assert-Match $executionBinding.resultSemantics 'releaseEligible is always false' 'A verified result must remain validation-only.'
+        Assert-Match $executionBinding.platformArtifactTrustBoundary 'does not prove provider execution|does not prove' 'The local result must not be described as platform proof.'
+        Assert-Match $executionBinding.fixtureQualification 'not release certification|not.*release certification' 'Fixture PASS must not become release certification.'
+
+        $bindingSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-entry-binding-v1.schema.json'
+        $resultSchemaPath = Join-Path $script:RepositoryRoot 'docs/standards/schemas/standard-entry-result-v1.schema.json'
+        $modulePath = Join-Path $script:RepositoryRoot 'scripts/StandardEntryPointContract.psm1'
+        $commandPath = Join-Path $script:RepositoryRoot 'scripts/Test-StandardEntryPointResult.ps1'
+        foreach ($requiredPath in @($bindingSchemaPath, $resultSchemaPath, $modulePath, $commandPath)) {
+            Assert-True (Test-Path -LiteralPath $requiredPath -PathType Leaf) "Execution binding contract target must exist: $requiredPath"
+        }
+        $bindingSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $bindingSchemaPath | ConvertFrom-Json
+        $resultSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath $resultSchemaPath | ConvertFrom-Json
+        $bindingShape = ConvertTo-Json -InputObject $bindingSchema.'$defs'.entryBinding -Depth 24 -Compress
+        $resultBindingShape = ConvertTo-Json -InputObject $resultSchema.'$defs'.entryBinding -Depth 24 -Compress
+        Assert-Equal $bindingShape $resultBindingShape 'The result schema must inline the exact binding shape so local schema validation uses one shared contract.'
+        Assert-ExactPropertySet $bindingSchema.'$defs'.entryBinding @('title', 'description', 'type', 'additionalProperties', 'required', 'properties') 'Binding schema object shape changed.'
+        Assert-ExactPropertySet $resultSchema.properties @('schemaVersion', 'binding', 'status', 'executed', 'releaseEligible', 'checks') 'Result schema property inventory changed.'
+        Assert-Match $standard '8\.1\.3 Versioned execution binding and result core' 'Normative Standard must document the versioned binding/result core.'
+        Assert-Match $standard 'does not independently prove provider execution' 'Normative Standard must preserve the platform-artifact trust boundary.'
+        Assert-Match $standard 'Repository fixtures verify only the declared local contract' 'Normative Standard must qualify fixture evidence.'
 
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases -f tag_name=v1.0.0') 'A gh api release creation with fields must be release-affecting.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'gh api repos/{owner}/{repo}/releases --method PATCH --raw-field name=v1.0.0') 'An explicit mutating gh api release request must be release-affecting.'
@@ -3988,5 +4153,55 @@ jobs:
         try { Assert-AuthorityUpstreamAdapterReport -Report $report | Out-Null }
         catch { $errorMessage = $_.Exception.Message }
         Assert-Match $errorMessage 'invalid result' 'A string schemaVersion must remain fail-closed.'
+    }
+
+    Context 'Authority gate preflight contract' {
+        # Scenario: The versioned contract advertises the shipped authority gate and its explicit preflight semantics.
+        # Purpose: Bind descriptor claims to the actual gate parameters, trusted module path, diagnostic-only branch, and pre-tool ordering.
+        It 'UnitT10_binds_the_actual_gate_to_explicit_preflight_semantics' {
+            $validationContract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
+            $executionBinding = $validationContract.entryPointContract.executionBinding
+            Assert-ExactPropertySet $executionBinding @('schemaVersion', 'bindingSchemaPath', 'resultSchemaPath', 'modulePath', 'commandPath', 'publicFunctions', 'bindingFields', 'inputInventoryRoots', 'resultSemantics', 'platformArtifactTrustBoundary', 'fixtureQualification', 'gatePreflightCommandPath', 'gatePreflightSemantics') 'Execution binding contract must add only the declared gate preflight descriptor fields.'
+            Assert-Equal $executionBinding.gatePreflightCommandPath 'scripts/Invoke-StandardAuthorityGate.ps1' 'Preflight descriptor must name the shipped authority gate.'
+            Assert-Equal $executionBinding.gatePreflightSemantics 'Explicit candidate/authority roots and full revisions are required before tools; BindingOnly emits a binding diagnostic, never an executed passed result or a success artifact.' 'Preflight descriptor must preserve the diagnostic-only semantics.'
+
+            $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+            $parameterBlockEnd = $gate.IndexOf('Set-StrictMode', [StringComparison]::Ordinal)
+            Assert-True ($parameterBlockEnd -gt 0) 'Authority gate must retain its explicit parameter block.'
+            $parameterBlock = $gate.Substring(0, $parameterBlockEnd)
+            foreach ($parameterPattern in @(
+                    '\[string\]\s+\$CandidateRoot',
+                    '\[string\]\s+\$AuthorityRoot',
+                    '\[string\]\s+\$CandidateRevision',
+                    '\[string\]\s+\$AuthorityRevision',
+                    '\[string\]\s+\$EventName',
+                    '\[string\]\s+\$ResultArtifact',
+                    '\[switch\]\s+\$AllowDevelopmentContent',
+                    '\[switch\]\s+\$BindingOnly'
+                )) {
+                Assert-Match $parameterBlock $parameterPattern 'Authority gate must expose each explicit preflight input.'
+            }
+            Assert-NotMatch $parameterBlock '\$RequiredChecks' 'Callers must not expand the fixed required-check set.'
+
+            $functionsOnlyReturn = $gate.IndexOf('if ($DefineFunctionsOnly) { return }', [StringComparison]::Ordinal)
+            $preflightCall = $gate.IndexOf('$authorityEntryBinding = Get-AuthorityEntryPreflight', [StringComparison]::Ordinal)
+            $pesterDiscovery = $gate.IndexOf('$pesterModules = @(Get-Module -ListAvailable -Name Pester', [StringComparison]::Ordinal)
+            Assert-True ($functionsOnlyReturn -ge 0 -and $preflightCall -gt $functionsOnlyReturn -and $pesterDiscovery -gt $preflightCall) 'Preflight must follow DefineFunctionsOnly and precede pinned Pester discovery.'
+            $ordinaryGate = $gate.Substring($gate.IndexOf('if ($BindingOnly) {', [StringComparison]::Ordinal))
+            Assert-NotMatch $ordinaryGate 'expectedGoRuntimeVersion|STANDARD_GO_RUNTIME_VERSION|STANDARD_GO_COMMAND_PATH' 'The ordinary authority gate must not require a Go runtime.'
+            Assert-Match $gate 'Join-Path \$candidateFullRoot ''scripts/Invoke-StandardAuthorityGate\.ps1''' 'The running gate must be compared with the claimed candidate path.'
+            Assert-Match $gate 'Import-Module -Name \$candidateModulePath -Force -PassThru' 'The binding module must load from the candidate root.'
+            Assert-Match $gate '\[string\]::Equals\(\$loadedModulePath, \$candidateModulePath, \$pathComparison\)' 'The loaded binding module path must be verified.'
+            Assert-Match $gate 'RequiredChecks = @\(''Standard v1 authority gate''\)' 'The authority entry point must bind its fixed singleton check.'
+            Assert-Match $gate '\[void\]\(Assert-StandardEntryPointBinding -Binding \$binding\)' 'Successful binding verification must not leak a Boolean to stdout.'
+            Assert-Match $gate 'binding = \$authorityEntryBinding' 'The ordinary result must carry the verified candidate and authority binding.'
+
+            $bindingOnlyStart = $gate.IndexOf('if ($BindingOnly) {', [StringComparison]::Ordinal)
+            $mainStart = $gate.IndexOf('$repositoryRoot =', $bindingOnlyStart, [StringComparison]::Ordinal)
+            Assert-True ($bindingOnlyStart -ge 0 -and $mainStart -gt $bindingOnlyStart) 'BindingOnly must have a bounded pre-tool return branch.'
+            $bindingOnlyBranch = $gate.Substring($bindingOnlyStart, $mainStart - $bindingOnlyStart)
+            Assert-Match $bindingOnlyBranch "type = 'standard-entry-point-binding-diagnostic'" 'BindingOnly must emit a typed binding diagnostic.'
+            Assert-NotMatch $bindingOnlyBranch 'Set-Content|WriteAllText|New-Item|Move-Item|Copy-Item' 'BindingOnly must not create a result or success artifact.'
+        }
     }
 }

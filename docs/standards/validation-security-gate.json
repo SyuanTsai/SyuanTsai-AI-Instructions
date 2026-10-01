@@ -204,6 +204,12 @@
       "requiresFailurePropagation": true,
       "forbiddenFailureSuppression": ["|| true", "|| :", "continue-on-error: true", "if: always()"]
     },
+    "publicCommandDocumentation": {
+      "mode": "consistency-only",
+      "commandScope": "local-markdown-command-section",
+      "unrelatedCanonicalAuthorizesRelease": false,
+      "setupAndDiagnosticsAreReleaseGates": false
+    },
     "componentScripts": {
       "mayExist": true,
       "mayBeTopLevelReleaseGate": false
@@ -232,7 +238,7 @@
       },
       {
         "path": ".github/workflows/pr8-powershell-validation.yml",
-        "role": "compatibility-and-linux-composition-bridge",
+        "role": "windows-core-authority",
         "consumerAlternateGate": false
       },
       {
@@ -242,7 +248,7 @@
       },
       {
         "path": ".github/workflows/syp101-production-smoke.yml",
-        "role": "production-smoke-contract",
+        "role": "windows-install-smoke",
         "consumerAlternateGate": false
       }
     ]

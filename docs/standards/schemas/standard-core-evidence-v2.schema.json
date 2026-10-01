@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions/blob/main/docs/standards/schemas/standard-core-evidence-v2.schema.json",
+  "title": "Standard ordinary core validation evidence v2",
+  "description": "Local execution evidence only. A PASS records the actual checks and remains release-ineligible; it is not CI, scanner, release, or platform evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "evidence", "generatedAt", "runId", "state", "exitCode", "releaseEligible", "contentMode", "candidate", "authority", "adapter", "checks", "artifacts", "failure"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "evidence": { "const": "standard-core-validation-evidence-v2" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "runId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "state": { "enum": ["PASS", "BLOCKED", "FAILED", "INVALID", "CANCELLED"] },
+    "exitCode": { "type": "integer", "enum": [0, 10, 20, 30, 40] },
+    "releaseEligible": { "const": false },
+    "contentMode": { "enum": ["immutable-source", "development"] },
+    "candidate": { "oneOf": [{ "$ref": "#/$defs/candidate" }, { "type": "null" }] },
+    "authority": { "oneOf": [{ "$ref": "#/$defs/authority" }, { "type": "null" }] },
+    "adapter": { "oneOf": [{ "$ref": "#/$defs/adapter" }, { "type": "null" }] },
+    "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } },
+    "artifacts": { "oneOf": [{ "$ref": "#/$defs/artifacts" }, { "type": "null" }] },
+    "failure": { "oneOf": [{ "$ref": "#/$defs/failure" }, { "type": "null" }] }
+  },
+  "allOf": [
+    { "if": { "properties": { "state": { "const": "PASS" } }, "required": ["state"] }, "then": { "properties": { "exitCode": { "const": 0 }, "candidate": { "$ref": "#/$defs/candidate" }, "authority": { "$ref": "#/$defs/authority" }, "adapter": { "$ref": "#/$defs/adapter" }, "checks": { "minItems": 1, "items": { "$ref": "#/$defs/passedCheck" } }, "artifacts": { "$ref": "#/$defs/artifacts" }, "failure": { "type": "null" } } } },
+    { "if": { "properties": { "state": { "const": "BLOCKED" } }, "required": ["state"] }, "then": { "properties": { "exitCode": { "const": 10 }, "failure": { "$ref": "#/$defs/failure" } } } },
+    { "if": { "properties": { "state": { "const": "FAILED" } }, "required": ["state"] }, "then": { "properties": { "exitCode": { "const": 20 }, "failure": { "$ref": "#/$defs/failure" } } } },
+    { "if": { "properties": { "state": { "const": "INVALID" } }, "required": ["state"] }, "then": { "properties": { "exitCode": { "const": 30 }, "failure": { "$ref": "#/$defs/failure" } } } },
+    { "if": { "properties": { "state": { "const": "CANCELLED" } }, "required": ["state"] }, "then": { "properties": { "exitCode": { "const": 40 }, "failure": { "$ref": "#/$defs/failure" } } } }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "revision": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+    "inventoryEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "length"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*[\\u0000-\\u001F\\u007F])[^/]+(?:/[^/]+)*$" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "length": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "sourceRevision", "baseRevision", "contentSha256", "inventory", "activeSkills", "contentMode", "eventName"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "sourceRevision": { "$ref": "#/$defs/revision" },
+        "baseRevision": { "$ref": "#/$defs/revision" },
+        "contentSha256": { "$ref": "#/$defs/sha256" },
+        "inventory": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/inventoryEntry" } },
+        "activeSkills": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" } },
+        "contentMode": { "enum": ["immutable-source", "development"] },
+        "eventName": { "enum": ["local", "pre-push", "pull_request", "push", "workflow_dispatch"] }
+      }
+    },
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "revision", "runnerSha256", "contractSha256", "contentMode"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "revision": { "$ref": "#/$defs/revision" },
+        "runnerSha256": { "$ref": "#/$defs/sha256" },
+        "contractSha256": { "$ref": "#/$defs/sha256" },
+        "contentMode": { "enum": ["source", "development"] }
+      }
+    },
+    "adapter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "identity", "sha256"],
+      "properties": { "schemaVersion": { "const": 2 }, "identity": { "const": "standard-core-adapter-v2" }, "sha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "check": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "executableSha256", "argumentsSha256", "processId", "startedAt", "endedAt", "exitCode", "status", "cleanedUp", "stdoutPath", "stdoutSha256", "stderrPath", "stderrSha256", "testCounts"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "kind": { "enum": ["general", "pester"] },
+        "executableSha256": { "$ref": "#/$defs/sha256" },
+        "argumentsSha256": { "$ref": "#/$defs/sha256" },
+        "processId": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "exitCode": { "type": "integer", "minimum": -1 },
+        "status": { "enum": ["passed", "failed", "timeout", "cancelled", "startup-failed", "cleanup-failed"] },
+        "cleanedUp": { "type": "boolean" },
+        "stdoutPath": { "type": "string", "minLength": 1 },
+        "stdoutSha256": { "$ref": "#/$defs/sha256" },
+        "stderrPath": { "type": "string", "minLength": 1 },
+        "stderrSha256": { "$ref": "#/$defs/sha256" },
+        "testCounts": { "oneOf": [{ "$ref": "#/$defs/testCounts" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "pester" } }, "required": ["kind"] }, "then": { "properties": { "testCounts": { "$ref": "#/$defs/testCounts" } } } },
+        { "if": { "properties": { "kind": { "const": "general" } }, "required": ["kind"] }, "then": { "properties": { "testCounts": { "type": "null" } } } }
+      ]
+    },
+    "passedCheck": {
+      "allOf": [
+        { "$ref": "#/$defs/check" },
+        { "type": "object", "properties": { "exitCode": { "const": 0 }, "status": { "const": "passed" }, "cleanedUp": { "const": true } } }
+      ]
+    },
+    "testCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "passed", "failed", "skipped"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 1 },
+        "passed": { "type": "integer", "minimum": 1 },
+        "failed": { "const": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runId", "root", "outputPath", "runRoot", "snapshotRoot"],
+      "properties": {
+        "runId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "root": { "type": "string", "minLength": 1 },
+        "outputPath": { "type": "string", "minLength": 1 },
+        "runRoot": { "type": "string", "minLength": 1 },
+        "snapshotRoot": { "type": "string", "minLength": 1 }
+      }
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "message"],
+      "properties": { "state": { "enum": ["BLOCKED", "FAILED", "INVALID", "CANCELLED"] }, "message": { "type": "string", "minLength": 1 } }
+    }
+  }
+}

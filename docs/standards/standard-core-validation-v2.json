@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 2,
+  "contract": "standard-core-validation-v2",
+  "status": "active",
+  "ordinaryCli": {
+    "script": "scripts/Invoke-StandardValidation.ps1",
+    "adapterIdentity": "standard-core-adapter-v2",
+    "adapterSchema": "docs/standards/schemas/standard-core-adapter-v2.schema.json",
+    "evidenceIdentity": "standard-core-validation-evidence-v2",
+    "evidenceSchema": "docs/standards/schemas/standard-core-evidence-v2.schema.json",
+    "defaultMode": "core-v2",
+    "requiredInputs": [
+      "CandidateRoot",
+      "AdapterPath",
+      "ArtifactsRoot",
+      "SourceRepository",
+      "SourceRevision",
+      "BaseRevision",
+      "EventName",
+      "AuthorityRevision",
+      "TimeoutSeconds"
+    ],
+    "optionalInput": "AllowDevelopmentContent",
+    "eventNames": ["local", "pre-push", "pull_request", "push", "workflow_dispatch"]
+  },
+  "core": {
+    "identity": "full candidate and authority Git commit revisions",
+    "sourceBinding": "canonical HTTPS SourceRepository and equivalent single local origin URL",
+    "candidateInventory": "regular files in the pinned Git tree, byte hashes, exact index path and mode set",
+    "untrackedPolicy": "reject non-ignored untracked source files; ignored and untracked private files are never inventoried or copied",
+    "developmentContent": "AllowDevelopmentContent permits only modified tracked bytes and always remains release-ineligible",
+    "snapshot": "run-owned copy of verified tracked regular files only; no .git directory or untracked content",
+    "skillDiscovery": "discover and compare active Skills only inside the verified tracked-only snapshot",
+    "checks": "execute every unique declared local general or Pester check against the snapshot with bounded output, timeout, and owned cleanup",
+    "legacyCapabilities": "no supervisor binding, resolver receipt, external scanner, provider, approval, publish, install, or ten-stage lifecycle prerequisite",
+    "filesystemIsolation": "same-account child processes do not have filesystem read isolation; execute untrusted candidates only in platform-provided no-secret low-privilege pull-request environments",
+    "localFixture": "local smoke tests use only trusted isolated fixtures"
+  },
+  "modes": {
+    "ordinary": "no CompleteLifecycle or DevelopmentHarness switch; requires adapter v2 and rejects adapter v1 before legacy gates",
+    "legacyAdvanced": "adapter v1 requires explicit CompleteLifecycle; signed supervisor binding remains mandatory",
+    "legacyDevelopmentHarness": "adapter v1 may use explicit DevelopmentHarness for local regression only; output remains unverified and release-ineligible",
+    "versionMixing": "adapter v2 with either legacy mode switch is invalid"
+  },
+  "terminalStates": [
+    { "state": "PASS", "exitCode": 0 },
+    { "state": "BLOCKED", "exitCode": 10 },
+    { "state": "FAILED", "exitCode": 20 },
+    { "state": "INVALID", "exitCode": 30 },
+    { "state": "CANCELLED", "exitCode": 40 }
+  ],
+  "releaseEligible": false
+}

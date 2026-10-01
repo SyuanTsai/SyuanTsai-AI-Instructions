@@ -804,40 +804,17 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
         Assert-Match $receipt.executionContext.architecture '^[a-z0-9_-]+$' 'The resolver receipt must record a normalized execution architecture.'
     }
 
-    # Scenario: The host has an old or shadowed Go executable while setup-go acquired the approved latest stable runtime.
-    # Purpose: Require the authority workflow and resolver to bind the explicit setup-go executable path and its hash.
-    It 'UnitT72_binds_the_setup_go_executable_path_into_the_canonical_resolver_call' {
+    # Scenario: An explicit advanced resolver call supplies the Go executable selected for that run.
+    # Purpose: Preserve run-bound Go path and hash evidence without requiring Go in ordinary workflows.
+    It 'UnitT72_keeps_explicit_go_identity_in_the_advanced_resolver_receipt' {
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1')
-        $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
-        $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
 
         Assert-Match $resolver '\[string\]\s*\$GoCommandPath' 'The resolver must accept the run-resolved Go executable path.'
         Assert-Match $resolver 'goRuntimePath' 'The skill-validator receipt must record the resolved Go executable path.'
         Assert-Match $resolver 'goRuntimeSha256' 'The skill-validator receipt must record the resolved Go executable hash.'
-        Assert-Match $gate 'GoCommandPath' 'The authority gate must pass the setup-resolved Go executable path to the resolver.'
-        Assert-Match $workflow 'STANDARD_GO_COMMAND_PATH' 'The standards workflow must export the setup-resolved Go executable path.'
-        Assert-Match $workflow '-GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'The standards workflow must bind the setup-resolved Go path.'
-        Assert-Match $requiredWorkflow 'STANDARD_GO_COMMAND_PATH' 'The required workflow must export the setup-resolved Go executable path.'
-        Assert-Match $requiredWorkflow '-GoCommandPath \$env:STANDARD_GO_COMMAND_PATH' 'The required workflow must bind the setup-resolved Go path.'
+        Assert-Match $gate 'GoCommandPath' 'The authority gate must pass an explicitly resolved Go executable path to the advanced resolver.'
     }
-
-    # Scenario: The runner exposes more than one Go executable in PATH after setup-go prepends its tool cache.
-    # Purpose: Select the effective PATH command rather than failing merely because a shadowed system Go is also discoverable.
-    It 'UnitT73_selects_the_effective_setup_go_command_when_path_contains_shadowed_versions' {
-        $workflows = @(
-            (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
-            (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
-        )
-
-        foreach ($workflowPath in $workflows) {
-            $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $workflowPath
-            Assert-Match $workflow 'Get-Command\s+-Name\s+go\s+-CommandType\s+Application' "Workflow '$workflowPath' must resolve Go through PowerShell command discovery."
-            Assert-Match $workflow 'Select-Object\s+-First\s+1' "Workflow '$workflowPath' must select the effective PATH-precedence Go command."
-            Assert-NotMatch $workflow '\$goApplications\.Count\s+-ne\s+1' "Workflow '$workflowPath' must not reject a valid setup-go command because a shadowed Go executable is discoverable."
-        }
-    }
-
     # Scenario: Caller-supplied output paths are written by two independent resolver/adapter processes.
     # Purpose: Require the same exclusive atomic-create contract for both public JSON report writers.
     It 'UnitT90_requires_exclusive_atomic_creation_for_caller_output_paths' {
@@ -1138,14 +1115,15 @@ catch {
         Assert-NotMatch $resolver '\.codex-plugin/plugin\.json|\.mcp\.json|marketplace\.json|upstream-adapter\.json' 'Validation-tool resolution must not become an upstream packaging or marketplace policy engine.'
     }
 
-    # Scenario: Canonical validation/security ordering is implemented as a second resolver policy.
-    # Purpose: Keep the stage/severity authority in the central gate policy and prevent provider resolution from inventing pass/block semantics.
-    It 'UnitT100_keeps_canonical_validation_security_policy_in_the_central_authority_gate' {
+    # Scenario: Canonical validation/security policy remains structured source data while ordinary execution is simplified.
+    # Purpose: Keep policy and inactive-proposal checks authoritative without restoring retired semantic stages to the ordinary gate or resolver.
+    It 'UnitT100_keeps_canonical_policy_data_separate_from_the_ordinary_gate_and_resolver' {
         Assert-True (Test-Path -LiteralPath $script:ValidationSecurityGatePath -PathType Leaf) 'Canonical validation/security policy must remain in the central standards directory.'
         Assert-True (Test-Path -LiteralPath $script:AuthorityGatePath -PathType Leaf) 'Canonical authority gate must remain available.'
         $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ValidationSecurityGatePath | ConvertFrom-Json
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         $proposal = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/pr12-source-merge-exception-proposal.json') | ConvertFrom-Json
 
         Assert-Equal $proposal.status 'proposed' 'The PR12 scanner limitation must remain an inactive policy proposal.'
@@ -1157,13 +1135,15 @@ catch {
         Assert-Equal $policy.policy 'canonical-validation-security-gate-v1' 'Canonical validation/security policy identity must remain central.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic preflight input binding must remain in central policy.'
         Assert-Equal $policy.security.semanticPreflight.providerInventoryBinding 'full-byte-manifest-plus-authenticated-provider-text-subset-with-strict-utf8-v1-digest' 'Semantic preflight provider-text inventory binding must remain central.'
-        foreach ($semanticSuite in @('standard-semantic-bridge.Tests.ps1','standard-semantic-inventory-probe.Tests.ps1','standard-semantic-preflight.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
-            Assert-Match $gate ([regex]::Escape($semanticSuite)) "Authority resolution must retain semantic behavior suite '$semanticSuite'."
+        foreach ($semanticSuite in @('standard-semantic-inventory-probe.Advanced.ps1','standard-semantic-preflight.Advanced.ps1','standard-semantic-raw-graph.Advanced.ps1')) {
+            $suitePath = Join-Path $PSScriptRoot $semanticSuite
+            Assert-True (Test-Path -LiteralPath $suitePath -PathType Leaf) "Semantic diagnostic suite '$semanticSuite' must remain available for explicit diagnosis."
+            Assert-NotMatch $gate ([regex]::Escape($semanticSuite)) "The ordinary authority gate must not execute diagnostic suite '$semanticSuite'."
         }
-        Assert-Match $gate 'STANDARD_AUTHORITY_PYTHON' 'Authority resolution must route semantic regressions through the frozen SkillSpector Python.'
-        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Tests.ps1','standard-semantic-raw-graph.Tests.ps1')) {
+        Assert-NotMatch $gate 'standard-semantic-bridge\.Tests\.ps1' 'The ordinary authority gate must not call the retained SYP-212 test file by path.'
+        foreach ($isolatedPythonSuite in @('standard-semantic-inventory-probe.Advanced.ps1','standard-semantic-raw-graph.Advanced.ps1')) {
             $suiteText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot $isolatedPythonSuite)
-            Assert-Match $suiteText '& \$script:Python -I -B' "Authority semantic suite '$isolatedPythonSuite' must request isolated Python startup."
+            Assert-Match $suiteText '& \$script:Python -I -B' "Semantic diagnostic suite '$isolatedPythonSuite' must request isolated Python startup."
         }
         Assert-Equal $policy.security.semanticPreflight.workBinding 'one-successful-provider-call-per-planned-work-item-with-matching-analyzer-path-and-interval' 'Semantic preflight per-work provider-call binding must remain central.'
         Assert-Equal $policy.security.semanticPreflight.jsonPropertyBinding 'reject-decoded-duplicate-properties-with-ordinal-ignore-case-semantics-before-deserialization' 'Semantic preflight JSON property-collision handling must remain central.'
@@ -1171,10 +1151,7 @@ catch {
         Assert-Equal $semanticPreflightNonAuthority.Count 2 'Unsigned preflight must declare both non-authority boundaries.'
         Assert-Equal $semanticPreflightNonAuthority[0] 'cannot-satisfy-semantic-evidence' 'Unsigned preflight must not satisfy semantic evidence.'
         Assert-Equal $semanticPreflightNonAuthority[1] 'cannot-authorize-release' 'Unsigned preflight must not authorize release.'
-        Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'Authority gate must enforce the canonical validation/security policy.'
-        Assert-Match $gate 'validation-security-gate\.json' 'Authority gate must load the canonical validation/security policy.'
-        Assert-Match $gate 'Package Validation' 'Authority gate must identify the Package Validation stage.'
-        Assert-Match $gate 'SkillSpector Static' 'Authority gate must identify the SkillSpector Static stage.'
+        Assert-NotMatch $normalMain 'Assert-AuthorityValidationSecurityGate|validation-security-gate\.json|semanticPreflight|STANDARD_AUTHORITY_PYTHON|one-successful-provider-call-per-planned-work-item' 'The ordinary authority gate must not execute the retired policy-controlled semantic or external stages.'
         Assert-NotMatch $resolver 'canonical-validation-security-gate-v1|Assert-AuthorityValidationSecurityGate|semantic-scan-preflight-v1' 'Validation-tool resolver must not become a stage/severity or semantic-preflight policy engine.'
     }
 

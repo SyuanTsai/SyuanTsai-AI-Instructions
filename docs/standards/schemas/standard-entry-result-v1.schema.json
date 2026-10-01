@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Standard entry point executed result v1",
+  "description": "A validation-only result that reports executed required checks for exactly one expected binding and never grants release eligibility.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "binding", "status", "executed", "releaseEligible", "checks"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "binding": { "$ref": "#/$defs/entryBinding" },
+    "status": { "const": "passed" },
+    "executed": { "const": true },
+    "releaseEligible": { "const": false },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/check" }
+    }
+  },
+  "$defs": {
+    "entryBinding": {
+      "title": "Standard entry point execution binding v1",
+      "description": "Binds one standard entry to separate candidate and authority Git snapshots, the current runtime, expected checks, and actual input-file hashes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "entryId",
+        "eventName",
+        "candidateRevision",
+        "authorityRevision",
+        "runtime",
+        "configSha256",
+        "requiredChecks",
+        "resultArtifact",
+        "contentMode",
+        "inputFileManifest"
+      ],
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 1 },
+        "entryId": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$" },
+        "eventName": { "enum": ["pull_request", "push", "workflow_dispatch", "local-contract"] },
+        "candidateRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "authorityRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "psEdition", "psVersion"],
+          "properties": {
+            "os": { "enum": ["windows", "linux", "macos"] },
+            "psEdition": { "enum": ["Core", "Desktop"] },
+            "psVersion": { "type": "string", "minLength": 1 }
+          }
+        },
+        "configSha256": { "$ref": "#/$defs/sha256" },
+        "requiredChecks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "resultArtifact": { "$ref": "#/$defs/resultArtifactPath" },
+        "contentMode": { "enum": ["immutable", "development"] },
+        "inputFileManifest": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/inputFileManifestEntry" },
+          "allOf": [
+            { "contains": { "type": "object", "properties": { "role": { "const": "candidate" } }, "required": ["role"] } },
+            { "contains": { "type": "object", "properties": { "role": { "const": "authority" } }, "required": ["role"] } }
+          ]
+        }
+      }
+    },
+    "inputFileManifestEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "sha256"],
+      "properties": {
+        "role": { "enum": ["candidate", "authority"] },
+        "path": { "$ref": "#/$defs/inputPath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "inputPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:(?:scripts|tests|docs/standards|\\.github/workflows)/)(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))(?!.*[\\u0000-\\u001F\\u007F<>:\"|?*])[^/]+(?:/[^/]+)*$"
+    },
+    "resultArtifactPath": {
+      "type": "string",
+      "minLength": 6,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(^|/)\\.\\.?(/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))(?!.*[\\u0000-\\u001F\\u007F<>:\"|?*])[^/]+(?:/[^/]+)*\\.[jJ][sS][oO][nN]$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "executed", "exitCode"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "const": "passed" },
+        "executed": { "const": true },
+        "exitCode": { "type": "integer", "const": 0 }
+      }
+    }
+  }
+}
