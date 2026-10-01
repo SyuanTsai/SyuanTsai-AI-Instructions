@@ -145,7 +145,7 @@ jobs:
         Assert-Match $required '(?m)^permissions:\r?\n\s+contents:\s*read\s*$' 'PowerShell Regression must retain read-only repository permissions.'
 
         foreach ($definition in @(
-            @{ Name = 'windows-powershell-51-even'; Version = '3.4.0'; Index = 0; Skipped = 2 },
+            @{ Name = 'windows-powershell-51-even'; Version = '3.4.0'; Index = 0; Skipped = 1 },
             @{ Name = 'windows-powershell-51-even-b'; Version = '3.4.0'; Index = 2; Skipped = 5 },
             @{ Name = 'windows-powershell-51-odd'; Version = '3.4.0'; Index = 1; Skipped = 0 },
             @{ Name = 'windows-powershell-51-odd-b'; Version = '3.4.0'; Index = 3; Skipped = 6 },

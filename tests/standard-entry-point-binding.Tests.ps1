@@ -228,41 +228,51 @@ Describe 'Standard entry point binding and result contract' {
         }
     }
 
-    # Scenario: The current development checkout has P01A tracked edits and this new untracked test file at the same HEAD as a clean clone.
-    # Purpose: Hash actual development bytes, expose same-revision inventory differences, and require explicit development mode.
+    # Scenario: Same-revision candidate and authority snapshots differ only by a controlled tracked standard-file edit.
+    # Purpose: Hash the candidate's actual development bytes and require explicit opt-in for immutable-mode rejection.
     It 'UnitT30_hashes_current_development_bytes_and_rejects_implicit_dirty_content' {
-        $authorityRoot = New-EntrySnapshotRoot -Name 'current-dev-authority' -Revision $script:SourceHead
-        $snapshots = [pscustomobject]@{
-            root = $TestDrive
-            candidate = $script:RepositoryRoot
-            authority = $authorityRoot
-            candidateRevision = $script:SourceHead
-            authorityRevision = $script:SourceHead
-        }
-        $binding = New-EntryTestBinding -Snapshots $snapshots -CandidateRevision $script:SourceHead -AuthorityRevision $script:SourceHead -AllowDevelopmentContent
+        $snapshots = New-EntrySnapshotPair -Name 'current-dev-bytes' -CandidateRevision $script:SourceHead -AuthorityRevision $script:SourceHead
+        $candidateRevision = (Invoke-EntryTestGit -Root $snapshots.candidate -Arguments @('rev-parse', '--verify', 'HEAD^{commit}') | Select-Object -Last 1).Trim()
+        $authorityRevision = (Invoke-EntryTestGit -Root $snapshots.authority -Arguments @('rev-parse', '--verify', 'HEAD^{commit}') | Select-Object -Last 1).Trim()
+        $candidateRevision | Should Be $script:SourceHead
+        $authorityRevision | Should Be $script:SourceHead
 
+        $candidateStandardPath = Join-Path $snapshots.candidate 'docs/standards/skill-repository-standard.md'
+        $authorityStandardPath = Join-Path $snapshots.authority 'docs/standards/skill-repository-standard.md'
+        [IO.File]::AppendAllText($candidateStandardPath, [Environment]::NewLine + '# SYP-226 UnitT30 development-candidate fixture' + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $candidateStatus = Invoke-EntryTestGit -Root $snapshots.candidate -Arguments @('status', '--porcelain=v1')
+        $candidateStatus | Should Match '^ M docs/standards/skill-repository-standard\.md$'
+        $authorityStatus = @(Invoke-EntryTestGit -Root $snapshots.authority -Arguments @('status', '--porcelain=v1') | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $authorityStatus.Count | Should Be 0
+
+        $binding = New-EntryTestBinding -Snapshots $snapshots -CandidateRevision $script:SourceHead -AuthorityRevision $script:SourceHead -AllowDevelopmentContent
         $binding.contentMode | Should Be 'development'
-        $developmentTestHash = Get-EntryTestFileSha256 -Path (Join-Path $script:RepositoryRoot 'tests/standard-entry-point-binding.Tests.ps1')
+
+        $developmentTestHash = Get-EntryTestFileSha256 -Path (Join-Path $snapshots.candidate 'tests/standard-entry-point-binding.Tests.ps1')
         $developmentTestEntry = @($binding.inputFileManifest | Where-Object { $_.role -ceq 'candidate' -and $_.path -ceq 'tests/standard-entry-point-binding.Tests.ps1' })
         $developmentTestEntry.Count | Should Be 1
         $developmentTestEntry[0].sha256 | Should Be $developmentTestHash
 
+        $developmentStandardHash = Get-EntryTestFileSha256 -Path $candidateStandardPath
+        $authorityStandardHash = Get-EntryTestFileSha256 -Path $authorityStandardPath
         $candidateStandard = @($binding.inputFileManifest | Where-Object { $_.role -ceq 'candidate' -and $_.path -ceq 'docs/standards/skill-repository-standard.md' })[0]
         $authorityStandard = @($binding.inputFileManifest | Where-Object { $_.role -ceq 'authority' -and $_.path -ceq 'docs/standards/skill-repository-standard.md' })[0]
+        $candidateStandard.sha256 | Should Be $developmentStandardHash
+        $authorityStandard.sha256 | Should Be $authorityStandardHash
         $candidateStandard.sha256 | Should Not Be $authorityStandard.sha256
 
-        $failureMessage = $null
-        try {
-            New-StandardEntryPointBinding `
-                -CandidateRoot $snapshots.candidate `
-                -AuthorityRoot $snapshots.authority `
-                -CandidateRevision $script:SourceHead `
-                -AuthorityRevision $script:SourceHead `
-                -EntryId 'standard-v1-authority' `
-                -EventName 'local-contract' `
-                -RequiredChecks @('Standard v1 authority gate') `
-                -ResultArtifact 'authority-entry-result.json' | Out-Null
+        $immutableArguments = @{
+            CandidateRoot = $snapshots.candidate
+            AuthorityRoot = $snapshots.authority
+            CandidateRevision = $script:SourceHead
+            AuthorityRevision = $script:SourceHead
+            EntryId = 'standard-v1-authority'
+            EventName = 'local-contract'
+            RequiredChecks = @('Standard v1 authority gate')
+            ResultArtifact = 'authority-entry-result.json'
         }
+        $failureMessage = $null
+        try { New-StandardEntryPointBinding @immutableArguments | Out-Null }
         catch { $failureMessage = $_.Exception.Message }
         $failureMessage | Should Match 'development|dirty|untracked|modified'
     }

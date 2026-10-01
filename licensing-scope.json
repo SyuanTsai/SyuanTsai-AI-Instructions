@@ -356,6 +356,22 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/standard-core-adapter-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-core-evidence-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-entry-binding-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/standard-entry-result-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json",
       "license": "Apache-2.0"
     },
@@ -381,6 +397,10 @@
     },
     {
       "path": "docs/standards/skill-repository-standard.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/standard-core-validation-v2.json",
       "license": "Apache-2.0"
     },
     {
@@ -496,7 +516,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/StandardEntryPointContract.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/StandardSemanticBridge.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Test-StandardEntryPointResult.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -809,6 +837,18 @@
     },
     {
       "path": "tests/source-merge-exception-draft.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-authority-entry-preflight.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-core-pester-adapter.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-entry-point-binding.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

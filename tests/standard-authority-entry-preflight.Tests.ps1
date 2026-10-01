@@ -483,12 +483,44 @@ Start-Sleep -Seconds 90
         Assert-EntryPreflightFailure -Result $unknownCheck -Marker 'parameter cannot be found|NamedParameterNotFound'
     }
 
-    # Scenario: The candidate root contains local changes but AllowDevelopmentContent is omitted.
-    # Purpose: Prevent dirty candidate bytes from being bound as immutable content implicitly.
+    # Scenario: A same-HEAD candidate snapshot contains one real tracked-byte mutation while development mode is omitted.
+    # Purpose: Prove immutable mode rejects controlled dirty candidate bytes without relying on the source checkout.
     It 'UnitT50_rejects_dirty_candidate_without_development_opt_in' {
-        $arguments = @(New-EntryPreflightArguments -BindingOnly)
-        $result = Invoke-EntryTestProcess -ScriptPath $script:GatePath -Arguments $arguments -Label 'UnitT50-dirty-without-development'
-        Assert-EntryPreflightFailure -Result $result -Marker 'STANDARD_ENTRY_BLOCKED\|immutable content mode rejects modified or untracked input files'
+        $candidateRoot = Join-Path $script:FixtureRoot ('candidate-dirty-' + [Guid]::NewGuid().ToString('N'))
+        $authorityRoot = Join-Path $script:FixtureRoot ('authority-same-head-' + [Guid]::NewGuid().ToString('N'))
+        $candidateSafeRoot = $script:CandidateRoot.Replace('\', '/')
+        $candidateRevision = $script:CandidateRevision
+
+        try {
+            foreach ($snapshotRoot in @($candidateRoot, $authorityRoot)) {
+                $cloneOutput = & $script:GitExecutable -c "safe.directory=$candidateSafeRoot" -C $script:CandidateRoot clone --shared --no-checkout --quiet -- $script:CandidateRoot $snapshotRoot 2>&1
+                $cloneExit = $LASTEXITCODE
+                if ($cloneExit -ne 0) {
+                    throw "Could not create same-HEAD Git fixture '$snapshotRoot' (exit $cloneExit): $(@($cloneOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)"
+                }
+                [void](Invoke-EntryTestGit -Root $snapshotRoot -Arguments @('checkout', '--detach', $candidateRevision))
+                (Invoke-EntryTestGit -Root $snapshotRoot -Arguments @('rev-parse', '--verify', 'HEAD^{commit}')) | Should Be $candidateRevision
+                (Invoke-EntryTestGit -Root $snapshotRoot -Arguments @('status', '--porcelain=v1')) | Should Be ''
+            }
+
+            $candidateStandardPath = Join-Path $candidateRoot 'docs/standards/skill-repository-standard.md'
+            [IO.File]::AppendAllText($candidateStandardPath, [Environment]::NewLine + '# SYP-226 UnitT50 dirty-candidate fixture' + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+            $candidateStatus = Invoke-EntryTestGit -Root $candidateRoot -Arguments @('status', '--porcelain=v1')
+            $candidateStatus | Should Match '^M docs/standards/skill-repository-standard\.md$'
+            (Invoke-EntryTestGit -Root $authorityRoot -Arguments @('status', '--porcelain=v1')) | Should Be ''
+
+            $arguments = @(New-EntryPreflightArguments -CandidateRoot $candidateRoot -AuthorityRoot $authorityRoot -CandidateRevision $candidateRevision -AuthorityRevision $candidateRevision -BindingOnly)
+            $candidateGatePath = Join-Path $candidateRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
+            $result = Invoke-EntryTestProcess -ScriptPath $candidateGatePath -Arguments $arguments -Label 'UnitT50-dirty-without-development'
+            Assert-EntryPreflightFailure -Result $result -Marker 'STANDARD_ENTRY_BLOCKED\|immutable content mode rejects modified or untracked input files'
+        }
+        finally {
+            foreach ($snapshotRoot in @($candidateRoot, $authorityRoot)) {
+                if (Test-Path -LiteralPath $snapshotRoot -PathType Container) {
+                    Remove-Item -LiteralPath $snapshotRoot -Recurse -Force
+                }
+            }
+        }
     }
 
     # Scenario: BindingOnly is invoked with explicit role identity and no Go, provider, supervisor, or scanner arguments.

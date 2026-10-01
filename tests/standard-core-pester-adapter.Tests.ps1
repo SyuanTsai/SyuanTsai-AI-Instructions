@@ -327,6 +327,77 @@ catch {
             param([Parameter(Mandatory = $true)] $Fixture)
             return @(Get-ChildItem -LiteralPath $Fixture.EvidenceRoot -Filter 'pester-shard-*.process.json' -File)
         }
+        function Get-P02AFilePreview {
+            param([string] $Path)
+            if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '<missing>' }
+            $stream = $null
+            try {
+                $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                $maximumBytes = 768
+                if ($stream.Length -le ($maximumBytes * 2)) {
+                    $buffer = [Array]::CreateInstance([byte], [int]$stream.Length)
+                    $read = $stream.Read($buffer, 0, $buffer.Length)
+                    return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+                }
+                $prefixBuffer = [Array]::CreateInstance([byte], $maximumBytes)
+                $prefixRead = $stream.Read($prefixBuffer, 0, $prefixBuffer.Length)
+                [void]$stream.Seek(-$maximumBytes, [IO.SeekOrigin]::End)
+                $tailBuffer = [Array]::CreateInstance([byte], $maximumBytes)
+                $tailRead = $stream.Read($tailBuffer, 0, $tailBuffer.Length)
+                $prefix = [Text.Encoding]::UTF8.GetString($prefixBuffer, 0, $prefixRead)
+                $tail = [Text.Encoding]::UTF8.GetString($tailBuffer, 0, $tailRead)
+                return $prefix + [Environment]::NewLine + '<truncated middle>' + [Environment]::NewLine + $tail
+            }
+            catch {
+                return '<read failed: ' + $_.Exception.Message + '>'
+            }
+            finally {
+                if ($null -ne $stream) { $stream.Dispose() }
+            }
+        }
+        function Get-P02AChildProcessDiagnostics {
+            param([Parameter(Mandatory = $true)] $Fixture)
+            $files = @(Get-P02AProcessEvidenceFiles -Fixture $Fixture | Sort-Object Name | Select-Object -First 4)
+            if ($files.Count -eq 0) { return '<no child process evidence>' }
+            $details = @()
+            foreach ($file in $files) {
+                try {
+                    $evidence = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $stdoutPath = if ($evidence.PSObject.Properties.Name -contains 'stdoutPath') { [string]$evidence.stdoutPath } else { '' }
+                    $stderrPath = if ($evidence.PSObject.Properties.Name -contains 'stderrPath') { [string]$evidence.stderrPath } else { '' }
+                    $cleanup = if ($evidence.PSObject.Properties.Name -contains 'cleanup') { $evidence.cleanup } else { $null }
+                    $failureSummary = if ($evidence.PSObject.Properties.Name -contains 'failureSummary') { [string]$evidence.failureSummary } else { '' }
+                    $details += [pscustomobject][ordered]@{
+                        evidencePath = $file.FullName
+                        status = if ($evidence.PSObject.Properties.Name -contains 'status') { $evidence.status } else { $null }
+                        exitCode = if ($evidence.PSObject.Properties.Name -contains 'exitCode') { $evidence.exitCode } else { $null }
+                        cleanup = $cleanup
+                        cleanedUp = if ($evidence.PSObject.Properties.Name -contains 'cleanedUp') { $evidence.cleanedUp } else { $null }
+                        outputQuotaExceeded = if ($evidence.PSObject.Properties.Name -contains 'outputQuotaExceeded') { $evidence.outputQuotaExceeded } else { $null }
+                        failureSummary = $failureSummary
+                        stdoutPath = $stdoutPath
+                        stderrPath = $stderrPath
+                        stdout = Get-P02AFilePreview -Path $stdoutPath
+                        stderr = Get-P02AFilePreview -Path $stderrPath
+                    }
+                }
+                catch {
+                    $details += [pscustomobject][ordered]@{ evidencePath = $file.FullName; readError = $_.Exception.Message }
+                }
+            }
+            $json = ConvertTo-Json -InputObject $details -Depth 8 -Compress
+            if ($json.Length -gt 14000) { return $json.Substring(0, 14000) + '<truncated>' }
+            return $json
+        }
+        function Assert-P02AExpectedWithChildDiagnostics {
+            param($Actual, $Expected, [Parameter(Mandatory = $true)] $Fixture, [string] $Message)
+            if ($Actual -cne $Expected) {
+                $actualText = if ($null -eq $Actual) { '<null>' } else { [string]$Actual }
+                $expectedText = if ($null -eq $Expected) { '<null>' } else { [string]$Expected }
+                $diagnostics = Get-P02AChildProcessDiagnostics -Fixture $Fixture
+                throw "$Message Expected='$expectedText' Actual='$actualText'. Child status, exit, cleanup and raw stream previews: $diagnostics"
+            }
+        }
         function Assert-P02ARejectedBeforeChild {
             param([Parameter(Mandatory = $true)] $Run, [Parameter(Mandatory = $true)] $Fixture)
             Assert-P02ATrue ($null -ne $Run.ExitCode -and $Run.ExitCode -ne 0) 'Unsafe summary path must return a true nonzero outer exit.'
@@ -344,11 +415,16 @@ catch {
         It 'UnitT10_selects_exact_discovered_names_in_stable_order' {
             $selectorScript = Get-P02AExecutorFunction -Name 'Select-PesterShardTestPaths'
             . $selectorScript
-            $allPaths = @('C:\inventory\zeta.Tests.ps1', 'C:\inventory\alpha.Tests.ps1', 'C:\inventory\mu.Tests.ps1')
+            $inventoryRoot = Join-Path ([IO.Path]::GetTempPath()) 'standard-pester-selection-inventory'
+            $allPaths = @(
+                (Join-Path $inventoryRoot 'zeta.Tests.ps1')
+                (Join-Path $inventoryRoot 'alpha.Tests.ps1')
+                (Join-Path $inventoryRoot 'mu.Tests.ps1')
+            )
             $oneSelected = Select-PesterShardTestPaths -AllTestPaths $allPaths -SelectedTestFileNames @('mu.Tests.ps1')
             Assert-P02ATrue ($oneSelected -is [array]) 'A one-file selection must remain a string array.'
             Assert-P02AEqual $oneSelected.Count 1 'A one-file selection must return exactly one path.'
-            Assert-P02AEqual $oneSelected[0] 'C:\inventory\mu.Tests.ps1' 'A selected name must resolve to its discovered full path.'
+            Assert-P02AEqual $oneSelected[0] (Join-Path $inventoryRoot 'mu.Tests.ps1') 'A selected name must resolve to its discovered full path.'
             $fullInventory = Select-PesterShardTestPaths -AllTestPaths $allPaths -SelectedTestFileNames @()
             Assert-P02ATrue ($fullInventory -is [array]) 'Full discovery must remain an array.'
             $expected = [string[]]@($allPaths)
@@ -361,20 +437,24 @@ catch {
         It 'UnitT20_rejects_duplicate_missing_and_unsafe_names' {
             $selectorScript = Get-P02AExecutorFunction -Name 'Select-PesterShardTestPaths'
             . $selectorScript
-            $inventory = @('C:\inventory\alpha.Tests.ps1', 'C:\inventory\beta.Tests.ps1')
+            $selectionInventoryRoot = Join-Path ([IO.Path]::GetTempPath()) 'standard-pester-invalid-selection-inventory'
+            $inventory = @(
+                (Join-Path $selectionInventoryRoot 'alpha.Tests.ps1')
+                (Join-Path $selectionInventoryRoot 'beta.Tests.ps1')
+            )
             $invalidCases = @(
                 [pscustomobject]@{ Name = 'blank'; Paths = $inventory; Selected = @('') }
                 [pscustomobject]@{ Name = 'whitespace'; Paths = $inventory; Selected = @('  ') }
                 [pscustomobject]@{ Name = 'missing'; Paths = $inventory; Selected = @('missing.Tests.ps1') }
                 [pscustomobject]@{ Name = 'duplicate'; Paths = $inventory; Selected = @('alpha.Tests.ps1', 'alpha.Tests.ps1') }
                 [pscustomobject]@{ Name = 'relative traversal'; Paths = $inventory; Selected = @('..\alpha.Tests.ps1') }
-                [pscustomobject]@{ Name = 'drive path'; Paths = $inventory; Selected = @('C:\inventory\alpha.Tests.ps1') }
+                [pscustomobject]@{ Name = 'absolute path'; Paths = $inventory; Selected = @((Join-Path $selectionInventoryRoot 'alpha.Tests.ps1')) }
                 [pscustomobject]@{ Name = 'UNC path'; Paths = $inventory; Selected = @('\\server\alpha.Tests.ps1') }
                 [pscustomobject]@{ Name = 'forward slash'; Paths = $inventory; Selected = @('nested/alpha.Tests.ps1') }
                 [pscustomobject]@{ Name = 'backslash'; Paths = $inventory; Selected = @('nested\alpha.Tests.ps1') }
                 [pscustomobject]@{ Name = 'unsafe character'; Paths = $inventory; Selected = @('bad?.Tests.ps1') }
                 [pscustomobject]@{ Name = 'control character'; Paths = $inventory; Selected = @(('bad' + [char]0 + '.Tests.ps1')) }
-                [pscustomobject]@{ Name = 'case ambiguity'; Paths = @('C:\inventory\alpha.Tests.ps1', 'C:\inventory\Alpha.Tests.ps1'); Selected = @('alpha.Tests.ps1') }
+                [pscustomobject]@{ Name = 'case ambiguity'; Paths = @((Join-Path $selectionInventoryRoot 'alpha.Tests.ps1'), (Join-Path $selectionInventoryRoot 'Alpha.Tests.ps1')); Selected = @('alpha.Tests.ps1') }
             )
             foreach ($case in $invalidCases) {
                 $threw = $false
@@ -391,7 +471,7 @@ catch {
     }
 
     Context 'Path ancestor validation' {
-        # Scenario: A real existing test file is reached through a directory junction.
+        # Scenario: A real existing test file is reached through a platform-native directory link.
         # Purpose: Reject its reparse parent while accepting an ordinary file and a missing target below a safe directory.
         It 'UnitT30_rejects_reparse_parent_of_existing_file_and_preserves_safe_paths' {
             $reparseCheckScript = Get-P02AExecutorFunction -Name 'Test-PesterShardReparseItem'
@@ -406,12 +486,13 @@ catch {
             [IO.File]::WriteAllText($safeFile, 'existing')
             $junctionPath = Join-Path $fixture.Root 'junction-parent'
             try {
-                [void](New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory -ErrorAction Stop)
+                $linkItemType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+                [void](New-Item -ItemType $linkItemType -Path $junctionPath -Target $targetDirectory -ErrorAction Stop)
                 $junctionItem = Get-Item -Force -LiteralPath $junctionPath
                 Assert-P02ATrue (($junctionItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) 'The controlled parent must be a real reparse point.'
                 $linkedFile = Join-Path $junctionPath 'existing.txt'
                 $linkedFileItem = Get-Item -Force -LiteralPath $linkedFile
-                Assert-P02ATrue ($linkedFileItem -is [IO.FileInfo]) 'The junction child must be an existing FileInfo leaf.'
+                Assert-P02ATrue ($linkedFileItem -is [IO.FileInfo]) 'The linked child must be an existing FileInfo leaf.'
 
                 $rejected = $false
                 try {
@@ -426,7 +507,7 @@ catch {
                 $null = Assert-PesterShardPathAncestorsNoReparse -Path $safeFile -Context 'safe existing file'
                 $safeDirectory = Join-Path $fixture.Root 'safe-existing-directory'
                 [void](New-Item -ItemType Directory -Path $safeDirectory -Force)
-                $absentTarget = Join-Path $safeDirectory 'not-yet\child.txt'
+                $absentTarget = Join-Path (Join-Path $safeDirectory 'not-yet') 'child.txt'
                 Assert-P02ATrue (-not (Test-Path -LiteralPath $absentTarget)) 'The absent target fixture must remain absent.'
                 $null = Assert-PesterShardPathAncestorsNoReparse -Path $absentTarget -Context 'safe absent target'
             }
@@ -451,7 +532,7 @@ catch {
             if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
                 Assert-P02AEqual $run.WindowStyle 'Hidden' 'The adapter process must run hidden on Windows.'
             }
-            Assert-P02AEqual $run.ExitCode 0 'A successful selected adapter run must exit zero.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $run.ExitCode -Expected 0 -Fixture $fixture -Message 'A successful selected adapter run must exit zero.'
             Assert-P02ATrue (Test-Path -LiteralPath $fixture.SelectedWitness -PathType Leaf) 'The selected fixture must produce its witness.'
             Assert-P02ATrue (-not (Test-Path -LiteralPath $fixture.UnselectedWitness -PathType Leaf)) 'The unselected fixture must not execute.'
             Assert-P02ATrue (Test-Path -LiteralPath $run.SummaryPath -PathType Leaf) 'A successful run must create its summary.'
@@ -528,8 +609,8 @@ Describe 'failed P02A fixture' {
             $failedEvidenceFiles = @(Get-P02AProcessEvidenceFiles -Fixture $failedFixture)
             Assert-P02AEqual $failedEvidenceFiles.Count 1 'A failed run must leave one real process evidence record.'
             $failedEvidence = Get-Content -LiteralPath $failedEvidenceFiles[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-            Assert-P02AEqual $failedEvidence.status 'failed' 'The failure case must retain the child process failure status.'
-            Assert-P02AEqual $failedEvidence.exitCode 2 'The failed Pester child must retain its actual nonzero exit.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $failedEvidence.status -Expected 'failed' -Fixture $failedFixture -Message 'The failure case must retain the child process failure status.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $failedEvidence.exitCode -Expected 2 -Fixture $failedFixture -Message 'The failed Pester child must retain its actual nonzero exit.'
             Assert-P02ATrue ($failedEvidence.cleanup.cleanedUp -is [bool] -and $failedEvidence.cleanup.cleanedUp) 'The failed child must be cleaned up.'
             $failedResult = Get-Content -LiteralPath $failedEvidence.resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-P02AEqual $failedResult.FailedCount 1 'The real Pester result must identify one failed test.'
@@ -549,7 +630,7 @@ Describe 'empty P02A fixture' {
             $emptyEvidenceFiles = @(Get-P02AProcessEvidenceFiles -Fixture $emptyFixture)
             Assert-P02AEqual $emptyEvidenceFiles.Count 1 'The empty run must leave one real process evidence record.'
             $emptyEvidence = Get-Content -LiteralPath $emptyEvidenceFiles[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-            Assert-P02AEqual $emptyEvidence.exitCode 0 'The empty Pester process must preserve its true zero child exit.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $emptyEvidence.exitCode -Expected 0 -Fixture $emptyFixture -Message 'The empty Pester process must preserve its true zero child exit.'
             Assert-P02ATrue ($emptyEvidence.cleanup.cleanedUp -is [bool] -and $emptyEvidence.cleanup.cleanedUp) 'The empty child must be cleaned up.'
             $emptyResult = Get-Content -LiteralPath $emptyEvidence.resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-P02AEqual $emptyResult.TotalCount 0 'The actual Pester result must identify an empty test inventory.'
@@ -620,7 +701,7 @@ Describe 'default beta P02A fixture' {
             $invocation = New-P02AAdapterInvocation -Fixture $fixture -IncludeSelection $false
             $run = Invoke-P02AHiddenAdapter -Invocation $invocation -Fixture $fixture
             Assert-P02ATrue (-not $run.TimedOut) 'The default-discovery adapter must finish within its bounded timeout.'
-            Assert-P02AEqual $run.ExitCode 0 'Default discovery must still exit zero.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $run.ExitCode -Expected 0 -Fixture $fixture -Message 'Default discovery must still exit zero.'
             Assert-P02ATrue (Test-Path -LiteralPath $run.SummaryPath -PathType Leaf) 'Default discovery must produce its requested optional summary.'
             $summary = Get-Content -LiteralPath $run.SummaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $expectedPaths = [string[]]@(
@@ -660,7 +741,7 @@ Describe 'partition beta P02A fixture' {
             $invocation = New-P02AAdapterInvocation -Fixture $fixture -IncludeSelection $false -ShardPartitionCount 2 -ShardPartitionIndex 1
             $run = Invoke-P02AHiddenAdapter -Invocation $invocation -Fixture $fixture
             Assert-P02ATrue (-not $run.TimedOut) 'The partitioned adapter must finish within its bounded timeout.'
-            Assert-P02AEqual $run.ExitCode 0 'The selected partition must exit zero.'
+            Assert-P02AExpectedWithChildDiagnostics -Actual $run.ExitCode -Expected 0 -Fixture $fixture -Message 'The selected partition must exit zero.'
             Assert-P02ATrue (-not (Test-Path -LiteralPath $fixture.AlphaWitness -PathType Leaf)) 'The alpha partition witness must remain absent.'
             Assert-P02ATrue (Test-Path -LiteralPath $fixture.BetaWitness -PathType Leaf) 'The beta partition witness must be written.'
             Assert-P02ATrue (Test-Path -LiteralPath $run.SummaryPath -PathType Leaf) 'A successful partition must write its summary.'
