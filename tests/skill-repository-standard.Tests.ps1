@@ -166,11 +166,37 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 }
             }
 
+            $enumProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'enum'
+            if ($null -ne $enumProperty) {
+                $enumMatches = $false
+                foreach ($enumValue in @($enumProperty.Value)) {
+                    if ($null -eq $enumValue) {
+                        if ($null -eq $Value) { $enumMatches = $true; break }
+                    }
+                    elseif ($enumValue -is [string]) {
+                        if ($Value -is [string] -and [string]$Value -ceq [string]$enumValue) { $enumMatches = $true; break }
+                    }
+                    elseif ($enumValue -is [int] -or $enumValue -is [long] -or $enumValue -is [double] -or $enumValue -is [decimal]) {
+                        if (($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) -and
+                            [decimal]$Value -eq [decimal]$enumValue) {
+                            $enumMatches = $true
+                            break
+                        }
+                    }
+                    elseif ($enumValue -is [bool] -and $Value -is [bool] -and $Value -eq $enumValue) {
+                        $enumMatches = $true
+                        break
+                    }
+                }
+                if (-not $enumMatches) { return $false }
+            }
+
             $typeProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'type'
             $type = if ($null -ne $typeProperty) { [string]$typeProperty.Value } else { '' }
-            if ($type -ceq 'object') {
-                $isObject = $null -ne $Value -and $Value -isnot [string] -and $Value -isnot [array] -and
-                    ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject])
+            $isObject = $null -ne $Value -and $Value -isnot [string] -and $Value -isnot [array] -and
+                ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject])
+            $isArray = $Value -is [array]
+            if ($type -ceq 'object' -or ($type -ceq '' -and $isObject)) {
                 if (-not $isObject) { return $false }
 
                 $actualNames = @($Value.PSObject.Properties | ForEach-Object { [string]$_.Name })
@@ -203,7 +229,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                     }
                 }
             }
-            elseif ($type -ceq 'array') {
+            elseif ($type -ceq 'array' -or ($type -ceq '' -and $isArray)) {
                 if ($Value -isnot [array]) { return $false }
                 $items = @($Value)
                 $minItemsProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'minItems'
