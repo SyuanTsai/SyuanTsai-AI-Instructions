@@ -124,10 +124,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": ".github/workflows/validator-maintenance-protected-consumer.yml",
-      "license": "Apache-2.0"
-    },
-    {
       "path": ".gitignore",
       "license": "NOASSERTION"
     },
