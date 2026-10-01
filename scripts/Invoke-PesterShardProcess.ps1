@@ -373,11 +373,29 @@ function Get-PesterShardProcessIdentity {
 function Add-PesterShardProcessIdentity {
     param(
         [Parameter(Mandatory = $true)][int] $ProcessId,
-        [Parameter(Mandatory = $true)][hashtable] $IdentityMap
+        [Parameter(Mandatory = $true)][hashtable] $IdentityMap,
+        [System.Diagnostics.Process] $Process
     )
 
     if ($ProcessId -le 0 -or $IdentityMap.ContainsKey($ProcessId)) { return }
-    $identity = Get-PesterShardProcessIdentity -ProcessId $ProcessId
+    $identity = $null
+    if ($null -ne $Process -and [Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+        try {
+            if ([int]$Process.Id -eq $ProcessId) {
+                $startTimeUtc = $Process.StartTime.ToUniversalTime().ToString('o')
+                $identity = [pscustomobject][ordered]@{
+                    processId = $ProcessId
+                    processName = [string]$Process.ProcessName
+                    startTimeUtc = $startTimeUtc
+                    identityAvailable = (-not [string]::IsNullOrWhiteSpace($startTimeUtc))
+                }
+            }
+        }
+        catch { }
+    }
+    else {
+        $identity = Get-PesterShardProcessIdentity -ProcessId $ProcessId
+    }
     if ($null -eq $identity) {
         $identity = [pscustomobject][ordered]@{
             processId = $ProcessId
@@ -386,6 +404,32 @@ function Add-PesterShardProcessIdentity {
             identityAvailable = $false
         }
     }
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and $null -ne $Process -and [bool]$identity.identityAvailable) {
+        $processHandleIsCurrent = $false
+        try {
+            $processHandleIsCurrent = ([int]$Process.Id -eq $ProcessId) -and (-not $Process.HasExited) -and
+                ([string]$Process.ProcessName -ceq [string]$identity.processName) -and
+                ($Process.StartTime.ToUniversalTime().ToString('o') -ceq [string]$identity.startTimeUtc)
+        }
+        catch { $processHandleIsCurrent = $false }
+
+        if ($processHandleIsCurrent) {
+            $linuxEntry = Get-PesterShardLinuxProcessEntry -ProcessId $ProcessId
+            if ($null -ne $linuxEntry) {
+                try {
+                    $processHandleIsCurrent = ([int]$Process.Id -eq $ProcessId) -and (-not $Process.HasExited) -and
+                        ([string]$Process.ProcessName -ceq [string]$identity.processName) -and
+                        ($Process.StartTime.ToUniversalTime().ToString('o') -ceq [string]$identity.startTimeUtc)
+                }
+                catch { $processHandleIsCurrent = $false }
+                if ($processHandleIsCurrent) {
+                    $identity | Add-Member -MemberType NoteProperty -Name startTimeTicks -Value ([long]$linuxEntry.startTimeTicks)
+                }
+            }
+        }
+    }
+
     $IdentityMap[$ProcessId] = $identity
 }
 
@@ -532,34 +576,181 @@ function Get-PesterShardPreflight {
     }
 }
 
-function Get-PesterShardDescendantProcessIds {
-    param([Parameter(Mandatory = $true)][int] $RootProcessId)
+function ConvertFrom-PesterShardLinuxProcessStat {
+    param([Parameter(Mandatory = $true)][int] $ProcessId, [Parameter(Mandatory = $true)][string] $StatText)
+    $openParen = $StatText.IndexOf('(')
+    $closeParen = $StatText.LastIndexOf(')')
+    if ($openParen -le 0 -or $closeParen -le $openParen) { throw "Linux process stat for PID $ProcessId has an invalid command boundary." }
 
-    $processes = @(
-        Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
-            Select-Object -Property ProcessId, ParentProcessId, CreationDate
-    )
-    $births = @{}
-    foreach ($entry in $processes) {
-        if ($entry.CreationDate -is [DateTime]) { $births[[int]$entry.ProcessId] = $entry.CreationDate.ToUniversalTime() }
+    $recordProcessId = 0
+    $recordProcessIdText = $StatText.Substring(0, $openParen).Trim()
+    if (-not [int]::TryParse($recordProcessIdText, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$recordProcessId) -or $recordProcessId -ne $ProcessId) {
+        throw "Linux process stat PID did not match the observed directory for PID $ProcessId."
     }
-    $frontier = @($RootProcessId)
+
+    $fields = @($StatText.Substring($closeParen + 1).Trim() -split '\s+')
+    if ($fields.Count -lt 20) { throw "Linux process stat for PID $ProcessId did not contain the required PPID and start-time fields." }
+    $parentProcessId = 0
+    $startTimeTicks = [long]0
+    if (-not [int]::TryParse([string]$fields[1], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$parentProcessId) -or $parentProcessId -lt 0 -or
+        -not [long]::TryParse([string]$fields[19], [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$startTimeTicks) -or $startTimeTicks -lt 0) {
+        throw "Linux process stat for PID $ProcessId contained invalid PPID or start-time fields."
+    }
+
+    return [pscustomobject][ordered]@{
+        processId = $recordProcessId
+        processName = $StatText.Substring($openParen + 1, $closeParen - $openParen - 1)
+        parentProcessId = $parentProcessId
+        startTimeTicks = $startTimeTicks
+    }
+}
+
+function Get-PesterShardLinuxProcessEntry {
+    param([Parameter(Mandatory = $true)][int] $ProcessId, [string] $ProcRoot = '/proc')
+    $statPath = Join-Path (Join-Path $ProcRoot ([string]$ProcessId)) 'stat'
+    try {
+        $statText = [IO.File]::ReadAllText($statPath)
+    }
+    catch {
+        $exception = $_.Exception
+        while ($null -ne $exception) {
+            if ($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]) { return $null }
+            $exception = $exception.InnerException
+        }
+        throw "Linux process stat for PID $ProcessId could not be read: $($_.Exception.Message)"
+    }
+    return ConvertFrom-PesterShardLinuxProcessStat -ProcessId $ProcessId -StatText $statText
+}
+
+function Get-PesterShardLinuxProcessTable {
+    param([string] $ProcRoot = '/proc')
+    if (-not [IO.Directory]::Exists($ProcRoot)) { throw "Linux process table root '$ProcRoot' is unavailable." }
+
+    $processTable = @{}
+    $directories = @(Get-ChildItem -LiteralPath $ProcRoot -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -match '^\d+$' })
+    foreach ($directory in $directories) {
+        $processId = 0
+        if (-not [int]::TryParse([string]$directory.Name, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$processId) -or $processId -le 0) {
+            throw "Linux process directory '$($directory.FullName)' had an invalid PID."
+        }
+        $entry = Get-PesterShardLinuxProcessEntry -ProcessId $processId -ProcRoot $ProcRoot
+        if ($null -ne $entry) { $processTable[$processId] = $entry }
+    }
+    return ,$processTable
+}
+
+function Get-PesterShardProcessDescendantsFromTable {
+    param([Parameter(Mandatory = $true)][int] $RootProcessId, [Parameter(Mandatory = $true)][hashtable] $ProcessTable, [Parameter(Mandatory = $true)][long] $ExpectedRootStartTimeTicks)
+    if (-not $ProcessTable.ContainsKey($RootProcessId)) { throw "Linux process table did not contain the verified root PID $RootProcessId." }
+    if ([long]$ProcessTable[$RootProcessId].startTimeTicks -ne $ExpectedRootStartTimeTicks) { throw "Linux process table root PID $RootProcessId did not match its captured start tick." }
+
+    $frontier = New-Object 'System.Collections.Generic.List[int]'
+    $frontier.Add($RootProcessId)
     $descendants = New-Object 'System.Collections.Generic.List[int]'
     while ($frontier.Count -gt 0) {
         $next = New-Object 'System.Collections.Generic.List[int]'
-        foreach ($process in $processes) {
-            $processId = [int]$process.ProcessId
-            $parentId = [int]$process.ParentProcessId
-            if (($frontier -contains $parentId) -and $births.ContainsKey($parentId) -and
-                $births.ContainsKey($processId) -and $births[$processId] -ge $births[$parentId] -and
-                $processId -ne $RootProcessId -and -not $descendants.Contains($processId)) {
-                $descendants.Add($processId)
-                $next.Add($processId)
+        foreach ($entry in $ProcessTable.Values) {
+            $processId = [int]$entry.processId
+            $parentProcessId = [int]$entry.parentProcessId
+            if (($frontier -contains $parentProcessId) -and $processId -ne $RootProcessId -and -not $descendants.Contains($processId) -and $ProcessTable.ContainsKey($parentProcessId)) {
+                $parentEntry = $ProcessTable[$parentProcessId]
+                if ([long]$entry.startTimeTicks -ge [long]$parentEntry.startTimeTicks) {
+                    $descendants.Add($processId)
+                    $next.Add($processId)
+                }
             }
         }
-        $frontier = @($next.ToArray())
+        $frontier = $next
     }
     return @($descendants.ToArray())
+}
+
+function Get-PesterShardDescendantProcessIds {
+    param([Parameter(Mandatory = $true)][int] $RootProcessId, [Parameter(Mandatory = $true)][hashtable] $ObservedProcessIdentities)
+    if ($RootProcessId -le 0) { throw 'RootProcessId must be positive.' }
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Select-Object -Property ProcessId, ParentProcessId, CreationDate)
+        $births = @{}
+        foreach ($entry in $processes) {
+            if ($entry.CreationDate -is [DateTime]) { $births[[int]$entry.ProcessId] = $entry.CreationDate.ToUniversalTime() }
+        }
+        $frontier = @($RootProcessId)
+        $descendants = New-Object 'System.Collections.Generic.List[int]'
+        while ($frontier.Count -gt 0) {
+            $next = New-Object 'System.Collections.Generic.List[int]'
+            foreach ($process in $processes) {
+                $processId = [int]$process.ProcessId
+                $parentId = [int]$process.ParentProcessId
+                if (($frontier -contains $parentId) -and $births.ContainsKey($parentId) -and $births.ContainsKey($processId) -and $births[$processId] -ge $births[$parentId] -and $processId -ne $RootProcessId -and -not $descendants.Contains($processId)) {
+                    $descendants.Add($processId)
+                    $next.Add($processId)
+                }
+            }
+            $frontier = @($next.ToArray())
+        }
+        return @($descendants.ToArray())
+    }
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { throw 'Owned descendant enumeration is unsupported on this operating-system platform.' }
+    $procRoot = '/proc'
+    if (-not [IO.File]::Exists((Join-Path (Join-Path $procRoot 'self') 'stat'))) { throw 'Linux /proc process identity is unavailable.' }
+    $rootBefore = Get-PesterShardLinuxProcessEntry -ProcessId $RootProcessId -ProcRoot $procRoot
+    if ($null -eq $rootBefore) { return @() }
+    $expectedRootIdentity = $ObservedProcessIdentities[$RootProcessId]
+    if ($null -eq $expectedRootIdentity -or -not [bool]$expectedRootIdentity.identityAvailable) { throw 'No immutable process identity was captured for the owned Linux root process.' }
+    $expectedRootTicks = $expectedRootIdentity.PSObject.Properties['startTimeTicks']
+    if ($null -eq $expectedRootTicks) { throw 'No Linux birth tick was captured for the owned root process while its PID was verified at start.' }
+    if ([long]$expectedRootTicks.Value -ne [long]$rootBefore.startTimeTicks) { throw 'The live Linux root PID changed birth identity; descendant ownership cannot be verified.' }
+
+    $rootIdentityBefore = Get-PesterShardProcessIdentity -ProcessId $RootProcessId
+    if ($null -eq $rootIdentityBefore) {
+        $rootStillPresent = Get-PesterShardLinuxProcessEntry -ProcessId $RootProcessId -ProcRoot $procRoot
+        if ($null -eq $rootStillPresent) { return @() }
+        throw 'The live Linux root process identity could not be verified.'
+    }
+    if (-not [bool]$rootIdentityBefore.identityAvailable) { throw 'The live Linux root process identity was unavailable.' }
+    if ($rootIdentityBefore.processName -cne $expectedRootIdentity.processName -or $rootIdentityBefore.startTimeUtc -cne $expectedRootIdentity.startTimeUtc) { throw 'The live Linux root PID changed process identity; descendant ownership cannot be verified.' }
+
+    $processTable = Get-PesterShardLinuxProcessTable -ProcRoot $procRoot
+    $rootFromTable = $processTable[$RootProcessId]
+    $rootAfter = Get-PesterShardLinuxProcessEntry -ProcessId $RootProcessId -ProcRoot $procRoot
+    if ($null -eq $rootAfter) { return @() }
+    if ($null -eq $rootFromTable) { throw "Linux process table omitted the still-present root PID $RootProcessId." }
+    if ([long]$rootBefore.startTimeTicks -ne [long]$rootFromTable.startTimeTicks -or [long]$rootBefore.startTimeTicks -ne [long]$rootAfter.startTimeTicks) { throw 'The Linux root PID changed birth identity during descendant enumeration.' }
+
+    $rootIdentityAfter = Get-PesterShardProcessIdentity -ProcessId $RootProcessId
+    if ($null -eq $rootIdentityAfter) {
+        $rootStillPresent = Get-PesterShardLinuxProcessEntry -ProcessId $RootProcessId -ProcRoot $procRoot
+        if ($null -eq $rootStillPresent) { return @() }
+        throw 'The Linux root process identity became unavailable during descendant enumeration.'
+    }
+    if (-not [bool]$rootIdentityAfter.identityAvailable) { throw 'The Linux root process identity became unavailable during descendant enumeration.' }
+    if ($rootIdentityAfter.processName -cne $expectedRootIdentity.processName -or $rootIdentityAfter.startTimeUtc -cne $expectedRootIdentity.startTimeUtc) { throw 'The Linux root PID changed process identity during descendant enumeration.' }
+    $descendantIds = @(Get-PesterShardProcessDescendantsFromTable -RootProcessId $RootProcessId -ProcessTable $processTable -ExpectedRootStartTimeTicks ([long]$expectedRootTicks.Value))
+    $verifiedDescendants = New-Object 'System.Collections.Generic.List[int]'
+    foreach ($processId in $descendantIds) {
+        $snapshotEntry = $processTable[[int]$processId]
+        $identity = Get-PesterShardProcessIdentity -ProcessId ([int]$processId)
+        $currentEntry = Get-PesterShardLinuxProcessEntry -ProcessId ([int]$processId) -ProcRoot $procRoot
+        if ($null -eq $currentEntry) { continue }
+        if ($null -eq $identity -or -not [bool]$identity.identityAvailable) { throw "Linux descendant PID $processId could not be bound to an immutable process identity." }
+        if ([long]$currentEntry.startTimeTicks -ne [long]$snapshotEntry.startTimeTicks) { continue }
+
+        $previousIdentity = $ObservedProcessIdentities[[int]$processId]
+        if ($null -ne $previousIdentity -and [bool]$previousIdentity.identityAvailable -and
+            ($identity.processName -cne $previousIdentity.processName -or $identity.startTimeUtc -cne $previousIdentity.startTimeUtc)) {
+            throw "Linux descendant PID $processId changed identity while it remained in the owned process snapshot."
+        }
+        $identity | Add-Member -MemberType NoteProperty -Name startTimeTicks -Value ([long]$currentEntry.startTimeTicks) -Force
+        $previousTicks = if ($null -eq $previousIdentity) { $null } else { $previousIdentity.PSObject.Properties['startTimeTicks'] }
+        if ($null -ne $previousTicks -and [long]$previousTicks.Value -ne [long]$currentEntry.startTimeTicks) {
+            throw "Linux descendant PID $processId changed birth tick while it remained in the owned process snapshot."
+        }
+        $ObservedProcessIdentities[[int]$processId] = $identity
+        $verifiedDescendants.Add([int]$processId)
+    }
+    return @($verifiedDescendants.ToArray())
 }
 
 function Read-PesterShardOutputPrefix {
@@ -1067,7 +1258,7 @@ function Stop-PesterShardOwnedProcessTree {
 
     $initialDescendants = @()
     try {
-        $initialDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId)
+        $initialDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities)
         foreach ($processId in $initialDescendants) {
             if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
                 $knownIds.Add([int]$processId)
@@ -1084,7 +1275,7 @@ function Stop-PesterShardOwnedProcessTree {
     while ([DateTime]::UtcNow -lt $cleanupDeadline) {
         $currentDescendants = @()
         try {
-            $currentDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId)
+            $currentDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities)
             foreach ($processId in $currentDescendants) {
                 if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
                     $knownIds.Add([int]$processId)
@@ -1274,7 +1465,7 @@ function Stop-PesterShardOwnedProcessTree {
     $finalDescendants = @()
     $finalEnumerationFailed = $false
     try {
-        $finalDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId |
+        $finalDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities |
             Where-Object { Test-PesterShardProcessAlive -ProcessId ([int]$_) })
         foreach ($processId in $finalDescendants) {
             Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $ObservedProcessIdentities
@@ -1618,7 +1809,7 @@ function Invoke-PesterShardProcess {
             if (-not $process.Start()) { throw 'Process.Start returned false.' }
             $processStarted = $true
             $rootProcessId = [int]$process.Id
-            Add-PesterShardProcessIdentity -ProcessId $rootProcessId -IdentityMap $observedProcessIdentities
+            Add-PesterShardProcessIdentity -ProcessId $rootProcessId -IdentityMap $observedProcessIdentities -Process $process
 
             if ($jobObjectCreated) {
                 if (-not [PesterShardProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
@@ -1659,7 +1850,7 @@ function Invoke-PesterShardProcess {
             & $writeProgress 'running'
             $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
             try {
-                foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId)) {
+                foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId -ObservedProcessIdentities $observedProcessIdentities)) {
                     if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
                         $observedDescendantProcessIds.Add([int]$processId)
                     }
@@ -1676,7 +1867,7 @@ function Invoke-PesterShardProcess {
                     $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
                 }
                 try {
-                    foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId)) {
+                    foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId -ObservedProcessIdentities $observedProcessIdentities)) {
                         if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
                             $observedDescendantProcessIds.Add([int]$processId)
                         }
