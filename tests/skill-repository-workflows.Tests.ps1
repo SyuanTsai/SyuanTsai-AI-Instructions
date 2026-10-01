@@ -148,11 +148,11 @@ jobs:
             @{ Name = 'windows-powershell-51-even'; Version = '3.4.0'; Index = 0; Skipped = 1 },
             @{ Name = 'windows-powershell-51-even-b'; Version = '3.4.0'; Index = 2; Skipped = 5 },
             @{ Name = 'windows-powershell-51-odd'; Version = '3.4.0'; Index = 1; Skipped = 0 },
-            @{ Name = 'windows-powershell-51-odd-b'; Version = '3.4.0'; Index = 3; Skipped = 6 },
+            @{ Name = 'windows-powershell-51-odd-b'; Version = '3.4.0'; Index = 3; Skipped = 0 },
             @{ Name = 'powershell-7-even'; Version = '4.10.1'; Index = 0; Skipped = 1 },
             @{ Name = 'powershell-7-even-b'; Version = '4.10.1'; Index = 2; Skipped = 5 },
             @{ Name = 'powershell-7-odd'; Version = '4.10.1'; Index = 1; Skipped = 0 },
-            @{ Name = 'powershell-7-odd-b'; Version = '4.10.1'; Index = 3; Skipped = 6 }
+            @{ Name = 'powershell-7-odd-b'; Version = '4.10.1'; Index = 3; Skipped = 0 }
         )) {
             $partitionMatch = [regex]::Match($required, ('(?ms)^  ' + [regex]::Escape($definition.Name) + ':\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)'))
             Assert-True $partitionMatch.Success "PowerShell Regression must retain partition '$($definition.Name)'."

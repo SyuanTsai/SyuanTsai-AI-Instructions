@@ -261,7 +261,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '3.4.0'
-            ExpectedSkippedCount = 6
+            ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 3
             OuterTimeoutSeconds = 2400
@@ -532,7 +532,7 @@ jobs:
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 6
+            ExpectedSkippedCount = 0
             ShardPartitionCount = 4
             ShardPartitionIndex = 3
             OuterTimeoutSeconds = 2400
