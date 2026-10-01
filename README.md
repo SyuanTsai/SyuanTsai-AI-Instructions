@@ -84,7 +84,7 @@ Bootstrap 會自動修復：
 
 ## 新電腦安裝
 
-需求：Windows PowerShell 5.1 或 PowerShell 7、Git、可存取 canonical GitHub Repository 與 Catalog 選中的 external repositories。
+需求：Windows、PowerShell 7 最新穩定版、Git，以及可存取 canonical GitHub Repository 與 Catalog 選中的 external repositories。
 
 ```powershell
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git
@@ -295,7 +295,7 @@ Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，
 
 既有 runbook 的 `.\scripts\test-production-cutover.ps1` 仍保留為相容入口，並轉交同一份 SYP-101 smoke。
 
-CI 在 Windows PowerShell 5.1 與 PowerShell 7 執行 regression、production lock 與 production smoke。
+CI 僅在 Windows 最新穩定 PowerShell 7 執行 regression、production lock 與 production smoke；一般 pull request 只執行 Windows Core 與 Windows Install Smoke。
 
 ## 授權
 
@@ -318,4 +318,4 @@ Runtime／Instructions／選取的 Skill 會遞送來源版本的授權文件、
 - `scripts/ai-instructions-rollout.psm1`、`scripts/invoke-ai-instructions-rollout.ps1`：fixed-drive Repository discovery、逐 Repo bootstrap、post-scan 與結構化 rollout report。
 - `scripts/cleanup-ai-instructions-pollution.ps1`：舊 runtime 使用的明確授權 tracked pollution 診斷／cleanup。
 - `catalog/`：schemas、examples、Catalog、source pins 與 Lock。
-- `tests/`：PowerShell 5.1／7 Pester suites。
+- `tests/`：Windows PowerShell 7 Pester suites。

@@ -986,9 +986,9 @@ function Assert-AuthorityEntryPointPolicy {
     }
     $expectedRoles = @(
         @{ path = '.github/workflows/standards-conformance.yml'; role = 'canonical-authority-regression' },
-        @{ path = '.github/workflows/pr8-powershell-validation.yml'; role = 'compatibility-and-linux-composition-bridge' },
+        @{ path = '.github/workflows/pr8-powershell-validation.yml'; role = 'windows-core-authority' },
         @{ path = '.github/workflows/syp86-production-lock.yml'; role = 'production-lock-contract' },
-        @{ path = '.github/workflows/syp101-production-smoke.yml'; role = 'production-smoke-contract' }
+        @{ path = '.github/workflows/syp101-production-smoke.yml'; role = 'windows-install-smoke' }
     )
     for ($index = 0; $index -lt $expectedRoles.Count; $index++) {
         $role = $roles[$index]

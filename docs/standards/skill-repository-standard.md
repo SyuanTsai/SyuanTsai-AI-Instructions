@@ -374,7 +374,7 @@ Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable p
 
 對 Pester，resolver **MUST** 每次從核准的 PowerShell Gallery endpoint 解析 latest stable；中央 authority policy **MUST** 另記錄經審查的該版本 immutable payload SHA-256。若最新穩定版尚無相符核准 identity，validation **MUST** fail closed，不得退回較舊版本。`Save-Module` 取得 run-owned 產物後，resolver **MUST** 在任何 `Test-ModuleManifest`、`Import-Module` 或其他可能初始化下載程式碼的操作前，驗證完整 regular/non-reparse payload 路徑及 bytes 與該 approved identity 相符；canonical hash 只排除 PowerShellGet 每次產生的單一 `PSGetModuleInfo.xml`，不得忽略其他套件檔案。Manifest version、root module、export 與 initialization-hook metadata **MUST** 以 data-only 解析，並在比對前後確認完整 installed closure 未漂移；resolver host **MUST NOT** 載入下載的 Pester。Receipt **MUST** 綁定 approved payload 及 run-owned installed closure；需要實際執行 Pester 的既有 Stage 5／authority test 邊界仍須核對 frozen receipt 與其完整 closure 後按 exact path 載入。任何 payload、metadata、manifest 或 closure 不符都須拒絕並清理 run-owned 安裝根目錄。
 
-Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials。Ruleset-required Composition (PowerShell 7 on Linux) **MUST** 在 main pull request 與 push 自動執行，且不得使用 paths filter；它 **MUST** 呼叫 canonical authority gate 並執行保留的 source composition/acquisition tests。standards-conformance.yml **MUST** 僅以 workflow_dispatch 作為手動診斷 workflow，不得建立重複自動 authority 狀態或取代 required Composition。Whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 main push 上退化成空 range。
+Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials。Windows Core **MUST** 在 Windows 上使用 SHA-256 驗證的最新穩定 PowerShell 7，對 main pull request 與 push 自動執行，且不得使用 paths filter；它 **MUST** 呼叫 canonical authority gate 並執行保留的 source composition/acquisition tests。Windows Install Smoke **MUST** 保留 production lock、真實安裝與 idempotence checks。standards-conformance.yml **MUST** 僅以 workflow_dispatch 作為手動診斷 workflow，不得建立重複自動 authority 狀態或取代 Windows Core。SYP86 lock 可保留指定 branch/path 的 push 與手動診斷，validator maintenance 可保留手動診斷；兩者 **MUST NOT** 增加普通 pull-request workflow。R4 更新的是預期 Windows CI contexts，不修改遠端 ruleset；既有 retired required contexts 的調整須另行授權完成。Whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 main push 上退化成空 range。
 
 對 `SkillSpector`，resolver **MUST**：
 
@@ -787,7 +787,7 @@ Migration 順序：
 1. 修改本 normative document；
 2. 同一 PR 更新 `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 中受影響的 regression 與必要 machine-readable policy；
 3. tool source / resolver behavior 變更時，同一 PR 更新 `scripts/Resolve-StandardValidationTool.ps1` trust anchor / adapter 與負向 regression；
-4. workflow authority/merge enforcement 變更時，同一 PR 更新 workflow regression、dedicated authority trigger 與 Ruleset-required bridge；
+4. workflow authority/merge enforcement 變更時，同一 PR 更新 workflow regression 與自動 authority job 契約；remote ruleset 的 required-context 對齊須另行授權並完成，在此之前不得宣稱 remote merge enforcement 已生效；
 5. 說明對 reference implementation 與已 conformant repositories 的影響；
 6. 重新執行 authority-level conformance regression；
 7. 經 Human Release/Policy Review 後才可 merge/fan out。

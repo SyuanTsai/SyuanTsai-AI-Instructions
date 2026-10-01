@@ -1,50 +1,79 @@
-name: Validator Maintenance Producer
+name: Validator Maintenance Diagnostic
 
 on:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   diagnostic-producer:
-    name: Untrusted validator maintenance diagnostic
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: Manual untrusted validator diagnostic
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - name: Checkout candidate without persisted credentials
+      - name: Checkout selected candidate without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Install verified latest stable PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          Invoke-WebRequest -Uri 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip' -OutFile $archivePath
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
+          }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
 
       - name: Ensure fixed Pester versions
         shell: pwsh
         run: |
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } |
-            Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-          }
-          if ($null -eq (Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1)) {
-            throw 'Pester 4.10.1 is unavailable.'
-          }
-          $maintenancePester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'5.9.0' } |
-            Select-Object -First 1
-          if ($null -eq $maintenancePester) {
-            Install-Module Pester -RequiredVersion 5.9.0 -Scope CurrentUser -Force -SkipPublisherCheck
-          }
-          if ($null -eq (Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'5.9.0' } | Select-Object -First 1)) {
-            throw 'Pester 5.9.0 is unavailable.'
+          $ErrorActionPreference = 'Stop'
+          foreach ($version in @('4.10.1', '5.9.0')) {
+            $modules = @(Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]$version })
+            if ($modules.Count -eq 0) {
+              Install-Module Pester -RequiredVersion $version -Scope CurrentUser -Force -SkipPublisherCheck
+              $modules = @(Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]$version })
+            }
+            if ($modules.Count -ne 1) { throw "Expected exactly one Pester $version module; found $($modules.Count)." }
           }
 
-      - name: Produce bounded diagnostic report
+      - name: Produce blocked maintenance diagnostic
         shell: pwsh
         env:
-          CANDIDATE_REVISION: ${{ github.event.pull_request.head.sha }}
+          CANDIDATE_REVISION: ${{ github.sha }}
           PRODUCER_RUN_ID: ${{ github.run_id }}
           PRODUCER_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -52,14 +81,15 @@ jobs:
           $result = & ./scripts/Invoke-StandardValidatorMaintenanceProducer.ps1 `
             -CandidateRevision $env:CANDIDATE_REVISION `
             -AuthorityRevision 'e69c453888db93e2d2697ea7f0b11df13cd1b8d2' `
+            -EventName $env:GITHUB_EVENT_NAME `
             -RunId ([long]$env:PRODUCER_RUN_ID) `
             -RunAttempt ([int]$env:PRODUCER_RUN_ATTEMPT) `
             -OutputRoot (Join-Path $env:RUNNER_TEMP 'validator-maintenance-producer')
           if ($result.ciAdmission -cne 'BLOCKED' -or $result.releaseEligible -ne $false) {
-            throw 'Diagnostic producer must remain non-admitting.'
+            throw 'Diagnostic producer must remain non-admitting and ineligible for release.'
           }
 
-      - name: Upload exactly one diagnostic artifact
+      - name: Upload diagnostic evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: validator-maintenance-${{ github.run_id }}-${{ github.run_attempt }}

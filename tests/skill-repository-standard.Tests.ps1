@@ -1631,8 +1631,8 @@ public sealed class C245NonCooperativeStream : Stream {
         }
 
         Assert-Match $workflow 'Run canonical Standard v1 authority gate' 'Standards workflow must execute the shared authority gate.'
-        Assert-Match $requiredWorkflow 'Composition \(PowerShell 7 on Linux\)' 'Ruleset-required Composition context must remain present.'
-        Assert-Match $requiredWorkflow 'Run required Standard v1 authority gate' 'Required Composition context must execute the authority gate.'
+        Assert-Match $requiredWorkflow 'name:\s*Windows Core' 'The Windows Core automatic authority job must remain present.'
+        Assert-Match $requiredWorkflow 'Run the Standard v1 authority gate' 'Windows Core must execute the authority gate.'
         Assert-Match $gate 'tests/skill-repository-standard\.Tests\.ps1' 'Shared gate must run the Standard authority regression.'
         Assert-Match $gate 'tests/skill-repository-workflows\.Tests\.ps1' 'Shared gate must run the workflow authority regression.'
         Assert-Match $gate 'tests/standard-authority-entry-preflight\.Tests\.ps1' 'Shared gate must run the entry preflight contract.'
@@ -3855,9 +3855,9 @@ public sealed class C245NonCooperativeStream : Stream {
         ) 'The authority workflow exception inventory must preserve all four workflow paths.'
         Assert-ExactStringSequence ($roles | ForEach-Object { [string]$_.role }) @(
             'canonical-authority-regression',
-            'compatibility-and-linux-composition-bridge',
+            'windows-core-authority',
             'production-lock-contract',
-            'production-smoke-contract'
+            'windows-install-smoke'
         ) 'The authority workflow exception roles must remain explicit and ordered.'
         foreach ($role in $roles) {
             Assert-False ([bool]$role.consumerAlternateGate) "Authority workflow '$($role.path)' must not be treated as a consumer alternate gate."

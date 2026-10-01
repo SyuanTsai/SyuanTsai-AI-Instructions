@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
-# Untrusted, read-only diagnostic producer. The protected workflow verifies
-# these bytes independently; a passing report never grants CI admission.
+# Untrusted, read-only manual diagnostic producer; a passing report never
+# grants CI admission or release eligibility.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $CandidateRevision,
     [Parameter(Mandatory = $true)][string] $AuthorityRevision,
+    [Parameter(Mandatory = $true)][ValidateSet('workflow_dispatch')][string] $EventName,
     [Parameter(Mandatory = $true)][long] $RunId,
     [Parameter(Mandatory = $true)][int] $RunAttempt,
     [Parameter(Mandatory = $true)][string] $OutputRoot
@@ -31,13 +32,20 @@ if (-not (Test-Path -LiteralPath (Split-Path -Parent $destination) -PathType Con
 }
 $workflowIds = @(
     'UnitT10_pins_every_checkout_and_disables_persisted_credentials',
-    'UnitT15_runs_linux_callback_containment_before_full_suites_and_authority_gate',
-    'UnitT20_runs_dedicated_authority_CI_for_every_authority_file_and_bridge_change',
-    'UnitT30_checks_the_actual_event_commit_range_instead_of_an_empty_main_range',
+    'UnitT15_ordinary_workflows_use_verified_Windows_PowerShell_only',
+    'UnitT16_plans_dynamic_inventory_with_exact_four_partition_coverage',
+    'UnitT17_rejects_empty_or_untruthful_summary_counts',
+    'UnitT20_keeps_two_Windows_PR_jobs_and_single_authority_gate',
+    'UnitT30_checks_the_actual_event_commit_range_and_manual_commit',
     'UnitT40_routes_managed_lifecycle_changes_through_the_central_authority_gate',
-    'UnitT50_routes_upstream_interoperability_changes_through_the_central_authority_gate',
-    'UnitT60_routes_validation_security_gate_changes_through_the_central_authority_gate',
-    'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles'
+    'UnitT50_keeps_upstream_interoperability_source_regressions_in_authority_ci',
+    'UnitT60_checks_validation_security_policy_without_restoring_external_gate_chain',
+    'UnitT70_rejects_consumer_alternate_gates_but_preserves_authority_workflow_roles',
+    'UnitT71_accepts_markdown_setup_and_diagnostics_outside_release_admission',
+    'UnitT72_rejects_release_command_with_only_an_unrelated_canonical_section',
+    'UnitT73_rejects_workflow_replacement_of_the_canonical_validator',
+    'UnitT74_accepts_release_example_with_fenced_comment',
+    'UnitT75_rejects_release_command_with_only_an_unrelated_setext_canonical_section'
 )
 Remove-Module Pester -Force -ErrorAction SilentlyContinue
 $pester = Get-Module Pester -ListAvailable |
@@ -61,8 +69,10 @@ $workflowResults = @($run.TestResult | ForEach-Object {
     [ordered]@{ id = [string]$_.Name; result = [string]$_.Result }
 })
 $maintenanceIds = @(
-    'UnitT03_rejects_wrong_candidate_maintenance_report_from_protected_inputs',
-    'UnitT50_binds_injected_maintenance_metadata_and_rejects_cross_run_or_archive_drift'
+    'UnitT10_partitions_bulk_tests_into_independent_owned_processes_by_default',
+    'InterT13_projects_candidate_bound_source_conformance_and_rejects_incomplete_evidence',
+    'rejects_v1_adapter_before_supervisor_gate',
+    'keeps tracked identity, safe paths, private exclusion, child failure, timeout, source mutation and output reservation fail-closed'
 )
 Remove-Module Pester -Force -ErrorAction SilentlyContinue
 $maintenancePester = Get-Module Pester -ListAvailable |
@@ -75,10 +85,9 @@ $configuration.Filter.FullName = @($maintenanceIds | ForEach-Object { "*$_" })
 $configuration.Run.PassThru = $true
 $configuration.Output.Verbosity = 'Minimal'
 $maintenance = Invoke-Pester -Configuration $configuration
-if ($null -eq $maintenance -or $maintenance.TotalCount -ne 51 -or
-    $maintenance.PassedCount -ne $maintenanceIds.Count -or
-    $maintenance.NotRunCount -ne 49 -or $maintenance.FailedCount -ne 0 -or
-    $maintenance.SkippedCount -ne 0) {
+if ($null -eq $maintenance -or $maintenance.PassedCount -ne $maintenanceIds.Count -or
+    $maintenance.TotalCount -ne ($maintenance.PassedCount + $maintenance.NotRunCount + $maintenance.FailedCount + $maintenance.SkippedCount) -or
+    $maintenance.FailedCount -ne 0 -or $maintenance.SkippedCount -ne 0) {
     throw 'Fixed maintenance behavior tests did not pass in full.'
 }
 $expected = @($workflowIds) + @($maintenanceIds)
@@ -104,7 +113,7 @@ $report = [ordered]@{
     status = 'passed'
     candidateRevision = $CandidateRevision
     authorityRevision = $AuthorityRevision
-    eventName = 'pull_request'
+    eventName = $EventName
     runId = ('{0:x32}' -f $RunId)
     runAttempt = $RunAttempt
     resultsSha256 = $resultsSha

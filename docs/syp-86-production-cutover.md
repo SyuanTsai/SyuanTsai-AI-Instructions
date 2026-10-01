@@ -8,8 +8,8 @@ The final cutover removes the legacy `.agents/skills/**` copies only when all ga
 
 1. `catalog/skills-catalog-lock.json` is tracked and `scripts/update-skills-catalog-lock.ps1 -Check` succeeds.
 2. The production Catalog exposes exactly the intended four sources and ten active stable Skill IDs.
-3. Windows PowerShell 5.1 and PowerShell 7 both pass the complete Pester suite.
-4. `SYP86 Production Smoke` installs a fresh disposable target through the installed launcher using the real commit-pinned Instructions archive and real external Skill archives, and produces a schema-v2 manifest with per-file provenance.
+3. The Windows Core workflow passes the authority gate and retained Pester difference using the verified latest stable PowerShell 7 runtime.
+4. `Windows Install Smoke` installs a fresh disposable target through the installed launcher using the real commit-pinned Instructions archive and real external Skill archives, and produces a schema-v2 manifest with per-file provenance.
 5. The same production smoke performs a second non-allowlist sync with `core.autocrlf=true`; managed bytes, Git status, HEAD and the retained `PersonalAgent` stash must remain unchanged.
 6. Installer safety tests prove that dirty runtime source bytes are rejected before Codex Home mutation, runtime/config bundle identity is checked at launch, and a late installation failure restores the previous launcher, runtime, config and personal files.
 7. Allowlist, excluded-repository, customized-file, wrong-hash, ZIP traversal/collision/link, and manifest-v1 migration scenarios all pass.

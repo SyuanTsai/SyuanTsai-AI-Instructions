@@ -118,17 +118,12 @@ Describe 'unselected P02A fixture' {
                 $manifest = Join-Path $pesterModule.ModuleBase 'Pester.psd1'
             }
             $version = $pesterModule.Version.ToString()
-            $isWindowsPlatform = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
-            $hostName = if ($PSVersionTable.PSEdition -eq 'Desktop') {
-                'powershell.exe'
+            if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+                $PSVersionTable.PSEdition -cne 'Core' -or
+                $PSVersionTable.PSVersion.Major -ne 7) {
+                throw 'Pester adapter contract tests require Windows PowerShell 7.'
             }
-            elseif ($isWindowsPlatform) {
-                'pwsh.exe'
-            }
-            else {
-                'pwsh'
-            }
-            $hostExe = Join-Path $PSHOME $hostName
+            $hostExe = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "The approved Pester manifest is missing: $manifest" }
             if (-not (Test-Path -LiteralPath $hostExe -PathType Leaf)) { throw "The current PowerShell executable is missing: $hostExe" }
             return [pscustomobject]@{ Manifest = $manifest; Version = $version; HostExe = $hostExe }
@@ -470,70 +465,6 @@ catch {
         }
     }
 
-    Context 'Linux process identity parsing' {
-        # Scenario: Linux proc stat records include command names with spaces/parentheses and a PID can be reused.
-        # Purpose: Bind PPID traversal to monotonic birth ticks, exclude a reused parent and its subtree, and reject malformed identity data.
-        It 'UnitT40_parses_linux_stat_and_excludes_reused_pid_descendants' {
-            $parserScript = Get-P02AExecutorFunction -Name 'ConvertFrom-PesterShardLinuxProcessStat'
-            . $parserScript
-            $entryScript = Get-P02AExecutorFunction -Name 'Get-PesterShardLinuxProcessEntry'
-            . $entryScript
-            $tableScript = Get-P02AExecutorFunction -Name 'Get-PesterShardLinuxProcessTable'
-            . $tableScript
-            $descendantScript = Get-P02AExecutorFunction -Name 'Get-PesterShardProcessDescendantsFromTable'
-            . $descendantScript
-
-            $procRoot = New-P02AChildDirectory
-            try {
-                $records = @(
-                    [pscustomobject]@{ ProcessId = 100; ParentProcessId = 1; StartTimeTicks = 1000; ProcessName = 'root' }
-                    [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; StartTimeTicks = 999; ProcessName = 'reused-parent' }
-                    [pscustomobject]@{ ProcessId = 203; ParentProcessId = 200; StartTimeTicks = 1001; ProcessName = 'stale-child' }
-                    [pscustomobject]@{ ProcessId = 201; ParentProcessId = 100; StartTimeTicks = 1100; ProcessName = 'worker)unit' }
-                    [pscustomobject]@{ ProcessId = 202; ParentProcessId = 201; StartTimeTicks = 1200; ProcessName = 'grandchild' }
-                    [pscustomobject]@{ ProcessId = 300; ParentProcessId = 1; StartTimeTicks = 900; ProcessName = 'unrelated' }
-                )
-                foreach ($record in $records) {
-                    $processDirectory = Join-Path $procRoot ([string]$record.ProcessId)
-                    [void](New-Item -ItemType Directory -Path $processDirectory -Force)
-                    $tailFields = @('S', [string]$record.ParentProcessId, '1', '1', '0', '-1', '0', '10', '0', '0', '0', '0', '0', '0', '0', '20', '0', '1', '0', [string]$record.StartTimeTicks, '4096', '1')
-                    $statText = "$($record.ProcessId) ($($record.ProcessName)) $($tailFields -join ' ')"
-                    [IO.File]::WriteAllText((Join-Path $processDirectory 'stat'), $statText)
-                }
-                [void](New-Item -ItemType Directory -Path (Join-Path $procRoot '999') -Force)
-
-                $parsed = Get-PesterShardLinuxProcessEntry -ProcessId 201 -ProcRoot $procRoot
-                Assert-P02AEqual $parsed.processName 'worker)unit' 'The stat parser must use the final close parenthesis around a process command.'
-                Assert-P02AEqual $parsed.parentProcessId 100 'The stat parser must read PPID after the state field.'
-                Assert-P02AEqual $parsed.startTimeTicks 1100 'The stat parser must read the monotonic process birth tick.'
-
-                $table = Get-PesterShardLinuxProcessTable -ProcRoot $procRoot
-                Assert-P02ATrue (-not $table.ContainsKey(999)) 'A process that vanished before its stat read must be skipped.'
-                $descendants = @(Get-PesterShardProcessDescendantsFromTable -RootProcessId 100 -ProcessTable $table -ExpectedRootStartTimeTicks 1000)
-                [Array]::Sort($descendants)
-                Assert-P02AEqual ($descendants -join '|') '201|202' 'Traversal must exclude an older reused child PID and its subtree.'
-
-                $rootTickMismatchRejected = $false
-                try { $null = Get-PesterShardProcessDescendantsFromTable -RootProcessId 100 -ProcessTable $table -ExpectedRootStartTimeTicks 999 }
-                catch {
-                    if ($_.Exception.Message -notmatch 'captured start tick') { throw }
-                    $rootTickMismatchRejected = $true
-                }
-                Assert-P02ATrue $rootTickMismatchRejected 'A reused root PID must fail closed when its birth tick changes.'
-
-                $malformedRejected = $false
-                try { $null = ConvertFrom-PesterShardLinuxProcessStat -ProcessId 100 -StatText '100 (broken) S 1' }
-                catch {
-                    if ($_.Exception.Message -notmatch 'required PPID|invalid PPID') { throw }
-                    $malformedRejected = $true
-                }
-                Assert-P02ATrue $malformedRejected 'Malformed process identity data must fail closed.'
-            }
-            finally {
-                if (Test-Path -LiteralPath $procRoot -PathType Container) { Remove-Item -LiteralPath $procRoot -Recurse -Force }
-            }
-        }
-    }
     Context 'Path ancestor validation' {
         # Scenario: A real existing test file is reached through a platform-native directory link.
         # Purpose: Reject its reparse parent while accepting an ordinary file and a missing target below a safe directory.

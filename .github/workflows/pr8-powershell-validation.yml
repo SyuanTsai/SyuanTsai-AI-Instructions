@@ -11,17 +11,20 @@ on:
     branches:
       - syp-86
       - main
-    # This required context has no paths filter, so every main pull request runs
-    # its authority gate and both retained source tests.
+    # This required check has no paths filter. Every main pull request runs the
+    # Windows Core authority gate and the complete retained PowerShell suite.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  windows-powershell-51-even:
-    name: Pester (Windows PowerShell 5.1 even shards)
+  windows-core:
+    name: Windows Core
     runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -29,547 +32,45 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Ensure Pester 3.4.0
-        shell: powershell
+      - name: Install verified latest stable PowerShell
+        shell: pwsh
         run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: powershell
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run even Pester partition
-        shell: powershell
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
           $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'3.4.0' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '3.4.0'
-            ExpectedSkippedCount = 1
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 0
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Downloaded PowerShell $version; ZIP SHA256: $actualSha256; portable path: $powerShellExe"
 
-  windows-powershell-51-even-b:
-    name: Pester (Windows PowerShell 5.1 even B shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 3.4.0
-        shell: powershell
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
         run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: powershell
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run even Pester partition
-        shell: powershell
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
           $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'3.4.0' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '3.4.0'
-            ExpectedSkippedCount = 5
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 2
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
           }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  windows-powershell-51-odd:
-    name: Pester (Windows PowerShell 5.1 odd shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 3.4.0
-        shell: powershell
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: powershell
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run odd Pester partition
-        shell: powershell
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'3.4.0' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '3.4.0'
-            ExpectedSkippedCount = 0
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 1
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  windows-powershell-51-odd-b:
-    name: Pester (Windows PowerShell 5.1 odd B shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 3.4.0
-        shell: powershell
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'3.4.0' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: powershell
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run odd Pester partition
-        shell: powershell
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'3.4.0' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 3.4.0 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '3.4.0'
-            ExpectedSkippedCount = 0
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 3
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  windows-powershell-51:
-    name: Pester (Windows PowerShell 5.1)
-    needs: [windows-powershell-51-even, windows-powershell-51-even-b, windows-powershell-51-odd, windows-powershell-51-odd-b]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require all four complete PowerShell 5.1 partitions
-        shell: pwsh
-        env:
-          EVEN_RESULT: ${{ needs['windows-powershell-51-even'].result }}
-          EVEN_B_RESULT: ${{ needs['windows-powershell-51-even-b'].result }}
-          ODD_RESULT: ${{ needs['windows-powershell-51-odd'].result }}
-          ODD_B_RESULT: ${{ needs['windows-powershell-51-odd-b'].result }}
-        run: |
-          if ($env:EVEN_RESULT -cne 'success' -or $env:EVEN_B_RESULT -cne 'success' -or $env:ODD_RESULT -cne 'success' -or $env:ODD_B_RESULT -cne 'success') {
-            throw "PowerShell 5.1 partition failure: even=$env:EVEN_RESULT even-b=$env:EVEN_B_RESULT odd=$env:ODD_RESULT odd-b=$env:ODD_B_RESULT"
-          }
-          Write-Host 'All four PowerShell 5.1 partitions passed with complete discovery and actual result counts.'
-
-  powershell-7-even:
-    name: Pester (PowerShell 7 even shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: pwsh
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run even Pester partition
-        shell: pwsh
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 1
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 0
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  powershell-7-even-b:
-    name: Pester (PowerShell 7 even B shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: pwsh
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run even Pester partition
-        shell: pwsh
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 5
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 2
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  powershell-7-odd:
-    name: Pester (PowerShell 7 odd shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: pwsh
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run odd Pester partition
-        shell: pwsh
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 0
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 1
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  powershell-7-odd-b:
-    name: Pester (PowerShell 7 odd B shards)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          }
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable.' }
-          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
-          Write-Host "Pester available: $($pester.Version) at $($pester.Path)"
-
-      - name: Parse all PowerShell files
-        shell: pwsh
-        run: |
-          $files = git ls-files '*.ps1' '*.psm1'
-          $failed = $false
-          foreach ($file in $files) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
-            foreach ($parseError in @($errors)) {
-              $failed = $true
-              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
-            }
-          }
-          if ($failed) { exit 1 }
-          exit 0
-
-      - name: Run odd Pester partition
-        shell: pwsh
-        run: |
-          # Keep the checkout-time line-ending policy; installer tests compare runtime sources with HEAD.
-          $ErrorActionPreference = 'Stop'
-          Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable |
-            Where-Object { $_.Version -eq [version]'4.10.1' } |
-            Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
-          Write-Host "Executing Pester $($pester.Version) through the bounded shard executor."
-          $executorArguments = @{
-            PesterModulePath = [string]$pester.Path
-            PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 0
-            ShardPartitionCount = 4
-            ShardPartitionIndex = 3
-            OuterTimeoutSeconds = 2400
-            TestRoot = './tests'
-            EvidenceRoot = $env:RUNNER_TEMP
-          }
-          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          exit 0
-
-  powershell-7:
-    name: Pester (PowerShell 7)
-    needs: [powershell-7-even, powershell-7-even-b, powershell-7-odd, powershell-7-odd-b]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require all four complete PowerShell 7 partitions
-        shell: pwsh
-        env:
-          EVEN_RESULT: ${{ needs['powershell-7-even'].result }}
-          EVEN_B_RESULT: ${{ needs['powershell-7-even-b'].result }}
-          ODD_RESULT: ${{ needs['powershell-7-odd'].result }}
-          ODD_B_RESULT: ${{ needs['powershell-7-odd-b'].result }}
-        run: |
-          if ($env:EVEN_RESULT -cne 'success' -or $env:EVEN_B_RESULT -cne 'success' -or $env:ODD_RESULT -cne 'success' -or $env:ODD_B_RESULT -cne 'success') {
-            throw "PowerShell 7 partition failure: even=$env:EVEN_RESULT even-b=$env:EVEN_B_RESULT odd=$env:ODD_RESULT odd-b=$env:ODD_B_RESULT"
-          }
-          Write-Host 'All four PowerShell 7 partitions passed with complete discovery and actual result counts.'
-
-  powershell-7-unix-composition:
-    name: Composition (PowerShell 7 on Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
 
       - name: Ensure Pester 4.10.1
         shell: pwsh
@@ -587,73 +88,100 @@ jobs:
           $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
           if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
 
-      - name: Run required Standard v1 authority gate
+      - name: Parse all PowerShell files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(git ls-files '*.ps1' '*.psm1')
+          if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) { throw 'Could not enumerate tracked PowerShell files.' }
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            foreach ($parseError in @($errors)) {
+              $failed = $true
+              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
+            }
+          }
+          if ($failed) { throw 'Tracked PowerShell files contain parse errors under the required PowerShell 7 runtime.' }
+
+      - name: Check whitespace in the event range
         shell: pwsh
         env:
           PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request' -and $env:PULL_REQUEST_BASE_SHA -match '^[0-9a-f]{40}$') {
+            git diff --check "$env:PULL_REQUEST_BASE_SHA...HEAD"
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:PUSH_BEFORE_SHA -match '^[0-9a-f]{40}$' -and $env:PUSH_BEFORE_SHA -notmatch '^0+$') {
+            git diff --check "$env:PUSH_BEFORE_SHA..HEAD"
+          } else {
+            $parent = (& git rev-parse --verify 'HEAD^' 2>$null)
+            if ($LASTEXITCODE -eq 0 -and [string]$parent -match '^[0-9a-f]{40}$') { git diff --check 'HEAD^..HEAD' }
+            else { git diff-tree --check --root -r HEAD }
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed for the event commit range.' }
+
+      - name: Run the Standard v1 authority gate
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $candidateRoot = [IO.Path]::GetFullPath((Get-Location).Path)
           $revision = (& git rev-parse --verify 'HEAD^{commit}').Trim()
           if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the full checked-out HEAD revision.' }
-          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'pr8-composition/authority-result.json'
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'windows-core/authority-result.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Standard v1 authority gate failed.' }
 
-      - name: Check whitespace
-        shell: bash
-        env:
-          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            git diff --check "$PULL_REQUEST_BASE_SHA...HEAD"
-          elif [[ "$GITHUB_EVENT_NAME" == "push" && -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
-            git diff --check "$PUSH_BEFORE_SHA..HEAD"
-          elif git rev-parse HEAD^ >/dev/null 2>&1; then
-            git diff --check HEAD^..HEAD
-          else
-            git diff-tree --check --root -r HEAD
-          fi
-          exit 0
-
-      - name: Run cross-platform composition and acquisition tests
+      - name: Run the non-authority Pester suite once
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in test step.' }
-          Import-Module $pester.Path -Force
-          $testPaths = @(
-            './tests/skills-source-composition.Tests.ps1',
-            './tests/skills-source-acquisition.Tests.ps1'
+          $pester = Get-Module Pester -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the test step.' }
+          $authorityScript = Get-Content -LiteralPath './scripts/Invoke-StandardAuthorityGate.ps1' -Raw
+          $authorityMatches = [regex]::Matches($authorityScript, '(?m)^\s*\(Join-Path \$repositoryRoot ''(tests/[^'']+\.Tests\.ps1)''\)')
+          $authorityNames = @($authorityMatches | ForEach-Object { [string]$_.Groups[1].Value })
+          $expectedAuthorityNames = @(
+            'tests/skill-repository-standard.Tests.ps1',
+            'tests/skill-repository-workflows.Tests.ps1',
+            'tests/standard-authority-entry-preflight.Tests.ps1',
+            'tests/standard-entry-point-binding.Tests.ps1',
+            'tests/standard-core-pester-adapter.Tests.ps1'
           )
-          foreach ($testPath in $testPaths) {
-            $result = Invoke-Pester -Script $testPath -PassThru
-            if ($null -eq $result) { throw "Pester did not return a result object for $testPath." }
-            Write-Host "$testPath - Total: $($result.TotalCount) Passed: $($result.PassedCount) Failed: $($result.FailedCount) Skipped: $($result.SkippedCount)"
-            if ($result.TotalCount -isnot [int] -and $result.TotalCount -isnot [long]) { throw "Pester returned a non-integer TotalCount for $testPath." }
-            if ([int64]$result.TotalCount -le 0) { throw "Pester discovered no tests in $testPath." }
-            if ([int]$result.FailedCount -ne 0) { throw "Pester reported $($result.FailedCount) failed tests in $testPath." }
-            if ([int]$result.PendingCount -ne 0) { throw "Pester reported $($result.PendingCount) pending tests in $testPath." }
-            if ([int]$result.InconclusiveCount -ne 0) { throw "Pester reported $($result.InconclusiveCount) inconclusive tests in $testPath." }
-            if ([int]$result.SkippedCount -ne 0) { throw "Pester reported $($result.SkippedCount) skipped tests in $testPath." }
-            if ([int64]$result.PassedCount -ne [int64]$result.TotalCount) { throw "Pester result counts are incomplete for $testPath." }
+          if ($authorityNames.Count -ne $expectedAuthorityNames.Count -or
+              (($authorityNames | Sort-Object) -join [Environment]::NewLine) -cne (($expectedAuthorityNames | Sort-Object) -join [Environment]::NewLine)) {
+            throw 'The Core Pester exclusion list no longer matches the exact authority gate test paths.'
           }
+          $testRoot = [IO.Path]::GetFullPath('./tests')
+          $allTestFiles = @(Get-ChildItem -LiteralPath $testRoot -Filter '*.Tests.ps1' -File -Recurse)
+          if ($allTestFiles.Count -eq 0) { throw 'Core Pester discovery found no test files.' }
+          $authorityFullPaths = @($expectedAuthorityNames | ForEach-Object { [IO.Path]::GetFullPath((Join-Path (Get-Location) $_)) })
+          foreach ($authorityPath in $authorityFullPaths) {
+            if (@($allTestFiles | Where-Object { [string]::Equals($_.FullName, $authorityPath, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) { throw "Authority test path must be discovered exactly once: $authorityPath" }
+          }
+          $selectedTestNames = @($allTestFiles | Where-Object { $authorityFullPaths -notcontains $_.FullName } | ForEach-Object { $_.Name })
+          if ($selectedTestNames.Count -ne @($selectedTestNames | Select-Object -Unique).Count) { throw 'Core Pester selection has duplicate leaf names and cannot be passed safely to the bounded runner.' }
+          if ($selectedTestNames.Count -ne ($allTestFiles.Count - $expectedAuthorityNames.Count)) { throw 'Core Pester selection does not equal all discovered tests minus the unique authority test paths.' }
+          $executorArguments = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '4.10.1'
+            ExpectedSkippedCount = 5
+            ShardPartitionCount = 1
+            ShardPartitionIndex = 0
+            OuterTimeoutSeconds = 2400
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
+            SelectedTestFileNames = $selectedTestNames
+            SummaryOutputPath = (Join-Path $env:RUNNER_TEMP 'windows-core-pester-summary.json')
+          }
+          Write-Host "Core Pester inventory: $($selectedTestNames.Count) files; authority files excluded once: $($expectedAuthorityNames.Count); runtime: $($PSVersionTable.PSVersion); Pester: $($pester.Version)"
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
+          if ($LASTEXITCODE -ne 0) { throw 'The bounded non-authority Pester suite failed.' }
 
-  routine-semantic-offline:
-    name: Routine semantic offline fixture regression (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Run all offline routine semantic fixtures
+      - name: Run offline routine semantic fixtures once
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
