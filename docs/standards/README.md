@@ -19,6 +19,9 @@
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
 - Central validation runner: `scripts/Invoke-StandardValidation.ps1`
+- Ordinary local core contract (v2): `docs/standards/standard-core-validation-v2.json`
+- Ordinary core adapter schema (v2): `docs/standards/schemas/standard-core-adapter-v2.schema.json`
+- Ordinary core evidence schema (v2): `docs/standards/schemas/standard-core-evidence-v2.schema.json`
 - Central runner contract: `docs/standards/standard-validation-contract-v1.json`
 - Consumer adapter schema: `docs/standards/schemas/standard-validation-adapter-v1.schema.json`
 - Candidate evidence schema: `docs/standards/schemas/standard-validation-evidence-v1.schema.json`
@@ -27,6 +30,8 @@
 - Resolver-hardening authority regression: `tests/standard-validation-resolver-hardening.Tests.ps1`
 - Central runner behavior regression: `tests/standard-validation-runner.Tests.ps1`
 - Tracking: Jira `SYP-167`
+
+普通 local consumer call 以 runner 的 v2 core adapter 為預設入口，執行 adapter 明確列出的 repository checks；v2 結果固定 `releaseEligible=false`，不表示 CI、外部安全掃描或 release admission。歷史 v1 adapter 與完整生命週期保留原契約，必須明確選用 `-CompleteLifecycle`；`-DevelopmentHarness` 僅供 legacy fixture regression，結果不可 release。v2 core 與 v1 歷史契約各用版本化 descriptor/schema 描述，不以新 core 語意改寫 v1 evidence。
 
 ## Scope
 
@@ -76,7 +81,7 @@ Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致�
 5. `docs/standards/validation-security-gate.json` 是 canonical validation stage order、security severity mapping、local/pre-push/CI pass-block semantics 與 consumer entry-point contract 的 machine-readable authority；schema 與 executable gate 必須同時更新。
 6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
 7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
-8. `scripts/Invoke-StandardAuthorityGate.ps1` 是 workflow 共用的 executable authority adapter；`.github/workflows/standards-conformance.yml` 與 `.github/workflows/pr8-powershell-validation.yml` 的 Ruleset-required Linux Composition job 必須呼叫同一 gate、執行相同的三個 authority regression suites、live resolver receipt checks 與 formal tool execution，且不得各自重建 resolver／tool execution sequence。
+8. scripts/Invoke-StandardAuthorityGate.ps1 是共用的 executable authority adapter。PR8 workflow 的 Ruleset-required Composition (PowerShell 7 on Linux) 是 main pull request 與 push 的唯一自動 authority gate，且不得設 paths filter；它執行 canonical gate 與保留的 source composition／acquisition tests。standards-conformance.yml 僅由 workflow_dispatch 手動啟動，提供相同 gate 的診斷證據，不再對相同事件建立重複自動狀態。此 gate 輸出 source-bound releaseEligible=false 結果，不執行外部 consumer tools，也不宣稱完整 consumer lifecycle。
 9. `scripts/Invoke-StandardValidation.ps1` 是 consumer-facing central orchestration contract 的唯一 runner；其 adapter、evidence schema 與 behavior regression 必須在同一 protected-base authority path 驗證，且 runner 的 development harness 不得成為 release approval。
 10. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 與 `tests/standard-validation-runner.Tests.ps1` 共同保護 Standard、merge-blocking workflow、resolver supply-chain 與 central runner contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
 11. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。

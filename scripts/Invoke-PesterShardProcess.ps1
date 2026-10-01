@@ -2,8 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string] $PesterModulePath,
     [Parameter(Mandatory = $true)][ValidateSet('3.4.0', '4.10.1')][string] $PesterVersion,
-    [Parameter(Mandatory = $true)][int] $ExpectedTotalCount,
-    [Parameter(Mandatory = $true)][int] $ExpectedSkippedCount,
+    [ValidateRange(-1, 2147483647)][int] $ExpectedTotalCount = -1,
+    [ValidateRange(-1, 2147483647)][int] $ExpectedSkippedCount = -1,
     [string[]] $IsolatedTestFileNames = @(
         'standard-validation-runner.Tests.ps1',
         'syp101-production-smoke-contract.Tests.ps1'
@@ -15,10 +15,29 @@ param(
     [ValidateRange(0, 1024)][int] $ExpectedFullShardCount = 0,
     [string] $CancellationPath,
     [string] $TestRoot = './tests',
-    [string] $EvidenceRoot
+    [string] $EvidenceRoot,
+    [AllowEmptyCollection()][string[]] $SelectedTestFileNames = @(),
+    [string] $SummaryOutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-PesterShardFileSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        $hashBytes = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $algorithm.Dispose()
+    }
+}
 
 if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
     throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation channel.'
@@ -30,7 +49,7 @@ if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
 # bounded-capture primitives as the trusted runner here.
 $script:PesterShardChildOutputQuotaCharacters = 1048576
 $script:PesterShardRunId = [guid]::NewGuid().ToString('N')
-$script:PesterShardExecutorSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$script:PesterShardExecutorSha256 = Get-PesterShardFileSha256 -Path $PSCommandPath
 
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     $null -eq ('PesterShardProcessControlNative' -as [type])) {
@@ -245,7 +264,7 @@ function Assert-PesterShardPathAncestorsNoReparse {
         if (Test-PesterShardReparseItem -Item $item) {
             throw "Preflight $Context contains a symlinked or reparse-point ancestor: $($item.FullName)"
         }
-        $parent = $item.Parent
+        $parent = if ($item -is [IO.FileInfo]) { $item.Directory } else { $item.Parent }
         if ($null -eq $parent -or $parent.FullName -ceq $item.FullName) { break }
         $item = $parent
     }
@@ -2000,11 +2019,18 @@ function New-PesterShardPlan {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string[]] $AllTestPaths,
-        [Parameter(Mandatory = $true)][string[]] $IsolatedTestFileNames,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $IsolatedTestFileNames,
         [ValidateRange(1, 1024)][int] $BulkShardSize = 1
     )
 
     if (@($AllTestPaths).Count -eq 0) { throw 'No Pester test files were discovered.' }
+    $seenTestPaths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($path in $AllTestPaths) {
+        $testPath = [string]$path
+        if ([string]::IsNullOrWhiteSpace($testPath)) { throw 'Pester shard inventory contains an empty discovered path.' }
+        if ($seenTestPaths.Contains($testPath)) { throw "Pester shard inventory contains duplicate discovered path '$testPath'." }
+        $seenTestPaths.Add($testPath)
+    }
     $orderedTestPaths = [string[]]@($AllTestPaths | ForEach-Object { [string]$_ })
     [Array]::Sort($orderedTestPaths, [StringComparer]::Ordinal)
 
@@ -2053,6 +2079,229 @@ function New-PesterShardPlan {
     return @($shards.ToArray())
 }
 
+function Select-PesterShardTestPaths {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $AllTestPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]] $SelectedTestFileNames
+    )
+
+    $orderedTestPaths = [string[]]@($AllTestPaths | ForEach-Object { [string]$_ })
+    [Array]::Sort($orderedTestPaths, [StringComparer]::Ordinal)
+    if ($SelectedTestFileNames.Count -eq 0) { return ,$orderedTestPaths }
+
+    $selectedPaths = New-Object 'System.Collections.Generic.List[string]'
+    $seenNames = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($rawName in $SelectedTestFileNames) {
+        $name = [string]$rawName
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            throw 'INVALID|Pester selection names must not be blank.'
+        }
+        if ($name -match '[<>:"/\\|?*\x00-\x1f]' -or
+            [IO.Path]::IsPathRooted($name) -or
+            -not $name.EndsWith('.Tests.ps1', [StringComparison]::OrdinalIgnoreCase) -or
+            $name.EndsWith('.') -or $name.EndsWith(' ')) {
+            throw 'INVALID|Pester selection requires one safe *.Tests.ps1 file name.'
+        }
+        $containsControl = $false
+        foreach ($character in $name.ToCharArray()) {
+            if ([char]::IsControl($character)) { $containsControl = $true; break }
+        }
+        if ($containsControl) { throw 'INVALID|Pester selection file names must not contain control characters.' }
+        $deviceName = ($name.Split('.')[0])
+        if ($deviceName -match '^(?i:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])$') {
+            throw 'INVALID|Pester selection file name is a reserved Windows device name.'
+        }
+        foreach ($seenName in $seenNames) {
+            if ([string]::Equals($seenName, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'INVALID|Pester selection contains a duplicate file name.'
+            }
+        }
+        $seenNames.Add($name)
+
+        $caseMatches = New-Object 'System.Collections.Generic.List[string]'
+        $exactMatches = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($path in $orderedTestPaths) {
+            $leaf = [IO.Path]::GetFileName([string]$path)
+            if ([string]::Equals($leaf, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                $caseMatches.Add([string]$path)
+            }
+            if ([string]::Equals($leaf, $name, [StringComparison]::Ordinal)) {
+                $exactMatches.Add([string]$path)
+            }
+        }
+        if ($caseMatches.Count -gt 1) {
+            throw 'INVALID|Pester selection is case-ambiguous in the discovered inventory.'
+        }
+        if ($exactMatches.Count -ne 1) {
+            throw 'INVALID|Pester selection name does not exactly match one discovered test file.'
+        }
+        $selectedPaths.Add([string]$exactMatches[0])
+    }
+
+    $stableSelectedPaths = [string[]]@($selectedPaths.ToArray())
+    [Array]::Sort($stableSelectedPaths, [StringComparer]::Ordinal)
+    return ,$stableSelectedPaths
+}
+
+function Resolve-PesterShardSummaryOutputPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $SummaryOutputPath,
+        [Parameter(Mandatory = $true)][string] $EvidenceRoot,
+        [Parameter(Mandatory = $true)][string] $TestRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SummaryOutputPath)) { return $null }
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $rawSummarySeparators = [char[]]@([char]92, [char]47)
+            $rawSummaryFileNameStart = $SummaryOutputPath.LastIndexOfAny($rawSummarySeparators) + 1
+            $rawSummaryFileName = $SummaryOutputPath.Substring($rawSummaryFileNameStart)
+            if ($rawSummaryFileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+                throw 'summary destination filename contains invalid Windows filename characters.'
+            }
+        }
+
+        $summaryFullPath = [IO.Path]::GetFullPath($SummaryOutputPath)
+        $evidenceFullPath = [IO.Path]::GetFullPath($EvidenceRoot)
+        $testFullPath = [IO.Path]::GetFullPath($TestRoot)
+        if (-not [string]::Equals([IO.Path]::GetExtension($summaryFullPath), '.json', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'summary destination must use the .json extension.'
+        }
+
+        $trimCharacters = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $separator = [string][IO.Path]::DirectorySeparatorChar
+        $evidencePrefix = $evidenceFullPath.TrimEnd($trimCharacters) + $separator
+        $testPrefix = $testFullPath.TrimEnd($trimCharacters) + $separator
+        $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else {
+            [StringComparison]::Ordinal
+        }
+        if ([string]::Equals($summaryFullPath, $evidenceFullPath, $pathComparison) -or
+            -not $summaryFullPath.StartsWith($evidencePrefix, $pathComparison)) {
+            throw 'summary destination must be strictly inside the evidence root.'
+        }
+        if ($summaryFullPath.StartsWith($testPrefix, $pathComparison)) {
+            throw 'summary destination must not be inside the test root.'
+        }
+
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $summaryFileName = [IO.Path]::GetFileName($summaryFullPath)
+            if ($summaryFileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+                throw 'summary destination filename contains invalid Windows filename characters.'
+            }
+        }
+
+        $temporaryName = '.' + [IO.Path]::GetFileName($summaryFullPath) + '.tmp-' + [guid]::NewGuid().ToString('N')
+        $temporaryPath = Join-Path ([IO.Path]::GetDirectoryName($summaryFullPath)) $temporaryName
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            ($summaryFullPath.Length -ge 240 -or $temporaryPath.Length -ge 240)) {
+            throw 'summary destination exceeds the controlled Windows path-length limit.'
+        }
+
+        Assert-PesterShardPathAncestorsNoReparse -Path $summaryFullPath -Context 'summary output path'
+        if (Test-Path -LiteralPath $summaryFullPath) {
+            throw 'summary destination already exists.'
+        }
+
+        $summaryParent = [IO.Path]::GetDirectoryName($summaryFullPath)
+        if ([string]::IsNullOrWhiteSpace($summaryParent)) {
+            throw 'summary destination has no parent directory.'
+        }
+        if (-not (Test-Path -LiteralPath $summaryParent -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $summaryParent -Force)
+        }
+        Assert-PesterShardPathAncestorsNoReparse -Path $summaryFullPath -Context 'summary output path'
+        if (Test-Path -LiteralPath $summaryFullPath) {
+            throw 'summary destination appeared during preflight.'
+        }
+        return $summaryFullPath
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message.StartsWith('INVALID|Pester summary', [StringComparison]::Ordinal)) { throw }
+        throw "INVALID|Pester summary path preflight failed: $message"
+    }
+}
+
+function Write-PesterShardExecutionSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $SummaryPath,
+        [Parameter(Mandatory = $true)][object] $SummaryObject
+    )
+
+    $summaryParent = [IO.Path]::GetDirectoryName($SummaryPath)
+    $temporaryPath = Join-Path $summaryParent ('.' + [IO.Path]::GetFileName($SummaryPath) + '.tmp-' + [guid]::NewGuid().ToString('N'))
+    $stream = $null
+    $ownsTemporaryFile = $false
+    try {
+        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $ownsTemporaryFile = $true
+        $json = ConvertTo-Json -InputObject $SummaryObject -Depth 12 -Compress
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $bytes = $encoding.GetBytes($json)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        $stream.Dispose()
+        $stream = $null
+        [IO.File]::Move($temporaryPath, $SummaryPath)
+        $ownsTemporaryFile = $false
+    }
+    catch {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+            $stream = $null
+        }
+        $cleanupMessage = ''
+        if ($ownsTemporaryFile -and (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+            try { [IO.File]::Delete($temporaryPath) }
+            catch { $cleanupMessage = ' Temporary-file cleanup also failed.' }
+        }
+        $message = [string]$_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace($cleanupMessage)) { $message += $cleanupMessage }
+        throw "INVALID|Pester summary could not be created atomically: $message"
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Assert-PesterShardResultCounts {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Summary,
+        [Parameter(Mandatory = $true)][ValidateSet('shard', 'aggregate')][string] $Context
+    )
+
+    if ($null -eq $Summary) { throw "Pester $Context result summary is missing." }
+    $fields = @('TotalCount', 'PassedCount', 'FailedCount', 'SkippedCount', 'PendingCount', 'InconclusiveCount')
+    foreach ($field in $fields) {
+        $property = $Summary.PSObject.Properties[$field]
+        if ($null -eq $property) { throw "Pester $Context result is missing $field." }
+        if ($property.Value -isnot [int] -and $property.Value -isnot [long]) {
+            throw "Pester $Context result contains a non-integer $field."
+        }
+        if ([long]$property.Value -lt 0) { throw "Pester $Context result contains a negative $field." }
+    }
+
+    $totalCount = [long]$Summary.TotalCount
+    $passedCount = [long]$Summary.PassedCount
+    $failedCount = [long]$Summary.FailedCount
+    $skippedCount = [long]$Summary.SkippedCount
+    $pendingCount = [long]$Summary.PendingCount
+    $inconclusiveCount = [long]$Summary.InconclusiveCount
+    if ($totalCount -le 0) { throw "Pester $Context result must contain at least one discovered test." }
+    if ($failedCount -ne 0) { throw "Pester $Context result reported $failedCount failed tests." }
+    if ($pendingCount -ne 0) { throw "Pester $Context result reported $pendingCount pending tests." }
+    if ($inconclusiveCount -ne 0) { throw "Pester $Context result reported $inconclusiveCount inconclusive tests." }
+    if (($passedCount + $skippedCount) -ne $totalCount) { throw "Pester $Context result counts are incomplete." }
+    if ($Context -ceq 'aggregate' -and $passedCount -le 0) { throw 'Pester aggregate must contain at least one passed test.' }
+}
+
 Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath -Context 'Pester module path'
 Import-Module $PesterModulePath -Force -ErrorAction Stop
 $loadedPester = Get-Module -Name Pester |
@@ -2070,9 +2319,14 @@ $allTestPaths = @(
     Get-ChildItem -LiteralPath $resolvedTestRoot -Filter '*.Tests.ps1' -File |
         ForEach-Object { [string]$_.FullName }
 )
+$selectedTestPaths = Select-PesterShardTestPaths -AllTestPaths $allTestPaths -SelectedTestFileNames $SelectedTestFileNames
+foreach ($selectedTestPath in $selectedTestPaths) {
+    Assert-PesterShardPathAncestorsNoReparse -Path $selectedTestPath -Context 'selected Pester test file'
+}
+$resolvedSummaryOutputPath = Resolve-PesterShardSummaryOutputPath -SummaryOutputPath $SummaryOutputPath -EvidenceRoot $EvidenceRoot -TestRoot $resolvedTestRoot
 $shards = New-Object 'System.Collections.Generic.List[object]'
 foreach ($shard in @(New-PesterShardPlan `
-        -AllTestPaths $allTestPaths `
+        -AllTestPaths $selectedTestPaths `
         -IsolatedTestFileNames $IsolatedTestFileNames `
         -BulkShardSize $BulkShardSize)) {
     $shards.Add($shard)
@@ -2216,13 +2470,14 @@ $childScript = @(
 ) -join [Environment]::NewLine
 $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
 
-$total = 0
-$passed = 0
-$failed = 0
-$skipped = 0
-$pending = 0
-$inconclusive = 0
+[long]$total = 0
+[long]$passed = 0
+[long]$failed = 0
+[long]$skipped = 0
+[long]$pending = 0
+[long]$inconclusive = 0
 $failedShardProcess = $false
+$completedShardSummaries = New-Object 'System.Collections.Generic.List[object]'
 foreach ($shard in @($selectedShards.ToArray())) {
     Write-Host "Starting Pester shard $($shard.Name)"
     $runToken = [guid]::NewGuid().ToString('N')
@@ -2300,26 +2555,61 @@ foreach ($shard in @($selectedShards.ToArray())) {
             Write-Host "Pester shard first failure (sanitized): $($processEvidence.failureSummary)"
         }
     }
-    foreach ($field in @('TotalCount', 'PassedCount', 'FailedCount', 'SkippedCount', 'PendingCount', 'InconclusiveCount')) {
-        if ($summary.$field -isnot [int] -and $summary.$field -isnot [long]) {
-            throw "Pester shard '$($shard.Name)' returned a non-integer $field. Process evidence='$($shardRun.processEvidencePath)'."
-        }
-    }
-    Write-Host "$($shard.Name) - Total: $($summary.TotalCount) Passed: $($summary.PassedCount) Failed: $($summary.FailedCount) Skipped: $($summary.SkippedCount)"
-    $total += [int]$summary.TotalCount
-    $passed += [int]$summary.PassedCount
-    $failed += [int]$summary.FailedCount
-    $skipped += [int]$summary.SkippedCount
-    $pending += [int]$summary.PendingCount
-    $inconclusive += [int]$summary.InconclusiveCount
+    Assert-PesterShardResultCounts -Summary $summary -Context 'shard'
+    $completedShardSummaries.Add([pscustomobject][ordered]@{
+        name = [string]$shard.Name
+        paths = [string[]]@($shard.Paths)
+        processEvidencePath = [IO.Path]::GetFullPath([string]$shardRun.processEvidencePath)
+        resultPath = [IO.Path]::GetFullPath([string]$shardRun.resultPath)
+        exitCode = [int]$shardRun.exitCode
+        status = [string]$shardRun.status
+        cleanedUp = [bool]$shardRun.cleanedUp
+        outputQuotaExceeded = [bool]$shardOutputQuotaExceeded
+    })
+    Write-Host "$($shard.Name) - Total: $($summary.TotalCount) Passed: $($summary.PassedCount) Failed: $($summary.FailedCount) Skipped: $($summary.SkippedCount) Pending: $($summary.PendingCount) Inconclusive: $($summary.InconclusiveCount)"
+    $total += [long]$summary.TotalCount
+    $passed += [long]$summary.PassedCount
+    $failed += [long]$summary.FailedCount
+    $skipped += [long]$summary.SkippedCount
+    $pending += [long]$summary.PendingCount
+    $inconclusive += [long]$summary.InconclusiveCount
     if ($shardProcessStatusInvalid -or [int]$shardRun.exitCode -ne 0) { $failedShardProcess = $true }
 }
 
 if ($failedShardProcess) { throw 'At least one isolated Pester shard exited nonzero.' }
-if ($total -ne $ExpectedTotalCount) { throw "Pester discovered $total tests across shards; expected exactly $ExpectedTotalCount." }
-if ($failed -gt 0) { throw "Pester reported $failed failed tests." }
-if ($pending -ne 0) { throw "Pester reported $pending pending tests." }
-if ($inconclusive -ne 0) { throw "Pester reported $inconclusive inconclusive tests." }
-if ($skipped -ne $ExpectedSkippedCount) { throw "Pester expected exactly $ExpectedSkippedCount platform/version skips; got $skipped." }
-if (($passed + $skipped) -ne $total) { throw 'Pester aggregate result counts are incomplete.' }
-Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped"
+$aggregateSummary = [pscustomobject][ordered]@{
+    TotalCount = $total
+    PassedCount = $passed
+    FailedCount = $failed
+    SkippedCount = $skipped
+    PendingCount = $pending
+    InconclusiveCount = $inconclusive
+}
+Assert-PesterShardResultCounts -Summary $aggregateSummary -Context 'aggregate'
+if ($ExpectedTotalCount -ge 0 -and $total -ne $ExpectedTotalCount) { throw "Pester discovered $total tests across shards; expected exactly $ExpectedTotalCount." }
+if ($ExpectedSkippedCount -ge 0 -and $skipped -ne $ExpectedSkippedCount) { throw "Pester expected exactly $ExpectedSkippedCount platform/version skips; got $skipped." }
+Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped Pending: $pending Inconclusive: $inconclusive"
+if (-not [string]::IsNullOrWhiteSpace($resolvedSummaryOutputPath)) {
+    $executedTestPaths = [string[]]@(
+        $completedShardSummaries.ToArray() | ForEach-Object { $_.paths }
+    )
+    [Array]::Sort($executedTestPaths, [StringComparer]::Ordinal)
+    $executionSummary = [pscustomobject][ordered]@{
+        schemaVersion = [int]1
+        type = 'standard-pester-execution-summary'
+        executed = [bool]$true
+        status = 'completed'
+        runtime = [pscustomobject][ordered]@{
+            osPlatform = [string][Environment]::OSVersion.Platform
+            psEdition = [string]$PSVersionTable.PSEdition
+            psVersion = [string]$PSVersionTable.PSVersion
+        }
+        pesterVersion = [string]$loadedPester.Version
+        pesterModuleSha256 = Get-PesterShardFileSha256 -Path $PesterModulePath
+        executorSha256 = Get-PesterShardFileSha256 -Path $PSCommandPath
+        testFiles = [string[]]@($executedTestPaths)
+        counts = $aggregateSummary
+        shards = [object[]]@($completedShardSummaries.ToArray())
+    }
+    Write-PesterShardExecutionSummary -SummaryPath $resolvedSummaryOutputPath -SummaryObject $executionSummary
+}

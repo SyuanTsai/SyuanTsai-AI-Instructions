@@ -16,6 +16,43 @@
     "result": "-OutputPath <atomic JSON evidence path>",
     "exitCodes": { "PASS": 0, "BLOCKED": 10, "FAILED": 20, "INVALID": 30, "CANCELLED": 40 }
   },
+  "entryPointContract": {
+    "policyPath": "docs/standards/validation-security-gate.json#/entryPointContract",
+    "publicCommandDocumentationPolicyPath": "docs/standards/validation-security-gate.json#/entryPointContract/publicCommandDocumentation",
+    "documentationSemantics": "consistency-only within each local Markdown command section; an unrelated canonical command does not authorize a release command; setup and diagnostics are not release gates",
+    "executionBinding": {
+      "schemaVersion": 1,
+      "bindingSchemaPath": "docs/standards/schemas/standard-entry-binding-v1.schema.json",
+      "resultSchemaPath": "docs/standards/schemas/standard-entry-result-v1.schema.json",
+      "modulePath": "scripts/StandardEntryPointContract.psm1",
+      "commandPath": "scripts/Test-StandardEntryPointResult.ps1",
+      "publicFunctions": [
+        "Get-StandardEntryPointRuntime",
+        "New-StandardEntryPointBinding",
+        "Assert-StandardEntryPointBinding",
+        "Assert-StandardEntryPointResult"
+      ],
+      "bindingFields": [
+        "schemaVersion",
+        "entryId",
+        "eventName",
+        "candidateRevision",
+        "authorityRevision",
+        "runtime",
+        "configSha256",
+        "requiredChecks",
+        "resultArtifact",
+        "contentMode",
+        "inputFileManifest"
+      ],
+      "inputInventoryRoots": ["scripts/", "tests/", "docs/standards/", ".github/workflows/"],
+      "resultSemantics": "Only a typed passed result for the exact expected binding and every executed zero-exit required check verifies; releaseEligible is always false.",
+      "platformArtifactTrustBoundary": "The caller supplies expected event, revisions, and required checks. A local JSON result reports matching claims; it does not prove provider execution, release admission, or external capability.",
+      "fixtureQualification": "Local fixtures verify the declared contract and implementation behavior only; they are not release certification or platform evidence.",
+      "gatePreflightCommandPath": "scripts/Invoke-StandardAuthorityGate.ps1",
+      "gatePreflightSemantics": "Explicit candidate/authority roots and full revisions are required before tools; BindingOnly emits a binding diagnostic, never an executed passed result or a success artifact."
+    }
+  },
   "stages": [
     { "order": 1, "id": "controlled-acquisition", "condition": "always", "barrier": "candidate-snapshot-and-authority-identity" },
     { "order": 2, "id": "integrity-verification", "condition": "always", "barrier": "exact-candidate-and-adapter-inventory" },

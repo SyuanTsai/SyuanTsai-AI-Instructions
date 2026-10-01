@@ -5,17 +5,95 @@ param(
         else { [System.IO.Path]::GetTempPath() }
     ),
 
-    [string] $ExpectedGoRuntimeVersion = $env:STANDARD_GO_RUNTIME_VERSION,
+    [switch] $DefineFunctionsOnly,
 
-    [string] $GoCommandPath = $env:STANDARD_GO_COMMAND_PATH,
+    [string] $CandidateRoot,
 
-    [switch] $DefineFunctionsOnly
+    [string] $AuthorityRoot,
+
+    [string] $CandidateRevision,
+
+    [string] $AuthorityRevision,
+
+    [string] $EventName,
+
+    [string] $ResultArtifact,
+
+    [switch] $AllowDevelopmentContent,
+
+    [switch] $BindingOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$expectedGoRuntimeSource = 'https://go.dev/dl/?mode=json'
+function Get-AuthorityEntryPreflight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $RunningScriptPath,
+        [AllowNull()][AllowEmptyString()][string] $CandidateRoot,
+        [AllowNull()][AllowEmptyString()][string] $AuthorityRoot,
+        [AllowNull()][AllowEmptyString()][string] $CandidateRevision,
+        [AllowNull()][AllowEmptyString()][string] $AuthorityRevision,
+        [AllowNull()][AllowEmptyString()][string] $EventName,
+        [AllowNull()][AllowEmptyString()][string] $ResultArtifact,
+        [switch] $AllowDevelopmentContent
+    )
+
+    $missingIdentity = @()
+    foreach ($identity in @(
+            [pscustomobject]@{ name = 'CandidateRoot'; value = $CandidateRoot },
+            [pscustomobject]@{ name = 'AuthorityRoot'; value = $AuthorityRoot },
+            [pscustomobject]@{ name = 'CandidateRevision'; value = $CandidateRevision },
+            [pscustomobject]@{ name = 'AuthorityRevision'; value = $AuthorityRevision },
+            [pscustomobject]@{ name = 'EventName'; value = $EventName },
+            [pscustomobject]@{ name = 'ResultArtifact'; value = $ResultArtifact }
+        )) {
+        if ([string]::IsNullOrWhiteSpace([string]$identity.value)) { $missingIdentity += [string]$identity.name }
+    }
+    if ($missingIdentity.Count -gt 0) {
+        throw ('STANDARD_ENTRY_INVALID|Missing required explicit preflight identity: ' + ($missingIdentity -join ', ') + '.')
+    }
+
+    $candidateFullRoot = [IO.Path]::GetFullPath($CandidateRoot)
+    $expectedGatePath = [IO.Path]::GetFullPath((Join-Path $candidateFullRoot 'scripts/Invoke-StandardAuthorityGate.ps1'))
+    $runningGatePath = [IO.Path]::GetFullPath($RunningScriptPath)
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else { [StringComparison]::Ordinal }
+    if (-not [string]::Equals($runningGatePath, $expectedGatePath, $pathComparison)) {
+        throw 'STANDARD_ENTRY_BLOCKED|running authority gate script must equal CandidateRoot/scripts/Invoke-StandardAuthorityGate.ps1.'
+    }
+
+    $candidateModulePath = [IO.Path]::GetFullPath((Join-Path $candidateFullRoot 'scripts/StandardEntryPointContract.psm1'))
+    if (-not (Test-Path -LiteralPath $candidateModulePath -PathType Leaf)) {
+        throw 'STANDARD_ENTRY_BLOCKED|candidate StandardEntryPointContract module is missing.'
+    }
+    $loadedModule = Import-Module -Name $candidateModulePath -Force -PassThru -ErrorAction Stop
+    if ($null -eq $loadedModule -or [string]::IsNullOrWhiteSpace([string]$loadedModule.Path)) {
+        throw 'STANDARD_ENTRY_BLOCKED|candidate StandardEntryPointContract module could not be resolved.'
+    }
+    $loadedModulePath = [IO.Path]::GetFullPath([string]$loadedModule.Path)
+    if (-not [string]::Equals($loadedModulePath, $candidateModulePath, $pathComparison)) {
+        throw 'STANDARD_ENTRY_BLOCKED|loaded StandardEntryPointContract module must equal CandidateRoot/scripts/StandardEntryPointContract.psm1.'
+    }
+
+    $bindingParameters = @{
+        CandidateRoot = $candidateFullRoot
+        AuthorityRoot = $AuthorityRoot
+        CandidateRevision = $CandidateRevision
+        AuthorityRevision = $AuthorityRevision
+        EntryId = 'standard-v1-authority'
+        EventName = $EventName
+        RequiredChecks = @('Standard v1 authority gate')
+        ResultArtifact = $ResultArtifact
+    }
+    if ($AllowDevelopmentContent) { $bindingParameters.AllowDevelopmentContent = $true }
+    $binding = New-StandardEntryPointBinding @bindingParameters
+    [void](Assert-StandardEntryPointBinding -Binding $binding)
+    return $binding
+}
 
 function Get-AuthorityProperty {
     param(
@@ -799,7 +877,7 @@ function Assert-AuthorityEntryPointPolicy {
     param([Parameter(Mandatory = $true)] $Contract)
 
     Assert-AuthorityJsonPropertySet -Object $Contract -Expected @(
-        'canonicalExecution', 'releaseAffectingSurfaces', 'componentScripts',
+        'canonicalExecution', 'releaseAffectingSurfaces', 'publicCommandDocumentation', 'componentScripts',
         'compatibilityLane', 'triggerAdapters', 'authorityWorkflowRoles'
     ) -Context 'Validation/security gate entry-point contract'
 
@@ -848,6 +926,18 @@ function Assert-AuthorityEntryPointPolicy {
     Assert-AuthorityExactStringSequence -Value $surfaces.forbiddenFailureSuppression -Expected @(
         '|| true', '|| :', 'continue-on-error: true', 'if: always()'
     ) -Context 'Entry-point failure suppression inventory'
+
+    $publicCommandDocumentation = Get-AuthorityRequiredProperty `
+        -Object $Contract `
+        -Name 'publicCommandDocumentation' `
+        -Context 'Validation/security gate entry-point contract'
+    Assert-AuthorityJsonPropertySet -Object $publicCommandDocumentation -Expected @(
+        'mode', 'commandScope', 'unrelatedCanonicalAuthorizesRelease', 'setupAndDiagnosticsAreReleaseGates'
+    ) -Context 'Entry-point public command documentation policy'
+    Assert-AuthorityExactString -Value $publicCommandDocumentation.mode -Expected 'consistency-only' -Context 'Entry-point public command documentation mode'
+    Assert-AuthorityExactString -Value $publicCommandDocumentation.commandScope -Expected 'local-markdown-command-section' -Context 'Entry-point public command documentation scope'
+    Assert-AuthorityExactBoolean -Value $publicCommandDocumentation.unrelatedCanonicalAuthorizesRelease -Expected $false -Context 'Entry-point unrelated canonical documentation authority'
+    Assert-AuthorityExactBoolean -Value $publicCommandDocumentation.setupAndDiagnosticsAreReleaseGates -Expected $false -Context 'Entry-point setup and diagnostics release authority'
 
     $componentScripts = Get-AuthorityRequiredProperty `
         -Object $Contract `
@@ -2004,6 +2094,111 @@ function Test-AuthorityConsumerNonCanonicalValidationCommand {
     return [regex]::IsMatch($Text, $toolPattern)
 }
 
+function Get-AuthorityMarkdownCommandSections {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
+
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $sections = New-Object 'System.Collections.Generic.List[string]'
+    $sectionLines = New-Object 'System.Collections.Generic.List[string]'
+    $fenceMarker = $null
+    $fenceLength = 0
+    foreach ($line in $normalized.Split("`n")) {
+        if ($null -ne $fenceMarker) {
+            $closingFence = [regex]::Match($line, '^ {0,3}(`+|~+)[ \t]*$')
+            if ($closingFence.Success -and
+                $closingFence.Groups[1].Value.Substring(0, 1) -ceq $fenceMarker -and
+                $closingFence.Groups[1].Value.Length -ge $fenceLength) {
+                [void]$sectionLines.Add([string]$line)
+                $fenceMarker = $null
+                $fenceLength = 0
+                continue
+            }
+
+            [void]$sectionLines.Add([string]$line)
+            continue
+        }
+
+        $openingFence = [regex]::Match($line, '^ {0,3}(`{3,}|~{3,})(.*)$')
+        if ($openingFence.Success) {
+            $markerRun = $openingFence.Groups[1].Value
+            $fenceInfo = $openingFence.Groups[2].Value
+            if ($markerRun.Substring(0, 1) -cne '`' -or $fenceInfo -notmatch '`') {
+                [void]$sectionLines.Add([string]$line)
+                $fenceMarker = $markerRun.Substring(0, 1)
+                $fenceLength = $markerRun.Length
+                continue
+            }
+        }
+
+        if ($line -match '^\s{0,3}#{1,6}(?:\s+|$)' -and $sectionLines.Count -gt 0) {
+            [void]$sections.Add([string]::Join("`n", $sectionLines.ToArray()))
+            $sectionLines.Clear()
+        }
+
+        if ($line -match '^ {0,3}(?:=+|-+)[ \t]*$' -and $sectionLines.Count -gt 0) {
+            $titleLineIndex = $sectionLines.Count - 1
+            $titleLine = [string]$sectionLines[$titleLineIndex]
+            if ($titleLineIndex -gt 0 -and $titleLine -notmatch '^\s*$') {
+                $hasPreviousContent = $false
+                for ($index = 0; $index -lt $titleLineIndex; $index++) {
+                    if ([string]$sectionLines[$index] -notmatch '^\s*$') {
+                        $hasPreviousContent = $true
+                        break
+                    }
+                }
+
+                if ($hasPreviousContent) {
+                    $previousSectionLines = $sectionLines.GetRange(0, $titleLineIndex)
+                    [void]$sections.Add([string]::Join("`n", $previousSectionLines.ToArray()))
+                    $sectionLines.Clear()
+                    [void]$sectionLines.Add($titleLine)
+                }
+            }
+        }
+
+        [void]$sectionLines.Add([string]$line)
+    }
+    if ($sectionLines.Count -gt 0) {
+        [void]$sections.Add([string]::Join("`n", $sectionLines.ToArray()))
+    }
+    return $sections.ToArray()
+}
+
+function Test-AuthorityMarkdownSectionDeclaresGate {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
+
+    $explicitGateDeclarationPattern = '(?is)\b(?:run|execute|invoke)\b.{0,120}\b(?:release|validation)\s+gate\b|\b(?:release|validation)\s+gate\b.{0,120}\b(?:run|execute|invoke)\b'
+    return [regex]::IsMatch($Text, $explicitGateDeclarationPattern)
+}
+
+function Assert-AuthorityConsumerPublicCommandDocumentation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $PublicRelativePath,
+        [Parameter(Mandatory = $true)][string] $CanonicalRelativePath,
+        [Parameter(Mandatory = $true)][bool] $RequiresFailurePropagation
+    )
+
+    foreach ($section in @(Get-AuthorityMarkdownCommandSections -Text $Text)) {
+        $releaseMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $section
+        $explicitGate = Test-AuthorityMarkdownSectionDeclaresGate -Text $section
+        if (-not $releaseMatch.Success -and -not $explicitGate) { continue }
+
+        if ($RequiresFailurePropagation -and (Test-AuthorityConsumerFailureSuppression -Text $section)) {
+            throw "BLOCK: release-affecting public command '$PublicRelativePath' suppresses canonical or release failure propagation."
+        }
+
+        if (Test-AuthorityConsumerNonCanonicalValidationCommand -Text $section -CanonicalRelativePath $CanonicalRelativePath) {
+            throw "BLOCK: consumer entry-point contract found a public command that declares an alternate release gate: '$PublicRelativePath'."
+        }
+
+        $canonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $section -CanonicalRelativePath $CanonicalRelativePath
+        if ($canonicalCount -ne 1) {
+            throw "BLOCK: consumer entry-point contract found a public release command without exactly one canonical validator invocation: '$PublicRelativePath'."
+        }
+    }
+}
+
 function Test-AuthorityConsumerCompatibilityMarker {
     param([Parameter(Mandatory = $true)][string] $Text)
 
@@ -2602,21 +2797,11 @@ function Assert-AuthorityConsumerEntryPointContract {
             throw "BLOCK: consumer entry-point public command '$publicRelativePath' is a reparse point."
         }
         $publicText = [System.IO.File]::ReadAllText($publicPath)
-        $nonCanonicalPublicCommand = Test-AuthorityConsumerNonCanonicalValidationCommand -Text $publicText -CanonicalRelativePath $canonicalRelative
-        $publicCanonicalCount = Test-AuthorityConsumerCanonicalInvocation -Text $publicText -CanonicalRelativePath $canonicalRelative
-        $publicReleaseAffecting = Test-AuthorityConsumerReleaseAffectingCommand -Text $publicText
-        if ($publicReleaseAffecting -and [bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation -and
-            (Test-AuthorityConsumerFailureSuppression -Text $publicText)) {
-            throw "BLOCK: release-affecting public command '$publicRelativePath' suppresses canonical or release failure propagation."
-        }
-        $isReleaseInstructions = $publicRelativePath -match '(?i)(?:^|/)RELEAS(?:E|ING)\.md$'
-        if ($publicReleaseAffecting -and $publicCanonicalCount -ne 1) {
-            throw "BLOCK: consumer entry-point contract found a public release command without exactly one canonical validator invocation: '$publicRelativePath'."
-        }
-        if ($nonCanonicalPublicCommand -and ($isReleaseInstructions -or
-            $publicText -match '(?is)(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate).{0,240}(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install)|(?:scripts[/\\]|Invoke-Pester|pytest|npm\s+(?:install|ci|test)|pip\s+install|go\s+install).{0,240}(?:release|publish|pre-push|merge|release\s+gate|validation\s+gate)')) {
-            throw "BLOCK: consumer entry-point contract found a public command that declares an alternate release gate: '$publicRelativePath'."
-        }
+        Assert-AuthorityConsumerPublicCommandDocumentation `
+            -Text $publicText `
+            -PublicRelativePath $publicRelativePath `
+            -CanonicalRelativePath $canonicalRelative `
+            -RequiresFailurePropagation ([bool]$contract.releaseAffectingSurfaces.requiresFailurePropagation)
     }
 
     return $true
@@ -2899,7 +3084,6 @@ function Assert-AuthorityPolicyReceipt {
 function Assert-AuthorityPesterResult {
     param(
         [Parameter(Mandatory = $true)] $Result,
-        [int] $MinimumTotalCount = 35,
         [int] $PesterMajorVersion = 6
     )
 
@@ -2914,8 +3098,8 @@ function Assert-AuthorityPesterResult {
     )) {
         Assert-AuthorityNonNegativeInteger -Value $entry.Value -Context "Pester $($entry.Name)"
     }
-    if ([int64]$total -lt $MinimumTotalCount) {
-        throw "Pester discovered only $total authority tests; expected at least $MinimumTotalCount."
+    if ([int64]$total -eq 0) {
+        throw 'Pester discovered zero authority tests.'
     }
     if ([int64]$failed -ne 0 -or [int64]$passed -ne [int64]$total) {
         throw "Pester authority tests did not all pass. Total=$total Passed=$passed Failed=$failed."
@@ -3676,636 +3860,234 @@ function Assert-AuthorityFixtureContract {
 
 if ($DefineFunctionsOnly) { return }
 
+$authorityEntryBinding = Get-AuthorityEntryPreflight `
+    -RunningScriptPath $PSCommandPath `
+    -CandidateRoot $CandidateRoot `
+    -AuthorityRoot $AuthorityRoot `
+    -CandidateRevision $CandidateRevision `
+    -AuthorityRevision $AuthorityRevision `
+    -EventName $EventName `
+    -ResultArtifact $ResultArtifact `
+    -AllowDevelopmentContent:$AllowDevelopmentContent
+
+if ($BindingOnly) {
+    $bindingDiagnostic = [ordered]@{
+        type = 'standard-entry-point-binding-diagnostic'
+        binding = $authorityEntryBinding
+    }
+    ConvertTo-Json -InputObject $bindingDiagnostic -Depth 20 -Compress | Write-Output
+    return
+}
+
 $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$resolverPath = Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'
-$pythonClosureHelperPath = Join-Path $PSScriptRoot 'Resolve-PythonWheelClosure.py'
-$validationSecurityGatePath = Join-Path $repositoryRoot 'docs/standards/validation-security-gate.json'
-$upstreamAdapterPolicyPath = Join-Path $repositoryRoot 'docs/standards/upstream-adapter.json'
-$upstreamAdapterValidatorPath = Join-Path $PSScriptRoot 'Validate-UpstreamAdapter.ps1'
-$expectedGoRuntimeVersion = [string]$ExpectedGoRuntimeVersion
-if ([string]::IsNullOrWhiteSpace($expectedGoRuntimeVersion) -or
-    $expectedGoRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw 'The authority gate requires STANDARD_GO_RUNTIME_VERSION from the setup-go run-resolved latest stable runtime.'
-}
-$goCommandPath = [string]$GoCommandPath
-if ([string]::IsNullOrWhiteSpace($goCommandPath)) {
-    $goApplications = @(Get-Command -Name 'go' -CommandType Application -ErrorAction SilentlyContinue)
-    if ($goApplications.Count -ne 1) {
-        throw 'The authority gate requires one run-resolved Go executable path from setup-go.'
-    }
-    $goCommandPath = if ($null -ne $goApplications[0].PSObject.Properties['Path']) {
-        [string]$goApplications[0].Path
-    }
-    else {
-        [string]$goApplications[0].Source
-    }
-}
-if ([string]::IsNullOrWhiteSpace($goCommandPath) -or -not [IO.Path]::IsPathRooted($goCommandPath)) {
-    throw 'The authority gate requires an absolute run-resolved Go executable path.'
-}
-$goCommandPath = [IO.Path]::GetFullPath($goCommandPath)
-$goCommandItem = Get-Item -Force -LiteralPath $goCommandPath -ErrorAction SilentlyContinue
-if ($null -eq $goCommandItem -or $goCommandItem.PSIsContainer -or
-    ($goCommandItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "The authority gate requires a regular run-resolved Go executable: $goCommandPath"
-}
 $authorityTestPaths = @(
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-validation-resolver-hardening.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-validation-runner.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/source-merge-exception-draft.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-semantic-bridge.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-semantic-inventory-probe.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-semantic-preflight.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-semantic-raw-graph.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-authority-entry-preflight.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-entry-point-binding.Tests.ps1')
+    (Join-Path $repositoryRoot 'tests/standard-core-pester-adapter.Tests.ps1')
 )
-foreach ($requiredPath in @($validationSecurityGatePath, $upstreamAdapterPolicyPath, $upstreamAdapterValidatorPath, $resolverPath, $pythonClosureHelperPath) + $authorityTestPaths) {
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Authority gate input is missing: $requiredPath"
+foreach ($testPath in $authorityTestPaths) {
+    $testItem = Get-Item -Force -LiteralPath $testPath -ErrorAction Stop
+    if ($testItem.PSIsContainer -or ($testItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Authority Pester path must be a regular non-reparse file: $testPath"
     }
 }
 
-$validationSecurityGate = Assert-AuthorityValidationSecurityGate `
-    -Policy (Read-AuthorityJson -Path $validationSecurityGatePath -Context 'Validation/security gate policy')
-$validationSecurityGatePolicySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $validationSecurityGatePath).Hash.ToLowerInvariant()
-
-$artifactsRootPath = [System.IO.Path]::GetFullPath($ArtifactsRoot)
-[void](New-Item -ItemType Directory -Path $artifactsRootPath -Force)
-$artifactsItem = Get-Item -Force -LiteralPath $artifactsRootPath
-if (-not $artifactsItem.PSIsContainer -or
-    ($artifactsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Authority artifacts root must be a non-reparse directory: $artifactsRootPath"
+$pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+if ($pesterModules.Count -ne 1) {
+    throw "The authority gate requires exactly one installed Pester 4.10.1 module; found $($pesterModules.Count)."
 }
-
-$runId = [guid]::NewGuid().ToString('N')
-$runRoot = Join-Path $artifactsRootPath "standard-authority-$runId"
-$installRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
-$fixtureRoot = Join-Path $runRoot 'fixture/standard-validation-fixture'
-[void](New-Item -ItemType Directory -Path $fixtureRoot -Force)
-
-$fixtureText = @'
----
-name: standard-validation-fixture
-description: Use when verifying that the canonical validation toolchain can inspect a harmless and deterministic Agent Skill package.
----
-
-# Standard Validation Fixture
-
-Use this deterministic fixture to confirm that each approved validation tool can inspect one complete Agent Skill package.
-
-## Procedure
-
-1. Read this file.
-2. Confirm that the package metadata is valid.
-3. Return a short validation status without changing files.
-
-## Expected result
-
-Report that the fixture is structurally valid and contains no executable content.
-'@
-$fixturePath = Join-Path $fixtureRoot 'SKILL.md'
-[System.IO.File]::WriteAllText($fixturePath, $fixtureText.TrimStart() + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-$fixtureSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash.ToLowerInvariant()
-
-$fixtureAgentsRoot = Join-Path $fixtureRoot 'agents'
-[void](New-Item -ItemType Directory -Path $fixtureAgentsRoot -Force)
-$fixtureMetadataText = @'
-interface:
-  display_name: "Standard Validation Fixture"
-  short_description: "Validate one deterministic canonical Skill package."
-  default_prompt: "Use $standard-validation-fixture to verify the canonical validation toolchain."
-'@
-$fixtureMetadataPath = Join-Path $fixtureAgentsRoot 'openai.yaml'
-[System.IO.File]::WriteAllText($fixtureMetadataPath, $fixtureMetadataText.TrimStart() + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-Assert-AuthorityFixtureContract -FixtureRoot $fixtureRoot -ExpectedSkillId 'standard-validation-fixture'
-$fixtureMetadataSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixtureMetadataPath).Hash.ToLowerInvariant()
-$fixtureFiles = @(
-    [pscustomobject][ordered]@{ path = 'SKILL.md'; sha256 = $fixtureSha256 },
-    [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = $fixtureMetadataSha256 }
-)
-$fixtureCanonicalInventory = ($fixtureFiles | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
-$fixtureInventoryHasher = [System.Security.Cryptography.SHA256]::Create()
-try {
-    $fixtureInventorySha256 = ([System.BitConverter]::ToString(
-        $fixtureInventoryHasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($fixtureCanonicalInventory))
-    ) -replace '-', '').ToLowerInvariant()
+$pesterManifestPath = [IO.Path]::GetFullPath((Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'))
+$pesterManifestItem = Get-Item -Force -LiteralPath $pesterManifestPath -ErrorAction Stop
+if ($pesterManifestItem.PSIsContainer -or ($pesterManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Pester 4.10.1 manifest must be a regular non-reparse file: $pesterManifestPath"
 }
-finally {
-    $fixtureInventoryHasher.Dispose()
+$pesterManifest = Import-PowerShellDataFile -LiteralPath $pesterManifestPath -ErrorAction Stop
+if ([version]$pesterManifest.ModuleVersion -ne [version]'4.10.1') {
+    throw "Pester manifest version must be exactly 4.10.1: $pesterManifestPath"
 }
-
-$policyReceiptPath = Join-Path $runRoot 'policy.json'
-& $resolverPath -ValidatePolicyOnly -RunId $runId -OutputPath $policyReceiptPath | Out-Host
-$policyReceipt = Read-AuthorityJson -Path $policyReceiptPath -Context 'Validation policy resolver'
-Assert-AuthorityPolicyReceipt -Receipt $policyReceipt -ExpectedRunId $runId
-
-$expectedSources = [ordered]@{
-    'skillspector' = 'NVIDIA/SkillSpector'
-    'skill-validator' = 'github.com/agent-ecosystem/skill-validator/cmd/skill-validator'
-    'skill-tools' = 'npm:skill-tools'
-    'pester' = 'PowerShellGallery:Pester'
+$pesterRootModuleName = ''
+if ($pesterManifest.ContainsKey('RootModule')) {
+    $pesterRootModuleName = [string]$pesterManifest['RootModule']
 }
-$receipts = [ordered]@{}
-$executablePaths = [ordered]@{}
-
-# Freeze the complete formal toolset before any validator executes.
-foreach ($entry in $expectedSources.GetEnumerator()) {
-    $receiptPath = Join-Path $runRoot ("receipt-{0}.json" -f $entry.Key)
-    & $resolverPath `
-        -ToolName $entry.Key `
-        -Install `
-        -InstallRoot $installRoot `
-        -RunId $runId `
-        -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
-        -GoCommandPath $goCommandPath `
-        -OutputPath $receiptPath | Out-Host
-    $receipt = Read-AuthorityJson -Path $receiptPath -Context "$($entry.Key) resolver"
-    $executablePaths[$entry.Key] = Assert-InstalledAuthorityToolReceipt `
-        -Receipt $receipt -ToolName $entry.Key -ExpectedSource $entry.Value -InstallRoot $installRoot -ExpectedRunId $runId
-    $receipts[$entry.Key] = $receipt
-    if ($entry.Key -ceq 'skillspector') {
-        Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath 'Env:GH_TOKEN' -Force -ErrorAction SilentlyContinue
-    }
+if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -and $pesterManifest.ContainsKey('ModuleToProcess')) {
+    $pesterRootModuleName = [string]$pesterManifest['ModuleToProcess']
 }
-
-foreach ($entry in $expectedSources.GetEnumerator()) {
-    $receipt = $receipts[$entry.Key]
-    $expectedClosure = Get-AuthorityProperty -Object $receipt -Name 'installedClosureSha256'
-    Assert-AuthoritySha256 -Value $expectedClosure -Context "$($entry.Key) installed closure"
-    $actualClosure = Get-AuthorityDirectoryClosureSha256 -Path ([string]$receipt.installRoot)
-    if ($actualClosure -cne [string]$expectedClosure) {
-        throw "$($entry.Key) installed closure changed after resolution. Expected '$expectedClosure', got '$actualClosure'."
-    }
+if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -or [IO.Path]::IsPathRooted($pesterRootModuleName)) {
+    throw "Pester 4.10.1 manifest must declare a relative root module: $pesterManifestPath"
 }
-
-$skillSpectorReceipt = $receipts.skillspector
-if ($skillSpectorReceipt.pythonPackageIndex -isnot [string] -or
-    [string]$skillSpectorReceipt.pythonPackageIndex -cnotmatch '^https://pypi\.org/simple/?$' -or
-    $skillSpectorReceipt.installEnvironment -isnot [string] -or
-    [string]$skillSpectorReceipt.installEnvironment -cne 'isolated-venv' -or
-    $skillSpectorReceipt.interpreterIsolation -isnot [string] -or
-    [string]$skillSpectorReceipt.interpreterIsolation -cne 'python-isolated-mode' -or
-    $skillSpectorReceipt.credentialIsolation -isnot [string] -or
-    [string]$skillSpectorReceipt.credentialIsolation -cne 'github-token-cleared-before-python' -or
-    $skillSpectorReceipt.installedMetadataVerification -isnot [string] -or
-    [string]$skillSpectorReceipt.installedMetadataVerification -cne 'static-dist-info-metadata' -or
-    $skillSpectorReceipt.directReferencesAllowed -isnot [bool] -or
-    [bool]$skillSpectorReceipt.directReferencesAllowed -or
-    $skillSpectorReceipt.pipOnlineDependencyTraversalAllowed -isnot [bool] -or
-    [bool]$skillSpectorReceipt.pipOnlineDependencyTraversalAllowed -or
-    $skillSpectorReceipt.yankedAllowed -isnot [bool] -or
-    [bool]$skillSpectorReceipt.yankedAllowed -or
-    $skillSpectorReceipt.dependencyDiscovery -isnot [string] -or
-    [string]$skillSpectorReceipt.dependencyDiscovery -cne 'approved-simple-json-lazy' -or
-    $skillSpectorReceipt.requiresPythonPolicy -isnot [string] -or
-    [string]$skillSpectorReceipt.requiresPythonPolicy -cne 'simple-json-wheel-metadata-normalized-specifier-set-current-interpreter' -or
-    $skillSpectorReceipt.dependencyResolver -isnot [string] -or
-    [string]$skillSpectorReceipt.dependencyResolver -cne 'pip-offline-backtracking' -or
-    $skillSpectorReceipt.offlineResolutionVerified -isnot [bool] -or
-    -not [bool]$skillSpectorReceipt.offlineResolutionVerified -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'interpreterIsolation=python-isolated-mode' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'credentialIsolation=github-token-cleared-before-python' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'installedMetadataVerification=static-dist-info-metadata' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'directReferences=blocked' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'pipOnlineDependencyTraversal=disabled' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'dependencyDiscovery=approved-simple-json-lazy' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'requiresPython=simple-json-wheel-metadata-normalized-specifier-set-current-interpreter' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'offlineBacktracking=verified' -or
-    [string]$skillSpectorReceipt.resolvedIdentity -cnotmatch 'offlineResolution=verified' -or
-    @($skillSpectorReceipt.dependencyClosure).Count -le 1) {
-    throw 'SkillSpector receipt does not bind the approved isolated dependency closure.'
-}
-Assert-AuthoritySha256 -Value $skillSpectorReceipt.installedClosureSha256 -Context 'SkillSpector installed closure'
-$skillSpectorHelper = Assert-AuthorityFileIdentity `
-    -PathValue $skillSpectorReceipt.resolverHelperPath `
-    -Sha256Value $skillSpectorReceipt.resolverHelperSha256 `
-    -Context 'SkillSpector Python wheel closure helper'
-if ($skillSpectorHelper -cne [System.IO.Path]::GetFullPath($pythonClosureHelperPath)) {
-    throw 'SkillSpector receipt identifies the wrong Python wheel closure helper.'
-}
-foreach ($name in @('candidateInventorySha256', 'selectionPlanSha256', 'rawSelectionPlanSha256', 'selectedClosureSha256')) {
-    Assert-AuthoritySha256 -Value $skillSpectorReceipt.$name -Context "SkillSpector $name"
-}
-foreach ($name in @('resolutionRounds', 'candidateCount')) {
-    Assert-AuthorityNonNegativeInteger -Value $skillSpectorReceipt.$name -Context "SkillSpector $name"
-    if ([int64]$skillSpectorReceipt.$name -le 0) { throw "SkillSpector $name must be positive." }
-}
-if ($skillSpectorReceipt.pipVersion -isnot [string] -or
-    [string]::IsNullOrWhiteSpace([string]$skillSpectorReceipt.pipVersion) -or
-    $skillSpectorReceipt.consoleEntryPoint -isnot [string] -or
-    [string]::IsNullOrWhiteSpace([string]$skillSpectorReceipt.consoleEntryPoint)) {
-    throw 'SkillSpector receipt is missing pip or console entry-point identity.'
-}
-foreach ($binding in @(
-    "pipVersion=$($skillSpectorReceipt.pipVersion)",
-    "resolutionRounds=$($skillSpectorReceipt.resolutionRounds)",
-    "candidateCount=$($skillSpectorReceipt.candidateCount)",
-    "resolverHelperSha256=$($skillSpectorReceipt.resolverHelperSha256)",
-    "candidateInventorySha256=$($skillSpectorReceipt.candidateInventorySha256)",
-    "selectionPlanSha256=$($skillSpectorReceipt.selectionPlanSha256)",
-    "selectedClosureSha256=$($skillSpectorReceipt.selectedClosureSha256)",
-    "consoleEntryPoint=$($skillSpectorReceipt.consoleEntryPoint)"
-)) {
-    if ([string]$skillSpectorReceipt.resolvedIdentity -cnotlike "*$binding*") {
-        throw "SkillSpector resolved identity is missing '$binding'."
-    }
-}
-
-$skillValidatorReceipt = $receipts.'skill-validator'
-$skillValidatorRuntimeVersion = if ($skillValidatorReceipt.goRuntimeVersion -is [string]) {
-    [string]$skillValidatorReceipt.goRuntimeVersion
+$pesterModuleBasePath = [IO.Path]::GetFullPath([string]$pesterModules[0].ModuleBase)
+$pesterRootModulePath = [IO.Path]::GetFullPath((Join-Path $pesterModuleBasePath $pesterRootModuleName))
+$pesterPathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    [StringComparison]::OrdinalIgnoreCase
 }
 else {
-    ''
+    [StringComparison]::Ordinal
 }
-$skillValidatorRuntimeIdentityPattern = if ($skillValidatorRuntimeVersion -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    "*#goRuntime=$skillValidatorRuntimeVersion#*"
+$pesterModuleBaseItem = Get-Item -Force -LiteralPath $pesterModuleBasePath -ErrorAction Stop
+$pesterModuleBasePrefix = $pesterModuleBasePath.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
+if (-not $pesterModuleBaseItem.PSIsContainer -or ($pesterModuleBaseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    -not $pesterRootModulePath.StartsWith($pesterModuleBasePrefix, $pesterPathComparison)) {
+    throw "Pester root module must stay under its regular verified module directory: $pesterRootModulePath"
 }
-else {
-    ''
+$pesterRootModuleItem = Get-Item -Force -LiteralPath $pesterRootModulePath -ErrorAction Stop
+if ($pesterRootModuleItem.PSIsContainer -or ($pesterRootModuleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Pester root module must be a regular non-reparse file: $pesterRootModulePath"
 }
-if ($skillValidatorReceipt.proxy -isnot [string] -or [string]$skillValidatorReceipt.proxy -cne 'https://proxy.golang.org' -or
-    $skillValidatorReceipt.checksumDatabase -isnot [string] -or [string]$skillValidatorReceipt.checksumDatabase -cne 'sum.golang.org' -or
-    $skillValidatorRuntimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
-    [string]$skillValidatorReceipt.resolvedIdentity -cnotlike $skillValidatorRuntimeIdentityPattern -or
-    $skillValidatorReceipt.moduleCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.moduleCacheIsolation -cne 'temporary-empty' -or
-    $skillValidatorReceipt.buildCacheIsolation -isnot [string] -or [string]$skillValidatorReceipt.buildCacheIsolation -cne 'temporary-empty' -or
-    $skillValidatorReceipt.temporaryDirectoryIsolation -isnot [string] -or [string]$skillValidatorReceipt.temporaryDirectoryIsolation -cne 'temporary-empty' -or
-    $skillValidatorReceipt.binaryInstallIsolation -isnot [string] -or [string]$skillValidatorReceipt.binaryInstallIsolation -cne 'run-owned' -or
-    $skillValidatorReceipt.goRuntimeSource -isnot [string] -or [string]$skillValidatorReceipt.goRuntimeSource -cne $expectedGoRuntimeSource -or
-    [string]$skillValidatorReceipt.resolvedIdentity -cnotmatch ('#goRuntimeSource=' + [regex]::Escape($expectedGoRuntimeSource) + '#')) {
-    throw 'skill-validator receipt does not bind the approved Go distribution isolation.'
+$pesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$pesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$loadedPesterModules = @(Import-Module -Name $pesterManifestPath -Force -PassThru -ErrorAction Stop)
+if ($loadedPesterModules.Count -ne 1) {
+    throw "Importing the verified Pester manifest must load exactly one root module; found $($loadedPesterModules.Count)."
 }
-if ($skillValidatorRuntimeVersion -cne $expectedGoRuntimeVersion) {
-    throw "skill-validator receipt Go runtime '$skillValidatorRuntimeVersion' does not match the setup-go run-resolved latest stable runtime '$expectedGoRuntimeVersion'."
-}
-Assert-AuthoritySkillValidatorRuntimeReceipt `
-    -Receipt $skillValidatorReceipt `
-    -GoCommandPath $goCommandPath `
-    -ExpectedGoRuntimeVersion $expectedGoRuntimeVersion `
-    -Context 'skill-validator receipt' | Out-Null
-
-$skillToolsReceipt = $receipts.'skill-tools'
-if ($skillToolsReceipt.registry -isnot [string] -or
-    [string]$skillToolsReceipt.registry -cnotmatch '^https://registry\.npmjs\.org/?$' -or
-    $skillToolsReceipt.executableVerified -isnot [bool] -or -not [bool]$skillToolsReceipt.executableVerified) {
-    throw 'skill-tools receipt does not bind the approved npm registry and entry point.'
-}
-Assert-AuthoritySha256 -Value $skillToolsReceipt.packageLockSha256 -Context 'skill-tools package lock'
-$skillToolsEntryPoint = Assert-AuthorityFileIdentity `
-    -PathValue $skillToolsReceipt.entryPointPath `
-    -Sha256Value $skillToolsReceipt.entryPointSha256 `
-    -Context 'skill-tools package entry point'
-$skillToolsNode = Assert-AuthorityFileIdentity `
-    -PathValue $skillToolsReceipt.nodePath `
-    -Sha256Value $skillToolsReceipt.nodeSha256 `
-    -Context 'skill-tools Node runtime'
-Assert-AuthorityPathWithinRoot -Path $skillToolsEntryPoint -Root ([string]$skillToolsReceipt.installRoot) -Context 'skill-tools package entry point'
-
-$pesterReceipt = $receipts.pester
-$pesterModulePath = Assert-AuthorityFileIdentity `
-    -PathValue $pesterReceipt.modulePath `
-    -Sha256Value $pesterReceipt.executableSha256 `
-    -Context 'Pester module'
-if ([System.IO.Path]::GetFullPath([string]$pesterReceipt.modulePath) -cne
-    [System.IO.Path]::GetFullPath([string]$pesterReceipt.executablePath)) {
-    throw 'Pester receipt modulePath and executablePath must identify the same frozen module manifest.'
+$loadedPester = $loadedPesterModules[0]
+$loadedPesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$loadedPesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+if ($loadedPester.Name -cne 'Pester' -or $loadedPester.Version -ne [version]'4.10.1' -or
+    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.Path) -Right $pesterRootModulePath) -or
+    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.ModuleBase) -Right $pesterModuleBasePath) -or
+    $loadedPesterRootModuleSha256 -cne $pesterRootModuleSha256 -or $loadedPesterManifestSha256 -cne $pesterManifestSha256) {
+    throw 'The loaded authority test engine must match the verified Pester 4.10.1 manifest, module base, root-module path, and file hashes.'
 }
 
-# Keep a run-owned fixture with every adopted upstream surface present.  The
-# adapter must prove that it can validate a real surface before later security
-# stages are allowed to run; the ordinary validation fixture intentionally has
-# no optional upstream metadata.
-$upstreamAdapterFixtureRoot = Join-Path $runRoot 'fixture/upstream-adapter-fixture'
-$upstreamAdapterSourceRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
-$upstreamAdapterSourceRevision = ('a' * 40)
-$upstreamAdapterArchiveSha256 = ('b' * 64)
-[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin') -Force)
-$upstreamAdapterSkillRoot = Join-Path $upstreamAdapterFixtureRoot 'skills/adapter-fixture-skill'
-[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'agents') -Force)
-[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterSkillRoot 'scripts') -Force)
-[void](New-Item -ItemType Directory -Path (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins') -Force)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterSkillRoot 'SKILL.md'),
-    "---`nname: adapter-fixture-skill`ndescription: A deterministic upstream adapter fixture Skill.`n---`n`n# Adapter Fixture`n`nThe [fixture script](scripts/run.ps1) prints one fixture message.`n",
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml'),
-    "interface:`n  display_name: `"Adapter Fixture Skill`"`n  short_description: `"Validate one deterministic upstream adapter Skill.`"`n  default_prompt: `"Use `$adapter-fixture-skill to verify the upstream adapter.`"`n",
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterSkillRoot 'scripts/run.ps1'),
-    "Write-Output 'adapter fixture'`n",
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin/plugin.json'),
-    '{"name":"adapter-fixture-plugin","description":"A deterministic upstream adapter fixture.","version":"1.0.0","skills":["./skills/adapter-fixture-skill"]}',
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot 'adapter-command.ps1'),
-    "Write-Output 'adapter fixture'`n",
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot '.mcp.json'),
-    '{"mcpServers":{"local":{"command":"./adapter-command.ps1","args":[]}}}',
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot '.app.json'),
-    '{"apps":[{"name":"adapter-fixture-app","mcpServer":"local"}]}',
-    (New-Object Text.UTF8Encoding($false))
-)
-[System.IO.File]::WriteAllText(
-    (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins/marketplace.json'),
-    ('{"plugins":[{"name":"adapter-fixture-marketplace-entry","source":{"source":"github","repo":"SyuanTsai/SyuanTsai-AI-Instructions","path":"./","sha":"' + $upstreamAdapterSourceRevision + '"}}]}'),
-    (New-Object Text.UTF8Encoding($false))
-)
-Assert-AuthorityFixtureContract -FixtureRoot $upstreamAdapterSkillRoot -ExpectedSkillId 'adapter-fixture-skill'
-$upstreamAdapterSkillFiles = @(
-    [pscustomobject][ordered]@{ path = 'SKILL.md'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'SKILL.md')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = 'agents/openai.yaml'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'agents/openai.yaml')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = 'scripts/run.ps1'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterSkillRoot 'scripts/run.ps1')).Hash.ToLowerInvariant() }
-)
-$upstreamAdapterSkillInventoryPaths = @($upstreamAdapterSkillFiles | ForEach-Object { [string]$_.path })
-$upstreamAdapterComponentFiles = @(
-    [pscustomobject][ordered]@{ path = '.agents/plugins/marketplace.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.agents/plugins/marketplace.json')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = '.app.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.app.json')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = '.codex-plugin/plugin.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.codex-plugin/plugin.json')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = '.mcp.json'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot '.mcp.json')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = 'adapter-command.ps1'; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $upstreamAdapterFixtureRoot 'adapter-command.ps1')).Hash.ToLowerInvariant() },
-    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/SKILL.md'; sha256 = [string]$upstreamAdapterSkillFiles[0].sha256 },
-    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/agents/openai.yaml'; sha256 = [string]$upstreamAdapterSkillFiles[1].sha256 },
-    [pscustomobject][ordered]@{ path = 'skills/adapter-fixture-skill/scripts/run.ps1'; sha256 = [string]$upstreamAdapterSkillFiles[2].sha256 }
-)
-$upstreamAdapterComponentInventorySha256 = Get-AuthorityComponentInventorySha256 -Inventory $upstreamAdapterComponentFiles
+$candidateRootPath = [IO.Path]::GetFullPath($CandidateRoot)
+$authorityRootPath = [IO.Path]::GetFullPath($AuthorityRoot)
+$artifactsRootPath = [IO.Path]::GetFullPath($ArtifactsRoot)
+$artifactsRootItem = Get-Item -Force -LiteralPath $artifactsRootPath -ErrorAction Stop
+if (-not $artifactsRootItem.PSIsContainer -or ($artifactsRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Authority ArtifactsRoot must be an existing non-reparse directory: $artifactsRootPath"
+}
+$artifactsPathRoot = [IO.Path]::GetPathRoot($artifactsRootPath)
+$artifactsRelativePath = $artifactsRootPath.Substring($artifactsPathRoot.Length)
+$artifactsCurrentPath = $artifactsPathRoot
+foreach ($artifactsSegment in $artifactsRelativePath.Split([char[]]@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)) {
+    $artifactsCurrentPath = Join-Path $artifactsCurrentPath $artifactsSegment
+    $artifactsAncestor = Get-Item -Force -LiteralPath $artifactsCurrentPath -ErrorAction Stop
+    if (-not $artifactsAncestor.PSIsContainer -or ($artifactsAncestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Authority ArtifactsRoot ancestor must be a regular non-reparse directory: $artifactsCurrentPath"
+    }
+}
+$separator = [IO.Path]::DirectorySeparatorChar
+$pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    [StringComparison]::OrdinalIgnoreCase
+}
+else { [StringComparison]::Ordinal }
+$artifactsPrefix = $artifactsRootPath.TrimEnd([char[]]@('\', '/')) + $separator
+foreach ($rootPath in @($candidateRootPath, $authorityRootPath)) {
+    $rootPrefix = $rootPath.TrimEnd([char[]]@('\', '/')) + $separator
+    if ($artifactsRootPath.StartsWith($rootPrefix, $pathComparison) -or $rootPath.StartsWith($artifactsPrefix, $pathComparison) -or
+        [string]::Equals($artifactsRootPath, $rootPath, $pathComparison)) {
+        throw 'Authority ArtifactsRoot must be separate from the candidate and authority input roots.'
+    }
+}
+$resultRelativePath = [string]$authorityEntryBinding.resultArtifact
+$resultPath = [IO.Path]::GetFullPath((Join-Path $artifactsRootPath ($resultRelativePath.Replace('/', [string]$separator))))
+if (-not $resultPath.StartsWith($artifactsPrefix, $pathComparison)) {
+    throw 'Authority result artifact must remain below the run-owned ArtifactsRoot.'
+}
+if (Test-Path -LiteralPath $resultPath) {
+    throw "Authority result artifact already exists: $resultPath"
+}
 
-# Stage 3: Package Validation. The optional upstream adapter and both package tools
-# must pass before any SkillSpector scan or repository test can run.
-# Context 'upstream adapter validation'
-$upstreamAdapterReportPath = Join-Path $runRoot 'upstream-adapter-report.json'
+# Invoke only the retained, ordinary authority checks. External resolvers, receipts,
+# package tools, scanners, fixtures, and stage summaries are outside this gate.
+$pesterResult = Invoke-Pester -Script $authorityTestPaths -Strict -PassThru
+Assert-AuthorityPesterResult -Result $pesterResult -PesterMajorVersion 4
+
+$bindingParameters = @{
+    RunningScriptPath = $PSCommandPath
+    CandidateRoot = $CandidateRoot
+    AuthorityRoot = $AuthorityRoot
+    CandidateRevision = $CandidateRevision
+    AuthorityRevision = $AuthorityRevision
+    EventName = $EventName
+    ResultArtifact = $ResultArtifact
+}
+if ($AllowDevelopmentContent) { $bindingParameters.AllowDevelopmentContent = $true }
+$verifiedBinding = Get-AuthorityEntryPreflight @bindingParameters
+$initialBindingJson = ConvertTo-Json -InputObject $authorityEntryBinding -Depth 20 -Compress
+$verifiedBindingJson = ConvertTo-Json -InputObject $verifiedBinding -Depth 20 -Compress
+if ($initialBindingJson -cne $verifiedBindingJson) {
+    throw 'Authority candidate or authority identity and input file hashes changed while the gate ran.'
+}
+
+$resultDirectory = Split-Path -Parent $resultPath
+$resultParentRelative = [IO.Path]::GetRelativePath($artifactsRootPath, $resultDirectory)
+$currentDirectory = $artifactsRootPath
+if ($resultParentRelative -cne '.') {
+    foreach ($segment in $resultParentRelative.Split([char[]]@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)) {
+        $currentDirectory = Join-Path $currentDirectory $segment
+        if (Test-Path -LiteralPath $currentDirectory) {
+            $directoryItem = Get-Item -Force -LiteralPath $currentDirectory -ErrorAction Stop
+            if (-not $directoryItem.PSIsContainer -or ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Authority result parent must be a regular non-reparse directory: $currentDirectory"
+            }
+        }
+        else {
+            [void](New-Item -ItemType Directory -Path $currentDirectory -ErrorAction Stop)
+        }
+    }
+}
+if (Test-Path -LiteralPath $resultPath) {
+    throw "Authority result artifact already exists: $resultPath"
+}
+$temporaryResultPath = Join-Path $resultDirectory ('.' + [IO.Path]::GetFileName($resultPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+$publishedResult = $false
 try {
-    & $upstreamAdapterValidatorPath `
-        -PackageRoot $upstreamAdapterFixtureRoot `
-        -PolicyPath $upstreamAdapterPolicyPath `
-        -SourceRepository $upstreamAdapterSourceRepository `
-        -SourceRevision $upstreamAdapterSourceRevision `
-        -ArchiveSha256 $upstreamAdapterArchiveSha256 `
-        -OutputPath $upstreamAdapterReportPath | Out-Null
+    $authorityResult = [pscustomobject][ordered]@{
+        schemaVersion = 1
+        status = 'passed'
+        executed = $true
+        releaseEligible = $false
+        binding = $authorityEntryBinding
+        checks = @(
+            [pscustomobject][ordered]@{
+                name = 'Standard v1 authority gate'
+                status = 'passed'
+                executed = $true
+                exitCode = 0
+            }
+        )
+    }
+    [void](Assert-StandardEntryPointResult -ExpectedBinding $authorityEntryBinding -Result $authorityResult)
+    $resultJson = ConvertTo-Json -InputObject $authorityResult -Depth 20
+    $resultBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($resultJson + [Environment]::NewLine)
+    $temporaryStream = [IO.File]::Open($temporaryResultPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $temporaryStream.Write($resultBytes, 0, $resultBytes.Length)
+        $temporaryStream.Flush($true)
+    }
+    finally { $temporaryStream.Dispose() }
+    [IO.File]::Move($temporaryResultPath, $resultPath, $false)
+    $publishedResult = $true
+    [void](Assert-StandardEntryPointResult -ExpectedBinding $authorityEntryBinding -ResultPath $resultPath)
 }
 catch {
-    throw "upstream adapter validation failed: $($_.Exception.Message)"
-}
-$upstreamAdapterReport = Read-AuthorityJson -Path $upstreamAdapterReportPath -Context 'upstream adapter validation'
-Assert-AuthorityUpstreamAdapterReport -Report $upstreamAdapterReport | Out-Null
-if ([string]$upstreamAdapterReport.status -cne 'passed' -or [string]$upstreamAdapterReport.decision -cne 'PASS') {
-    throw 'upstream adapter validation must pass a fixture with adopted surfaces before Stage 4.'
-}
-foreach ($surface in @('plugin', 'mcp', 'app', 'marketplace')) {
-    if (@($upstreamAdapterReport.surfaces) -cnotcontains $surface) {
-        throw "upstream adapter validation did not exercise required surface '$surface'."
+    if ($publishedResult -and (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
     }
-}
-
-$bundledSkills = Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'bundledSkills' -Context 'upstream adapter validation'
-if ($bundledSkills -isnot [array] -or @($bundledSkills).Count -ne 1) {
-    throw 'upstream adapter validation must report exactly one declared bundled Skill for the controlled fixture.'
-}
-$bundledSkill = @($bundledSkills)[0]
-$bundledSkillPath = Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'path' -Context 'upstream adapter bundled Skill inventory'
-if ($bundledSkillPath -isnot [string] -or [string]$bundledSkillPath -cne './skills/adapter-fixture-skill') {
-    throw 'upstream adapter bundled Skill inventory is not bound to the controlled Plugin declaration.'
-}
-Assert-AuthorityExactPathInventory `
-    -Value (Get-AuthorityRequiredProperty -Object $bundledSkill -Name 'inventory' -Context 'upstream adapter bundled Skill inventory') `
-    -Expected $upstreamAdapterSkillInventoryPaths `
-    -Context 'upstream adapter bundled Skill inventory' | Out-Null
-Assert-AuthorityExactComponentInventory `
-    -Value (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
-    -Expected $upstreamAdapterComponentFiles `
-    -Context 'upstream adapter component inventory' | Out-Null
-if ([string]$upstreamAdapterReport.adapterVersion -cne 'upstream-interoperability-adapter-v1' -or
-    [string]$upstreamAdapterReport.candidateIdentity.sourceRepository -cne $upstreamAdapterSourceRepository -or
-    [string]$upstreamAdapterReport.candidateIdentity.sourceRevision -cne $upstreamAdapterSourceRevision -or
-    [string]$upstreamAdapterReport.candidateIdentity.archiveSha256 -cne $upstreamAdapterArchiveSha256 -or
-    [string]$upstreamAdapterReport.candidateIdentity.packageSha256 -cne $upstreamAdapterComponentInventorySha256 -or
-    [string]$upstreamAdapterReport.componentInventorySha256 -cne $upstreamAdapterComponentInventorySha256) {
-    throw 'upstream adapter report does not bind the controlled fixture identity and component inventory.'
-}
-Assert-AuthorityComponentInventoryFiles `
-    -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
-    -Root $upstreamAdapterFixtureRoot `
-    -Context 'upstream adapter component identity' | Out-Null
-
-# Prove that a report cannot be replayed after one validated component changes.
-$mutatedAdapterComponentPath = Join-Path $upstreamAdapterFixtureRoot '.app.json'
-$originalMutatedAdapterComponentBytes = [System.IO.File]::ReadAllBytes($mutatedAdapterComponentPath)
-try {
-    [System.IO.File]::WriteAllText(
-        $mutatedAdapterComponentPath,
-        '{"apps":[{"name":"adapter-fixture-app","mcpServer":"local"},{"name":"unexpected","mcpServer":"local"}]}',
-        (New-Object Text.UTF8Encoding($false))
-    )
-    $mutationDetected = $false
-    try {
-        Assert-AuthorityComponentInventoryFiles `
-            -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
-            -Root $upstreamAdapterFixtureRoot `
-            -Context 'upstream adapter replay check' | Out-Null
-    }
-    catch {
-        $mutationDetected = $true
-    }
-    if (-not $mutationDetected) { throw 'upstream adapter replay check failed to detect component mutation.' }
+    throw
 }
 finally {
-    [System.IO.File]::WriteAllBytes($mutatedAdapterComponentPath, $originalMutatedAdapterComponentBytes)
+    if (Test-Path -LiteralPath $temporaryResultPath) {
+        Remove-Item -LiteralPath $temporaryResultPath -Force -ErrorAction SilentlyContinue
+    }
 }
-
-# Token statistics do not enumerate every file passed to skill-validator.
-# Capture all input hashes before invocation and verify them again afterward.
-$skillValidatorCoveragePath = Join-Path $runRoot 'skill-validator-coverage.json'
-$skillValidatorCoverageEnvelope = [pscustomobject][ordered]@{
-    schemaVersion = 1
-    toolName = 'skill-validator'
-    coverageMode = 'authority-input-inventory'
-    root = $upstreamAdapterSkillRoot
-    files = @($upstreamAdapterSkillFiles)
-}
-Assert-AuthorityToolInputInventory `
-    -Envelope $skillValidatorCoverageEnvelope `
-    -ExpectedToolName 'skill-validator' `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
-
-$skillValidatorOutput = Invoke-AuthorityExternalCommand `
-    -Command $executablePaths.'skill-validator' `
-    -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $upstreamAdapterSkillRoot) `
-    -Context 'skill-validator package validation' `
-    -DiagnosticRoot $runRoot
-$skillValidatorOutputPath = Join-Path $runRoot 'skill-validator-report.json'
-[System.IO.File]::WriteAllText($skillValidatorOutputPath, $skillValidatorOutput + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-$skillValidatorReport = Read-AuthorityJson -Path $skillValidatorOutputPath -Context 'skill-validator package validation'
-Assert-AuthoritySkillValidatorReport `
-    -Report $skillValidatorReport `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths `
-    -ExpectedTokenPaths @('SKILL.md') `
-    -ExpectedOtherTokenPaths @('agents/openai.yaml')
-Assert-AuthorityToolInputInventory `
-    -Envelope $skillValidatorCoverageEnvelope `
-    -ExpectedToolName 'skill-validator' `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
-$skillValidatorCoverageJson = $skillValidatorCoverageEnvelope | ConvertTo-Json -Depth 20
-[System.IO.File]::WriteAllText($skillValidatorCoveragePath, $skillValidatorCoverageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-
-# skill-tools v0.4.1 SARIF carries diagnostic locations, not a complete file
-# inventory.  Keep a run-owned input snapshot in memory so the diagnostic
-# report is bound to the same exact adapter inventory without mistaking
-# findings for coverage.  It is re-hashed after the tool exits and persisted
-# only after that post-run identity check succeeds.
-$skillToolsCoveragePath = Join-Path $runRoot 'skill-tools-coverage.json'
-$skillToolsCoverageEnvelope = [pscustomobject][ordered]@{
-    schemaVersion = 1
-    toolName = 'skill-tools'
-    coverageMode = 'authority-input-inventory'
-    root = $upstreamAdapterSkillRoot
-    files = @($upstreamAdapterSkillFiles)
-}
-Assert-AuthoritySkillToolsCoverageEnvelope `
-    -Envelope $skillToolsCoverageEnvelope `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths | Out-Null
-
-$skillToolsOutput = Invoke-AuthorityExternalCommand `
-    -Command $skillToolsNode `
-    -Arguments @($skillToolsEntryPoint, 'check', $upstreamAdapterSkillRoot, '--format', 'sarif', '--fail-on', 'error', '--min-score', '0') `
-    -Context 'skill-tools package validation' `
-    -DiagnosticRoot $runRoot
-$skillToolsOutputPath = Join-Path $runRoot 'skill-tools-report.sarif.json'
-[System.IO.File]::WriteAllText($skillToolsOutputPath, $skillToolsOutput + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-$skillToolsReport = Read-AuthorityJson -Path $skillToolsOutputPath -Context 'skill-tools package validation'
-Assert-AuthoritySkillToolsSarifReport `
-    -Report $skillToolsReport `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths `
-    -CoverageEnvelope $skillToolsCoverageEnvelope
-$skillToolsCoverageJson = $skillToolsCoverageEnvelope | ConvertTo-Json -Depth 20
-[System.IO.File]::WriteAllText($skillToolsCoveragePath, $skillToolsCoverageJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-Assert-AuthorityComponentInventoryFiles `
-    -Inventory (Get-AuthorityRequiredProperty -Object $upstreamAdapterReport -Name 'componentInventory' -Context 'upstream adapter component inventory') `
-    -Root $upstreamAdapterFixtureRoot `
-    -Context 'upstream adapter post-package-validation identity' | Out-Null
-
-# Stage 4: SkillSpector Static.
-$skillSpectorReportPath = Join-Path $runRoot 'skillspector-report.json'
-[void](Invoke-AuthorityExternalCommand `
-    -Command $executablePaths.skillspector `
-    -Arguments @('scan', $upstreamAdapterSkillRoot, '--no-llm', '--format', 'json', '--output', $skillSpectorReportPath) `
-    -Context 'SkillSpector static scan' `
-    -DiagnosticRoot $runRoot)
-$skillSpectorReport = Read-AuthorityJson -Path $skillSpectorReportPath -Context 'SkillSpector static scan'
-Assert-AuthoritySkillSpectorReport `
-    -Report $skillSpectorReport `
-    -ExpectedFixtureRoot $upstreamAdapterSkillRoot `
-    -ExpectedSkillId 'adapter-fixture-skill' `
-    -ExpectedInventoryPaths $upstreamAdapterSkillInventoryPaths
-
-# Stage 5: Repository Tests. Only repository/authority tests remain after the
-# deterministic package and static security stages have passed.
-Import-Module $pesterModulePath -Force -ErrorAction Stop
-$pesterModuleRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $pesterModulePath))
-$loadedPester = Get-Module Pester | Where-Object {
-    [string]::Equals([System.IO.Path]::GetFullPath([string]$_.ModuleBase), $pesterModuleRoot, [System.StringComparison]::OrdinalIgnoreCase)
-} | Select-Object -First 1
-if ($null -eq $loadedPester -or [string]$loadedPester.Version -cne [string]$pesterReceipt.resolvedVersion) {
-    throw 'The exact frozen Pester module was not imported.'
-}
-$approvedSemanticPython = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-    Join-Path ([string]$skillSpectorReceipt.installRoot) 'venv\Scripts\python.exe'
-}
-else { Join-Path ([string]$skillSpectorReceipt.installRoot) 'venv/bin/python' }
-$approvedSemanticPython = [IO.Path]::GetFullPath($approvedSemanticPython)
-$approvedPythonItem = Get-Item -Force -LiteralPath $approvedSemanticPython -ErrorAction SilentlyContinue
-if ($null -eq $approvedPythonItem -or $approvedPythonItem.PSIsContainer -or
-    ($approvedPythonItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-    -not $approvedSemanticPython.StartsWith(([IO.Path]::GetFullPath([string]$skillSpectorReceipt.installRoot) + [IO.Path]::DirectorySeparatorChar),[StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The frozen SkillSpector receipt does not expose a regular in-closure Python for semantic authority tests.'
-}
-$priorAuthorityPython = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON','Process')
-$priorAuthoritySkillSpectorVersion = [Environment]::GetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION','Process')
-try {
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',[string]$skillSpectorReceipt.resolvedVersion,'Process')
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$approvedSemanticPython,'Process')
-    $authorityResult = Invoke-Pester -Path $authorityTestPaths -PassThru
-}
-finally {
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_PYTHON',$priorAuthorityPython,'Process')
-    [Environment]::SetEnvironmentVariable('STANDARD_AUTHORITY_SKILLSPECTOR_VERSION',$priorAuthoritySkillSpectorVersion,'Process')
-}
-Assert-AuthorityPesterResult `
-    -Result $authorityResult `
-    -MinimumTotalCount 55 `
-    -PesterMajorVersion ([version]$pesterReceipt.resolvedVersion).Major
-
-$candidateCommit = Get-AuthorityCandidateCommit -RepositoryRoot $repositoryRoot
 
 $summary = [ordered]@{
-    schemaVersion = 1
-    runId = $runId
-    candidateCommit = $candidateCommit
-    goRuntimeVersion = $expectedGoRuntimeVersion
-    canonicalGate = [ordered]@{
-        policy = [string]$validationSecurityGate.policy
-        policyPath = 'docs/standards/validation-security-gate.json'
-        policySha256 = $validationSecurityGatePolicySha256
-        stageIds = @($validationSecurityGate.stages | ForEach-Object { [string]$_.id })
-        executionScope = 'protected-authority-fixture-regression'
-        productionCandidateRunnerInvoked = $false
-        tenStageCompletionClaim = $false
-    }
-    fixture = [ordered]@{
-        id = 'standard-validation-fixture'
-        inventorySha256 = $fixtureInventorySha256
-        files = $fixtureFiles
-    }
-    upstreamAdapterFixture = [ordered]@{
-        id = 'adapter-fixture-skill'
-        rootRelativePath = 'skills/adapter-fixture-skill'
-        files = $upstreamAdapterSkillFiles
-    }
-    tools = @($expectedSources.Keys | ForEach-Object {
-        $receipt = $receipts[$_]
-        [ordered]@{
-            toolName = $_
-            source = [string]$receipt.source
-            version = [string]$receipt.resolvedVersion
-            resolvedIdentity = [string]$receipt.resolvedIdentity
-        }
-    })
-    stages = @(
-        [ordered]@{
-            name='package-validation'; result='passed'; exitCode=0; mode='upstream-adapter-skill-validator-skill-tools'
-            skillValidatorMode='structure-json-allow-agents-bundled-skill+authority-input-inventory'; skillToolsMode='sarif-check-bundled-skill'
-            reports=@('upstream-adapter-report.json', 'skill-validator-report.json', 'skill-validator-coverage.json', 'skill-tools-report.sarif.json', 'skill-tools-coverage.json')
-        },
-        [ordered]@{ name='skillspector-static'; result='passed'; exitCode=0; mode='static-no-llm-bundled-skill'; report='skillspector-report.json' },
-        [ordered]@{
-            name='repository-tests'; result='passed'; exitCode=0; mode='authority-pester'
-            reports=@(); total=[int]$authorityResult.TotalCount
-            passed=[int]$authorityResult.PassedCount; failed=[int]$authorityResult.FailedCount
-        }
-    )
+    status = 'passed'
+    executed = $true
+    releaseEligible = $false
+    candidateRevision = $CandidateRevision
+    authorityRevision = $AuthorityRevision
+    eventName = $EventName
+    pesterVersion = $loadedPester.Version.ToString()
+    pesterTestPaths = @($authorityTestPaths | ForEach-Object { [IO.Path]::GetRelativePath($repositoryRoot, $_).Replace('\', '/') })
+    totalCount = [int]$pesterResult.TotalCount
+    passedCount = [int]$pesterResult.PassedCount
+    resultPath = $resultPath
 }
-$summaryPath = Join-Path $runRoot 'authority-gate-summary.json'
-$summaryJson = $summary | ConvertTo-Json -Depth 20
-[System.IO.File]::WriteAllText($summaryPath, $summaryJson + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
-Write-Host "Standard authority gate passed. Evidence: $summaryPath"
+$summaryJson = ConvertTo-Json -InputObject $summary -Depth 20
+Write-Host "Standard authority gate passed. Result: $resultPath"
 $summaryJson

@@ -204,6 +204,12 @@
       "requiresFailurePropagation": true,
       "forbiddenFailureSuppression": ["|| true", "|| :", "continue-on-error: true", "if: always()"]
     },
+    "publicCommandDocumentation": {
+      "mode": "consistency-only",
+      "commandScope": "local-markdown-command-section",
+      "unrelatedCanonicalAuthorizesRelease": false,
+      "setupAndDiagnosticsAreReleaseGates": false
+    },
     "componentScripts": {
       "mayExist": true,
       "mayBeTopLevelReleaseGate": false

@@ -104,10 +104,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": ".github/workflows/pr8-even-shard-diagnostic.yml",
-      "license": "Apache-2.0"
-    },
-    {
       "path": ".github/workflows/pr8-powershell-validation.yml",
       "license": "Apache-2.0"
     },
@@ -453,10 +449,6 @@
     },
     {
       "path": "scripts/Invoke-FocusedLinuxContainment.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "scripts/Invoke-PesterEvenDiagnostic.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -828,15 +820,15 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-inventory-probe.Tests.ps1",
+      "path": "tests/standard-semantic-inventory-probe.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-preflight.Tests.ps1",
+      "path": "tests/standard-semantic-preflight.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/standard-semantic-raw-graph.Tests.ps1",
+      "path": "tests/standard-semantic-raw-graph.Advanced.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -849,10 +841,6 @@
     },
     {
       "path": "tests/syp101-production-smoke-contract.Tests.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "tests/test_pr8_even_diagnostic.py",
       "license": "Apache-2.0"
     },
     {
