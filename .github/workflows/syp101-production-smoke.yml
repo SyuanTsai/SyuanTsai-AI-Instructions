@@ -72,11 +72,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & ./scripts/update-skills-catalog-lock.ps1 -Check
-          if ($LASTEXITCODE -ne 0) { throw 'The checked-in production catalog lock is stale or invalid.' }
+          if (-not $?) { throw 'The checked-in production catalog lock is stale or invalid.' }
 
       - name: Run real pinned-archive production install and idempotence smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           & ./scripts/test-syp101-production-smoke.ps1
-          if ($LASTEXITCODE -ne 0) { throw 'The real pinned-archive production smoke failed.' }
+          if (-not $?) { throw 'The real pinned-archive production smoke failed.' }

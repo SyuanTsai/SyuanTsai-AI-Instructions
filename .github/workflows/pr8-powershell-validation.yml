@@ -132,14 +132,14 @@ jobs:
           $revision = (& git rev-parse --verify 'HEAD^{commit}').Trim()
           if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the full checked-out HEAD revision.' }
           & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'windows-core/authority-result.json'
-          if ($LASTEXITCODE -ne 0) { throw 'Standard v1 authority gate failed.' }
+          if (-not $?) { throw 'Standard v1 authority gate failed.' }
 
       - name: Run the non-authority Pester suite once
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
-          $pester = Get-Module Pester -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the test step.' }
           $authorityScript = Get-Content -LiteralPath './scripts/Invoke-StandardAuthorityGate.ps1' -Raw
           $authorityMatches = [regex]::Matches($authorityScript, '(?m)^\s*\(Join-Path \$repositoryRoot ''(tests/[^'']+\.Tests\.ps1)''\)')
@@ -179,7 +179,7 @@ jobs:
           }
           Write-Host "Core Pester inventory: $($selectedTestNames.Count) files; authority files excluded once: $($expectedAuthorityNames.Count); runtime: $($PSVersionTable.PSVersion); Pester: $($pester.Version)"
           & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          if ($LASTEXITCODE -ne 0) { throw 'The bounded non-authority Pester suite failed.' }
+          if (-not $?) { throw 'The bounded non-authority Pester suite failed.' }
 
       - name: Run offline routine semantic fixtures once
         shell: pwsh

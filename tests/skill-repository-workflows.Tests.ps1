@@ -145,6 +145,8 @@ jobs:
                 $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
             }
             Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|runs-on:\s*ubuntu-latest|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 or Linux CI lane."
+            Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
+            Assert-NotMatch $workflow 'Get-Module Pester -ListAvailable -Name Pester' "Workflow '$relativePath' must not pass Pester both positionally and through -Name."
             Assert-Match $workflow 'runs-on:\s*windows-latest' "Workflow '$relativePath' must run on Windows."
             Assert-Match $workflow "version = '7\.6\.6'" "Workflow '$relativePath' must pin the reviewed latest stable PowerShell release."
             Assert-Match $workflow '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860' "Workflow '$relativePath' must verify the reviewed PowerShell ZIP SHA256."
@@ -181,6 +183,7 @@ jobs:
         Assert-NotMatch $smoke '(?m)^\s+needs:' 'Windows Install Smoke must not depend on a retired job.'
         Assert-Match $required 'timeout-minutes:\s*180' 'The sequential Core suite must have a bounded job-level timeout.'
         Assert-Match $required 'PesterVersion = ''4\.10\.1''' 'The retained suite must use the established Pester 4.10.1 engine.'
+        Assert-Match $required '\$pester = Get-Module -ListAvailable -Name Pester' 'Core must discover the installed Pester module with a valid parameter binding.'
         Assert-Equal ([regex]::Matches($required, '& \./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must use the existing bounded executor exactly once.'
         Assert-Equal ([regex]::Matches($required, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must execute the authority gate exactly once.'
         Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Core must pass the dynamically discovered non-authority difference to the bounded executor.'
