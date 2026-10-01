@@ -3406,6 +3406,7 @@ function Invoke-StandardValidationProcess {
     $rootProcessId = $null
     $jobHandle = [IntPtr]::Zero
     $jobClosed = $true
+    $windowsJobAssigned = $false
     $processGroupId = 0
     $processGroupLaunch = $false
     $pidNamespaceLaunch = $false
@@ -3613,6 +3614,7 @@ function Invoke-StandardValidationProcess {
                 if (-not [StandardValidationProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
                     throw 'AssignProcessToJobObject returned false.'
                 }
+                $windowsJobAssigned = $true
             }
             catch {
                 $protectionSetupFailed = $true
@@ -3753,7 +3755,13 @@ function Invoke-StandardValidationProcess {
         )
         $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
         while (-not $protectionSetupFailed -and -not $process.HasExited) {
-            foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
+            # A successfully assigned Windows Job Object owns every descendant and provides the
+            # termination boundary. Avoid repeatedly enumerating the full Win32 process table
+            # while it runs; retain descendant discovery for paths without that boundary and
+            # keep the existing cleanup verification after process completion/termination.
+            if (-not $windowsJobAssigned) {
+                foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
+            }
             $quotaStream = $null
             if ($stdoutTask.IsCompleted) {
                 try { if ([bool]$stdoutTask.GetAwaiter().GetResult().Exceeded) { $quotaStream = 'stdout' } } catch { }
