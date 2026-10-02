@@ -23,7 +23,8 @@
       "description": "Durable Notion memory and interruption-safe task Handoff workflows.",
       "default": false,
       "includes": [
-        "manage-notion-ai-memory"
+        "manage-notion-ai-memory",
+        "manage-task-handoff"
       ],
       "excludes": []
     },
@@ -128,6 +129,30 @@
       "source": {
         "sourceId": "agent-skills",
         "path": ".agents/skills/manage-notion-ai-memory"
+      },
+      "profiles": [
+        "ai-memory"
+      ],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "manage-task-handoff",
+      "group": "knowledge-management",
+      "source": {
+        "sourceId": "agent-skills",
+        "path": ".agents/skills/manage-task-handoff"
       },
       "profiles": [
         "ai-memory"

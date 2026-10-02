@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "a851a6c1834c016cb6faebc6e6499c480e70611f4be6b2b90293dc223475a67f",
+  "catalogSha256": "3885666efaf4088512d7cf056f1ee18ee42764cba25707e754f27c9faccb87cf",
   "sources": [
     {
       "id": "agent-skills",
@@ -49,6 +49,12 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/manage-notion-ai-memory",
       "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "id": "manage-task-handoff",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/manage-task-handoff",
+      "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     {
       "id": "plan-production-change",

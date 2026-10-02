@@ -3,7 +3,7 @@
   "catalogRepository": "https://github.com/example/ai-instructions.git",
   "catalogCommit": "89abcdef0123456789abcdef0123456789abcdef",
   "catalogId": "example-agent-skills",
-  "lockSha256": "9b0b6495c3ab55bb7aa3c0cfd8a537089d2562ff0305e6de1c89d6694d00ae8a",
+  "lockSha256": "d270adb45375a98a81f3cfd5b9e74ff2d6caddbd949fe69c8b34eab6fcc9fe88",
   "files": [
     {
       "skillId": "work-with-jira",
