@@ -3,6 +3,8 @@ Describe 'Skills Catalog contract' {
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:ContractModule = Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
 $script:ProductionCatalog = Join-Path $script:RepositoryRoot 'catalog\skills-catalog.json'
+$script:ProductionPins = Join-Path $script:RepositoryRoot 'catalog\skills-catalog.sources.json'
+$script:ProductionLock = Join-Path $script:RepositoryRoot 'catalog\skills-catalog-lock.json'
 $script:CatalogExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog.example.json'
 $script:LockExample = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock.example.json'
 $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v2.example.json'
@@ -121,6 +123,35 @@ function Get-TestRawSha256 {
         $expectedProfileIds = @('ai-memory', 'atlassian', 'code-collaboration', 'core', 'external-research', 'knowledge-capture', 'observability')
         $catalogProfileIds = @($catalog.profiles | Select-Object -ExpandProperty id | Sort-Object)
         ($catalogProfileIds -join "`n") | Should Be ($expectedProfileIds -join "`n")
+    }
+
+    # Scenario: Production Catalog switches to canonical source packages after the source repositories merge.
+    # Purpose: Prevent a legacy source path or stale immutable pin from silently returning to production.
+    It 'UnitT10a_binds_production_catalog_v2_to_canonical_sources_and_lock' {
+        $catalog = Test-SkillsCatalogDocument -CatalogPath $script:ProductionCatalog
+        $pins = Test-SkillsCatalogSourcePinsDocument -SourcePinsPath $script:ProductionPins -CatalogPath $script:ProductionCatalog
+        $lock = Test-SkillsCatalogLockDocument -LockPath $script:ProductionLock -CatalogPath $script:ProductionCatalog
+
+        $catalog.schemaVersion | Should Be 2
+        $lock.schemaVersion | Should Be 2
+        @($catalog.skills).Count | Should Be 13
+        @($lock.skills).Count | Should Be 12
+        @($catalog.skills | Where-Object { $_.lifecycle.status -eq 'removed' }).Count | Should Be 1
+        foreach ($skill in @($catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' })) {
+            $skill.source.sourcePath | Should Be "skills/$($skill.id)"
+            $skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
+            $locked = @($lock.skills | Where-Object { $_.id -ceq $skill.id })
+            $locked.Count | Should Be 1
+            $locked[0].sourcePath | Should Be $skill.source.sourcePath
+            $locked[0].targetPath | Should Be $skill.source.targetPath
+        }
+        foreach ($pin in @($pins.sources)) {
+            $pin.requestedRef | Should Be 'main'
+            $pin.resolvedCommit | Should Match '^[0-9a-f]{40}$'
+            $lockedSource = @($lock.sources | Where-Object { $_.id -ceq $pin.id })
+            $lockedSource.Count | Should Be 1
+            $lockedSource[0].resolvedCommit | Should Be $pin.resolvedCommit
+        }
     }
 
     # Scenario: Version 2 Catalog/Lock and version 3 manifests separate canonical source paths from runtime targets.

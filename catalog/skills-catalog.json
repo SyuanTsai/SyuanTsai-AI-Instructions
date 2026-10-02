@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "catalogId": "syuantsai-agent-skills",
   "sources": [
     {
@@ -91,7 +91,8 @@
       "group": "core-engineering",
       "source": {
         "sourceId": "general",
-        "path": ".agents/skills/plan-production-change"
+        "sourcePath": "skills/plan-production-change",
+        "targetPath": ".agents/skills/plan-production-change"
       },
       "profiles": [
         "core"
@@ -115,7 +116,8 @@
       "group": "core-engineering",
       "source": {
         "sourceId": "general",
-        "path": ".agents/skills/verify-data-access-performance"
+        "sourcePath": "skills/verify-data-access-performance",
+        "targetPath": ".agents/skills/verify-data-access-performance"
       },
       "profiles": [
         "core"
@@ -139,7 +141,8 @@
       "group": "knowledge-management",
       "source": {
         "sourceId": "general",
-        "path": ".agents/skills/manage-notion-ai-memory"
+        "sourcePath": "skills/manage-notion-ai-memory",
+        "targetPath": ".agents/skills/manage-notion-ai-memory"
       },
       "profiles": [
         "ai-memory"
@@ -163,7 +166,8 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "code-collaboration",
-        "path": ".agents/skills/write-copilot-implementation-prompt"
+        "sourcePath": "skills/write-copilot-implementation-prompt",
+        "targetPath": ".agents/skills/write-copilot-implementation-prompt"
       },
       "profiles": [
         "code-collaboration"
@@ -187,7 +191,8 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/configure-bitbucket-api-access"
+        "sourcePath": "skills/configure-bitbucket-api-access",
+        "targetPath": ".agents/skills/configure-bitbucket-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -209,7 +214,8 @@
       "group": "code-collaboration",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/review-bitbucket-pull-request"
+        "sourcePath": "skills/review-bitbucket-pull-request",
+        "targetPath": ".agents/skills/review-bitbucket-pull-request"
       },
       "profiles": [
         "code-collaboration"
@@ -265,7 +271,8 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/configure-jira-api-access"
+        "sourcePath": "skills/configure-jira-api-access",
+        "targetPath": ".agents/skills/configure-jira-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -287,7 +294,8 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/work-with-jira"
+        "sourcePath": "skills/work-with-jira",
+        "targetPath": ".agents/skills/work-with-jira"
       },
       "profiles": [
         "atlassian"
@@ -337,7 +345,8 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/configure-confluence-api-access"
+        "sourcePath": "skills/configure-confluence-api-access",
+        "targetPath": ".agents/skills/configure-confluence-api-access"
       },
       "profiles": [],
       "compatibility": {
@@ -359,7 +368,8 @@
       "group": "atlassian-work-management",
       "source": {
         "sourceId": "atlassian-ecosystem",
-        "path": ".agents/skills/publish-requirements-to-confluence"
+        "sourcePath": "skills/publish-requirements-to-confluence",
+        "targetPath": ".agents/skills/publish-requirements-to-confluence"
       },
       "profiles": [
         "atlassian"
@@ -409,7 +419,8 @@
       "group": "observability",
       "source": {
         "sourceId": "general",
-        "path": ".agents/skills/investigate-datadog-logs"
+        "sourcePath": "skills/investigate-datadog-logs",
+        "targetPath": ".agents/skills/investigate-datadog-logs"
       },
       "profiles": [
         "observability"
@@ -439,7 +450,8 @@
       "group": "external-research",
       "source": {
         "sourceId": "general",
-        "path": ".agents/skills/search-with-felo"
+        "sourcePath": "skills/search-with-felo",
+        "targetPath": ".agents/skills/search-with-felo"
       },
       "profiles": [],
       "compatibility": {
@@ -469,7 +481,8 @@
       "group": "knowledge-capture",
       "source": {
         "sourceId": "knowledge-content",
-        "path": ".agents/skills/capture-private-course-knowledge"
+        "sourcePath": "skills/capture-private-course-knowledge",
+        "targetPath": ".agents/skills/capture-private-course-knowledge"
       },
       "profiles": [
         "knowledge-capture"

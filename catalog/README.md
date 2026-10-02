@@ -20,7 +20,7 @@
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
-- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。SYP-155～159 完成前，production Catalog/Lock 仍維持 legacy schema v1；不得把 target path 當成 source layout authority。
+- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。Production Catalog/Lock 在 SYP-155～159 來源合併後已切換到 v2 canonical source；consumer target 仍為 `.agents/skills/<skill-id>/**`。不得把 target path 當成 source layout authority。
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
