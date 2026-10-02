@@ -100,15 +100,16 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_twelve_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_thirteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 12
+        $activeSkills.Count | Should Be 13
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
             'verify-data-access-performance' = 'general'
             'investigate-datadog-logs' = 'general'
             'manage-notion-ai-memory' = 'general'
+            'manage-task-handoff' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
@@ -247,7 +248,7 @@ Describe 'production Skills Catalog' {
 
         $profile.Count | Should Be 1
         [bool]$profile[0].default | Should Be $false
-        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-notion-ai-memory')
+        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-notion-ai-memory','manage-task-handoff')
         $skill.Count | Should Be 1
         [string]$skill[0].group | Should Be 'knowledge-management'
         Assert-StringSequence -Actual @($skill[0].profiles) -Expected @('ai-memory')
@@ -258,7 +259,7 @@ Describe 'production Skills Catalog' {
             $selection = [pscustomobject]@{ profiles=@('ai-memory'); includeSkills=@(); excludeSkills=@() }
             Assert-StringSequence `
                 -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
-                -Expected @('manage-notion-ai-memory')
+                -Expected @('manage-notion-ai-memory','manage-task-handoff')
         }
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
@@ -310,7 +311,7 @@ Describe 'production Skills Catalog' {
         $script:catalog.schemaVersion | Should Be 2
         $script:lock.schemaVersion | Should Be 2
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $active.Count | Should Be 12
+        $active.Count | Should Be 13
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
             [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"

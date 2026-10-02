@@ -95,7 +95,7 @@ function Get-TestRawSha256 {
             -ManifestPath $script:ManifestExample `
             -ConfigurationPath $script:ConfigurationExample
 
-        $result.SkillCount | Should Be 13
+        $result.SkillCount | Should Be 14
         $result.ProfileCount | Should Be 7
         $result.SourceCount | Should Be 1
         $result.ManifestFileCount | Should Be 2
@@ -134,8 +134,8 @@ function Get-TestRawSha256 {
 
         $catalog.schemaVersion | Should Be 2
         $lock.schemaVersion | Should Be 2
-        @($catalog.skills).Count | Should Be 13
-        @($lock.skills).Count | Should Be 12
+        @($catalog.skills).Count | Should Be 14
+        @($lock.skills).Count | Should Be 13
         @($catalog.skills | Where-Object { $_.lifecycle.status -eq 'removed' }).Count | Should Be 1
         foreach ($skill in @($catalog.skills | Where-Object { $_.lifecycle.status -ne 'removed' })) {
             $skill.source.sourcePath | Should Be "skills/$($skill.id)"
