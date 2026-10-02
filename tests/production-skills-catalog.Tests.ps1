@@ -122,7 +122,8 @@ Describe 'production Skills Catalog' {
         foreach ($skill in $activeSkills) {
             $expectedSourceBySkill.ContainsKey([string]$skill.id) | Should Be $true
             [string]$skill.source.sourceId | Should Be $expectedSourceBySkill[[string]$skill.id]
-            [string]$skill.source.path | Should Be ".agents/skills/$($skill.id)"
+            [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
+            [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
         }
 
         $removedFelo = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'search-with-felo' })
@@ -303,12 +304,21 @@ Describe 'production Skills Catalog' {
         @($script:lock.skills | Where-Object { [string]$_.id -eq 'search-with-felo' }).Count | Should Be 0
     }
 
-    # Scenario: The canonical source/target schema is introduced without rewriting production pins.
-    # Purpose: Keep the migration boundary explicit until the later production repin tasks are approved.
-    It 'InterT31_keeps_production_catalog_and_lock_on_legacy_schema_v1' {
-        $script:catalog.schemaVersion | Should Be 1
-        $script:lock.schemaVersion | Should Be 1
-        @($script:catalog.skills | Where-Object { $null -ne $_.source.PSObject.Properties['sourcePath'] -or $null -ne $_.source.PSObject.Properties['targetPath'] }).Count | Should Be 0
-        @($script:lock.skills | Where-Object { $null -ne $_.PSObject.Properties['targetPath'] }).Count | Should Be 0
+    # Scenario: Production moves to canonical source packages while consumer targets stay separate.
+    # Purpose: Guard the complete v2 source/target cutover without dropping a Skill or its immutable lock entry.
+    It 'InterT31_binds_production_catalog_and_lock_to_canonical_schema_v2' {
+        $script:catalog.schemaVersion | Should Be 2
+        $script:lock.schemaVersion | Should Be 2
+        $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
+        $active.Count | Should Be 12
+        foreach ($skill in $active) {
+            [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
+            [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
+            $locked = @($script:lock.skills | Where-Object { $_.id -eq $skill.id })
+            $locked.Count | Should Be 1
+            [string]$locked[0].sourcePath | Should Be $skill.source.sourcePath
+            [string]$locked[0].targetPath | Should Be $skill.source.targetPath
+        }
+        @($script:catalog.skills | Where-Object { $null -ne $_.source.PSObject.Properties['path'] }).Count | Should Be 0
     }
 }
