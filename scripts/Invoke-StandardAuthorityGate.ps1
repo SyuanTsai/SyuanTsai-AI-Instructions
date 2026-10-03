@@ -2334,17 +2334,15 @@ function Get-AuthorityConsumerReleaseAffectingMatch {
     param([Parameter(Mandatory = $true)][string] $Text)
 
     # URL values can contain words that resemble release action names, such as
-    # `powershell-release` in a stable-channel download URL. Keep scan offsets
-    # unchanged, and stop at shell separators even inside quotes so evaluated
-    # command text after a URL remains visible to release classification.
+    # `powershell-release` in a stable-channel download URL. Mask only the URL
+    # token; expandable strings may execute `$()` or backtick substitutions.
+    # Stopping at quotes and shell separators keeps that command text visible.
     $urlMatchEvaluator = [System.Text.RegularExpressions.MatchEvaluator] {
         param([System.Text.RegularExpressions.Match] $match)
         return (' ' * $match.Length)
     }
-    $quotedUrlPattern = '(?i)(?<quote>[''"])https?://[^\r\n;|&''"]*?\k<quote>'
-    $unquotedUrlPattern = '(?i)https?://[^\s;|&''"]+'
-    $releaseScanText = [regex]::Replace($Text, $quotedUrlPattern, $urlMatchEvaluator)
-    $releaseScanText = [regex]::Replace($releaseScanText, $unquotedUrlPattern, $urlMatchEvaluator)
+    $urlTokenPattern = '(?i)https?://[^\s;|&''"`$]+'
+    $releaseScanText = [regex]::Replace($Text, $urlTokenPattern, $urlMatchEvaluator)
 
     # Action delegates are executable release surfaces too. Their behavior is
     # opaque to this repository, so they must still be structurally bound to

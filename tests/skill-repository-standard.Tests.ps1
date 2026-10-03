@@ -3925,6 +3925,10 @@ public sealed class C245NonCooperativeStream : Stream {
 '@
         $quotedStableRuntimeExecutable = Get-AuthorityConsumerExecutableText -Text $quotedStableRuntimeUrl
         Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text $quotedStableRuntimeExecutable) 'A stable PowerShell release URL used as download data must not be classified as a release command.'
+        $interpolatedUrlWithPublish = 'Invoke-WebRequest -Uri "https://example.test/$(npm publish)"'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $interpolatedUrlWithPublish) 'A publish command inside a double-quoted URL subexpression must remain release-affecting.'
+        $backtickUrlWithTagPush = 'curl "https://example.test/`git push --tags`"'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $backtickUrlWithTagPush) 'A tag push inside a double-quoted URL command substitution must remain release-affecting.'
         $quotedExecutableWithTagPush = "Invoke-Expression 'https://example.test/foo; git push --tags'"
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $quotedExecutableWithTagPush) 'A tag push after a URL inside executable quoted text must remain release-affecting.'
         $publishAfterUrl = "Invoke-WebRequest -Uri 'https://aka.ms/powershell-release?tag=stable'; npm publish"
