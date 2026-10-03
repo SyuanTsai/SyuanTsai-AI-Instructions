@@ -3918,6 +3918,32 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push --mirror') 'A mirror push must be release-affecting because it can publish tag refs.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: docker/build-push-action@0123456789012345678901234567890123456789`nwith:`n  push: true") 'A Docker build-push action must be release-affecting because its push input can publish an image.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'docker buildx build --platform linux/amd64 --push .') 'A Docker buildx build with --push must be release-affecting because it publishes an image.'
+        $quotedStableRuntimeUrl = @'
+- shell: pwsh
+  run: |
+    Invoke-WebRequest -Uri 'https://aka.ms/powershell-release?tag=stable'
+'@
+        $quotedStableRuntimeExecutable = Get-AuthorityConsumerExecutableText -Text $quotedStableRuntimeUrl
+        Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text $quotedStableRuntimeExecutable) 'A stable PowerShell release URL used as download data must not be classified as a release command.'
+        $interpolatedUrlWithPublish = 'Invoke-WebRequest -Uri "https://example.test/$(npm publish)"'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $interpolatedUrlWithPublish) 'A publish command inside a double-quoted URL subexpression must remain release-affecting.'
+        $backtickUrlWithTagPush = 'curl "https://example.test/`git push --tags`"'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $backtickUrlWithTagPush) 'A tag push inside a double-quoted URL command substitution must remain release-affecting.'
+        $quotedExecutableWithTagPush = "Invoke-Expression 'https://example.test/foo; git push --tags'"
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text $quotedExecutableWithTagPush) 'A tag push after a URL inside executable quoted text must remain release-affecting.'
+        $publishAfterUrl = "Invoke-WebRequest -Uri 'https://aka.ms/powershell-release?tag=stable'; npm publish"
+        $publishAfterUrlMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $publishAfterUrl
+        Assert-True $publishAfterUrlMatch.Success 'A real npm publish command after a release-looking URL must remain release-affecting.'
+        Assert-Equal $publishAfterUrlMatch.Index $publishAfterUrl.IndexOf('npm publish') 'Filtering URL data must preserve release-command source offsets.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'make deploy') 'A real deploy command must remain release-affecting.'
+        $unquotedUrlBeforePublish = 'Invoke-WebRequest -Uri https://aka.ms/powershell-release?tag=stable;npm publish'
+        $adjacentPublishMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $unquotedUrlBeforePublish
+        Assert-True $adjacentPublishMatch.Success 'An adjacent semicolon must end an unquoted URL before a real publish command.'
+        Assert-Equal $adjacentPublishMatch.Index $unquotedUrlBeforePublish.IndexOf('npm publish') 'An adjacent semicolon and URL mask must preserve the publish command offset.'
+        $unquotedUrlBeforeDeploy = 'Invoke-WebRequest -Uri https://aka.ms/powershell-release?tag=stable|make deploy'
+        $pipedDeployMatch = Get-AuthorityConsumerReleaseAffectingMatch -Text $unquotedUrlBeforeDeploy
+        Assert-True $pipedDeployMatch.Success 'A pipeline separator must end an unquoted URL before a real deploy command.'
+        Assert-Equal $pipedDeployMatch.Index $unquotedUrlBeforeDeploy.IndexOf('make deploy') 'A pipeline separator and URL mask must preserve the deploy command offset.'
         Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text './scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A direct canonical validator command must count as an invocation.'
         Assert-True ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'pwsh -File ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'A canonical validator launched through pwsh -File must count as an invocation.'
         Assert-False ([bool](Test-AuthorityConsumerCanonicalInvocation -Text 'Get-Item ./scripts/Validate.ps1' -CanonicalRelativePath 'scripts/Validate.ps1')) 'Reading the canonical validator path must not count as executing it.'
