@@ -2333,6 +2333,19 @@ function Get-AuthorityConsumerWorkflowReleaseExecutableText {
 function Get-AuthorityConsumerReleaseAffectingMatch {
     param([Parameter(Mandatory = $true)][string] $Text)
 
+    # URL values can contain words that resemble release action names, such as
+    # `powershell-release` in a stable-channel download URL. Keep scan offsets
+    # unchanged, and stop at shell separators even inside quotes so evaluated
+    # command text after a URL remains visible to release classification.
+    $urlMatchEvaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param([System.Text.RegularExpressions.Match] $match)
+        return (' ' * $match.Length)
+    }
+    $quotedUrlPattern = '(?i)(?<quote>[''"])https?://[^\r\n;|&''"]*?\k<quote>'
+    $unquotedUrlPattern = '(?i)https?://[^\s;|&''"]+'
+    $releaseScanText = [regex]::Replace($Text, $quotedUrlPattern, $urlMatchEvaluator)
+    $releaseScanText = [regex]::Replace($releaseScanText, $unquotedUrlPattern, $urlMatchEvaluator)
+
     # Action delegates are executable release surfaces too. Their behavior is
     # opaque to this repository, so they must still be structurally bound to
     # the canonical validator before the release job can run.
@@ -2353,10 +2366,10 @@ function Get-AuthorityConsumerReleaseAffectingMatch {
     $githubApiMutationPattern = '(?im)(?<![A-Za-z0-9_.-])gh\s+api\b[^\r\n]*(?:\s-[fF](?:=|\s)|\s--(?:field|raw-field|input)(?:=|\s)|\s(?:-X|--method)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b)'
 
     $candidateMatches = @(
-        [regex]::Match($Text, $releasePattern)
-        [regex]::Match($Text, $gitPushAmbiguousRefspecPattern)
-        [regex]::Match($Text, $githubApiMutationPattern)
-        (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $Text)
+        [regex]::Match($releaseScanText, $releasePattern)
+        [regex]::Match($releaseScanText, $gitPushAmbiguousRefspecPattern)
+        [regex]::Match($releaseScanText, $githubApiMutationPattern)
+        (Get-AuthorityConsumerOpaqueReleaseHelperMatch -Text $releaseScanText)
     ) | Where-Object { $_.Success } | Sort-Object -Property Index
     if (@($candidateMatches).Count -gt 0) {
         return @($candidateMatches)[0]
