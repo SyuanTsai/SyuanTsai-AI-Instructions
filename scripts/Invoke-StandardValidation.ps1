@@ -3391,7 +3391,9 @@ function Invoke-StandardValidationProcess {
         [Parameter(Mandatory = $true)][hashtable] $Environment,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
         [string] $CancellationPath,
-        [switch] $CoreLifecycleOnly
+        [switch] $CoreLifecycleOnly,
+        [switch] $EmitSupervisorProgress,
+        [ValidateRange(1, 30)][int] $SupervisorProgressIntervalSeconds = 30
     )
 
     $startedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -3754,7 +3756,23 @@ function Invoke-StandardValidationProcess {
             $script:StandardValidationChildOutputQuotaCharacters
         )
         $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+        $supervisorProgressClock = [Diagnostics.Stopwatch]::StartNew()
+        $nextSupervisorProgressSeconds = 0
+        $supervisorProgressLines = 0
         while (-not $protectionSetupFailed -and -not $process.HasExited) {
+            if ($EmitSupervisorProgress -and $supervisorProgressLines -lt 240) {
+                $elapsedSeconds = [Math]::Max(0, [int][Math]::Floor($supervisorProgressClock.Elapsed.TotalSeconds))
+                if ($elapsedSeconds -ge $nextSupervisorProgressSeconds) {
+                    $progressNow = [DateTimeOffset]::UtcNow
+                    $remainingSeconds = [Math]::Max(0, [int][Math]::Ceiling(($deadline.ToUniversalTime() - $progressNow.UtcDateTime).TotalSeconds))
+                    [Console]::Error.WriteLine("Core Pester supervisor utc=$($progressNow.ToString('o')) elapsedSeconds=$elapsedSeconds remainingSeconds=$remainingSeconds state=running")
+                    $supervisorProgressLines++
+                    $nextSupervisorProgressSeconds += $SupervisorProgressIntervalSeconds
+                    if ($supervisorProgressLines -eq 240) {
+                        [Console]::Error.WriteLine('Core Pester supervisor progress cap reached (240 heartbeat lines).')
+                    }
+                }
+            }
             # A successfully assigned Windows Job Object owns every descendant and provides the
             # termination boundary. Avoid repeatedly enumerating the full Win32 process table
             # while it runs; retain descendant discovery for paths without that boundary and
@@ -7467,7 +7485,8 @@ function Invoke-StandardCoreValidationRun {
                 -Environment @{ STANDARD_VALIDATION_CORE_RUN_ID = $runId; STANDARD_VALIDATION_CORE_CHECK_ID = [string]$check.id; STANDARD_VALIDATION_CORE_SKILLS = ($skillSet.ids -join ';') } `
                 -TimeoutSeconds $TimeoutSeconds `
                 -CancellationPath $CancellationPath `
-                -CoreLifecycleOnly
+                -CoreLifecycleOnly `
+                -EmitSupervisorProgress:([string]$check.kind -ceq 'pester')
             $stdoutSha256 = Write-StandardCoreCapturedText -Path $stdoutPath -Value ([string]$processResult.stdout)
             $stderrSha256 = Write-StandardCoreCapturedText -Path $stderrPath -Value ([string]$processResult.stderr)
             $testCounts = $null
