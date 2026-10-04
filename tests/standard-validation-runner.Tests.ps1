@@ -666,7 +666,8 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
 
     # Scenario: Core checks cross the tracked snapshot and owned process boundary with both valid and invalid inputs.
     # Purpose: Preserve the retained refusal paths, true exits and cleanup while the Core runner changes.
-    It 'InterT10_keeps_tracked_identity_safe_paths_and_failure_boundaries' {
+    # InterT10: Preserve the exact test title used by the authority workflow contract.
+    It 'keeps tracked identity, safe paths, private exclusion, child failure, timeout, source mutation and output reservation fail-closed' {
         $root = Join-Path $TestDrive ('s1b3-core-boundaries-' + [guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $root -Force)
         try {
