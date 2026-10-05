@@ -776,11 +776,20 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Match $lock 'dependency-a==1\.0\.0 --hash=sha256:[0-9a-f]{64}' 'Dependency wheel must be hash locked.'
     }
 
+    # Scenario: The canonical resolver acquires SkillSpector dependencies from approved PyPI wheel artifacts.
+    # Purpose: Preserve same-URL timeout retry bounds, shared byte/deadline accounting, and fail-closed artifact checks.
     It 'UnitT26d_requires_offline_hash_locked_SkillSpector_installation' {
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         $helper = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:PythonClosureHelperPath
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
+        Assert-True $helper.Contains('MAX_WHEEL_DOWNLOAD_ATTEMPTS = 2') 'Approved artifact downloads must allow at most two total attempts.'
+        Assert-True $helper.Contains('def _is_retryable_artifact_timeout(error: BaseException)') 'Retryable failures must be classified explicitly.'
+        Assert-True $helper.Contains('isinstance(error, urllib.error.HTTPError)') 'HTTP status errors must remain non-retryable even when wrapped as URL errors.'
+        Assert-True $helper.Contains('isinstance(error.reason, TimeoutError)') 'Only an explicit URLError timeout reason may retry.'
+        Assert-True $helper.Contains('total_received = 0') -and $helper.Contains('total_received += len(chunk)') 'Partial bytes across attempts must share the per-wheel byte counter.'
+        Assert-True $standard.Contains('at most once (two total attempts)') -and $standard.Contains('same acquisition deadline and cumulative byte budget') 'Normative policy must cap retries and preserve the acquisition budget.'
+        Assert-True $standard.Contains('HTTP status, TLS, redirect, policy, integrity, metadata, local I/O, and all other failures') 'Normative policy must enumerate non-retryable failures.'
         Assert-Match $resolver 'function Invoke-IsolatedPythonCommand' 'Python isolation must be centralized in one command wrapper.'
         Assert-Match $resolver 'return Invoke-CheckedCommand.*@\(''-I''\) \+ \$Arguments' 'Every wrapped Python subprocess must prepend isolated mode.'
         Assert-NotMatch $resolver "Invoke-CheckedCommand -Command 'python'" 'System Python must not bypass isolated mode.'
@@ -1510,7 +1519,7 @@ elif args[0] == "verify":
         $deadlineError = $null
         try {
             [void](Resolve-PythonWheelClosureFromApprovedIndex `
-                -PythonCommand $python -HelperPath $helper -ApprovedIndex 'https://pypi.org/simple' `
+                -PythonCommand $python -HelperPath $helper -ExpectedHelperSha256 (Get-FileSha256 -Path $helper) -ApprovedIndex 'https://pypi.org/simple' `
                 -RootWheelPath $rootWheel -RootWheelSha256 ('0' * 64) `
                 -CandidatePath (Join-Path $TestDrive 'candidate') -WheelhousePath (Join-Path $TestDrive 'selected') `
                 -WorkPath (Join-Path $TestDrive 'work') -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 1)

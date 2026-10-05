@@ -1591,6 +1591,7 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
     param(
         [Parameter(Mandatory = $true)][string] $PythonCommand,
         [Parameter(Mandatory = $true)][string] $HelperPath,
+        [Parameter(Mandatory = $true)][string] $ExpectedHelperSha256,
         [Parameter(Mandatory = $true)][string] $ApprovedIndex,
         [Parameter(Mandatory = $true)][string] $RootWheelPath,
         [Parameter(Mandatory = $true)][string] $RootWheelSha256,
@@ -1603,6 +1604,10 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
 
     if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf)) {
         throw "Python wheel closure helper not found: $HelperPath"
+    }
+    if ($ExpectedHelperSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        (Get-FileSha256 -Path $HelperPath) -cne $ExpectedHelperSha256) {
+        throw 'Python wheel closure helper changed before acquisition.'
     }
     [void](New-Item -ItemType Directory -Path $WorkPath -Force)
     $planPath = Join-Path $WorkPath 'offline-backtracking-plan.json'
@@ -1629,6 +1634,9 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
         '--max-rounds', '128', '--max-candidates', '256', '--max-bytes', '536870912',
         '--initial-bytes', [string]((Get-Item -LiteralPath $RootWheelPath).Length)
     ) -TimeoutSeconds $remaining)
+    if ((Get-FileSha256 -Path $HelperPath) -cne $ExpectedHelperSha256) {
+        throw 'Python wheel closure helper changed during acquisition.'
+    }
     foreach ($path in @($planPath, $inventoryPath, $resultPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Python wheel closure helper did not produce required evidence: $path"
@@ -1644,6 +1652,9 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
         throw "Python wheel closure helper result is invalid JSON: $($_.Exception.Message)"
     }
     try {
+        if ((Get-FileSha256 -Path $HelperPath) -cne $ExpectedHelperSha256) {
+            throw 'Python wheel closure helper changed before evidence verification.'
+        }
         $verificationOutput = @(Invoke-IsolatedPythonCommand -PythonCommand $PythonCommand -Arguments @(
             $HelperPath, 'verify',
             '--candidate-dir', $CandidatePath,
@@ -1652,6 +1663,9 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
             '--inventory', $inventoryPath,
             '--result', $resultPath
         ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $AcquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
+        if ((Get-FileSha256 -Path $HelperPath) -cne $ExpectedHelperSha256) {
+            throw 'Python wheel closure helper changed during evidence verification.'
+        }
         $verification = ($verificationOutput -join [Environment]::NewLine) | ConvertFrom-Json
     }
     catch {
@@ -3809,6 +3823,7 @@ function Resolve-SkillSpector {
                 $resolutionEvidence = Resolve-PythonWheelClosureFromApprovedIndex `
                     -PythonCommand $venvPython `
                     -HelperPath $closureHelperPath `
+                    -ExpectedHelperSha256 $closureHelperSha256 `
                     -ApprovedIndex $approvedIndex `
                     -RootWheelPath $wheelPath `
                     -RootWheelSha256 $expectedHash `
