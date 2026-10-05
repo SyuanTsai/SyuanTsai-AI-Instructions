@@ -27,6 +27,26 @@ Describe 'Bounded offline acquisition fixtures' {
         Assert-OfflineFailure { Get-RemainingAcquisitionSeconds -Stopwatch $watch -LimitSeconds 2 } 'deadline exceeded'
     }
 
+    # Scenario: The Python closure helper changes after its frozen SHA-256 is measured.
+    # Purpose: Prevent the acquisition receipt from claiming a helper identity different from the code invoked.
+    It 'UnitT25_rejects_python_helper_mutation_after_hash_capture' {
+        $resolverPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1'
+        . $resolverPath -ValidatePolicyOnly | Out-Null
+
+        $python = Assert-Command -Name 'python'
+        $helper = Join-Path $TestDrive 'mutating-python-helper.py'
+        $helperSource = 'import pathlib; pathlib.Path(__file__).write_text(pathlib.Path(__file__).read_text(encoding="utf-8") + "\\n# helper changed after launch\\n", encoding="utf-8")'
+        [IO.File]::WriteAllText($helper, $helperSource, (New-Object Text.UTF8Encoding($false)))
+        $expectedHelperSha256 = Get-FileSha256 -Path $helper
+        $rootWheel = Join-Path $TestDrive 'root-1.0-py3-none-any.whl'
+        [IO.File]::WriteAllText($rootWheel, 'synthetic root wheel')
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+
+        Assert-OfflineFailure {
+            [void](Resolve-PythonWheelClosureFromApprovedIndex -PythonCommand $python -HelperPath $helper -ExpectedHelperSha256 $expectedHelperSha256 -ApprovedIndex 'https://pypi.org/simple' -RootWheelPath $rootWheel -RootWheelSha256 (Get-FileSha256 -Path $rootWheel) -CandidatePath (Join-Path $TestDrive 'mutating-candidate') -WheelhousePath (Join-Path $TestDrive 'mutating-selected') -WorkPath (Join-Path $TestDrive 'mutating-work') -AcquisitionStopwatch $watch -AcquisitionLimitSeconds 20)
+        } 'helper.*changed'
+        Assert-OfflineCondition ((Get-FileSha256 -Path $helper) -cne $expectedHelperSha256) 'The fixture must mutate the measured helper bytes.'
+    }
     # Scenario: An injected HTTP-like task never completes, while the acquisition cancellation timer expires.
     # Purpose: Stop pending I/O promptly using the existing cancellation path without any real download.
     It 'UnitT20_cancels_a_pending_offline_download_task' {

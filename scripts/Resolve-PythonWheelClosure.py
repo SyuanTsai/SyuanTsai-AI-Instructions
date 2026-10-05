@@ -20,10 +20,12 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -47,6 +49,7 @@ APPROVED_INDEX = "https://pypi.org/simple"
 APPROVED_ARTIFACT_HOSTS = frozenset(("files.pythonhosted.org", "pypi.org"))
 SIMPLE_JSON_MEDIA_TYPE = "application/vnd.pypi.simple.v1+json"
 MAX_WHEEL_BYTES = 512 * 1024 * 1024
+MAX_WHEEL_DOWNLOAD_ATTEMPTS = 2
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_SIMPLE_JSON_BYTES = 32 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
@@ -592,47 +595,104 @@ class PyPISimpleCatalog:
         self._cache[project] = selected
         return selected
 
+    @staticmethod
+    def _is_retryable_artifact_timeout(error: BaseException) -> bool:
+        # HTTPError is a URLError subclass; keep HTTP status failures out even if
+        # a synthetic or unusual response attaches a TimeoutError reason.
+        if isinstance(error, urllib.error.HTTPError):
+            return False
+        if isinstance(error, TimeoutError):
+            return True
+        return (
+            isinstance(error, urllib.error.URLError)
+            and isinstance(error.reason, TimeoutError)
+        )
+
     def materialize(self, descriptor: Descriptor, destination: Path) -> Path:
         self._validate_remote_url(descriptor.url, APPROVED_ARTIFACT_HOSTS)
-        temporary = destination / f".{uuid.uuid4().hex}.download"
-        digest = hashlib.sha256()
-        total = 0
         request = urllib.request.Request(descriptor.url, headers={"Accept": "application/octet-stream"})
-        try:
-            timeout = min(30, self.budget.remaining("wheel download") if self.budget else 30)
-            with self._artifact_opener.open(request, timeout=timeout) as response, temporary.open("xb") as output:
-                self._validate_remote_url(response.geturl(), APPROVED_ARTIFACT_HOSTS)
-                read_chunk = response.read1 if hasattr(response, "read1") else response.read
-                while True:
-                    if self.budget is not None:
-                        self.budget.remaining("wheel download")
-                    chunk = read_chunk(1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_WHEEL_BYTES:
-                        raise ClosureError(f"Wheel exceeds size limit: {descriptor.filename!r}")
-                    if self.budget is not None:
-                        self.budget.consume(len(chunk))
-                    digest.update(chunk)
-                    output.write(chunk)
-            if digest.hexdigest() != descriptor.sha256:
-                raise ClosureError(
-                    f"Downloaded wheel hash mismatch for {descriptor.filename!r}: "
-                    f"expected {descriptor.sha256}, got {digest.hexdigest()}"
-                )
-            target = destination / descriptor.filename
-            if target.exists():
-                if file_sha256(target) != descriptor.sha256:
-                    raise ClosureError(f"Candidate filename collision for {descriptor.filename!r}")
-                temporary.unlink()
-                return target
-            os.replace(str(temporary), str(target))
-            return target
-        except Exception:
-            if temporary.exists():
-                temporary.unlink()
-            raise
+        total_received = 0
+
+        for attempt in range(MAX_WHEEL_DOWNLOAD_ATTEMPTS):
+            temporary = destination / f".{uuid.uuid4().hex}.download"
+            digest = hashlib.sha256()
+            retry_error: Optional[BaseException] = None
+            try:
+                timeout = min(30, self.budget.remaining("wheel download") if self.budget else 30)
+                try:
+                    response = self._artifact_opener.open(request, timeout=timeout)
+                except Exception as error:
+                    if (
+                        attempt + 1 < MAX_WHEEL_DOWNLOAD_ATTEMPTS
+                        and self._is_retryable_artifact_timeout(error)
+                    ):
+                        retry_error = error
+                    else:
+                        raise
+
+                if retry_error is None:
+                    with response:
+                        self._validate_remote_url(response.geturl(), APPROVED_ARTIFACT_HOSTS)
+                        read_chunk = response.read1 if hasattr(response, "read1") else response.read
+                        with temporary.open("xb") as output:
+                            while True:
+                                if self.budget is not None:
+                                    self.budget.remaining("wheel download")
+                                try:
+                                    chunk = read_chunk(1024 * 1024)
+                                except Exception as error:
+                                    if (
+                                        attempt + 1 < MAX_WHEEL_DOWNLOAD_ATTEMPTS
+                                        and self._is_retryable_artifact_timeout(error)
+                                    ):
+                                        retry_error = error
+                                        break
+                                    raise
+                                if not chunk:
+                                    break
+                                total_received += len(chunk)
+                                if total_received > MAX_WHEEL_BYTES:
+                                    raise ClosureError(f"Wheel exceeds size limit: {descriptor.filename!r}")
+                                if self.budget is not None:
+                                    self.budget.consume(len(chunk))
+                                digest.update(chunk)
+                                output.write(chunk)
+
+                    if retry_error is None:
+                        if digest.hexdigest() != descriptor.sha256:
+                            raise ClosureError(
+                                f"Downloaded wheel hash mismatch for {descriptor.filename!r}: "
+                                f"expected {descriptor.sha256}, got {digest.hexdigest()}"
+                            )
+                        target = destination / descriptor.filename
+                        if target.exists():
+                            if file_sha256(target) != descriptor.sha256:
+                                raise ClosureError(f"Candidate filename collision for {descriptor.filename!r}")
+                            temporary.unlink()
+                            return target
+                        os.replace(str(temporary), str(target))
+                        return target
+
+                if temporary.exists():
+                    temporary.unlink()
+                if self.budget is not None:
+                    self.budget.remaining("wheel download retry")
+                    self.budget.record(
+                        phase="artifact-retry",
+                        round_number=self.budget.last_round,
+                        candidate_count=self.budget.last_candidate_count,
+                        project=descriptor.project,
+                        version=str(descriptor.version),
+                        source="approved-pypi-artifact",
+                        error_class=type(retry_error).__name__,
+                    )
+            except Exception:
+                if temporary.exists():
+                    temporary.unlink()
+                raise
+
+        raise ClosureError(f"Wheel download attempts exhausted for {descriptor.filename!r}")
+
 
 
 class LocalCatalog:
@@ -1954,6 +2014,243 @@ def self_test_command(arguments: argparse.Namespace) -> None:
             )
         if not any("invalid yanked value" in entry["reason"] for entry in discovery_catalog.rejected_candidates()):
             raise AssertionError("Malformed yanked metadata must be recorded as candidate rejection evidence")
+        class _SelfTestArtifactResponse:
+            def __init__(self, payload: bytes, *, timeout_after_payload: bool = False,
+                         final_url: Optional[str] = None) -> None:
+                self._payload = payload
+                self._offset = 0
+                self._timeout_after_payload = timeout_after_payload
+                self._timeout_raised = False
+                self._final_url = final_url or "https://files.pythonhosted.org/packages/resolver-self-test.whl"
+                self.closed = False
+
+            def __enter__(self) -> "_SelfTestArtifactResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self.closed = True
+
+            def geturl(self) -> str:
+                return self._final_url
+
+            def read(self, limit: int = -1) -> bytes:
+                if self._offset < len(self._payload):
+                    end = len(self._payload) if limit < 0 else min(len(self._payload), self._offset + limit)
+                    chunk = self._payload[self._offset:end]
+                    self._offset = end
+                    return chunk
+                if self._timeout_after_payload and not self._timeout_raised:
+                    self._timeout_raised = True
+                    raise TimeoutError("synthetic socket read timeout")
+                return b""
+
+        class _SelfTestArtifactOpener:
+            def __init__(self, outcomes: Sequence[object], after_open: Optional[object] = None) -> None:
+                self._outcomes = list(outcomes)
+                self._after_open = after_open
+                self.calls: List[Tuple[str, float]] = []
+
+            def open(self, request: urllib.request.Request, timeout: float) -> object:
+                self.calls.append((request.full_url, timeout))
+                if callable(self._after_open):
+                    self._after_open(len(self.calls))
+                outcome = self._outcomes[min(len(self.calls) - 1, len(self._outcomes) - 1)]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        def make_artifact_budget(name: str, *, max_bytes: int, initial_bytes: int = 0) -> AcquisitionBudget:
+            return AcquisitionBudget(
+                seconds=60, max_rounds=1, max_candidates=8, max_bytes=max_bytes,
+                diagnostics_path=root / f"{name}.jsonl", run_id="self-test",
+                head_sha="0" * 40, initial_bytes=initial_bytes,
+            )
+
+        def assert_no_partial_download(directory: Path, context: str) -> None:
+            if list(directory.glob(".*.download")):
+                raise AssertionError(f"{context} left a partial .download file")
+
+        artifact_bytes = root_wheel.read_bytes()
+        retry_descriptor = local_descriptor(root_wheel)
+        partial_bytes = b"partial response before timeout"
+        retry_budget = make_artifact_budget(
+            "retry-success", max_bytes=7 + len(partial_bytes) + len(artifact_bytes), initial_bytes=7
+        )
+
+        def shrink_retry_deadline(call_count: int) -> None:
+            if call_count == 1:
+                retry_budget.deadline = time.monotonic() + 2
+
+        retry_opener = _SelfTestArtifactOpener([
+            _SelfTestArtifactResponse(partial_bytes, timeout_after_payload=True),
+            _SelfTestArtifactResponse(artifact_bytes),
+        ], after_open=shrink_retry_deadline)
+        retry_catalog = PyPISimpleCatalog(APPROVED_INDEX, retry_budget)
+        retry_catalog._artifact_opener = retry_opener
+        retry_directory = root / "retry-success"
+        retry_directory.mkdir()
+        retry_target = retry_catalog.materialize(retry_descriptor, retry_directory)
+        if retry_target.read_bytes() != artifact_bytes or retry_target.name != retry_descriptor.filename:
+            raise AssertionError("A timeout retry must admit only the complete hash-verified wheel")
+        if len(retry_opener.calls) != 2 or [call[0] for call in retry_opener.calls] != [retry_descriptor.url] * 2:
+            raise AssertionError("A transient timeout must retry the exact same approved URL once")
+        if not 0 < retry_opener.calls[1][1] < retry_opener.calls[0][1]:
+            raise AssertionError("A timeout retry must use the remaining shared acquisition deadline")
+        retry_events = [json.loads(line) for line in retry_budget.diagnostics_path.read_text(encoding="utf-8").splitlines()]
+        retry_events = [event for event in retry_events if event.get("phase") == "artifact-retry"]
+        if len(retry_events) != 1 or retry_events[0].get("errorClass") != "TimeoutError" or retry_events[0].get("errorSummary") != "":
+            raise AssertionError("A timeout retry must emit one diagnostic-only event with only its error class")
+        if "url" in retry_events[0] or retry_descriptor.url in retry_budget.diagnostics_path.read_text(encoding="utf-8"):
+            raise AssertionError("A retry diagnostic must not expose the artifact URL")
+        if retry_budget.bytes_received != 7 + len(partial_bytes) + len(artifact_bytes):
+            raise AssertionError("Partial bytes from the first attempt must remain in the cumulative byte budget")
+        assert_no_partial_download(retry_directory, "Successful timeout retry")
+
+        wrapped_retry_budget = make_artifact_budget(
+            "urlerror-retry", max_bytes=len(artifact_bytes)
+        )
+        wrapped_retry_opener = _SelfTestArtifactOpener([
+            urllib.error.URLError(TimeoutError("synthetic urlopen timeout")),
+            _SelfTestArtifactResponse(artifact_bytes),
+        ])
+        wrapped_retry_catalog = PyPISimpleCatalog(APPROVED_INDEX, wrapped_retry_budget)
+        wrapped_retry_catalog._artifact_opener = wrapped_retry_opener
+        wrapped_retry_directory = root / "urlerror-retry"
+        wrapped_retry_directory.mkdir()
+        wrapped_retry_target = wrapped_retry_catalog.materialize(retry_descriptor, wrapped_retry_directory)
+        if wrapped_retry_target.read_bytes() != artifact_bytes or len(wrapped_retry_opener.calls) != 2:
+            raise AssertionError("URLError(reason=TimeoutError) must retry the same verified artifact exactly once")
+        assert_no_partial_download(wrapped_retry_directory, "URLError timeout retry")
+
+        per_wheel_budget = make_artifact_budget(
+            "retry-per-wheel-limit", max_bytes=len(artifact_bytes) + len(partial_bytes) + 1
+        )
+        per_wheel_opener = _SelfTestArtifactOpener([
+            _SelfTestArtifactResponse(partial_bytes, timeout_after_payload=True),
+            _SelfTestArtifactResponse(artifact_bytes),
+        ])
+        per_wheel_catalog = PyPISimpleCatalog(APPROVED_INDEX, per_wheel_budget)
+        per_wheel_catalog._artifact_opener = per_wheel_opener
+        per_wheel_directory = root / "retry-per-wheel-limit"
+        per_wheel_directory.mkdir()
+        original_max_wheel_bytes = MAX_WHEEL_BYTES
+        try:
+            globals()["MAX_WHEEL_BYTES"] = len(artifact_bytes) + len(partial_bytes) - 1
+            per_wheel_error: Optional[BaseException] = None
+            try:
+                per_wheel_catalog.materialize(retry_descriptor, per_wheel_directory)
+            except Exception as error:
+                per_wheel_error = error
+        finally:
+            globals()["MAX_WHEEL_BYTES"] = original_max_wheel_bytes
+        if not isinstance(per_wheel_error, ClosureError) or "size limit" not in str(per_wheel_error).lower():
+            raise AssertionError("Bytes from partial attempts must count toward the per-wheel size limit")
+        if len(per_wheel_opener.calls) != 2:
+            raise AssertionError("A retry must not reset cumulative per-wheel byte accounting")
+        assert_no_partial_download(per_wheel_directory, "Cumulative per-wheel limit")
+        exhausted_budget = make_artifact_budget("retry-exhausted", max_bytes=1024 * 1024)
+        exhausted_opener = _SelfTestArtifactOpener([
+            TimeoutError("first timeout"), TimeoutError("second timeout"),
+        ])
+        exhausted_catalog = PyPISimpleCatalog(APPROVED_INDEX, exhausted_budget)
+        exhausted_catalog._artifact_opener = exhausted_opener
+        exhausted_directory = root / "retry-exhausted"
+        exhausted_directory.mkdir()
+        exhausted_error: Optional[BaseException] = None
+        try:
+            exhausted_catalog.materialize(retry_descriptor, exhausted_directory)
+        except Exception as error:
+            exhausted_error = error
+        if not isinstance(exhausted_error, TimeoutError) or str(exhausted_error) != "second timeout" or len(exhausted_opener.calls) != 2:
+            raise AssertionError("Two timeouts must exhaust exactly two total attempts and preserve the transport error")
+        assert_no_partial_download(exhausted_directory, "Exhausted timeout retry")
+
+        deadline_budget = make_artifact_budget("retry-deadline", max_bytes=1024 * 1024)
+
+        def expire_retry_deadline(call_count: int) -> None:
+            if call_count == 1:
+                deadline_budget.deadline = time.monotonic() - 1
+
+        deadline_opener = _SelfTestArtifactOpener(
+            [TimeoutError("first timeout")], after_open=expire_retry_deadline
+        )
+        deadline_catalog = PyPISimpleCatalog(APPROVED_INDEX, deadline_budget)
+        deadline_catalog._artifact_opener = deadline_opener
+        deadline_directory = root / "retry-deadline"
+        deadline_directory.mkdir()
+        deadline_error: Optional[BaseException] = None
+        try:
+            deadline_catalog.materialize(retry_descriptor, deadline_directory)
+        except Exception as error:
+            deadline_error = error
+        if not isinstance(deadline_error, ClosureError) or "deadline" not in str(deadline_error).lower():
+            raise AssertionError("A retry must fail closed when the shared acquisition deadline has expired")
+        if len(deadline_opener.calls) != 1:
+            raise AssertionError("An expired shared deadline must prevent a second network attempt")
+        assert_no_partial_download(deadline_directory, "Deadline-bounded retry")
+
+        def assert_single_failure_attempt(
+            name: str, descriptor: Descriptor, outcome: object, *, expected_calls: int = 1,
+            verify_metadata: bool = False, expected_text: str = "",
+        ) -> None:
+            directory = root / name
+            directory.mkdir()
+            opener = _SelfTestArtifactOpener([outcome])
+            catalog = PyPISimpleCatalog(APPROVED_INDEX)
+            catalog._artifact_opener = opener
+            failure: Optional[BaseException] = None
+            try:
+                materialized = catalog.materialize(descriptor, directory)
+                if verify_metadata:
+                    verify_candidate(materialized, descriptor)
+            except Exception as error:
+                failure = error
+            if failure is None or (expected_text and expected_text.lower() not in str(failure).lower()):
+                raise AssertionError(f"{name} must preserve its fail-closed error: {failure!r}")
+            if len(opener.calls) != expected_calls:
+                raise AssertionError(f"{name} must not retry a non-timeout failure; calls={len(opener.calls)}")
+            assert_no_partial_download(directory, name)
+
+        assert_single_failure_attempt(
+            "http-timeout-reason-no-retry", retry_descriptor,
+            urllib.error.HTTPError(retry_descriptor.url, 503, TimeoutError("HTTP status is not a transport retry"), {}, None),
+            expected_text="HTTP status",
+        )
+        assert_single_failure_attempt(
+            "http-status-no-retry", retry_descriptor,
+            urllib.error.HTTPError(retry_descriptor.url, 503, "Service Unavailable", {}, None),
+            expected_text="503",
+        )
+        assert_single_failure_attempt(
+            "tls-no-retry", retry_descriptor,
+            urllib.error.URLError(ssl.SSLError("certificate verify failed")),
+            expected_text="certificate",
+        )
+        assert_single_failure_attempt(
+            "redirect-policy-no-retry", retry_descriptor,
+            _SelfTestArtifactResponse(artifact_bytes, final_url="https://example.invalid/redirected.whl"),
+            expected_text="unapproved",
+        )
+        assert_single_failure_attempt(
+            "hash-no-retry", retry_descriptor,
+            _SelfTestArtifactResponse(b"tampered wheel bytes"),
+            expected_text="hash mismatch",
+        )
+        wrong_metadata_wheel = make_test_wheel(sources, "wrong-metadata", "1.0")
+        wrong_metadata_descriptor = replace(
+            local_descriptor(wrong_metadata_wheel), project="expected-metadata"
+        )
+        assert_single_failure_attempt(
+            "metadata-no-retry", wrong_metadata_descriptor,
+            _SelfTestArtifactResponse(wrong_metadata_wheel.read_bytes()),
+            verify_metadata=True, expected_text="metadata name mismatch",
+        )
+        unapproved_descriptor = replace(retry_descriptor, url="http://example.invalid/unapproved.whl")
+        assert_single_failure_attempt(
+            "unapproved-source-no-retry", unapproved_descriptor,
+            _SelfTestArtifactResponse(artifact_bytes), expected_calls=0, expected_text="unapproved",
+        )
+
         if simple_file_is_yanked({}, "missing.whl") or simple_file_is_yanked({"yanked": False}, "false.whl"):
             raise AssertionError("Missing/native-false yanked metadata must remain eligible")
         if not simple_file_is_yanked({"yanked": True}, "true.whl") or not simple_file_is_yanked(

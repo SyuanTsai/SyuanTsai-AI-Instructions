@@ -350,6 +350,12 @@ jobs:
         foreach ($testName in $script:AuthorityTests) {
             Assert-Equal ([regex]::Matches($gate, [regex]::Escape($testName))).Count 1 "Shared authority gate must execute '$testName' exactly once."
         }
+        $resolverHardeningName = 'standard-validation-resolver-hardening.Tests.ps1'
+        $resolverHardeningPath = Join-Path $script:RepositoryRoot ('tests/' + $resolverHardeningName)
+        $resolverHardeningTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $resolverHardeningPath
+        Assert-Match $resolverHardeningTests 'UnitT25_rejects_python_helper_mutation_after_hash_capture' 'Windows Core must retain the helper hash-binding negative regression.'
+        Assert-False ($script:AuthorityTests -contains $resolverHardeningName) 'Resolver hardening tests must remain in Windows Core full-suite discovery.'
+        Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|tenStageCompletionClaim' 'Normal authority gate must not require retired external dependencies.'
         Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'Normal authority gate must execute the exact retained Pester paths.'
