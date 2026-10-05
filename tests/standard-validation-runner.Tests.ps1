@@ -493,7 +493,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         function New-CoreBoundaryFixture {
             param(
                 [string] $Root,
-                [ValidateSet('pass', 'failed-child', 'timeout', 'source-mutate', 'zero-pester')]
+                [ValidateSet('pass', 'failed-child', 'timeout', 'source-mutate', 'zero-pester', 'slow-pester', 'slow-general')]
                 [string] $Behavior = 'pass',
                 [ValidateSet('general', 'pester')]
                 [string] $Kind = 'general'
@@ -516,6 +516,8 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                     break
                 }
                 'zero-pester' { "`$zeroReport = [ordered]@{schemaVersion=1;report='standard-core-pester-result-v1';total=0;passed=0;failed=0;skipped=0} | ConvertTo-Json -Compress`nWrite-Output `$zeroReport`n"; break }
+                'slow-pester' { "Start-Sleep -Seconds 5`n`$oneReport = [ordered]@{schemaVersion=1;report='standard-core-pester-result-v1';total=1;passed=1;failed=0;skipped=0} | ConvertTo-Json -Compress`nWrite-Output `$oneReport`n"; break }
+                'slow-general' { "Start-Sleep -Seconds 2`nWrite-Output 'fixture check passed'`n"; break }
                 default { "Write-Output 'fixture check passed'`n" }
             }
             Write-CoreBoundaryUtf8 -Path (Join-Path $checks 'run.ps1') -Text $checkBody
@@ -570,7 +572,8 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                 [string] $AuthorityRevision,
                 [int] $TimeoutSeconds = 30,
                 [switch] $PreexistingOutput,
-                [switch] $PreexistingLock
+                [switch] $PreexistingLock,
+                [switch] $ObserveLiveStderr
             )
             $artifactRoot = Join-Path $Fixture.Root ($CaseName + '-artifacts')
             [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
@@ -614,6 +617,15 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                 $started = $true
                 $processId = [int]$process.Id
                 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $firstStderrLine = $null
+                $liveStderrBeforeExit = $false
+                if ($ObserveLiveStderr) {
+                    $firstStderrTask = $process.StandardError.ReadLineAsync()
+                    $firstCompleted = [Threading.Tasks.Task]::WhenAny($firstStderrTask, [Threading.Tasks.Task]::Delay(20000)).GetAwaiter().GetResult()
+                    if ($firstCompleted -ne $firstStderrTask) { throw "Core boundary CLI '$CaseName' emitted no live stderr within 20 seconds." }
+                    $firstStderrLine = $firstStderrTask.GetAwaiter().GetResult()
+                    $liveStderrBeforeExit = -not $process.HasExited
+                }
                 $stderrTask = $process.StandardError.ReadToEndAsync()
                 if (-not $process.WaitForExit(60000)) {
                     try { $process.Kill() } catch { }
@@ -621,7 +633,9 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                     throw "Core boundary CLI '$CaseName' timed out; pid=$processId; exited=$($process.HasExited)."
                 }
                 $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
-                $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+                $stderr = if ($null -eq $firstStderrLine) { [string]$stderrTask.GetAwaiter().GetResult() } else {
+                    [string]$firstStderrLine + [Environment]::NewLine + [string]$stderrTask.GetAwaiter().GetResult()
+                }
                 $evidence = $null
                 if (-not [string]::IsNullOrWhiteSpace($stdout)) {
                     try { $evidence = $stdout | ConvertFrom-Json -ErrorAction Stop } catch { }
@@ -636,6 +650,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                 finally { $sha256.Dispose() }
                 return [pscustomobject]@{
                     ProcessId = $processId; ExitCode = [int]$process.ExitCode; Stdout = $stdout; Stderr = $stderr
+                    LiveStderrBeforeExit = $liveStderrBeforeExit
                     Evidence = $evidence; OutputPath = $outputPath; OutputAfter = $outputAfter; LockPath = $lockPath
                     LockSentinel = $lockSentinel; LockAfter = $lockAfter
                     StdoutSha256 = $stdoutSha256
@@ -649,6 +664,9 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         }
     }
 
+    # Scenario: Core checks cross the tracked snapshot and owned process boundary with both valid and invalid inputs.
+    # Purpose: Preserve the retained refusal paths, true exits and cleanup while the Core runner changes.
+    # InterT10: Preserve the exact test title used by the authority workflow contract.
     It 'keeps tracked identity, safe paths, private exclusion, child failure, timeout, source mutation and output reservation fail-closed' {
         $root = Join-Path $TestDrive ('s1b3-core-boundaries-' + [guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $root -Force)
@@ -726,6 +744,33 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
             Assert-Equal $zeroRun.ExitCode 20 'A Pester check reporting zero tests must return FAILED=20.'
             Assert-Equal $zeroRun.Evidence.checks[0].exitCode 0 'Zero-test rejection must preserve the child process exit code.'
             Assert-Equal $zeroRun.Evidence.checks[0].status 'failed' 'A zero-test report must fail the typed Pester check.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $root -PathType Container) { Remove-Item -LiteralPath $root -Recurse -Force }
+        }
+    }
+
+    # Scenario: The ordinary Core dispatcher executes a validated Pester check and then a general check.
+    # Purpose: Verify only Pester emits trusted outer stderr while the child is still running, and both typed checks retain normal evidence.
+    It 'InterT20_streams_supervisor_progress_only_for_core_pester_checks' {
+        $root = Join-Path $TestDrive ('s1b3-core-progress-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $root -Force)
+        try {
+            $pesterFixture = New-CoreBoundaryFixture -Root (Join-Path $root 'pester') -Behavior 'slow-pester' -Kind 'pester'
+            $pesterRun = Invoke-CoreBoundaryCli -Fixture $pesterFixture -CaseName 'live-pester' -ObserveLiveStderr
+            Assert-True $pesterRun.LiveStderrBeforeExit 'The Core Pester supervisor heartbeat must arrive before the check exits.'
+            Assert-Match $pesterRun.Stderr '^Core Pester supervisor utc=.+ elapsedSeconds=\d+ remainingSeconds=\d+ state=running' 'The trusted Core Pester dispatcher must opt into fixed live progress.'
+            Assert-Equal $pesterRun.ExitCode 0 'The valid typed Pester check must pass.'
+            Assert-Equal $pesterRun.Evidence.state 'PASS' 'A valid Core Pester check must retain PASS evidence.'
+            Assert-Equal $pesterRun.Evidence.checks[0].testCounts.total 1 'The Core parser must retain the one executed case.'
+            Assert-Equal $pesterRun.Evidence.checks[0].cleanedUp $true 'The Core Pester child must be cleaned.'
+
+            $generalFixture = New-CoreBoundaryFixture -Root (Join-Path $root 'general') -Behavior 'slow-general' -Kind 'general'
+            $generalRun = Invoke-CoreBoundaryCli -Fixture $generalFixture -CaseName 'quiet-general'
+            Assert-False ($generalRun.Stderr -match 'Core Pester supervisor') 'A general Core check must not emit the Pester heartbeat.'
+            Assert-Equal $generalRun.ExitCode 0 'The valid general check must pass.'
+            Assert-Equal $generalRun.Evidence.state 'PASS' 'A valid general Core check must retain PASS evidence.'
+            Assert-Equal $generalRun.Evidence.checks[0].cleanedUp $true 'The Core general child must be cleaned.'
         }
         finally {
             if (Test-Path -LiteralPath $root -PathType Container) { Remove-Item -LiteralPath $root -Recurse -Force }

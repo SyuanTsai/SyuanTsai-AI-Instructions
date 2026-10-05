@@ -844,7 +844,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/standard-core-progress.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/standard-entry-point-binding.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/standard-process-discovery.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
