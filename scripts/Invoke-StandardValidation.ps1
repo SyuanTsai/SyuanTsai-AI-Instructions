@@ -2814,6 +2814,17 @@ function Get-StandardValidationDescendantProcessIds {
 
     $relations = @()
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # Without a live root the snapshot cannot establish a birth-verified
+        # parent edge. Avoid a full process-table scan after short-lived checks;
+        # Job termination and retained owned-PID cleanup still run in the caller.
+        $rootProbe = $null
+        try {
+            $rootProbe = [Diagnostics.Process]::GetProcessById($RootProcessId)
+            if ($rootProbe.HasExited) { return @() }
+        }
+        catch [ArgumentException] { return @() }
+        catch { } # Uncertain liveness must retain the existing snapshot path.
+        finally { if ($null -ne $rootProbe) { $rootProbe.Dispose() } }
         try {
             $relations = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | ForEach-Object {
                     [pscustomobject]@{ ProcessId = [int]$_.ProcessId; ParentProcessId = [int]$_.ParentProcessId; CreationDate = $_.CreationDate }
