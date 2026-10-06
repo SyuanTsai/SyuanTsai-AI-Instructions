@@ -28,19 +28,43 @@ Describe 'SYP258 source validation result gate' {
             [IO.File]::WriteAllText($toolPath, 'fixture tool', (New-Object Text.UTF8Encoding($false)))
             $frozen = @([pscustomobject]@{ path = $toolPath; sha256 = Get-StandardValidationFileSha256 -Path $toolPath -Context 'fixture tool' })
             $receipts = @()
+            $receiptValues = @{}
+            $fixtureToolsRoot=Join-Path $TestDrive ([IO.Path]::GetFileName($root) + '-tools')
+            [void][IO.Directory]::CreateDirectory($fixtureToolsRoot)
             $policy = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
             foreach ($name in @('skill-validator','skill-tools','skillspector')) {
                 $receiptPath = Join-Path $root ($name + '.json')
-                $installRoot=Join-Path $root ($name + '-install')
+                $installRoot=Join-Path $fixtureToolsRoot ($name + '-install')
                 [void][IO.Directory]::CreateDirectory($installRoot)
                 [IO.File]::WriteAllText((Join-Path $installRoot 'dependency.bin'), ('fixture dependency ' + $name), (New-Object Text.UTF8Encoding($false)))
-                $installedClosureSha256=Get-StandardValidationDirectoryClosureSha256 -Root $installRoot -Context 'fixture installed closure'
-                $receiptValue=[pscustomobject]@{ toolName=$name; resolutionRunId=$runId; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$installedClosureSha256 }
+                $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+                $identityKind=switch($name) {'skill-validator' {'go-module-version-build-info-and-binary-hash'}; 'skill-tools' {'registry-integrity-and-locked-dependency-closure'}; 'skillspector' {'release-commit-asset-metadata-dependency-closure-and-executable'}}
+                $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
                 if ($name -ceq 'skill-tools') {
-                    $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $toolPath
-                    $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue $frozen[0].sha256
+                    $shim=Join-Path $installRoot 'skill-tools.cmd';$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot 'node.exe'
+                    [IO.File]::WriteAllText($shim, '@echo off', (New-Object Text.UTF8Encoding($false)))
+                    [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))
+                    [IO.File]::WriteAllText($node, 'fixture Node runtime', (New-Object Text.UTF8Encoding($false)))
+                    foreach ($filePath in @($shim,$payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package launcher'} }
+                    $receiptValue.executablePath=$shim;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $shim -Context 'fixture shim'
+                    $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $payload
+                    $receiptValue | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $payload -Context 'fixture payload')
+                    $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $node
+                    $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $node -Context 'fixture runtime')
+                    $receiptValue | Add-Member -NotePropertyName executableVerified -NotePropertyValue $true
+                    $launcher.kind='windows-cmd-shim';$launcher.shimPath=$shim;$launcher.shimSha256=$receiptValue.executableSha256;$launcher.payloadPath=$payload;$launcher.payloadSha256=$receiptValue.entryPointSha256;$launcher.runtimePath=$node;$launcher.runtimeSha256=$receiptValue.nodeSha256
                 }
+                else {
+                    $installedExecutable=Join-Path $installRoot ($name + '.exe')
+                    [IO.File]::WriteAllText($installedExecutable, ('fixture executable ' + $name), (New-Object Text.UTF8Encoding($false)))
+                    $receiptValue.executablePath=$installedExecutable;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $installedExecutable -Context 'fixture installed executable'
+                    $frozen += [pscustomobject]@{path=$installedExecutable;sha256=$receiptValue.executableSha256}
+                }
+                $installedClosureSha256=Get-StandardValidationDirectoryClosureSha256 -Root $installRoot -Context 'fixture installed closure'
+                $receiptValue.installedClosureSha256=$installedClosureSha256;$receiptValue.dependencyClosureSha256=$installedClosureSha256
+                $receiptValue.launcherDigestSha256=Get-StandardValidationLauncherDigest -Launcher $launcher -Context 'fixture unsigned launcher'
                 Write-SourceGateFixtureJson -Path $receiptPath -Value $receiptValue
+                $receiptValues[$name]=$receiptValue
                 $binding = [pscustomobject]@{ path=$receiptPath; sha256=Get-StandardValidationFileSha256 -Path $receiptPath -Context 'fixture receipt' }
                 $frozen += $binding; $receipts += $binding
             }
@@ -79,7 +103,12 @@ Describe 'SYP258 source validation result gate' {
                     foreach ($nativeSkill in $nativeSkills) {
                         $nativePath=Join-Path $runRoot ($eventId + '-' + $nativeSkill + '-native.json')
                         Write-SourceGateFixtureJson $nativePath ([pscustomobject]@{fixture=$true;tool=$dispatch.tool;skillId=$nativeSkill;status='passed'})
-                        $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$toolPath;commandSha256=$frozen[0].sha256;arguments=@('validate',$nativeSkill);exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'fixture native tool report'}
+                        $nativeName=if($dispatch.tool -ceq 'static-analyzer'){'skillspector'}else{$dispatch.tool}
+                        $nativeReceipt=$receiptValues[$nativeName]
+                        $nativeCommand=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodePath}else{$nativeReceipt.executablePath}
+                        $nativeCommandHash=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodeSha256}else{$nativeReceipt.executableSha256}
+                        $nativeArguments=if($nativeName -ceq 'skill-tools'){@($nativeReceipt.entryPointPath,'validate',$nativeSkill)}else{@('validate',$nativeSkill)}
+                        $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$nativeCommand;commandSha256=$nativeCommandHash;arguments=$nativeArguments;exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'fixture native tool report'}
                     }
                     $envelope | Add-Member -NotePropertyName nativeReports -NotePropertyValue $nativeReports
                 }
@@ -148,8 +177,8 @@ Describe 'SYP258 source validation result gate' {
             $binding.sha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'mutated case ledger'
         }
         function Set-SourceGateReceipt {
-            param($Report, [scriptblock] $Mutate)
-            $binding=$Report.sourceValidation.toolReceipts[0]
+            param($Report, [scriptblock] $Mutate, [int] $Index=0)
+            $binding=$Report.sourceValidation.toolReceipts[$Index]
             $receipt=Get-Content -Raw $binding.path | ConvertFrom-Json
             & $Mutate $receipt
             Write-SourceGateFixtureJson $binding.path $receipt
@@ -197,6 +226,7 @@ Describe 'SYP258 source validation result gate' {
         @{ Name='event_command_receipt_hash'; Change={param($r) $r.sourceValidation.events[0].commandSha256=$r.sourceValidation.toolReceipts[0].sha256} },
         @{ Name='retained_adapter_replacement'; Change={param($r) [IO.File]::WriteAllText($r.sourceValidation.adapterSnapshot.path, '{}')} },
         @{ Name='native_report_replacement'; Change={param($r) $raw=Get-Content -Raw $r.sourceValidation.events[1].outputPath | ConvertFrom-Json; $envelope=$raw.stdout | ConvertFrom-Json; [IO.File]::WriteAllText($envelope.nativeReports[0].path, '{"fixture":"replaced"}')} },
+        @{ Name='native_tools_payload_argument_substitution'; Change={param($r) Set-SourceGateEnvelope $r 2 {param($e) $e.nativeReports[0].arguments[0]='substituted-payload.js'}} },
         @{ Name='empty_inventory'; Change={param($r) $r.sourceValidation.activeSkills=@(); $r.candidate.activeSkills=@()} },
         @{ Name='duplicate_inventory'; Change={param($r) $r.sourceValidation.activeSkills=@('alpha','alpha'); $r.candidate.activeSkills=@('alpha','alpha')} },
         @{ Name='missing_package_event'; Change={param($r) $r.sourceValidation.events=@($r.sourceValidation.events | Select-Object -Skip 1)} },
@@ -243,6 +273,42 @@ Describe 'SYP258 source validation result gate' {
         $rejected=$false
         try { Invoke-SourceGateFixture -Report $report | Out-Null } catch { $rejected=$true }
         if (-not $rejected) { throw "Source required-context gate accepted '$Name'." }
+    }
+
+    # Scenario: A frozen unsigned resolver receipt omits its executable, has an unsupported schema or substitutes the package launcher payload.
+    # Purpose: V2 rejects malformed tool identities directly, before retained-adapter comparison can mask missing receipt validation.
+    It 'UnitT40_rejects_unsigned_receipt_<Name>' -TestCases @(
+        @{Name='missingExecutable';Index=0;Change={param($r) $r.PSObject.Properties.Remove('executablePath');$r.PSObject.Properties.Remove('executableSha256')}},
+        @{Name='malformedResolver';Index=0;Change={param($r) $r.schemaVersion=9}},
+        @{Name='launcherSubstitution';Index=1;Change={param($r) $r.launcher.payloadPath=$r.executablePath;$r.launcher.payloadSha256=$r.executableSha256;$r.launcherDigestSha256=Get-StandardValidationLauncherDigest -Launcher $r.launcher -Context 'substituted fixture launcher'}}
+    ) {
+        param([string]$Name,[int]$Index,[scriptblock]$Change)
+        $report=New-SourceGateFixture
+        Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId
+        Set-SourceGateReceipt -Report $report -Mutate $Change -Index $Index
+        $rejected=$false
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId } catch {$rejected=$true}
+        if(-not $rejected){throw "Unsigned resolver receipt '$Name' was accepted."}
+    }
+
+    # Scenario: Source tools complete, then the general or Pester repository check fails before it can publish a case sidecar.
+    # Purpose: V3 retains schema-valid source evidence on failure while requiring the complete case sidecar for source PASS.
+    It 'UnitT50_requires_case_sidecar_only_for_top_level_source_PASS_<Kind>' -TestCases @(
+        @{Kind='general';Expected=$true},@{Kind='pester';Expected=$true},@{Kind='pass';Expected=$false}
+    ) {
+        param([string]$Kind,[bool]$Expected)
+        $report=New-SourceGateFixture
+        $schemaPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $baselineJson=$report | ConvertTo-Json -Depth 100
+        if(-not(Test-Json -Json $baselineJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue)){throw 'Complete source fixture must be schema-valid before removing the case sidecar.'}
+        $report.sourceValidation.PSObject.Properties.Remove('pesterCaseInventory')
+        if($Kind -cne 'pass'){
+            $index=if($Kind -ceq 'general'){0}else{1}
+            $report.state='FAILED';$report.exitCode=20;$report.failure=[pscustomobject]@{state='FAILED';message='Fixture repository check failed before sidecar creation.'}
+            $report.checks[$index].status='failed';$report.checks[$index].exitCode=1
+        }
+        $valid=Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+        if($valid -ne $Expected){throw "Source '$Kind' without case sidecar has schema validity '$valid', expected '$Expected'."}
     }
 }
 

@@ -7218,7 +7218,9 @@ function Assert-StandardCoreFrozenFiles {
 # Source validation is an explicit use of the existing tool adapters and raw
 # process envelope. Ordinary Core does not load, resolve, or dispatch it.
 function Assert-StandardCoreSourceToolReceipts {
-    param([object[]] $Bindings, [object[]] $FrozenFiles, [string] $RunId)
+    param([object[]] $Bindings, [object[]] $FrozenFiles, [string] $RunId,
+        [string] $CandidateRoot = $script:StandardValidationRepositoryRoot,
+        [string] $ArtifactsRoot = $script:StandardValidationRepositoryRoot)
     $policy = (Get-StandardValidationJsonSnapshot -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/validation-toolchain.json') -Context 'source tool policy').value
     $receipts = @($Bindings)
     if ($receipts.Count -ne 3) { throw 'INVALID|Source validation requires exactly three frozen tool receipts.' }
@@ -7228,6 +7230,11 @@ function Assert-StandardCoreSourceToolReceipts {
         $matches = @($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
         if ($matches.Count -ne 1) { throw 'INVALID|Source tool receipt is not frozen.' }
         $receipt = (Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source resolver receipt').value
+        foreach ($property in @('schemaVersion','resolvedAtUtc','identityKind','installRoot','executablePath','executableSha256','launcher','launcherDigestSha256')) {
+            [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source resolver receipt')
+        }
+        if (-not (Test-StandardValidationIntegerRange -Value $receipt.schemaVersion -Minimum 1 -Maximum 1)) { throw 'INVALID|Source resolver receipt schema is unsupported.' }
+        [void](Assert-StandardValidationLifecycleTimestamp -Value $receipt.resolvedAtUtc -Context 'source resolver receipt')
         $name = [string]$receipt.toolName
         if ($name -cnotin @('skill-validator','skill-tools','skillspector') -or -not $receiptNames.Add($name) -or
             [string]$receipt.resolutionRunId -cne $RunId -or $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
@@ -7235,6 +7242,33 @@ function Assert-StandardCoreSourceToolReceipts {
             [string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion) -or [string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) {
             throw 'INVALID|Source resolver receipt has a wrong run, source, channel, or identity.'
         }
+        $identityKind = switch ($name) {
+            'skill-validator' { 'go-module-version-build-info-and-binary-hash' }
+            'skill-tools' { 'registry-integrity-and-locked-dependency-closure' }
+            'skillspector' { 'release-commit-asset-metadata-dependency-closure-and-executable' }
+        }
+        if ([string]$receipt.identityKind -cne $identityKind -or [string]$receipt.resolvedVersion -cnotmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'INVALID|Source resolver receipt does not identify the installed stable tool.'
+        }
+        if (-not [IO.Path]::IsPathRooted([string]$receipt.installRoot) -or -not [IO.Path]::IsPathRooted([string]$receipt.executablePath) -or
+            -not (Test-StandardValidationPathWithin -Path $receipt.executablePath -Root $receipt.installRoot)) { throw 'INVALID|Source resolver executable must be inside its absolute installed root.' }
+        Assert-StandardValidationSha256 -Value ([string]$receipt.executableSha256) -Context 'source resolver executable'
+        if ($name -ceq 'skill-tools') {
+            foreach ($property in @('nodePath','nodeSha256','entryPointPath','entryPointSha256')) {
+                [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source skill-tools receipt')
+            }
+            if ([string]$receipt.launcher.kind -cnotin @('windows-cmd-shim','unix-node-shim') -or
+                [string]$receipt.launcher.shimPath -cne [string]$receipt.executablePath -or [string]$receipt.launcher.shimSha256 -cne [string]$receipt.executableSha256 -or
+                [string]$receipt.launcher.payloadPath -cne [string]$receipt.entryPointPath -or [string]$receipt.launcher.payloadSha256 -cne [string]$receipt.entryPointSha256 -or
+                [string]$receipt.launcher.runtimePath -cne [string]$receipt.nodePath -or [string]$receipt.launcher.runtimeSha256 -cne [string]$receipt.nodeSha256) {
+                throw 'INVALID|Source skill-tools launcher does not bind its executable, payload and Node runtime.'
+            }
+        }
+        elseif ([string]$receipt.launcher.kind -cne 'direct-executable') { throw 'INVALID|Source native tool requires its direct executable launcher.' }
+        $launcherDigest = Assert-StandardValidationLauncherIntegrity -Launcher $receipt.launcher -ToolName $name -CommandPath $receipt.executablePath `
+            -InstallRoot $receipt.installRoot -CandidateRoot $CandidateRoot -ArtifactsRoot $ArtifactsRoot -Context 'source resolver receipt'
+        Assert-StandardValidationSha256 -Value ([string]$receipt.launcherDigestSha256) -Context 'source launcher digest'
+        if ($launcherDigest -cne [string]$receipt.launcherDigestSha256) { throw 'BLOCKED|Source resolver launcher digest differs.' }
         foreach ($pair in @(@('executablePath','executableSha256'),@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))) {
             if (Test-StandardValidationHasProperty -Object $receipt -Name $pair[0]) {
                 if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) {
@@ -7267,6 +7301,7 @@ function Assert-StandardCoreNativeReports {
             -not (Test-StandardValidationPathWithin -Path $native.path -Root $RunRoot) -or
             (Get-StandardValidationFileSha256 -Path $native.path -Context 'native tool report') -cne [string]$native.sha256 -or
             $native.arguments -isnot [array] -or @($native.arguments).Count -eq 0) { throw 'FAILED|Native tool report, command, exit or package binding changed.' }
+        if ($name -ceq 'skill-tools' -and [string]$native.arguments[0] -cne [string]$receipt.entryPointPath) { throw 'FAILED|Native skill-tools invocation does not bind its resolved payload.' }
     }
 }
 
@@ -7277,7 +7312,7 @@ function Invoke-StandardCoreSourceTools {
         [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath)
     Assert-StandardValidationExactPropertySet -Object $Spec -Expected @('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts') -Context 'source validation dispatch'
     Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-    Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+    Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
     $retainedAdapterPath = Join-Path $RunRoot 'source-core-adapter.json'
     [IO.File]::WriteAllBytes($retainedAdapterPath, [IO.File]::ReadAllBytes($AdapterPath))
     if ((Get-StandardValidationFileSha256 -Path $retainedAdapterPath -Context 'source retained adapter') -cne $AdapterSha256) { throw 'BLOCKED|Source adapter changed before retention.' }
@@ -7305,7 +7340,7 @@ function Invoke-StandardCoreSourceTools {
     $script:StandardValidationEvidenceArtifactLedger.Clear()
     foreach ($dispatch in $dispatches) {
         Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
         $parameters = @{
             CommandSpec=$commands[$dispatch.slot]; RunRoot=$RunRoot; ChildWorkingRoot=$children;
             StageId=$dispatch.stage; ToolId=$dispatch.tool; CandidateId=$candidateId;
@@ -7321,7 +7356,7 @@ function Invoke-StandardCoreSourceTools {
         $nativeSkills=if ($null -eq $dispatch.skill) {@($SkillSet.ids)} else {@([string]$dispatch.skill.id)}
         Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot
         Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
         if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
         if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
     }
@@ -7354,7 +7389,7 @@ function Assert-StandardCoreSourceCheckReport {
     Assert-StandardCoreFrozenFiles -Files @($source.frozenFiles)
     $expectedId = Get-StandardValidationTextSha256 -Value "$ExpectedSourceRevision`n$($source.contentSha256)`n$($Report.adapter.sha256)`n$($Report.runId)"
     if ([string]$source.candidateId -cne $expectedId) { throw 'FAILED|Source candidate ID does not bind candidate, adapter and run.' }
-    Assert-StandardCoreSourceToolReceipts -Bindings @($source.toolReceipts) -FrozenFiles @($source.frozenFiles) -RunId ([string]$Report.runId)
+    Assert-StandardCoreSourceToolReceipts -Bindings @($source.toolReceipts) -FrozenFiles @($source.frozenFiles) -RunId ([string]$Report.runId) -CandidateRoot $Report.artifacts.snapshotRoot -ArtifactsRoot $ArtifactsRoot
     if (-not (Test-StandardValidationPathWithin -Path $source.adapterSnapshot.path -Root $Report.artifacts.runRoot) -or
         [string]$source.adapterSnapshot.sha256 -cne [string]$Report.adapter.sha256 -or
         (Get-StandardValidationFileSha256 -Path $source.adapterSnapshot.path -Context 'source retained adapter') -cne [string]$Report.adapter.sha256) { throw 'FAILED|Source dispatch adapter bytes changed.' }
