@@ -1,3 +1,38 @@
+Describe 'SYP258 explicit source validation contract' {
+    # Scenario: A source repository explicitly opts into package tools and Static using the ordinary v2 runner.
+    # Purpose: V4/V6 keeps the additional source contract optional and ordinary Core free of implicit tools.
+    It 'UnitT10_declares_an_optional_source_slot_and_explicit_runner_switch' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $schema = Get-Content -Raw (Join-Path $root 'docs/standards/schemas/standard-core-adapter-v2.schema.json') | ConvertFrom-Json
+        $property = $schema.properties.PSObject.Properties['sourceValidation']
+        if ($null -eq $property) { throw 'The v2 adapter must expose its optional sourceValidation contract.' }
+        if (@($schema.required) -contains 'sourceValidation') { throw 'Ordinary Core must not require sourceValidation.' }
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/Invoke-StandardValidation.ps1'), [ref]$tokens, [ref]$errors)
+        if (@($errors).Count -gt 0) { throw 'The source runner must remain parseable.' }
+        if (@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'SourceValidation' }).Count -ne 1) { throw 'Source validation must require an explicit public runner switch.' }
+        $core = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-StandardCoreValidationRun' }, $true))
+        if ($core.Count -ne 1 -or @($core[0].Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'SourceValidation' }).Count -ne 1) { throw 'The v2 runner must receive the explicit source switch.' }
+    }
+
+    # Scenario: Source validation rechecks the tracked candidate before repository checks and again after check execution.
+    # Purpose: V2/V6 prevents mandatory development-content input from prompting or breaking immutable candidate revalidation.
+    It 'UnitT20_supplies_required_development_content_mode_to_every_candidate_inventory_call' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/Invoke-StandardValidation.ps1'), [ref]$tokens, [ref]$errors)
+        if (@($errors).Count -gt 0) { throw 'The source runner must remain parseable.' }
+        $core=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-StandardCoreValidationRun'}, $true))
+        if ($core.Count -ne 1) { throw 'The ordinary Core runner must remain explicit.' }
+        $calls=@($core[0].Body.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-StandardCoreTrackedInventory'}, $true))
+        if ($calls.Count -lt 2) { throw 'The runner must retain initial inventory and execution-time candidate revalidation.' }
+        foreach ($call in $calls) {
+            $modeArguments=@($call.CommandElements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'AllowDevelopmentContent' })
+            if ($modeArguments.Count -ne 1) { throw "Candidate inventory at line $($call.Extent.StartLineNumber) omitted mandatory -AllowDevelopmentContent." }
+        }
+    }
+}
+
 Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot

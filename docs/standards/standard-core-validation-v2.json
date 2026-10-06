@@ -49,5 +49,22 @@
     { "state": "INVALID", "exitCode": 30 },
     { "state": "CANCELLED", "exitCode": 40 }
   ],
+  "sourceValidation": {
+    "selection": "Explicit -SourceValidation with core v2 adapter.sourceValidation and RunId; absent extension rejects this mode; ordinary Core rejects extension and never dispatches source tools.",
+    "ordering": [
+      "setup-and-identity-freeze",
+      "package-adapter",
+      "skill-validator-and-skill-tools-per-discovered-active-package",
+      "complete-skillspector-static-no-llm",
+      "repository-general-and-pester",
+      "strict-source-report",
+      "three-required-context-projections"
+    ],
+    "setup": "Existing approved-source resolver acquires only during explicit setup, freezes three actual tool receipts and full installed closure; source execution never downloads or changes source.",
+    "binding": "One immutable candidate, authority, adapter, fresh run and raw process output; duplicate/empty/partial inventory, changed identity, invalid parse, failure, timeout or cleanup failure never passes.",
+    "semantic": "Source checks cover stages 1–5 only; no provider, consent, signer, key or release prerequisite. Existing explicit Semantic and full lifecycle retain their own contract.",
+    "requiredCheckGate": "Assert-StandardCoreSourceCheckReport; Core-only PASS never qualifies. Same-workflow projection only; no release/install/publish authorization.",
+    "releaseEligible": false
+  },
   "releaseEligible": false
 }

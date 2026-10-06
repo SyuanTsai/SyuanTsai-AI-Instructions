@@ -21,6 +21,7 @@ param(
     [string] $CancellationPath,
     [string] $TrustedToolRoot,
     [switch] $AllowDevelopmentContent,
+    [switch] $SourceValidation,
     [switch] $DevelopmentHarness,
     [switch] $SemanticTriggered,
     [switch] $SemanticConsent,
@@ -7200,6 +7201,269 @@ function Write-StandardCoreCapturedText {
     return Get-StandardValidationFileSha256 -Path $Path -Context 'core captured child stream'
 }
 
+function Assert-StandardCoreFrozenFiles {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Files)
+    if ($Files.Count -eq 0) { throw 'INVALID|Source validation requires frozen tool files.' }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $Files) {
+        Assert-StandardValidationExactPropertySet -Object $file -Expected @('path', 'sha256') -Context 'source frozen file'
+        $path = Assert-StandardValidationCanonicalRootPath -Path ([string]$file.path) -Context 'source frozen file'
+        if (-not [IO.Path]::IsPathRooted([string]$file.path) -or -not $seen.Add($path)) { throw 'INVALID|Duplicate or relative source frozen file.' }
+        Assert-StandardValidationRegularFile -Path $path -Context 'source frozen file'
+        Assert-StandardValidationSha256 -Value ([string]$file.sha256) -Context 'source frozen file'
+        if ((Get-StandardValidationFileSha256 -Path $path -Context 'source frozen file') -cne [string]$file.sha256) { throw "BLOCKED|Source frozen file changed: $path" }
+    }
+}
+
+# Source validation is an explicit use of the existing tool adapters and raw
+# process envelope. Ordinary Core does not load, resolve, or dispatch it.
+function Assert-StandardCoreSourceToolReceipts {
+    param([object[]] $Bindings, [object[]] $FrozenFiles, [string] $RunId)
+    $policy = (Get-StandardValidationJsonSnapshot -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/validation-toolchain.json') -Context 'source tool policy').value
+    $receipts = @($Bindings)
+    if ($receipts.Count -ne 3) { throw 'INVALID|Source validation requires exactly three frozen tool receipts.' }
+    $receiptNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($binding in $receipts) {
+        Assert-StandardValidationExactPropertySet -Object $binding -Expected @('path','sha256') -Context 'source tool receipt'
+        $matches = @($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
+        if ($matches.Count -ne 1) { throw 'INVALID|Source tool receipt is not frozen.' }
+        $receipt = (Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source resolver receipt').value
+        $name = [string]$receipt.toolName
+        if ($name -cnotin @('skill-validator','skill-tools','skillspector') -or -not $receiptNames.Add($name) -or
+            [string]$receipt.resolutionRunId -cne $RunId -or $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
+            [string]$receipt.channel -cne 'latest-stable' -or [string]$receipt.source -cne [string]$policy.tools.$name.source -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion) -or [string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) {
+            throw 'INVALID|Source resolver receipt has a wrong run, source, channel, or identity.'
+        }
+        foreach ($pair in @(@('executablePath','executableSha256'),@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))) {
+            if (Test-StandardValidationHasProperty -Object $receipt -Name $pair[0]) {
+                if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) {
+                    throw 'INVALID|Source resolver executable or payload is not frozen.'
+                }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$receipt.installRoot)) { throw 'INVALID|Source tool installed closure is required.' }
+        Assert-StandardValidationSha256 -Value ([string]$receipt.installedClosureSha256) -Context 'source installed closure'
+        $closure = Get-StandardValidationDirectoryClosureSha256 -Root ([string]$receipt.installRoot) -Context 'source installed closure'
+        if ($closure -cne [string]$receipt.installedClosureSha256) { throw 'BLOCKED|Source installed tool closure differs from the resolver receipt.' }
+    }
+}
+
+function Assert-StandardCoreNativeReports {
+    param($Envelope, [string] $ToolId, [string[]] $Skills, [object[]] $Receipts, [string] $RunRoot)
+    if ($ToolId -cnotin @('skill-validator','skill-tools','static-analyzer')) { return }
+    $name=if ($ToolId -ceq 'static-analyzer') {'skillspector'} else {$ToolId}
+    $receiptBindings=@($Receipts | Where-Object { [string](Get-StandardValidationJsonSnapshot -Path $_.path -Context 'native report tool receipt').value.toolName -ceq $name })
+    if ($receiptBindings.Count -ne 1) { throw 'FAILED|Native report tool receipt is missing.' }
+    $receipt=(Get-StandardValidationJsonSnapshot -Path $receiptBindings[0].path -Context 'native report tool receipt').value
+    $command=if ($name -ceq 'skill-tools') {[string]$receipt.nodePath} else {[string]$receipt.executablePath}
+    $commandHash=if ($name -ceq 'skill-tools') {[string]$receipt.nodeSha256} else {[string]$receipt.executableSha256}
+    $reports=Get-StandardValidationProperty -Object $Envelope -Name 'nativeReports'
+    if ($reports -isnot [array] -or @($reports).Count -ne $Skills.Count) { throw 'FAILED|Native tool report inventory is incomplete.' }
+    for ($index=0; $index -lt $Skills.Count; $index++) {
+        $native=$reports[$index]
+        if ([string]$native.skillId -cne $Skills[$index] -or [string]$native.command -cne $command -or [string]$native.commandSha256 -cne $commandHash -or
+            -not (Test-StandardValidationIntegerRange -Value $native.exitCode -Minimum 0 -Maximum 0) -or
+            -not (Test-StandardValidationPathWithin -Path $native.path -Root $RunRoot) -or
+            (Get-StandardValidationFileSha256 -Path $native.path -Context 'native tool report') -cne [string]$native.sha256 -or
+            $native.arguments -isnot [array] -or @($native.arguments).Count -eq 0) { throw 'FAILED|Native tool report, command, exit or package binding changed.' }
+    }
+}
+
+function Invoke-StandardCoreSourceTools {
+    param($Spec, $SkillSet, [string] $RunId, [string] $SourceRevision, [string] $AuthorityRevision,
+        [string] $SnapshotRoot, [string] $ContentSha256, [string] $RunRoot,
+        [string] $AdapterPath, [string] $AdapterSha256, [string] $ArtifactsRoot,
+        [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath)
+    Assert-StandardValidationExactPropertySet -Object $Spec -Expected @('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts') -Context 'source validation dispatch'
+    Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
+    Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+    $retainedAdapterPath = Join-Path $RunRoot 'source-core-adapter.json'
+    [IO.File]::WriteAllBytes($retainedAdapterPath, [IO.File]::ReadAllBytes($AdapterPath))
+    if ((Get-StandardValidationFileSha256 -Path $retainedAdapterPath -Context 'source retained adapter') -cne $AdapterSha256) { throw 'BLOCKED|Source adapter changed before retention.' }
+    $candidateId = Get-StandardValidationTextSha256 -Value "$SourceRevision`n$ContentSha256`n$AdapterSha256`n$RunId"
+    $commands = @{}
+    foreach ($slot in @('packageAdapter','skillValidator','skillTools','staticAnalyzer')) {
+        $commands[$slot] = Assert-StandardValidationCommandSpec -Spec $Spec.$slot -Context "source $slot" -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -TrustedToolRoot $TrustedToolRoot -TrustAnchorRoot $TrustedToolRoot -ExpectedToolName $slot -DevelopmentHarness $true
+        $command = $commands[$slot]
+        if (@($Spec.frozenFiles | Where-Object { [string]$_.path -ceq [string]$command.command -and [string]$_.sha256 -ceq [string]$command.commandSha256 }).Count -ne 1) { throw 'INVALID|Source dispatch command is not frozen.' }
+        foreach ($argument in $command.arguments) {
+            if ([IO.Path]::IsPathRooted([string]$argument) -and @($Spec.frozenFiles | Where-Object { [string]$_.path -ceq [string]$argument }).Count -ne 1) { throw 'INVALID|Source dispatch absolute argument is not a frozen file.' }
+        }
+    }
+    $dispatches = @([pscustomobject]@{slot='packageAdapter';tool='package-adapter';skill=$null;stage='package-validation'})
+    foreach ($skill in $SkillSet.records) {
+        $dispatches += [pscustomobject]@{slot='skillValidator';tool='skill-validator';skill=$skill;stage='package-validation'}
+        $dispatches += [pscustomobject]@{slot='skillTools';tool='skill-tools';skill=$skill;stage='package-validation'}
+    }
+    $dispatches += [pscustomobject]@{slot='staticAnalyzer';tool='static-analyzer';skill=$null;stage='skillspector-static'}
+    $events = New-Object 'System.Collections.Generic.List[object]'
+    $children = Join-Path $RunRoot 'source-children'
+    [void][IO.Directory]::CreateDirectory($children)
+    $script:StandardValidationAuthorityEvidence = $null
+    $script:StandardValidationLaunchBinding = $null
+    $script:StandardValidationEvidenceArtifactLedger.Clear()
+    foreach ($dispatch in $dispatches) {
+        Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
+        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+        $parameters = @{
+            CommandSpec=$commands[$dispatch.slot]; RunRoot=$RunRoot; ChildWorkingRoot=$children;
+            StageId=$dispatch.stage; ToolId=$dispatch.tool; CandidateId=$candidateId;
+            SnapshotRoot=$SnapshotRoot; ExpectedSnapshotContentSha256=$ContentSha256;
+            SkillsRoot=$SkillSet.root; ActiveSkillsText=($SkillSet.ids -join ';');
+            OriginalCandidateRoot=$SnapshotRoot; ExpectedCandidateContentSha256=$ContentSha256;
+            AdapterPath=$AdapterPath; ExpectedAdapterSha256=$AdapterSha256;
+            TimeoutSeconds=$TimeoutSeconds; CancellationPath=$CancellationPath; ExpectedActiveSkills=$SkillSet.ids
+        }
+        if ($null -ne $dispatch.skill) { $parameters.SkillId=$dispatch.skill.id; $parameters.SkillInventorySha256=$dispatch.skill.inventorySha256 }
+        $result = Invoke-StandardValidationCommandAndRecord @parameters
+        $events.Add($result.event)
+        $nativeSkills=if ($null -eq $dispatch.skill) {@($SkillSet.ids)} else {@([string]$dispatch.skill.id)}
+        Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot
+        Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
+        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId
+        if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
+        if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
+    }
+    return [pscustomobject][ordered]@{
+        status='passed'; runId=$RunId; candidateId=$candidateId; sourceRevision=$SourceRevision;
+        contentSha256=$ContentSha256; authorityRevision=$AuthorityRevision; activeSkills=@($SkillSet.ids);
+        skillsRoot=$SkillSet.relative; toolReceipts=@($Spec.toolReceipts); frozenFiles=@($Spec.frozenFiles); events=@($events.ToArray()); adapterSnapshot=[pscustomobject]@{path=$retainedAdapterPath;sha256=$AdapterSha256}
+    }
+}
+
+function Assert-StandardCoreSourceCheckReport {
+    param($Report, [string] $ExpectedSourceRevision, [string] $ExpectedBaseRevision,
+        [string] $ExpectedAuthorityRevision, [string] $ExpectedEventName,
+        [string] $ArtifactsRoot, [string] $OutputPath, [int] $ProcessExitCode)
+    if ($ProcessExitCode -ne 0 -or -not (Test-StandardValidationIntegerRange -Value $Report.schemaVersion -Minimum 2 -Maximum 2) -or [string]$Report.evidence -cne 'standard-core-validation-evidence-v2' -or
+        [string]$Report.state -cne 'PASS' -or -not (Test-StandardValidationIntegerRange -Value $Report.exitCode -Minimum 0 -Maximum 0) -or $Report.releaseEligible -isnot [bool] -or $Report.releaseEligible -or
+        [string]$Report.contentMode -cne 'immutable-source' -or [string]$Report.candidate.contentMode -cne 'immutable-source' -or
+        [string]$Report.authority.contentMode -cne 'source' -or [string]$Report.candidate.sourceRevision -cne $ExpectedSourceRevision -or
+        [string]$Report.candidate.baseRevision -cne $ExpectedBaseRevision -or [string]$Report.authority.revision -cne $ExpectedAuthorityRevision -or
+        [string]$Report.candidate.eventName -cne $ExpectedEventName -or [string]$Report.artifacts.runId -cne [string]$Report.runId -or
+        [string]$Report.artifacts.root -cne $ArtifactsRoot -or [string]$Report.artifacts.outputPath -cne $OutputPath) { throw 'FAILED|Source report lacks an exact passing Core binding.' }
+    $source = Get-StandardValidationProperty -Object $Report -Name 'sourceValidation'
+    if ($null -eq $source -or [string]$source.status -cne 'passed' -or [string]$source.runId -cne [string]$Report.runId -or
+        [string]$source.sourceRevision -cne $ExpectedSourceRevision -or [string]$source.authorityRevision -cne $ExpectedAuthorityRevision -or
+        [string]$source.contentSha256 -cne [string]$Report.candidate.contentSha256 -or
+        (@($source.activeSkills) -join ';') -cne (@($Report.candidate.activeSkills) -join ';') -or @($source.activeSkills).Count -eq 0 -or
+        @($source.activeSkills | Select-Object -Unique).Count -ne @($source.activeSkills).Count) { throw 'FAILED|Core-only or mismatched source validation cannot satisfy source checks.' }
+    $snapshotInventory = Get-StandardValidationInventory -Root $Report.artifacts.snapshotRoot -Context 'source report candidate snapshot'
+    if ((Get-StandardValidationInventorySha256 -Inventory $snapshotInventory) -cne [string]$Report.candidate.contentSha256) { throw 'FAILED|Source report candidate snapshot content differs.' }
+    Assert-StandardCoreFrozenFiles -Files @($source.frozenFiles)
+    $expectedId = Get-StandardValidationTextSha256 -Value "$ExpectedSourceRevision`n$($source.contentSha256)`n$($Report.adapter.sha256)`n$($Report.runId)"
+    if ([string]$source.candidateId -cne $expectedId) { throw 'FAILED|Source candidate ID does not bind candidate, adapter and run.' }
+    Assert-StandardCoreSourceToolReceipts -Bindings @($source.toolReceipts) -FrozenFiles @($source.frozenFiles) -RunId ([string]$Report.runId)
+    if (-not (Test-StandardValidationPathWithin -Path $source.adapterSnapshot.path -Root $Report.artifacts.runRoot) -or
+        [string]$source.adapterSnapshot.sha256 -cne [string]$Report.adapter.sha256 -or
+        (Get-StandardValidationFileSha256 -Path $source.adapterSnapshot.path -Context 'source retained adapter') -cne [string]$Report.adapter.sha256) { throw 'FAILED|Source dispatch adapter bytes changed.' }
+    $adapter=(Get-StandardValidationJsonSnapshot -Path $source.adapterSnapshot.path -Context 'source retained adapter').value
+    if ([string]$adapter.adapter -cne 'standard-core-adapter-v2' -or $adapter.schemaVersion -ne 2 -or
+        [string]$adapter.skillsRoot -cne [string]$source.skillsRoot -or (@($adapter.activeSkills) -join ';') -cne (@($source.activeSkills) -join ';')) { throw 'FAILED|Source retained adapter identity differs.' }
+    foreach ($field in @('toolReceipts','frozenFiles')) {
+        if ((ConvertTo-Json -InputObject $adapter.sourceValidation.$field -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $source.$field -Depth 20 -Compress)) { throw 'FAILED|Source tool identity differs from the dispatched adapter.' }
+    }
+    $expected = @('package-validation|package-adapter|')
+    foreach ($skill in $source.activeSkills) { $expected += "package-validation|skill-validator|$skill"; $expected += "package-validation|skill-tools|$skill" }
+    $expected += 'skillspector-static|static-analyzer|'
+    if (@($source.events).Count -ne $expected.Count) { throw 'FAILED|Source process inventory is incomplete.' }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    for ($index=0; $index -lt $expected.Count; $index++) {
+        $event = @($source.events)[$index]
+        $slot=switch ([string]$event.toolId) { 'package-adapter' {'packageAdapter'}; 'skill-validator' {'skillValidator'}; 'skill-tools' {'skillTools'}; 'static-analyzer' {'staticAnalyzer'}; default {throw 'FAILED|Source tool role is unknown.'} }
+        $command=Assert-StandardValidationCommandSpec -Spec $adapter.sourceValidation.$slot -Context "source report $slot" -CandidateRoot $Report.artifacts.snapshotRoot -ArtifactsRoot $ArtifactsRoot -TrustedToolRoot (Split-Path -Parent $adapter.sourceValidation.$slot.command) -TrustAnchorRoot (Split-Path -Parent $adapter.sourceValidation.$slot.command) -ExpectedToolName $slot -DevelopmentHarness $true
+        if (-not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report) -or
+            [string]$event.commandSha256 -cne [string]$command.commandSha256 -or
+            @($source.frozenFiles | Where-Object { [string]$_.path -ceq [string]$command.command -and [string]$_.sha256 -ceq [string]$event.commandSha256 }).Count -ne 1) { throw 'FAILED|Source raw event or dispatched command identity does not bind.' }
+        if ("$($event.stageId)|$($event.toolId)|$($event.skillId)" -cne $expected[$index] -or -not $seen.Add([string]$event.eventId) -or
+            [string]$event.candidateId -cne [string]$source.candidateId -or [string]$event.status -cne 'passed' -or $event.exitCode -ne 0 -or
+            $event.cleanedUp -isnot [bool] -or -not $event.cleanedUp -or -not (Test-StandardValidationPathWithin -Path $event.outputPath -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source process event has a wrong identity, order, result, or cleanup.' }
+        $raw = (Get-StandardValidationJsonSnapshot -Path $event.outputPath -Context 'source raw event').value
+        foreach ($field in @('eventId','stageId','toolId','skillId','candidateId')) { if ([string]$raw.$field -cne [string]$event.$field) { throw 'FAILED|Source raw event binding changed.' } }
+        if ($raw.process.exitCode -ne 0 -or [string]$raw.process.status -cne 'passed' -or $raw.process.cleanedUp -isnot [bool] -or -not $raw.process.cleanedUp -or
+            (Get-StandardValidationOutputHash -Stdout ([string]$raw.stdout) -Stderr ([string]$raw.stderr)) -cne [string]$event.outputSha256) { throw 'FAILED|Source raw output or process result changed.' }
+        $arguments = @{Stdout=[string]$raw.stdout;ProcessResult=$raw.process;CandidateId=[string]$source.candidateId;Context='source report raw envelope';ExpectedActiveSkills=@($source.activeSkills)}
+        if (-not [string]::IsNullOrWhiteSpace([string]$event.skillId)) {
+            $arguments.SkillId=[string]$event.skillId
+            Assert-StandardValidationSafeRelativePath -Value ([string]$source.skillsRoot) -Context 'source report skillsRoot'
+            $root = Join-Path $Report.artifacts.snapshotRoot ($source.skillsRoot + '/' + $event.skillId)
+            $inventory = Get-StandardValidationInventory -Root $root -Context 'source report skill inventory'
+            $arguments.SkillInventorySha256=Get-StandardValidationInventorySha256 -Inventory $inventory
+        }
+        $envelope = Assert-StandardValidationToolEnvelope @arguments
+        $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
+        Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot
+        if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
+            ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
+    }
+    if (@($Report.checks).Count -ne 2 -or $Report.checks[0].kind -cne 'general' -or $Report.checks[1].kind -cne 'pester') { throw 'FAILED|Source report requires the complete repository checks.' }
+    for ($checkIndex=0; $checkIndex -lt @($Report.checks).Count; $checkIndex++) {
+        $check=$Report.checks[$checkIndex]
+        $declared=@($adapter.checks)[$checkIndex]
+        if ([string]$check.id -cne [string]$declared.id -or [string]$check.kind -cne [string]$declared.kind -or
+            [string]$check.executableSha256 -cne [string]$declared.executableSha256 -or
+            [string]$check.argumentsSha256 -cne (Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject ([string[]]$declared.arguments) -Compress))) { throw 'FAILED|Source repository dispatch differs from the retained adapter.' }
+        if ($check.status -cne 'passed' -or $check.exitCode -ne 0 -or $check.cleanedUp -isnot [bool] -or -not $check.cleanedUp) { throw 'FAILED|Source repository check did not pass cleanly.' }
+        foreach ($stream in @('stdout','stderr')) {
+            $path=[string]$check.($stream+'Path')
+            if (-not (Test-StandardValidationPathWithin -Path $path -Root $Report.artifacts.runRoot) -or
+                (Get-StandardValidationFileSha256 -Path $path -Context 'source repository output') -cne [string]$check.($stream+'Sha256')) { throw 'FAILED|Source repository output changed.' }
+        }
+    }
+    $counts=$Report.checks[1].testCounts
+    foreach ($field in @('total','passed','failed','skipped')) { if (-not (Test-StandardValidationIntegerRange -Value $counts.$field -Minimum 0 -Maximum ([decimal][int]::MaxValue))) { throw 'FAILED|Source Pester counts are invalid.' } }
+    if ($counts.total -le 0 -or $counts.passed -le 0 -or $counts.failed -ne 0 -or $counts.skipped -ne 0 -or $counts.passed -ne $counts.total) { throw 'FAILED|Source Pester inventory did not fully pass.' }
+    $pesterLines=@(([IO.File]::ReadAllText($Report.checks[1].stdoutPath) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $rawCounts=$pesterLines[-1] | ConvertFrom-Json -ErrorAction Stop
+    Assert-StandardValidationExactPropertySet -Object $rawCounts -Expected @('schemaVersion','report','total','passed','failed','skipped') -Context 'source Pester raw counts'
+    if ($rawCounts.schemaVersion -ne 1 -or [string]$rawCounts.report -cne 'standard-core-pester-result-v1') { throw 'FAILED|Source Pester raw result is invalid.' }
+    foreach ($field in @('total','passed','failed','skipped')) { if (-not (Test-StandardValidationIntegerRange -Value $rawCounts.$field -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or $rawCounts.$field -cne $counts.$field) { throw 'FAILED|Source Pester raw counts differ from the report.' } }
+    $binding=$source.pesterCaseInventory
+    if (-not (Test-StandardValidationPathWithin -Path $binding.path -Root $Report.artifacts.runRoot) -or
+        (Get-StandardValidationFileSha256 -Path $binding.path -Context 'source Pester cases') -cne [string]$binding.sha256) { throw 'FAILED|Source Pester case inventory changed.' }
+    $cases=(Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source Pester cases').value
+    if ($cases.schemaVersion -ne 1 -or [string]$cases.report -cne 'standard-core-pester-case-inventory-v1' -or
+        [string]$cases.coreRunId -cne [string]$Report.runId -or [string]$cases.runScope -cne 'complete-unfiltered-tests-tree' -or
+        [string]$cases.terminalStatus -cne 'complete' -or $cases.complete -isnot [bool] -or -not $cases.complete -or
+        @($cases.errors).Count -ne 0 -or $cases.failedBlockCount -ne 0 -or $cases.failedContainerCount -ne 0 -or
+        $cases.caseDiscoveryCount -cne $counts.total -or $cases.caseExecutionCount -cne $counts.total -or
+        @($cases.discoveryCases).Count -ne $counts.total -or @($cases.executionCases).Count -ne $counts.total -or
+        [string]$cases.candidateSnapshotIdentity.coreRunId -cne [string]$Report.runId -or
+        [string]$cases.candidateSnapshotIdentity.root -cne [string]$Report.artifacts.snapshotRoot) { throw 'FAILED|Source Pester discovery, blocks or case inventory did not pass.' }
+    # Preserve the existing Pester sidecar representation: its snapshot digest
+    # is the sorted path/hash JSON digest, distinct from the Core tree digest.
+    $pesterInventory = @($snapshotInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{path=[string]$_.path;sha256=[string]$_.sha256} })
+    $pesterSnapshotHash = Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $pesterInventory -Depth 3 -Compress)
+    if ([string]$cases.candidateSnapshotSha256 -cne $pesterSnapshotHash -or [string]$cases.shardIdentity -cne 'core-full' -or
+        $cases.shardUnion.complete -isnot [bool] -or -not $cases.shardUnion.complete -or
+        $cases.shardUnion.discoveryCount -cne $counts.total -or $cases.shardUnion.executionUnionCount -cne $counts.total) { throw 'FAILED|Source Pester snapshot or full case union differs.' }
+    foreach ($field in @('Failed','Skipped','Inconclusive','NotRun')) {
+        if (-not (Test-StandardValidationIntegerRange -Value $cases.reportedCounts.$field -Minimum 0 -Maximum 0)) { throw 'FAILED|Source Pester reports unpassed cases.' }
+    }
+    if ($cases.reportedCounts.Passed -cne $counts.passed) { throw 'FAILED|Source Pester reported case counts differ.' }
+    $identitySets = @()
+    foreach ($collection in @('discoveryCases','executionCases')) {
+        $identities = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($case in $cases.$collection) {
+            Assert-StandardValidationSafeRelativePath -Value ([string]$case.sourceFile) -Context 'source Pester case file'
+            $tuple = ConvertTo-Json -InputObject ([object[]]@(([string]$case.sourceFile).ToUpperInvariant(), [int]$case.sourceStartOffset, [string]$case.expandedPath)) -Depth 3 -Compress
+            $identity = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple))
+            if ([string]$case.identity -cne $identity -or -not $identities.Add($identity) -or [string]$case.result -cne 'Passed' -or
+                -not [string]::IsNullOrWhiteSpace([string]$case.identityError) -or [int]$case.sourceStartOffset -lt 0 -or
+                @($snapshotInventory | Where-Object { [string]$_.path -ceq ('tests/' + $case.sourceFile) }).Count -ne 1) { throw 'FAILED|Source Pester case result or identity is invalid.' }
+        }
+        $identitySets += ,@($identities | Sort-Object)
+    }
+    if (($identitySets[0] -join ';') -cne ($identitySets[1] -join ';') -or
+        (@($cases.shardCaseIdentities | Sort-Object) -join ';') -cne ($identitySets[0] -join ';')) { throw 'FAILED|Source Pester case identity union is incomplete.' }
+    $testFiles=@($snapshotInventory | Where-Object { [string]$_.path -clike 'tests/*.Tests.ps1' } | ForEach-Object { ([string]$_.path).Substring(6) } | Sort-Object)
+    foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) {
+        if (@($testFiles).Count -eq 0 -or (@($cases.$field | Sort-Object) -join ';') -cne ($testFiles -join ';')) { throw 'FAILED|Source Pester complete test-file inventory differs.' }
+    }
+    return $true
+}
+
 function New-StandardCoreEvidence {
     param(
         [Parameter(Mandatory = $true)][string] $RunId,
@@ -7211,10 +7475,11 @@ function New-StandardCoreEvidence {
         $Adapter,
         [AllowEmptyCollection()][object[]] $Checks = @(),
         $Artifacts,
+        $SourceEvidence,
         [string] $FailureMessage
     )
 
-    return [pscustomobject][ordered]@{
+    $result = [pscustomobject][ordered]@{
         schemaVersion = 2
         evidence = 'standard-core-validation-evidence-v2'
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -7230,6 +7495,8 @@ function New-StandardCoreEvidence {
         artifacts = $Artifacts
         failure = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { $null } else { [pscustomobject][ordered]@{ state = $State; message = $FailureMessage } }
     }
+    if ($null -ne $SourceEvidence) { $result | Add-Member -NotePropertyName sourceValidation -NotePropertyValue $SourceEvidence }
+    return $result
 }
 
 function Invoke-StandardCoreValidationRun {
@@ -7247,10 +7514,14 @@ function Invoke-StandardCoreValidationRun {
         [string] $CancellationPath,
         [string] $TrustedToolRoot,
         [bool] $AllowDevelopmentContent = $false,
+        [bool] $SourceValidation = $false,
+        [string] $ValidationRunId,
         [string] $CoreModeConflict
     )
 
     $runId = [guid]::NewGuid().ToString('N')
+    if ($SourceValidation -and $ValidationRunId -cmatch '^[a-f0-9]{32}$') { $runId = $ValidationRunId }
+    $sourceEvidence = $null
     $state = 'FAILED'
     $failureMessage = 'Core validation did not complete.'
     $candidateEvidence = $null
@@ -7283,6 +7554,7 @@ function Invoke-StandardCoreValidationRun {
     $finalWritten = $false
     try {
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
+        if ($SourceValidation -and ($AllowDevelopmentContent -or $ValidationRunId -cnotmatch '^[a-f0-9]{32}$')) { throw 'INVALID|Source validation requires immutable content and its frozen setup RunId.' }
         if ($EventName -cnotin @('local', 'pre-push', 'pull_request', 'push', 'workflow_dispatch')) {
             throw 'INVALID|EventName must be one of local, pre-push, pull_request, push, or workflow_dispatch.'
         }
@@ -7359,7 +7631,7 @@ function Invoke-StandardCoreValidationRun {
             throw 'INVALID|Ordinary core mode accepts only standard-core-adapter-v2; v1 adapters are legacy and require an explicit -DevelopmentHarness or -CompleteLifecycle mode.'
         }
         if (-not [string]::IsNullOrWhiteSpace($CoreModeConflict)) { throw "INVALID|$CoreModeConflict" }
-        Assert-StandardValidationExactPropertySet -Object $adapterValue -Expected @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks') -Context 'standard core adapter v2'
+        Assert-StandardValidationExactPropertySet -Object $adapterValue -Expected $(if ($SourceValidation) { @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks', 'sourceValidation') } else { @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks') }) -Context 'standard core adapter v2'
         if ($null -eq $AuthorityRevision -or [string]::IsNullOrWhiteSpace($AuthorityRevision)) { throw 'INVALID|AuthorityRevision is required for core validation.' }
         Assert-StandardValidationRevision -Value $AuthorityRevision -Context 'AuthorityRevision'
         $authorityRoot = [string]$script:StandardValidationRepositoryRoot
@@ -7408,7 +7680,7 @@ function Invoke-StandardCoreValidationRun {
         Assert-StandardValidationOutsideRoot -Path $trustedRootFull -Root $candidateRootFull -Context 'TrustedToolRoot'
         Assert-StandardValidationOutsideRoot -Path $trustedRootFull -Root $artifactRootFull -Context 'TrustedToolRoot'
         Assert-StandardValidationOutsideRoot -Path $trustedRootFull -Root $authorityRoot -Context 'TrustedToolRoot'
-        Assert-StandardValidationExactPropertySet -Object $adapterValue -Expected @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks') -Context 'standard core adapter v2'
+        Assert-StandardValidationExactPropertySet -Object $adapterValue -Expected $(if ($SourceValidation) { @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks', 'sourceValidation') } else { @('schemaVersion', 'adapter', 'skillsRoot', 'activeSkills', 'checks') }) -Context 'standard core adapter v2'
         $skillsRootRelative = [string]$adapterValue.skillsRoot
         Assert-StandardValidationSafeRelativePath -Value $skillsRootRelative -Context 'core adapter skillsRoot'
         if ($adapterValue.activeSkills -isnot [array] -or @($adapterValue.activeSkills).Count -eq 0) { throw 'INVALID|core adapter activeSkills must be a non-empty array.' }
@@ -7483,6 +7755,16 @@ function Invoke-StandardCoreValidationRun {
 
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
             throw 'CANCELLED|Core validation was cancelled before child execution.'
+        }
+        if ($SourceValidation) {
+            if ($authorityContentMode -cne 'source') { throw 'BLOCKED|Source validation requires immutable authority bytes.' }
+            $sourceEvidence = Invoke-StandardCoreSourceTools -Spec $adapterValue.sourceValidation -SkillSet $skillSet `
+                -RunId $runId -SourceRevision $SourceRevision -AuthorityRevision $AuthorityRevision `
+                -SnapshotRoot $snapshotRoot -ContentSha256 $candidateSnapshot.contentSha256 -RunRoot $runRoot `
+                -AdapterPath $adapterFull -AdapterSha256 $adapterSha256 -ArtifactsRoot $artifactRootFull `
+                -TrustedToolRoot $trustedRootFull -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath
+            $candidateAfter = Get-StandardCoreTrackedInventory -CandidateRoot $candidateRootFull -ProcessWorkingRoot $runRoot -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -SourceRepository $SourceRepository -AllowDevelopmentContent $false
+            if ($candidateAfter.contentSha256 -cne $candidateSnapshot.contentSha256) { throw 'BLOCKED|Candidate changed during source tool dispatch.' }
         }
         for ($checkIndex = 0; $checkIndex -lt $adapterChecks.Count; $checkIndex++) {
             $check = $adapterChecks[$checkIndex]
@@ -7560,6 +7842,13 @@ function Invoke-StandardCoreValidationRun {
                 throw "BLOCKED|Core check '$($check.id)' executable changed while a core check ran."
             }
         }
+        if ($SourceValidation) {
+            Assert-StandardCoreFrozenFiles -Files @($adapterValue.sourceValidation.frozenFiles)
+            $casePath = Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
+            $sourceEvidence | Add-Member -NotePropertyName pesterCaseInventory -NotePropertyValue ([pscustomobject]@{path=$casePath;sha256=(Get-StandardValidationFileSha256 -Path $casePath -Context 'source Pester inventory')})
+            $proposed = New-StandardCoreEvidence -RunId $runId -State PASS -ExitCode 0 -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence
+            [void](Assert-StandardCoreSourceCheckReport -Report $proposed -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -ExpectedAuthorityRevision $AuthorityRevision -ExpectedEventName $EventName -ArtifactsRoot $artifactRootFull -OutputPath $outputFull -ProcessExitCode 0)
+        }
         $state = 'PASS'
         $failureMessage = ''
     }
@@ -7615,6 +7904,7 @@ function Invoke-StandardCoreValidationRun {
             -Adapter $adapterEvidence `
             -Checks @($checkEvidence.ToArray()) `
             -Artifacts $artifactEvidence `
+            -SourceEvidence $sourceEvidence `
             -FailureMessage $failureMessage
         if ($null -ne $outputReservationStream) {
             try {
@@ -7626,7 +7916,7 @@ function Invoke-StandardCoreValidationRun {
                 if ($state -eq 'PASS') {
                     $state = 'FAILED'
                     $failureMessage = "Core evidence write failed: $($_.Exception.Message)"
-                    $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -FailureMessage $failureMessage
+                    $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence -FailureMessage $failureMessage
                 }
             }
             try { $outputReservationStream.Dispose() } catch { }
@@ -7659,7 +7949,7 @@ function Invoke-StandardCoreValidationRun {
         }
     }
     if ($state -ne [string]$finalEvidence.state) {
-        $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -FailureMessage $failureMessage
+        $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence -FailureMessage $failureMessage
     }
     return $finalEvidence
 }
@@ -7686,6 +7976,7 @@ function Invoke-StandardValidationRun {
         [string] $CancellationPath,
         [string] $TrustedToolRoot,
         [bool] $AllowDevelopmentContent = $false,
+        [bool] $SourceValidation = $false,
         [bool] $DevelopmentHarness = $false,
         [bool] $SemanticTriggered = $false,
         [bool] $SemanticConsent = $false,
@@ -7718,7 +8009,7 @@ function Invoke-StandardValidationRun {
                 @('SupervisorLaunchBindingPath', $SupervisorLaunchBindingPath),
                 @('AuthorityArchivePath', $AuthorityArchivePath),
                 @('AuthoritySnapshotEvidencePath', $AuthoritySnapshotEvidencePath),
-                @('RunId', $ValidationRunId),
+                @('RunId', $(if ($SourceValidation) { $null } else { $ValidationRunId })),
                 @('SemanticProvider', $SemanticProvider),
                 @('SemanticPurpose', $SemanticPurpose),
                 @('SemanticScope', $SemanticScope),
@@ -7752,6 +8043,7 @@ function Invoke-StandardValidationRun {
             -CancellationPath $CancellationPath `
             -TrustedToolRoot $TrustedToolRoot `
             -AllowDevelopmentContent $AllowDevelopmentContent `
+            -SourceValidation $SourceValidation -ValidationRunId $ValidationRunId `
             -CoreModeConflict $(if ($coreConflicts.Count -gt 0) { 'Ordinary core mode rejects legacy options: ' + (($coreConflicts | Select-Object -Unique) -join ', ') + '.' } else { $null })
     }
     if (Test-Path -LiteralPath $AdapterPath -PathType Leaf) {
@@ -7781,6 +8073,7 @@ function Invoke-StandardValidationRun {
         }
     }
 
+    if ($SourceValidation) { throw 'INVALID|Source validation cannot be combined with advanced lifecycle or development harness.' }
     $script:StandardValidationAuthorityEvidence = $null
     $script:StandardValidationLaunchBinding = $null
     $script:StandardValidationLastEvent = $null
@@ -8775,6 +9068,7 @@ $result = Invoke-StandardValidationRun `
     -CancellationPath $CancellationPath `
     -TrustedToolRoot $TrustedToolRoot `
     -AllowDevelopmentContent ([bool]$AllowDevelopmentContent) `
+    -SourceValidation ([bool]$SourceValidation) `
     -DevelopmentHarness ([bool]$DevelopmentHarness) `
     -SemanticTriggered ([bool]$SemanticTriggered) `
     -SemanticConsent ([bool]$SemanticConsent) `
