@@ -1,3 +1,28 @@
+Describe 'SYP258 source tool identity freeze' {
+    BeforeAll {
+        $runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $runner -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+    }
+
+    # Scenario: A source tool file changes after the explicit setup step freezes its byte identity.
+    # Purpose: V2/V6 rejects identity replacement without downloading or resolving a different tool.
+    It 'UnitT10_accepts_the_frozen_file_and_rejects_changed_or_missing_bytes' {
+        if ($null -eq (Get-Command Assert-StandardCoreFrozenFiles -CommandType Function -ErrorAction SilentlyContinue)) { throw 'The source runner must authenticate frozen tool files.' }
+        $path = Join-Path $TestDrive 'source-tool.bin'
+        [IO.File]::WriteAllText($path, 'frozen fixture bytes', (New-Object Text.UTF8Encoding($false)))
+        $files = @([pscustomobject]@{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() })
+        Assert-StandardCoreFrozenFiles -Files $files | Out-Null
+        [IO.File]::WriteAllText($path, 'replaced fixture bytes', (New-Object Text.UTF8Encoding($false)))
+        $rejected = $false
+        try { Assert-StandardCoreFrozenFiles -Files $files | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Replacing frozen bytes must be rejected.' }
+        Remove-Item -LiteralPath $path
+        $rejected = $false
+        try { Assert-StandardCoreFrozenFiles -Files $files | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Removing frozen tool bytes must be rejected.' }
+    }
+}
+
 Describe 'Bounded offline acquisition fixtures' {
     BeforeAll {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null

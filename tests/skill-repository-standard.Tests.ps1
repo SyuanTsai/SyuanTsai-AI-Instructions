@@ -1,3 +1,317 @@
+Describe 'SYP258 source validation result gate' {
+    BeforeAll {
+        $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $script:SourceGateRunnerPath -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+
+        function Write-SourceGateFixtureJson {
+            param([string] $Path, $Value)
+            [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding($false)))
+        }
+        function New-SourceGateFixture {
+            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            $runId = 'c' * 32
+            $runRoot = Join-Path $root ('runs/' + $runId)
+            $snapshot = Join-Path $runRoot 'candidate'
+            $skills = @('alpha', 'beta')
+            foreach ($id in $skills) {
+                $skillRoot = Join-Path $snapshot ('skills/' + $id)
+                [void][IO.Directory]::CreateDirectory($skillRoot)
+                [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), ('fixture ' + $id), (New-Object Text.UTF8Encoding($false)))
+            }
+            [void][IO.Directory]::CreateDirectory((Join-Path $snapshot 'tests'))
+            [IO.File]::WriteAllText((Join-Path $snapshot 'tests/Fixture.Tests.ps1'), '# source gate case fixture', (New-Object Text.UTF8Encoding($false)))
+            $inventory = Get-StandardValidationInventory -Root $snapshot -Context 'source gate fixture'
+            $contentHash = Get-StandardValidationInventorySha256 -Inventory $inventory
+            $caseSnapshotRows=@($inventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{ path=$_.path; sha256=$_.sha256 } })
+            $caseSnapshotSha256=Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $caseSnapshotRows -Depth 3 -Compress)
+            $toolPath = Join-Path $root 'fixture-tool.bin'
+            [IO.File]::WriteAllText($toolPath, 'fixture tool', (New-Object Text.UTF8Encoding($false)))
+            $frozen = @([pscustomobject]@{ path = $toolPath; sha256 = Get-StandardValidationFileSha256 -Path $toolPath -Context 'fixture tool' })
+            $receipts = @()
+            $receiptValues = @{}
+            $fixtureToolsRoot=Join-Path $TestDrive ([IO.Path]::GetFileName($root) + '-tools')
+            [void][IO.Directory]::CreateDirectory($fixtureToolsRoot)
+            $policy = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+            foreach ($name in @('skill-validator','skill-tools','skillspector')) {
+                $receiptPath = Join-Path $root ($name + '.json')
+                $installRoot=Join-Path $fixtureToolsRoot ($name + '-install')
+                [void][IO.Directory]::CreateDirectory($installRoot)
+                [IO.File]::WriteAllText((Join-Path $installRoot 'dependency.bin'), ('fixture dependency ' + $name), (New-Object Text.UTF8Encoding($false)))
+                $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+                $identityKind=switch($name) {'skill-validator' {'go-module-version-build-info-and-binary-hash'}; 'skill-tools' {'registry-integrity-and-locked-dependency-closure'}; 'skillspector' {'release-commit-asset-metadata-dependency-closure-and-executable'}}
+                $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
+                if ($name -ceq 'skill-tools') {
+                    $shim=Join-Path $installRoot 'skill-tools.cmd';$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot 'node.exe'
+                    [IO.File]::WriteAllText($shim, '@echo off', (New-Object Text.UTF8Encoding($false)))
+                    [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))
+                    [IO.File]::WriteAllText($node, 'fixture Node runtime', (New-Object Text.UTF8Encoding($false)))
+                    foreach ($filePath in @($shim,$payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package launcher'} }
+                    $receiptValue.executablePath=$shim;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $shim -Context 'fixture shim'
+                    $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $payload
+                    $receiptValue | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $payload -Context 'fixture payload')
+                    $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $node
+                    $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $node -Context 'fixture runtime')
+                    $receiptValue | Add-Member -NotePropertyName executableVerified -NotePropertyValue $true
+                    $launcher.kind='windows-cmd-shim';$launcher.shimPath=$shim;$launcher.shimSha256=$receiptValue.executableSha256;$launcher.payloadPath=$payload;$launcher.payloadSha256=$receiptValue.entryPointSha256;$launcher.runtimePath=$node;$launcher.runtimeSha256=$receiptValue.nodeSha256
+                }
+                else {
+                    $installedExecutable=Join-Path $installRoot ($name + '.exe')
+                    [IO.File]::WriteAllText($installedExecutable, ('fixture executable ' + $name), (New-Object Text.UTF8Encoding($false)))
+                    $receiptValue.executablePath=$installedExecutable;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $installedExecutable -Context 'fixture installed executable'
+                    $frozen += [pscustomobject]@{path=$installedExecutable;sha256=$receiptValue.executableSha256}
+                }
+                $installedClosureSha256=Get-StandardValidationDirectoryClosureSha256 -Root $installRoot -Context 'fixture installed closure'
+                $receiptValue.installedClosureSha256=$installedClosureSha256;$receiptValue.dependencyClosureSha256=$installedClosureSha256
+                $receiptValue.launcherDigestSha256=Get-StandardValidationLauncherDigest -Launcher $launcher -Context 'fixture unsigned launcher'
+                Write-SourceGateFixtureJson -Path $receiptPath -Value $receiptValue
+                $receiptValues[$name]=$receiptValue
+                $binding = [pscustomobject]@{ path=$receiptPath; sha256=Get-StandardValidationFileSha256 -Path $receiptPath -Context 'fixture receipt' }
+                $frozen += $binding; $receipts += $binding
+            }
+            $sourceSpec=[pscustomobject]@{
+                packageAdapter=[pscustomobject]@{command=$toolPath;arguments=@()}
+                skillValidator=[pscustomobject]@{command=$toolPath;arguments=@()}
+                skillTools=[pscustomobject]@{command=$toolPath;arguments=@()}
+                staticAnalyzer=[pscustomobject]@{command=$toolPath;arguments=@()}
+                frozenFiles=$frozen;toolReceipts=$receipts
+            }
+            $adapterPath=Join-Path $runRoot 'source-adapter.json'
+            Write-SourceGateFixtureJson $adapterPath ([pscustomobject]@{
+                schemaVersion=2;adapter='standard-core-adapter-v2';skillsRoot='skills';activeSkills=$skills;sourceValidation=$sourceSpec
+                checks=@([pscustomobject]@{id='repository-general';kind='general';executable=$toolPath;executableSha256=$frozen[0].sha256;arguments=@()},[pscustomobject]@{id='repository-pester';kind='pester';executable=$toolPath;executableSha256=$frozen[0].sha256;arguments=@()})
+            })
+            $adapterHash=Get-StandardValidationFileSha256 -Path $adapterPath -Context 'fixture retained adapter'
+            $adapterBinding=[pscustomobject]@{path=$adapterPath;sha256=$adapterHash}
+            $candidateId = Get-StandardValidationTextSha256 -Value "$('a' * 40)`n$contentHash`n$adapterHash`n$runId"
+            $dispatches = @([pscustomobject]@{ stage='package-validation'; tool='package-adapter'; skill=$null })
+            foreach ($id in $skills) {
+                $dispatches += [pscustomobject]@{ stage='package-validation'; tool='skill-validator'; skill=$id }
+                $dispatches += [pscustomobject]@{ stage='package-validation'; tool='skill-tools'; skill=$id }
+            }
+            $dispatches += [pscustomobject]@{ stage='skillspector-static'; tool='static-analyzer'; skill=$null }
+            $events = @()
+            foreach ($dispatch in $dispatches) {
+                $eventId = [guid]::NewGuid().ToString()
+                $envelope = [pscustomobject]@{ schemaVersion=1; status='passed'; decision='PASS'; candidateIdentity=$candidateId; activeSkills=$skills; findings=@(); analyzerCompleteness='complete'; skillId=$dispatch.skill; skillInventorySha256=$null }
+                if ($null -ne $dispatch.skill) {
+                    $skillInventory = Get-StandardValidationInventory -Root (Join-Path $snapshot ('skills/' + $dispatch.skill)) -Context 'source gate skill fixture'
+                    $envelope.skillInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $skillInventory
+                }
+                if ($dispatch.tool -cne 'package-adapter') {
+                    $nativeReports=@()
+                    $nativeSkills=if ($null -ne $dispatch.skill) {@($dispatch.skill)} else {$skills}
+                    foreach ($nativeSkill in $nativeSkills) {
+                        $nativePath=Join-Path $runRoot ($eventId + '-' + $nativeSkill + '-native.json')
+                        Write-SourceGateFixtureJson $nativePath ([pscustomobject]@{fixture=$true;tool=$dispatch.tool;skillId=$nativeSkill;status='passed'})
+                        $nativeName=if($dispatch.tool -ceq 'static-analyzer'){'skillspector'}else{$dispatch.tool}
+                        $nativeReceipt=$receiptValues[$nativeName]
+                        $nativeCommand=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodePath}else{$nativeReceipt.executablePath}
+                        $nativeCommandHash=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodeSha256}else{$nativeReceipt.executableSha256}
+                        $nativeArguments=if($nativeName -ceq 'skill-tools'){@($nativeReceipt.entryPointPath,'validate',$nativeSkill)}else{@('validate',$nativeSkill)}
+                        $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$nativeCommand;commandSha256=$nativeCommandHash;arguments=$nativeArguments;exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'fixture native tool report'}
+                    }
+                    $envelope | Add-Member -NotePropertyName nativeReports -NotePropertyValue $nativeReports
+                }
+                $stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+                $process = [pscustomobject]@{ status='passed'; exitCode=0; cleanedUp=$true; stdout=$stdout; stderr=''; startedAt='2026-01-01T00:00:00Z'; endedAt='2026-01-01T00:00:01Z' }
+                $rawPath = Join-Path $runRoot ($eventId + '.json')
+                Write-SourceGateFixtureJson -Path $rawPath -Value ([pscustomobject]@{ schemaVersion=1; eventId=$eventId; stageId=$dispatch.stage; toolId=$dispatch.tool; skillId=$dispatch.skill; candidateId=$candidateId; process=$process; stdout=$stdout; stderr='' })
+                $events += [pscustomobject]@{ eventId=$eventId; stageId=$dispatch.stage; toolId=$dispatch.tool; skillId=$dispatch.skill; candidateId=$candidateId; commandSha256=$frozen[0].sha256; exitCode=0; status='passed'; outputSha256=Get-StandardValidationOutputHash -Stdout $stdout -Stderr ''; outputPath=$rawPath; cleanedUp=$true }
+            }
+            $checks = @()
+            foreach ($kind in @('general','pester')) {
+                $stdoutPath=Join-Path $runRoot ($kind + '.stdout.txt'); $stderrPath=Join-Path $runRoot ($kind + '.stderr.txt')
+                $counts = [pscustomobject]@{ total=2; passed=2; failed=0; skipped=0 }
+                $stdout = if ($kind -ceq 'pester') { [pscustomobject]@{ schemaVersion=1; report='standard-core-pester-result-v1'; total=2; passed=2; failed=0; skipped=0 } | ConvertTo-Json -Compress } else { 'Repository fixture passed.' }
+                [IO.File]::WriteAllText($stdoutPath, $stdout, (New-Object Text.UTF8Encoding($false)))
+                [IO.File]::WriteAllText($stderrPath, '', (New-Object Text.UTF8Encoding($false)))
+                $checks += [pscustomobject]@{ id=('repository-' + $kind); kind=$kind; status='passed'; exitCode=0; cleanedUp=$true; stdoutPath=$stdoutPath; stdoutSha256=Get-StandardValidationFileSha256 -Path $stdoutPath -Context 'fixture repository output'; stderrPath=$stderrPath; stderrSha256=Get-StandardValidationFileSha256 -Path $stderrPath -Context 'fixture repository errors'; testCounts=if ($kind -ceq 'pester') { $counts } else { $null }; executableSha256=$frozen[0].sha256; argumentsSha256=Get-StandardValidationTextSha256 -Value '[]'; processId=123; startedAt='2026-01-01T00:00:00Z'; endedAt='2026-01-01T00:00:01Z' }
+            }
+            $casePath=Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
+            $caseRows=@(1..2 | ForEach-Object {
+                $expandedPath='Fixture.UnitT' + $_
+                $tuple=ConvertTo-Json -InputObject ([object[]]@('FIXTURE.TESTS.PS1', $_, $expandedPath)) -Compress -Depth 3
+                [pscustomobject]@{ identity=[Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple)); sourceFile='Fixture.Tests.ps1'; sourceStartOffset=$_; sourceStartLine=$_; expandedPath=$expandedPath; result='Passed'; identityError=$null }
+            })
+            Write-SourceGateFixtureJson $casePath ([pscustomobject]@{
+                schemaVersion=1; report='standard-core-pester-case-inventory-v1'; coreRunId=$runId
+                candidateSnapshotIdentity=[pscustomobject]@{coreRunId=$runId;root=$snapshot}; candidateSnapshotSha256=$caseSnapshotSha256
+                pesterModule=[pscustomobject]@{version='6.0.0';manifestPath='fixture';moduleRoot='fixture';lockPath='fixture';lockSha256='1' * 64;closureSha256Before='2' * 64;closureSha256After='2' * 64}
+                runPath='tests';runScope='complete-unfiltered-tests-tree';testFileInventory=@('Fixture.Tests.ps1');containerFileInventory=@('Fixture.Tests.ps1');discoveredCaseFileInventory=@('Fixture.Tests.ps1')
+                caseDiscoveryCount=2;caseExecutionCount=2;containerCount=1;failedBlockCount=0;failedContainerCount=0;terminalStatus='complete'
+                reportedCounts=[pscustomobject]@{Passed=2;Failed=0;Skipped=0;Inconclusive=0;NotRun=0};shardIdentity='core-full';shardCaseIdentities=@($caseRows.identity)
+                shardUnion=[pscustomobject]@{discoveryCount=2;executionUnionCount=2;complete=$true};discoveryCases=$caseRows;executionCases=$caseRows;complete=$true;errors=@()
+            })
+            $caseBinding=[pscustomobject]@{path=$casePath;sha256=Get-StandardValidationFileSha256 -Path $casePath -Context 'fixture case ledger'}
+            return [pscustomobject]@{
+                schemaVersion=2; evidence='standard-core-validation-evidence-v2'; generatedAt='2026-01-01T00:00:01Z'; state='PASS'; exitCode=0; runId=$runId; releaseEligible=$false; contentMode='immutable-source'; failure=$null
+                candidate=[pscustomobject]@{ repository='https://example.com/example/skills.git'; sourceRevision='a' * 40; baseRevision='b' * 40; contentSha256=$contentHash; inventory=$inventory; activeSkills=$skills; contentMode='immutable-source'; eventName='pull_request' }
+                authority=[pscustomobject]@{ repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision='e' * 40; contentMode='source'; runnerSha256='3' * 64; contractSha256='4' * 64 }
+                adapter=[pscustomobject]@{ schemaVersion=2; identity='standard-core-adapter-v2'; sha256=$adapterHash }
+                artifacts=[pscustomobject]@{ runId=$runId; root=$root; outputPath=Join-Path $root 'result.json'; runRoot=$runRoot; snapshotRoot=$snapshot }
+                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision='e' * 40; activeSkills=$skills; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$frozen; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
+                checks=$checks
+            }
+        }
+        function Invoke-SourceGateFixture {
+            param($Report, [int] $ExitCode=0)
+            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision ('e' * 40) -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode
+        }
+        function Set-SourceGateEnvelope {
+            param($Report, [int] $Index, [scriptblock] $Mutate)
+            $event=$Report.sourceValidation.events[$Index]
+            $raw=Get-Content -Raw $event.outputPath | ConvertFrom-Json
+            $envelope=$raw.stdout | ConvertFrom-Json
+            & $Mutate $envelope
+            $raw.stdout=$envelope | ConvertTo-Json -Depth 30 -Compress
+            $raw.process.stdout=$raw.stdout
+            $event.outputSha256=Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
+            Write-SourceGateFixtureJson -Path $event.outputPath -Value $raw
+        }
+        function Set-SourceGateCases {
+            param($Report, [scriptblock] $Mutate)
+            $binding=$Report.sourceValidation.pesterCaseInventory
+            $cases=Get-Content -Raw $binding.path | ConvertFrom-Json
+            & $Mutate $cases
+            Write-SourceGateFixtureJson $binding.path $cases
+            $binding.sha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'mutated case ledger'
+        }
+        function Set-SourceGateReceipt {
+            param($Report, [scriptblock] $Mutate, [int] $Index=0)
+            $binding=$Report.sourceValidation.toolReceipts[$Index]
+            $receipt=Get-Content -Raw $binding.path | ConvertFrom-Json
+            & $Mutate $receipt
+            Write-SourceGateFixtureJson $binding.path $receipt
+            $binding.sha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'mutated receipt'
+        }
+    }
+
+    # Scenario: Ordinary Core returns PASS without package-tool or complete Static evidence.
+    # Purpose: V2 prevents repository-only success from satisfying the three source required contexts.
+    It 'UnitT10_rejects_Core_only_PASS_as_source_validation_success' {
+        $gate = Get-Command Assert-StandardCoreSourceCheckReport -CommandType Function -ErrorAction SilentlyContinue
+        if ($null -eq $gate) { throw 'The source report gate must exist before rejection can be verified.' }
+        $report = New-SourceGateFixture
+        if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete baseline must pass before removal of source evidence.' }
+        $report.PSObject.Properties.Remove('sourceValidation')
+        $rejected = $false
+        try { Invoke-SourceGateFixture -Report $report | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'Core-only PASS must be rejected by source required-context projection.' }
+    }
+
+    # Scenario: One run contains both package tools for every discovered package, complete Static and passed repository tests.
+    # Purpose: V1/V2 proves the rejection fixtures begin from a complete accepted report, rather than an unrelated invalid envelope.
+    It 'UnitT20_accepts_one_complete_two_package_candidate_run' {
+        $report=New-SourceGateFixture
+        if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete candidate-bound source evidence must pass.' }
+    }
+
+    # Scenario: A complete report is altered in one required binding, process, package coverage or repository result.
+    # Purpose: V2/V3 rejects incomplete or replaced evidence and preserves every real tool/Pester failure.
+    It 'UnitT30_rejects_<Name>_from_source_required_contexts' -TestCases @(
+        @{ Name='wrong_candidate_SHA'; Change={param($r) $r.candidate.sourceRevision='b' * 40} },
+        @{ Name='wrong_base_SHA'; Change={param($r) $r.candidate.baseRevision='a' * 40} },
+        @{ Name='wrong_authority_SHA'; Change={param($r) $r.sourceValidation.authorityRevision='a' * 40} },
+        @{ Name='wrong_run'; Change={param($r) $r.sourceValidation.runId='d' * 32} },
+        @{ Name='wrong_content'; Change={param($r) $r.sourceValidation.contentSha256='0' * 64} },
+        @{ Name='wrong_derived_candidate'; Change={param($r) $r.adapter.sha256='0' * 64} },
+        @{ Name='missing_tool_receipt'; Change={param($r) $r.sourceValidation.toolReceipts=@($r.sourceValidation.toolReceipts | Select-Object -Skip 1)} },
+        @{ Name='wrong_receipt_run'; Change={param($r) Set-SourceGateReceipt $r {param($e) $e.resolutionRunId='0' * 32}} },
+        @{ Name='wrong_receipt_source'; Change={param($r) Set-SourceGateReceipt $r {param($e) $e.source='https://example.test/untrusted'}} },
+        @{ Name='empty_receipt_identity'; Change={param($r) Set-SourceGateReceipt $r {param($e) $e.resolvedIdentity=''}} },
+        @{ Name='missing_installed_closure'; Change={param($r) Set-SourceGateReceipt $r {param($e) $e.PSObject.Properties.Remove('installedClosureSha256')}} },
+        @{ Name='empty_install_root'; Change={param($r) Set-SourceGateReceipt $r {param($e) $e.installRoot=''}} },
+        @{ Name='added_unfrozen_dependency'; Change={param($r) $receipt=Get-Content -Raw $r.sourceValidation.toolReceipts[0].path | ConvertFrom-Json; [IO.File]::WriteAllText((Join-Path $receipt.installRoot 'injected-dependency.bin'), 'unfrozen replacement dependency', (New-Object Text.UTF8Encoding($false)))} },
+        @{ Name='event_command_receipt_hash'; Change={param($r) $r.sourceValidation.events[0].commandSha256=$r.sourceValidation.toolReceipts[0].sha256} },
+        @{ Name='retained_adapter_replacement'; Change={param($r) [IO.File]::WriteAllText($r.sourceValidation.adapterSnapshot.path, '{}')} },
+        @{ Name='native_report_replacement'; Change={param($r) $raw=Get-Content -Raw $r.sourceValidation.events[1].outputPath | ConvertFrom-Json; $envelope=$raw.stdout | ConvertFrom-Json; [IO.File]::WriteAllText($envelope.nativeReports[0].path, '{"fixture":"replaced"}')} },
+        @{ Name='native_tools_payload_argument_substitution'; Change={param($r) Set-SourceGateEnvelope $r 2 {param($e) $e.nativeReports[0].arguments[0]='substituted-payload.js'}} },
+        @{ Name='empty_inventory'; Change={param($r) $r.sourceValidation.activeSkills=@(); $r.candidate.activeSkills=@()} },
+        @{ Name='duplicate_inventory'; Change={param($r) $r.sourceValidation.activeSkills=@('alpha','alpha'); $r.candidate.activeSkills=@('alpha','alpha')} },
+        @{ Name='missing_package_event'; Change={param($r) $r.sourceValidation.events=@($r.sourceValidation.events | Select-Object -Skip 1)} },
+        @{ Name='duplicate_event'; Change={param($r) $r.sourceValidation.events[1]=$r.sourceValidation.events[0]} },
+        @{ Name='wrong_tool_identity'; Change={param($r) $r.sourceValidation.events[1].toolId='skill-tools'} },
+        @{ Name='tool_exit_failure'; Change={param($r) $r.sourceValidation.events[1].exitCode=1} },
+        @{ Name='tool_timeout'; Change={param($r) $r.sourceValidation.events[1].status='timed-out'} },
+        @{ Name='tool_cleanup_failure'; Change={param($r) $r.sourceValidation.events[1].cleanedUp=$false} },
+        @{ Name='wrong_envelope_candidate'; Change={param($r) Set-SourceGateEnvelope $r 1 {param($e) $e.candidateIdentity='0' * 64}} },
+        @{ Name='wrong_envelope_package'; Change={param($r) Set-SourceGateEnvelope $r 1 {param($e) $e.skillId='beta'}} },
+        @{ Name='incomplete_Static'; Change={param($r) Set-SourceGateEnvelope $r 5 {param($e) $e.analyzerCompleteness='partial'}} },
+        @{ Name='Static_high_finding'; Change={param($r) Set-SourceGateEnvelope $r 5 {param($e) $e.findings=@([pscustomobject]@{severity='high'})}} },
+        @{ Name='Static_medium_review'; Change={param($r) Set-SourceGateEnvelope $r 5 {param($e) $e.findings=@([pscustomobject]@{severity='medium'})}} },
+        @{ Name='Static_unknown_severity'; Change={param($r) Set-SourceGateEnvelope $r 5 {param($e) $e.findings=@([pscustomobject]@{severity='unknown'})}} },
+        @{ Name='Static_missing_package'; Change={param($r) Set-SourceGateEnvelope $r 5 {param($e) $e.activeSkills=@('alpha')}} },
+        @{ Name='raw_replacement'; Change={param($r) [IO.File]::WriteAllText($r.sourceValidation.events[0].outputPath, '{}')} },
+        @{ Name='version_only_output'; Change={param($r) $event=$r.sourceValidation.events[0]; $raw=Get-Content -Raw $event.outputPath | ConvertFrom-Json; $raw.stdout='tool v1.0.0'; $raw.process.stdout=$raw.stdout; $event.outputSha256=Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr ''; Write-SourceGateFixtureJson $event.outputPath $raw} },
+        @{ Name='raw_cleanup_failure'; Change={param($r) $event=$r.sourceValidation.events[0]; $raw=Get-Content -Raw $event.outputPath | ConvertFrom-Json; $raw.process.cleanedUp=$false; Write-SourceGateFixtureJson $event.outputPath $raw} },
+        @{ Name='raw_process_stream_mismatch'; Change={param($r) $event=$r.sourceValidation.events[0]; $raw=Get-Content -Raw $event.outputPath | ConvertFrom-Json; $raw.process.stdout='different stream'; Write-SourceGateFixtureJson $event.outputPath $raw} },
+        @{ Name='Pester_zero_discovery'; Change={param($r) $r.checks[1].testCounts.total=0; $r.checks[1].testCounts.passed=0} },
+        @{ Name='Pester_case_failure'; Change={param($r) $r.checks[1].testCounts.failed=1; $r.checks[1].testCounts.passed=1} },
+        @{ Name='Pester_skip'; Change={param($r) $r.checks[1].testCounts.skipped=1; $r.checks[1].testCounts.passed=1} },
+        @{ Name='repository_cleanup_failure'; Change={param($r) $r.checks[1].cleanedUp=$false} },
+        @{ Name='repository_output_replacement'; Change={param($r) [IO.File]::WriteAllText($r.checks[1].stdoutPath, 'replaced output')} },
+        @{ Name='Pester_raw_counts_mismatch'; Change={param($r) $check=$r.checks[1]; $raw=Get-Content -Raw $check.stdoutPath | ConvertFrom-Json; $raw.total=3; Write-SourceGateFixtureJson $check.stdoutPath $raw; $check.stdoutSha256=Get-StandardValidationFileSha256 -Path $check.stdoutPath -Context 'mutated Pester raw'} },
+        @{ Name='Pester_block_failure'; Change={param($r) Set-SourceGateCases $r {param($e) $e.failedBlockCount=1}} },
+        @{ Name='Pester_container_failure'; Change={param($r) Set-SourceGateCases $r {param($e) $e.failedContainerCount=1}} },
+        @{ Name='Pester_discovery_error'; Change={param($r) Set-SourceGateCases $r {param($e) $e.errors=@('discovery failed')}} },
+        @{ Name='Pester_partial_scope'; Change={param($r) Set-SourceGateCases $r {param($e) $e.runScope='focused'}} },
+        @{ Name='Pester_incomplete_ledger'; Change={param($r) Set-SourceGateCases $r {param($e) $e.complete=$false}} },
+        @{ Name='Pester_wrong_ledger_run'; Change={param($r) Set-SourceGateCases $r {param($e) $e.coreRunId='0' * 32}} },
+        @{ Name='Pester_missing_executed_case'; Change={param($r) Set-SourceGateCases $r {param($e) $e.executionCases=@($e.executionCases | Select-Object -First 1)}} },
+        @{ Name='Pester_failed_case_ledger'; Change={param($r) Set-SourceGateCases $r {param($e) $e.executionCases[0].result='Failed'}} },
+        @{ Name='Pester_reported_failure_ledger'; Change={param($r) Set-SourceGateCases $r {param($e) $e.reportedCounts.Failed=1}} },
+        @{ Name='Pester_incomplete_shard_union'; Change={param($r) Set-SourceGateCases $r {param($e) $e.shardUnion.complete=$false}} },
+        @{ Name='Pester_duplicate_case_identity'; Change={param($r) Set-SourceGateCases $r {param($e) $e.executionCases[1]=$e.executionCases[0]}} },
+        @{ Name='Pester_mismatched_case_set'; Change={param($r) Set-SourceGateCases $r {param($e) $e.executionCases[0].expandedPath='Another.UnitT10'; $tuple=ConvertTo-Json -InputObject ([object[]]@('FIXTURE.TESTS.PS1', 1, 'Another.UnitT10')) -Compress -Depth 3; $e.executionCases[0].identity=[Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple))}} },
+        @{ Name='Pester_wrong_snapshot_hash'; Change={param($r) Set-SourceGateCases $r {param($e) $e.candidateSnapshotSha256='0' * 64}} }
+    ) {
+        param([string] $Name, [scriptblock] $Change)
+        $report=New-SourceGateFixture
+        if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw "Baseline must pass before mutation '$Name'." }
+        & $Change $report
+        $rejected=$false
+        try { Invoke-SourceGateFixture -Report $report | Out-Null } catch { $rejected=$true }
+        if (-not $rejected) { throw "Source required-context gate accepted '$Name'." }
+    }
+
+    # Scenario: A frozen unsigned resolver receipt omits its executable, has an unsupported schema or substitutes the package launcher payload.
+    # Purpose: V2 rejects malformed tool identities directly, before retained-adapter comparison can mask missing receipt validation.
+    It 'UnitT40_rejects_unsigned_receipt_<Name>' -TestCases @(
+        @{Name='missingExecutable';Index=0;Change={param($r) $r.PSObject.Properties.Remove('executablePath');$r.PSObject.Properties.Remove('executableSha256')}},
+        @{Name='malformedResolver';Index=0;Change={param($r) $r.schemaVersion=9}},
+        @{Name='launcherSubstitution';Index=1;Change={param($r) $r.launcher.payloadPath=$r.executablePath;$r.launcher.payloadSha256=$r.executableSha256;$r.launcherDigestSha256=Get-StandardValidationLauncherDigest -Launcher $r.launcher -Context 'substituted fixture launcher'}}
+    ) {
+        param([string]$Name,[int]$Index,[scriptblock]$Change)
+        $report=New-SourceGateFixture
+        Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId
+        Set-SourceGateReceipt -Report $report -Mutate $Change -Index $Index
+        $rejected=$false
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId } catch {$rejected=$true}
+        if(-not $rejected){throw "Unsigned resolver receipt '$Name' was accepted."}
+    }
+
+    # Scenario: Source tools complete, then the general or Pester repository check fails before it can publish a case sidecar.
+    # Purpose: V3 retains schema-valid source evidence on failure while requiring the complete case sidecar for source PASS.
+    It 'UnitT50_requires_case_sidecar_only_for_top_level_source_PASS_<Kind>' -TestCases @(
+        @{Kind='general';Expected=$true},@{Kind='pester';Expected=$true},@{Kind='pass';Expected=$false}
+    ) {
+        param([string]$Kind,[bool]$Expected)
+        $report=New-SourceGateFixture
+        $schemaPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $baselineJson=$report | ConvertTo-Json -Depth 100
+        if(-not(Test-Json -Json $baselineJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue)){throw 'Complete source fixture must be schema-valid before removing the case sidecar.'}
+        $report.sourceValidation.PSObject.Properties.Remove('pesterCaseInventory')
+        if($Kind -cne 'pass'){
+            $index=if($Kind -ceq 'general'){0}else{1}
+            $report.state='FAILED';$report.exitCode=20;$report.failure=[pscustomobject]@{state='FAILED';message='Fixture repository check failed before sidecar creation.'}
+            $report.checks[$index].status='failed';$report.checks[$index].exitCode=1
+        }
+        $valid=Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+        if($valid -ne $Expected){throw "Source '$Kind' without case sidecar has schema validity '$valid', expected '$Expected'."}
+    }
+}
+
 Describe 'Agent Skill Repository Standard v1 contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
