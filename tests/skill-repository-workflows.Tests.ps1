@@ -1151,4 +1151,15 @@ Describe 'Third-party raw Skill authority routing' {
         $raw | Should Match 'Source checks do not authorize adoption'
         $raw | Should Match 'explicit adoption caller.*MUST.*reject a pending descriptor'
     }
+    # Scenario: Raw ownership uses central tests while owned sources retain their full repository test tree.
+    # Purpose: Keep the raw route explicit and prevent caller-selected partial source checks.
+    It 'UnitT20_binds_the_complete_central_raw_suite_to_the_canonical_authority_gate' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $raw=Get-Content -Raw (Join-Path $root 'docs/standards/third-party-raw-skill-sources.md')
+        foreach ($required in @('central-third-party-raw-skill-v1','tests/third-party-skill-source.Tests.ps1','tests/third-party-source-envelope.Tests.ps1','testSourceIdentity','complete-central-raw-skill-suite','zero failed/skipped/inconclusive/not-run','Omitting the selector retains the complete unfiltered')) {
+            if (-not $raw.Contains($required)) {throw ('Missing raw source authority invariant: '+$required)}
+        }
+        $gate=Get-Content -Raw (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1')
+        if (-not $gate.Contains('skill-repository-standard.Tests.ps1')) {throw 'The same authority gate must execute the raw ownership regression.'}
+    }
 }

@@ -64,6 +64,7 @@
     "binding": "One immutable candidate, authority, adapter, fresh run and raw process output; duplicate/empty/partial inventory, changed identity, invalid parse, failure, timeout or cleanup failure never passes.",
     "semantic": "Source checks cover stages 1–5 only; no provider, consent, signer, key or release prerequisite. Existing explicit Semantic and full lifecycle retain their own contract.",
     "requiredCheckGate": "Assert-StandardCoreSourceCheckReport; Core-only PASS never qualifies. Same-workflow projection only; no release/install/publish authorization.",
+    "testOwnership": "Omitted: complete unfiltered candidate tests tree. Explicit central-third-party-raw-skill-v1: successful candidate-bound raw package evidence, complete fixed central raw suite, same immutable authority revision and frozen files, separately bound testSourceIdentity; no caller-defined root or test filter. Both modes require the complete actual discovery/execution union and zero unpassed cases.",
     "releaseEligible": false
   },
   "releaseEligible": false

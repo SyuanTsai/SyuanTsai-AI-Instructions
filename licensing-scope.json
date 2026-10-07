@@ -636,6 +636,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Invoke-ThirdPartySourceChecks.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Normalize-InstalledSemanticGraph.py",
       "license": "Apache-2.0"
     },

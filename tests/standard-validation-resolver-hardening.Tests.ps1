@@ -1534,6 +1534,18 @@ catch {
     }
 }
 Describe 'Third-party raw Skill tool boundary' {
+    # Scenario: The raw test ownership selector is present in both adapter and retained evidence schemas.
+    # Purpose: Reject caller-defined ownership, roots and filtered test inventories without changing tool policy.
+    It 'UnitT05_keeps_raw_test_ownership_typed_and_fixed_in_both_core_schemas' {
+        $root=Split-Path -Parent $PSScriptRoot
+        foreach ($name in @('standard-core-adapter-v2.schema.json','standard-core-evidence-v2.schema.json')) {
+            $schema=Get-Content -Raw (Join-Path $root ('docs/standards/schemas/'+$name)) | ConvertFrom-Json
+            $source=$schema.properties.sourceValidation
+            if ($source.additionalProperties -ne $false -or $source.properties.testOwnership.const -cne 'central-third-party-raw-skill-v1') {throw 'Raw test ownership must have one explicit typed value.'}
+            if (@($source.required) -contains 'testOwnership') {throw 'Existing owned sources must remain compatible without this selector.'}
+            if (@($source.properties.PSObject.Properties.Name | Where-Object {$_ -in @('testRoot','testFiles','testFilter')}).Count -ne 0) {throw 'Source callers cannot choose a central suite subset.'}
+        }
+    }
     # Scenario: The package adapter validates inert bytes and reports the remaining canonical gate.
     # Purpose: Keep package-only results release-ineligible and avoid hidden download/execution fallback.
     It 'UnitT10_keeps_the_adapter_inert_and_release_ineligible' {

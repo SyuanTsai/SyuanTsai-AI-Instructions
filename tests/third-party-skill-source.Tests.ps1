@@ -1,5 +1,16 @@
 Describe 'Third party raw Skill source adoption' {
     BeforeAll {
+        function Assert-RawTestEqual {
+            param($Actual,$Expected)
+            if ($Actual -cne $Expected) { throw "Raw source assertion failed: expected [$Expected], actual [$Actual]." }
+        }
+        function Assert-RawTestThrows {
+            param([scriptblock]$Action)
+            $rejected=$false
+            try { & $Action | Out-Null } catch { $rejected=$true }
+            if (-not $rejected) { throw 'The invalid raw source operation must throw.' }
+        }
+
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-source-acquisition.psm1') -Force -ErrorAction Stop
         Import-Module (Join-Path $PSScriptRoot '../scripts/third-party-skill-source.psm1') -Force -ErrorAction Stop
         function Write-RawFixture { param($Root,$Path,$Text)
@@ -53,30 +64,30 @@ Describe 'Third party raw Skill source adoption' {
     # Purpose: Verify original bytes without projecting fabricated source artifacts or claiming release approval.
     It 'UnitT10_validates_candidate_identity_and_complete_inventory_without_installing_metadata' {
         $report = Invoke-RawFixture
-        $report.status | Should Be 'passed'
-        $report.validationKind | Should Be 'third-party-package-only'
-        $report.releaseEligible | Should Be $false
-        $report.adoptionApproved | Should Be $false
-        @($report.componentInventory).Count | Should Be 3
-        $report.skills[0].contentSha256 | Should Be $descriptor.skills[0].contentSha256
-        Test-Path (Join-Path $sourceRoot 'catalog/source.json') | Should Be $false
-        Test-Path (Join-Path $sourceRoot 'skills/sample/agents/openai.yaml') | Should Be $false
+        Assert-RawTestEqual ($report.status) ('passed')
+        Assert-RawTestEqual ($report.validationKind) ('third-party-package-only')
+        Assert-RawTestEqual ($report.releaseEligible) ($false)
+        Assert-RawTestEqual ($report.adoptionApproved) ($false)
+        Assert-RawTestEqual (@($report.componentInventory).Count) (3)
+        Assert-RawTestEqual ($report.skills[0].contentSha256) ($descriptor.skills[0].contentSha256)
+        Assert-RawTestEqual (Test-Path (Join-Path $sourceRoot 'catalog/source.json')) ($false)
+        Assert-RawTestEqual (Test-Path (Join-Path $sourceRoot 'skills/sample/agents/openai.yaml')) ($false)
     }
 
     # Scenario: A different source identity or archive is supplied with a valid descriptor.
     # Purpose: Prevent replay against a mutable ref or another archive/source.
     It 'UnitT20_rejects_wrong_revision_repository_and_archive' {
-        { Test-ThirdPartySkillSource -SourceRoot $sourceRoot -DescriptorPath $descriptorPath -ArchivePath $archivePath -SourceRepository $descriptor.repository -SourceRevision 'main' } | Should Throw
-        { Test-ThirdPartySkillSource -SourceRoot $sourceRoot -DescriptorPath $descriptorPath -ArchivePath $archivePath -SourceRepository 'https://github.com/example/other.git' -SourceRevision ('a'*40) } | Should Throw
+        Assert-RawTestThrows { Test-ThirdPartySkillSource -SourceRoot $sourceRoot -DescriptorPath $descriptorPath -ArchivePath $archivePath -SourceRepository $descriptor.repository -SourceRevision 'main' }
+        Assert-RawTestThrows { Test-ThirdPartySkillSource -SourceRoot $sourceRoot -DescriptorPath $descriptorPath -ArchivePath $archivePath -SourceRepository 'https://github.com/example/other.git' -SourceRevision ('a'*40) }
         [IO.File]::WriteAllText($archivePath,'changed archive')
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: A resource is changed or added after inventory binding.
     # Purpose: Protect the complete package rather than validating only SKILL.md.
     It 'UnitT30_rejects_changed_and_unlisted_package_bytes' {
         Write-RawFixture $sourceRoot 'skills/sample/references/new.md' '# Hidden new resource'
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: Source bytes and their descriptor hash are changed while the acquired archive stays original.
@@ -85,48 +96,48 @@ Describe 'Third party raw Skill source adoption' {
         Write-RawFixture $sourceRoot 'skills/sample/references/design.md' '# Different source tree'
         $descriptor.skills[0].contentSha256=Get-SkillInventorySha256 -RepositoryRoot $sourceRoot -SkillRoot (Join-Path $sourceRoot 'skills/sample')
         Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: JSON contains unknown, duplicate or case-conflicting keys, or an escaping source path.
     # Purpose: Keep alternate ownership strict and parser-independent.
     It 'UnitT40_rejects_ambiguous_fields_and_unsafe_paths' {
         $descriptor.unexpected=$true; Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
         $descriptor.Remove('unexpected'); $descriptor.skills[0].sourcePath='../sample'; Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
         $descriptor.skills[0].sourcePath='skills/sample'; Write-RawDescriptor
         $text=[IO.File]::ReadAllText($descriptorPath)
         [IO.File]::WriteAllText($descriptorPath,$text.Replace('"schemaVersion": 1','"schemaVersion": 1, "schemaVersion": 1'))
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: A license is altered or its descriptor points outside the adopted ancestor scope.
     # Purpose: Bind necessary legal documents to the same reviewed source.
     It 'UnitT50_rejects_missing_changed_or_unrelated_license_documents' {
         Write-RawFixture $sourceRoot 'LICENSE' 'changed license'
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
         $descriptor.licenseDocuments[0].path='unrelated/NOTICE'; Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: A candidate requests the approved route before actual review and license disposition.
     # Purpose: A package-only pass cannot enable formal adoption.
     It 'UnitT60_requires_review_evidence_and_license_acceptance_for_approved_adoption' {
-        { Invoke-RawFixture -RequireApproved } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture -RequireApproved }
         $descriptor.reviewState='approved'; Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
         $descriptor.reviewEvidence=@('https://example.org/review/1'); $descriptor.licenseReview='accepted'; $descriptor.licenseEvidence=@('https://example.org/legal/1'); Write-RawDescriptor
         $report=Invoke-RawFixture -RequireApproved
-        $report.adoptionApproved | Should Be $true
-        $report.releaseEligible | Should Be $false
+        Assert-RawTestEqual ($report.adoptionApproved) ($true)
+        Assert-RawTestEqual ($report.releaseEligible) ($false)
     }
 
     # Scenario: Metadata appears although the raw source declares it absent.
     # Purpose: Avoid applying the alternate path to a source with a different ownership contract.
     It 'UnitT70_rejects_source_owned_metadata_conflicts' {
         Write-RawFixture $sourceRoot 'catalog/source.json' '{}'
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: A declared legal document is accessed through a reparse-backed ancestor.
@@ -137,7 +148,7 @@ Describe 'Third party raw Skill source adoption' {
         $kind=if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {'Junction'} else {'SymbolicLink'}
         New-Item -ItemType $kind -Path (Join-Path $sourceRoot 'LICENSES') -Target $outside -ErrorAction Stop | Out-Null
         $descriptor.licenseDocuments[0].path='LICENSES/NOTICE'; $descriptor.licenseDocuments[0].sha256=(Get-FileHash (Join-Path $outside 'NOTICE')).Hash.ToLowerInvariant(); Write-RawDescriptor
-        { Invoke-RawFixture } | Should Throw
+        Assert-RawTestThrows { Invoke-RawFixture }
     }
 
     # Scenario: The published deidentified example evolves beside the strict descriptor schema.
@@ -145,8 +156,8 @@ Describe 'Third party raw Skill source adoption' {
     It 'UnitT90_keeps_the_synthetic_example_schema_valid_and_unapproved' {
         $standard=Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards'
         $text=Get-Content -Raw (Join-Path $standard 'examples/third-party-raw-skill-source-v1.json')
-        Test-Json -Json $text -SchemaFile (Join-Path $standard 'schemas/third-party-raw-skill-source-v1.schema.json') -ErrorAction Stop | Should Be $true
-        ($text|ConvertFrom-Json).reviewState | Should Be 'candidate'
-        ($text|ConvertFrom-Json).licenseReview | Should Be 'pending'
+        Assert-RawTestEqual (Test-Json -Json $text -SchemaFile (Join-Path $standard 'schemas/third-party-raw-skill-source-v1.schema.json') -ErrorAction Stop) ($true)
+        Assert-RawTestEqual (($text|ConvertFrom-Json).reviewState) ('candidate')
+        Assert-RawTestEqual (($text|ConvertFrom-Json).licenseReview) ('pending')
     }
 }
