@@ -308,6 +308,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/delivery/syp-195/managed-runtime-binding.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/delivery/syp-195/static-artifact-inspection.json",
       "license": "Apache-2.0"
     },

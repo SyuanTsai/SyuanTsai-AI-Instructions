@@ -22,6 +22,7 @@
 - [候選 Catalog](candidate/catalog/skills-catalog.json)、[sources](candidate/catalog/skills-catalog.sources.json)、[Lock](candidate/catalog/skills-catalog-lock.json)：在既有中央資料上增加一個來源與非預設 `diagram-design` profile；其餘 pin 保留。
 - [raw descriptor](candidate/raw-source-descriptor.json)、[package integrity](candidate/package-integrity.json)：完整原始 archive 重新展開比對、281 個 package／legal 原始檔的 inventory、原始 hash、central metadata ownership。`releaseEligible=false`、`adoptionApproved=false`。
 - [隔離受管驗證](managed-acceptance.json) 與 [重現 harness](verify-managed-candidate.ps1)：包含實際套件、逐檔 hash、provenance、冪等、VerifyOnly、customized／unmanaged、profile、移除與交易失敗回復。使用本次中央 code 的獨立 runtime fixture 與派生候選 Catalog，未修改真實 USER scope。
+- [實際 runtime bytes 綁定](managed-runtime-binding.json)：原報告的 `runtimeAuthorityCommit` 是 fixture Catalog 的基準，並非執行 module 的完整 identity。保留的 19 個 runtime modules 已逐檔比對雲端實作，記錄原始 bytes 與 Git blob SHA-256，僅正規化 LF／CRLF 後完全相同。後續 harness 直接記錄 `runtimeModuleInventory` 與明確的 `catalogBaselineCommit`。
 - [三種 Mermaid 功能驗收](../../examples/diagram-design-acceptance/README.md)：架構、流程、時序；原稿、實際 extractor IR、HTML／SVG、fidelity 與瀏覽器證據。
 - [實際 exporter／self_check](upstream-export-checks.json)：三種 exporter XML 與文字保留成功，三種 self_check 退出碼 0。未修改的 exporter 會加入 Google Fonts import，沒有通過離線攜帶性；交付 static SVG 使用另行繪製的完全內嵌版本。
 - ASTRA `gpt-6-astra / xhigh` 完整惡意內容 JSON：Jira SYP-195 attachment `10035`，SHA-256 `6d289fad53400e895c4f5dafd3fafa0cfe64952ba0e82bc5b267702a74547733`；完整範圍為固定 279 個 Skill 檔案及 4 份 policy／license 文件，結論為未發現。該結論不能代替實際 SkillSpector 或授權確認。

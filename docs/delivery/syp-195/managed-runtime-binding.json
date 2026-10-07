@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "validationKind": "retained-managed-fixture-runtime-binding",
+  "releaseEligible": false,
+  "status": "passed",
+  "executedAcceptanceReportSha256": "ad81f6addae17981984b891b8d39c276cdc6b24c18fa66b3a39d8a3cc1991269",
+  "committedRuntimeIdentity": "30ceff81109a7e4bbc249f02542b0a91e1b5f925",
+  "legacyRuntimeAuthorityCommitMeaning": "The original acceptance report field names the fixture catalog baseline. It does not identify the executed runtime bytes; this retained-fixture comparison binds those bytes to the committed implementation.",
+  "comparison": "Compare every retained runtime module byte-for-byte after LF/CRLF normalization against its Git blob; retain both raw SHA-256 values.",
+  "modules": [
+    {
+      "path": "scripts/agent-artifact-remediation.psm1",
+      "executedFixtureSha256": "ebf8835bfad6dc34fcbf6a64234e867f48efe71aeb7f080547e39876af708680",
+      "committedBlobSha256": "82233d0f65e6dd7faf4c04754173476d9069ca2aa0c46503cdcf1dc0162fd03f",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/agent-environment-reconciler.psm1",
+      "executedFixtureSha256": "33abc097d16fcf75f415b4c1164ed23ba42e36f3da61abea5eade8cea7cdc153",
+      "committedBlobSha256": "670b812fd3317eba17a9e601fd99dbbef8ba38b909dad23ff04c04975965086b",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/ai-instructions-rollout.psm1",
+      "executedFixtureSha256": "b7f9e441b291c078459d2b878db626a9fd7b2f71d1a7d9217ad3906056a7ddbb",
+      "committedBlobSha256": "dcd745f9039c6a8d7dde33816ea58f4eb43c16f27002bd3864978c05823564a7",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/ai-instructions-runtime-contract.psm1",
+      "executedFixtureSha256": "32f9770176cebe7dcab2c23ccb6392521bb0ad5780b6f590f3fdcce9e2276f87",
+      "committedBlobSha256": "7285af8b78842c7be14f6fe46dd647e61c622b14b531a93a5804b7e09e2f49e5",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/ai-instructions-updater.psm1",
+      "executedFixtureSha256": "695ea8bd11bb44838f2eb470dbd28af1c95c5a574c00d6564ecae5d4cc01c91f",
+      "committedBlobSha256": "3625341619bc1b8cc2078c9aa40e78d9eae239a54ef4e307e9a4538bce6d1795",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/installer-safe-mutation.psm1",
+      "executedFixtureSha256": "a837199fbc89482b855430c567a59c7a12650f150012b7316adb8aca2f59e1d5",
+      "committedBlobSha256": "ac1e73ffb1b8ea1b95fdc3a177449442281d3d485f62ec42e464f6f5f38ba359",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/license-delivery.psm1",
+      "executedFixtureSha256": "b1cb1736a36e101901dac92a7302fba9181f14919171e4db28dba78b571a7c2e",
+      "committedBlobSha256": "a378ac0f282779145b45894b8372f8dcabe9792fe0d4e549cffade9b087c4be3",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/RoutineSemanticScan.psm1",
+      "executedFixtureSha256": "42de9b3f57a92c06c6f5611f8760630a4c973b5fb74e3c9fad05744fbfcfd9b2",
+      "committedBlobSha256": "aa529c379f9bec8bfda636aa7740d2f3c59279bb43c2029be6f6e4fd1bc4f78e",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/safe-zip.psm1",
+      "executedFixtureSha256": "734f402fb5e4f48c7994bbd8a3371018456af881b6d6c20b5c8b320dac842e15",
+      "committedBlobSha256": "94cec413f55e9f1b984b30e3bb6e50019794383017c44ec3124d0acd67971cf5",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-catalog-contract.psm1",
+      "executedFixtureSha256": "e81914980880b72134af77533060eda1ece428ece4010ecdf1b5d0aed907f5c3",
+      "committedBlobSha256": "5add4c286fbbc81ba416a22fbb60c209219670120f01283546c04836949ac6e9",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-selection.psm1",
+      "executedFixtureSha256": "690c060f09fab52e2d3d5efee2f663f3f8a9085055d3e42a9a1a1fbd7ed873c3",
+      "committedBlobSha256": "26fd06ebefcb7610f8166b2cdb5e9c784331b74d7a12ec3732de4e9c20b6bfaf",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-source-acquisition.psm1",
+      "executedFixtureSha256": "4a5b7ac7b0039edbc1d0fa98e7c8bf848c28d7315d5eb879e9f216134d14b602",
+      "committedBlobSha256": "21120c700638bbe4b9976a5c0d701d5d5b27675733cc2ded785dc870d2bb72cb",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-source-composition.psm1",
+      "executedFixtureSha256": "c5f3a0cd470666034547b754382fd73ce0532fa1a0034a85e1e517e2d313c596",
+      "committedBlobSha256": "4cc65c2a352d1a8a4354c5204a88b516d87f83072c2d54f6479f229f98338537",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-source-retrieval.psm1",
+      "executedFixtureSha256": "292c03cda90df527f5c7e0dde4ce9a8ee1eb61604c9b00c56121c9955649a44f",
+      "committedBlobSha256": "05332ef66ff70940736a147f3225611bc40c603baa42ff539ee173651ca7b2f4",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/skills-source-routing.psm1",
+      "executedFixtureSha256": "0e94c5b47dc45bdec5addc9b987694b52f102bdb924d7e217763b8ae42e2960c",
+      "committedBlobSha256": "c726b9f23485ac1f7256c8f4a5b28fa39b4a2a598d0dc9e4e5f4a19ca38cde34",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/StandardEntryPointContract.psm1",
+      "executedFixtureSha256": "9e06795a17fbc4f45b6edee517e806e6ed9922ce9a4910bd8ffb250a557c6949",
+      "committedBlobSha256": "dc66e6bfb0b83699fa0399b03f68ef84b09d6b3103e388e7063891e53b5887b8",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/StandardSemanticBridge.psm1",
+      "executedFixtureSha256": "a2708d486e4c228aa310ec0b47a2e6a1e1ade64d5cae3de44210a0a64b4f96df",
+      "committedBlobSha256": "daf90f703898cc56fc3310e1eec462bafa6552edcac0de4f08a3cd4b9f63a429",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/syp101-production-smoke-contract.psm1",
+      "executedFixtureSha256": "7f4ee72e283a7df0f91a867f5ab2c3fbedb270a8a385dad6e73501433455efef",
+      "committedBlobSha256": "c5035cd3067ec816ddde5bb71abb2748c397458876e42d704d131463896185b6",
+      "equalAfterLineEndingNormalization": true
+    },
+    {
+      "path": "scripts/third-party-skill-source.psm1",
+      "executedFixtureSha256": "deb140b0971c270ce2faf5267ff4ecd6946cfbf669088c47643579fbefb853ec",
+      "committedBlobSha256": "deb140b0971c270ce2faf5267ff4ecd6946cfbf669088c47643579fbefb853ec",
+      "equalAfterLineEndingNormalization": true
+    }
+  ]
+}

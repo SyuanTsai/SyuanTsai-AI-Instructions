@@ -21,6 +21,9 @@ $runtime=Join-Path $work 'runtime'
 foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $central 'scripts') -File -Filter '*.psm1')) {
     Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $runtime $file.Name)
 }
+$runtimeModuleInventory=@(Get-ChildItem -LiteralPath $runtime -File -Filter '*.psm1' | Sort-Object Name | ForEach-Object {
+    [ordered]@{path=('scripts/'+$_.Name);sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+})
 foreach($name in @('skills-catalog.json','skills-catalog-lock.json')) {
     Copy-Item -LiteralPath (Join-Path $candidate ('catalog/'+$name)) -Destination (Join-Path $runtime ('catalog/'+$name))
 }
@@ -87,7 +90,8 @@ $blocked=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $colli
 Assert-Case ($blocked.outcome -ceq 'failed' -and (Hash $collision) -ceq $collisionHash) 'Unmanaged collision was overwritten.'
 $report=[ordered]@{
     schemaVersion=1;validationKind='isolated-managed-candidate-acceptance';status='passed';releaseEligible=$false;realUserScopeUpdated=$false
-    candidateState='candidate/pending';runtimeAuthorityCommit='638a342e0757867558e396e2f7decb79fcf7addb';catalogIsDerivedFixture=$true
+    candidateState='candidate/pending';catalogBaselineCommit='638a342e0757867558e396e2f7decb79fcf7addb';catalogIsDerivedFixture=$true
+    runtimeModuleInventory=$runtimeModuleInventory
     catalogSha256=Hash (Join-Path $candidate 'catalog/skills-catalog.json');lockSha256=Hash (Join-Path $candidate 'catalog/skills-catalog-lock.json')
     sourceCommit=$descriptor.resolvedCommit;archiveSha256=$descriptor.archiveSha256;skillContentSha256=$descriptor.skills[0].contentSha256
     payloadFiles=$payload.Count;licenseDocuments=2;licenseReceipts=1;installedFiles=$desired.Files.Count
