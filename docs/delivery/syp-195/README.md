@@ -36,10 +36,13 @@
 
 ## 正式採用與 SYP-259 接收
 
-1. 完成 PR #76 的最新 HEAD required CI 與 human review，依中央 AGENTS.md 正常 merge authority 變更。記錄最終 merge SHA；目前尚無 merge SHA，不以分支 commit 代替。
+1. PR #76 已在最新 HEAD CI 通過後，依使用者授權正常合併；merge SHA 為 `715c9cf5af9d9d6fb429791c3384e859d67fc445`。後續實跑準備發現 Core 原先仍將所有 Pester case 綁在上游 `tests/`，因此補齊明確的中央 raw test ownership。該後續 authority 變更仍須最新 HEAD required CI、human review 與正常 merge，不能以未核准分支作正式 source authority。
 2. 授權查證與來源技術驗證各自進行。補齊原始套件必要授權／notice 與未證實素材的可用權利，作實際 license review；證據不足不自動等同必須改 pin 或 Fork。只禁用圖示不能掩蓋必要套件權利缺口，正式採用前須依實際用途與完整套件查證結論處理，不自行裁掉檔案。
 3. 以同一固定來源、descriptor、原始 archive 與最新已 merge authority 建立 fresh RunId 的 canonical `-SourceValidation`。凍結 adapter、module closure、schema、descriptor、archive 和工具 receipts；實際執行 skill-validator、skill-tools、完整 SkillSpector Static no-LLM、中央 raw ownership general／Pester checks。任何 severity／coverage 失敗保持阻擋，不能降級為 ordinary Core-only PASS。
 4. `Validate-ThirdPartySkillSource.ps1 -SourceValidationEnvelope` 只產生來源檢查的 package-stage envelope；完整且有效的 candidate/pending descriptor 可以接受來源檢查，報告仍保留 `adoptionApproved=false` 與 `releaseEligible=false`。正式採用時顯式 `RequireApproved` 仍拒絕 pending，假 approved claim 仍被拒絕。本次修正有實際 Red／Green 行為測試；尚未產生的正式 source CI／receipt／review 證據明列未完成，不填入猜測值。
+   - raw 來源明確設定 `sourceValidation.testOwnership=central-third-party-raw-skill-v1`。中央擁有的完整兩組 suite 與其 bytes／authority revision 凍結；candidate snapshot 與 test-source inventory 分開綁定，保留完整 case union 與零未通過案例要求。
+   - [`Invoke-ThirdPartySourceChecks.ps1`](../../../scripts/Invoke-ThirdPartySourceChecks.ps1) 供 canonical general／Pester check dispatch 使用。以同一 RunId 的 approved-source Pester resolver receipt 執行實際完整 suite，記錄實際 source block offset、expanded case identity、discovery／execution 與失敗 counts。entry、所有 module closure、Pester receipt／payload及 wrapper executable 都必須凍結；執行期不取得新工具。這些是驗證 dispatch adapter，不是新增或包裝 Skill。
+   - 固定的 Pester run root 是中央 authority，不使用候選 root 的 Pester container hooks。獨立 Pester recorder smoke 或 15 個 suite cases 成功只能證明該子階段，不能宣稱完整 SourceValidation。
 5. 通過本單交付條件後，SYP-259 重新讀取四张前置 SYP-195／215／216／275、latest central/source、個人選取与實際已授權主機。以本候選差異重建正式 Catalog／sources／Lock，做部署時 CI、review、normal merge 後才生效。
 6. 真實 USER scope 安裝、記憶入口切換及一次性更新由 SYP-259 執行。本次工作的電腦不自動成為部署目標。保留 notify-only，先產生 install/update/remove/preserve/ownership 清單與備份；正式執行後重驗 hash、discovery、冪等與回復。
 

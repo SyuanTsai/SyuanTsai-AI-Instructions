@@ -7305,12 +7305,40 @@ function Assert-StandardCoreNativeReports {
     }
 }
 
+function Get-StandardCoreCentralRawTestInventory {
+    param([string] $AuthorityRevision, [object[]] $FrozenFiles)
+    $root=[string]$script:StandardValidationRepositoryRoot
+    $paths=@('tests/third-party-skill-source.Tests.ps1','tests/third-party-source-envelope.Tests.ps1')
+    $head=([string](Invoke-StandardCoreGit -RepositoryRoot $root -WorkingDirectory $root -Arguments @('rev-parse','--verify','HEAD^{commit}')).stdout).Trim()
+    if ($head -cne $AuthorityRevision) { throw 'FAILED|Central raw test authority revision differs.' }
+    $tracked=Invoke-StandardCoreGit -RepositoryRoot $root -WorkingDirectory $root -Arguments (@('ls-files','--error-unmatch','--')+$paths)
+    if ((([string]$tracked.stdout -split "`r?`n" | Where-Object {$_} | Sort-Object) -join ';') -cne (($paths | Sort-Object) -join ';')) { throw 'FAILED|Central raw tests are not the complete governed tracked suite.' }
+    $diff=Invoke-StandardCoreGit -RepositoryRoot $root -WorkingDirectory $root -Arguments (@('diff','--no-ext-diff','--no-textconv','--quiet',$AuthorityRevision,'--')+$paths) -AllowedExitCodes @(0,1)
+    if ($diff.exitCode -ne 0) { throw 'FAILED|Central raw test bytes differ from the authority revision.' }
+    $inventory=@()
+    foreach ($relative in $paths) {
+        $path=Join-Path $root $relative
+        Assert-StandardValidationRegularFile -Path $path -Context 'central raw test'
+        $hash=Get-StandardValidationFileSha256 -Path $path -Context 'central raw test'
+        if (@($FrozenFiles | Where-Object {[string]$_.path -ceq $path -and [string]$_.sha256 -ceq $hash}).Count -ne 1) { throw 'FAILED|Central raw test file is not frozen exactly once.' }
+        $inventory += [pscustomobject]@{path=$relative;sha256=$hash}
+    }
+    return $inventory
+}
+
 function Invoke-StandardCoreSourceTools {
     param($Spec, $SkillSet, [string] $RunId, [string] $SourceRevision, [string] $AuthorityRevision,
         [string] $SnapshotRoot, [string] $ContentSha256, [string] $RunRoot,
         [string] $AdapterPath, [string] $AdapterSha256, [string] $ArtifactsRoot,
         [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath)
-    Assert-StandardValidationExactPropertySet -Object $Spec -Expected @('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts') -Context 'source validation dispatch'
+    $specFields=@('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts')
+    $testOwnership=Get-StandardValidationProperty -Object $Spec -Name 'testOwnership'
+    if (Test-StandardValidationHasProperty -Object $Spec -Name 'testOwnership') {
+        if ($testOwnership -isnot [string] -or $testOwnership -cne 'central-third-party-raw-skill-v1') { throw 'INVALID|Unknown source test ownership.' }
+        $specFields += 'testOwnership'
+        [void](Get-StandardCoreCentralRawTestInventory -AuthorityRevision $AuthorityRevision -FrozenFiles @($Spec.frozenFiles))
+    }
+    Assert-StandardValidationExactPropertySet -Object $Spec -Expected $specFields -Context 'source validation dispatch'
     Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
     Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
     $retainedAdapterPath = Join-Path $RunRoot 'source-core-adapter.json'
@@ -7360,11 +7388,13 @@ function Invoke-StandardCoreSourceTools {
         if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
         if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
     }
-    return [pscustomobject][ordered]@{
+    $sourceResult = [pscustomobject][ordered]@{
         status='passed'; runId=$RunId; candidateId=$candidateId; sourceRevision=$SourceRevision;
         contentSha256=$ContentSha256; authorityRevision=$AuthorityRevision; activeSkills=@($SkillSet.ids);
         skillsRoot=$SkillSet.relative; toolReceipts=@($Spec.toolReceipts); frozenFiles=@($Spec.frozenFiles); events=@($events.ToArray()); adapterSnapshot=[pscustomobject]@{path=$retainedAdapterPath;sha256=$AdapterSha256}
     }
+    if ($null -ne $testOwnership) { $sourceResult | Add-Member -NotePropertyName testOwnership -NotePropertyValue $testOwnership }
+    return $sourceResult
 }
 
 function Assert-StandardCoreSourceCheckReport {
@@ -7399,6 +7429,16 @@ function Assert-StandardCoreSourceCheckReport {
     foreach ($field in @('toolReceipts','frozenFiles')) {
         if ((ConvertTo-Json -InputObject $adapter.sourceValidation.$field -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $source.$field -Depth 20 -Compress)) { throw 'FAILED|Source tool identity differs from the dispatched adapter.' }
     }
+    $testOwnership=[string](Get-StandardValidationProperty -Object $adapter.sourceValidation -Name 'testOwnership')
+    if ($testOwnership -cne [string](Get-StandardValidationProperty -Object $source -Name 'testOwnership') -or
+        (Test-StandardValidationHasProperty -Object $adapter.sourceValidation -Name 'testOwnership') -ne (Test-StandardValidationHasProperty -Object $source -Name 'testOwnership') -or
+        ((Test-StandardValidationHasProperty -Object $adapter.sourceValidation -Name 'testOwnership') -and $testOwnership -cne 'central-third-party-raw-skill-v1')) { throw 'FAILED|Source test ownership differs from the dispatched adapter.' }
+    $testInventory=$snapshotInventory
+    $expectedTestScope='complete-unfiltered-tests-tree'
+    if ($testOwnership -ceq 'central-third-party-raw-skill-v1') {
+        $testInventory=@(Get-StandardCoreCentralRawTestInventory -AuthorityRevision $ExpectedAuthorityRevision -FrozenFiles @($source.frozenFiles))
+        $expectedTestScope='complete-central-raw-skill-suite'
+    }
     $expected = @('package-validation|package-adapter|')
     foreach ($skill in $source.activeSkills) { $expected += "package-validation|skill-validator|$skill"; $expected += "package-validation|skill-tools|$skill" }
     $expected += 'skillspector-static|static-analyzer|'
@@ -7427,6 +7467,18 @@ function Assert-StandardCoreSourceCheckReport {
             $arguments.SkillInventorySha256=Get-StandardValidationInventorySha256 -Inventory $inventory
         }
         $envelope = Assert-StandardValidationToolEnvelope @arguments
+        if ($index -eq 0 -and $testOwnership -ceq 'central-third-party-raw-skill-v1') {
+            $rawSource=Get-StandardValidationProperty -Object $envelope -Name 'rawSourceEvidence'
+            if ([string]$rawSource.contract -cne 'third-party-raw-skill-source-v1' -or [string]$rawSource.validationKind -cne 'third-party-package-only' -or
+                [string]$rawSource.status -cne 'passed' -or $rawSource.releaseEligible -isnot [bool] -or $rawSource.releaseEligible -or
+                $rawSource.archiveProjectionVerified -isnot [bool] -or -not $rawSource.archiveProjectionVerified -or
+                [string]$rawSource.candidateIdentity.resolvedCommit -cne $ExpectedSourceRevision -or
+                (ConvertTo-StandardCoreRepositoryIdentity -Value ([string]$rawSource.candidateIdentity.repository) -Context 'raw package source repository') -cne (ConvertTo-StandardCoreRepositoryIdentity -Value ([string]$Report.candidate.repository) -Context 'Core candidate repository') -or
+                (@($rawSource.skills.id) -join ';') -cne (@($source.activeSkills) -join ';')) { throw 'FAILED|Central raw tests require actual candidate-bound raw package evidence.' }
+            foreach ($skill in @($rawSource.skills)) {
+                if ([string]$skill.sourcePath -cne ($source.skillsRoot+'/'+$skill.id)) { throw 'FAILED|Raw package test ownership has a mismatched source path.' }
+            }
+        }
         $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
         Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot
         if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
@@ -7459,13 +7511,21 @@ function Assert-StandardCoreSourceCheckReport {
         (Get-StandardValidationFileSha256 -Path $binding.path -Context 'source Pester cases') -cne [string]$binding.sha256) { throw 'FAILED|Source Pester case inventory changed.' }
     $cases=(Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source Pester cases').value
     if ($cases.schemaVersion -ne 1 -or [string]$cases.report -cne 'standard-core-pester-case-inventory-v1' -or
-        [string]$cases.coreRunId -cne [string]$Report.runId -or [string]$cases.runScope -cne 'complete-unfiltered-tests-tree' -or
+        [string]$cases.coreRunId -cne [string]$Report.runId -or [string]$cases.runScope -cne $expectedTestScope -or
         [string]$cases.terminalStatus -cne 'complete' -or $cases.complete -isnot [bool] -or -not $cases.complete -or
         @($cases.errors).Count -ne 0 -or $cases.failedBlockCount -ne 0 -or $cases.failedContainerCount -ne 0 -or
         $cases.caseDiscoveryCount -cne $counts.total -or $cases.caseExecutionCount -cne $counts.total -or
         @($cases.discoveryCases).Count -ne $counts.total -or @($cases.executionCases).Count -ne $counts.total -or
         [string]$cases.candidateSnapshotIdentity.coreRunId -cne [string]$Report.runId -or
         [string]$cases.candidateSnapshotIdentity.root -cne [string]$Report.artifacts.snapshotRoot) { throw 'FAILED|Source Pester discovery, blocks or case inventory did not pass.' }
+    if ($testOwnership -ceq 'central-third-party-raw-skill-v1') {
+        $testSource=Get-StandardValidationProperty -Object $cases -Name 'testSourceIdentity'
+        Assert-StandardValidationExactPropertySet -Object $testSource -Expected @('ownership','root','authorityRevision','files') -Context 'central raw Pester test identity'
+        if ([string]$testSource.ownership -cne $testOwnership -or [string]$testSource.root -cne [string]$script:StandardValidationRepositoryRoot -or
+            [string]$testSource.authorityRevision -cne $ExpectedAuthorityRevision -or $testSource.files -isnot [array] -or
+            (ConvertTo-Json -InputObject $testSource.files -Depth 4 -Compress) -cne (ConvertTo-Json -InputObject $testInventory -Depth 4 -Compress)) { throw 'FAILED|Central raw Pester test identity or byte inventory differs.' }
+    }
+    elseif ($null -ne (Get-StandardValidationProperty -Object $cases -Name 'testSourceIdentity')) { throw 'FAILED|Candidate-owned tests cannot substitute another test source.' }
     # Preserve the existing Pester sidecar representation: its snapshot digest
     # is the sorted path/hash JSON digest, distinct from the Core tree digest.
     $pesterInventory = @($snapshotInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{path=[string]$_.path;sha256=[string]$_.sha256} })
@@ -7486,13 +7546,13 @@ function Assert-StandardCoreSourceCheckReport {
             $identity = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple))
             if ([string]$case.identity -cne $identity -or -not $identities.Add($identity) -or [string]$case.result -cne 'Passed' -or
                 -not [string]::IsNullOrWhiteSpace([string]$case.identityError) -or [int]$case.sourceStartOffset -lt 0 -or
-                @($snapshotInventory | Where-Object { [string]$_.path -ceq ('tests/' + $case.sourceFile) }).Count -ne 1) { throw 'FAILED|Source Pester case result or identity is invalid.' }
+                @($testInventory | Where-Object { [string]$_.path -ceq ('tests/' + $case.sourceFile) }).Count -ne 1) { throw 'FAILED|Source Pester case result or identity is invalid.' }
         }
         $identitySets += ,@($identities | Sort-Object)
     }
     if (($identitySets[0] -join ';') -cne ($identitySets[1] -join ';') -or
         (@($cases.shardCaseIdentities | Sort-Object) -join ';') -cne ($identitySets[0] -join ';')) { throw 'FAILED|Source Pester case identity union is incomplete.' }
-    $testFiles=@($snapshotInventory | Where-Object { [string]$_.path -clike 'tests/*.Tests.ps1' } | ForEach-Object { ([string]$_.path).Substring(6) } | Sort-Object)
+    $testFiles=@($testInventory | Where-Object { [string]$_.path -clike 'tests/*.Tests.ps1' } | ForEach-Object { ([string]$_.path).Substring(6) } | Sort-Object)
     foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) {
         if (@($testFiles).Count -eq 0 -or (@($cases.$field | Sort-Object) -join ';') -cne ($testFiles -join ';')) { throw 'FAILED|Source Pester complete test-file inventory differs.' }
     }

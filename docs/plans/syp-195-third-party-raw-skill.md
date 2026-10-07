@@ -59,6 +59,17 @@
 - 驗證：目標 envelope／raw-source suite、三組 authority regression、licensing inventory 與最新 HEAD CI；正式 raw source tools 在中央契約正常 review／merge 後執行，不以本次 package check 或 fixtures 冒充實際 SourceValidation。
 - 授權查證與來源工具證據各自保留；證據不足不自動等同必須換版或 Fork。只有證據確認原路徑無法滿足採用條件時，才提出來源變更決策。
 
+### 3.4 原始第三方來源的中央測試 ownership（2026-10-08）
+
+- 已核實：中央契約已正常合併，但 `Assert-StandardCoreSourceCheckReport` 仍將所有 Pester case 與完整 test inventory 綁在 candidate 的 `tests/`。未修改的外部來源沒有中央 Pester suite，因此該實作無法履行本案已核准的中央測試 ownership。
+- 目標：`Invoke-StandardValidation.ps1`、Core adapter／evidence schema、Core machine-readable contract、raw normative 文件、三組 authority regression；新增中央 raw-source Pester 執行入口，輸出真實 discovery／execution sidecar。
+- 改變：以可省略的固定 `sourceValidation.testOwnership=central-third-party-raw-skill-v1` 明確選取中央擁有的兩組完整 raw contract suite。測試路徑由 authority 定義，caller 不能自訂清單或 root。核對同一 authority Git revision、實際 bytes 與 frozen files；sidecar 保留 candidate snapshot 綁定，另外記錄 test-source identity。僅 package stage 實際成功回報 raw contract 時可使用。
+- TDD：Given 無上游 Pester suite 的完整 raw candidate 與凍結中央 suite；When strict source-report gate 核對；Then 完整 case union 可通過。先觀察原 gate 拒絕的 Red，再修正 inventory ownership。加入錯 authority、變更測試 bytes、缺 frozen file、錯 test root、遺漏 suite／case、普通 source 冒充 raw 及未知 ownership 的拒絕情境。
+- 安全／相容：既有省略欄位的來源仍要求完整未篩選 candidate `tests/`，不得改成中央 suite。保留所有三個實際工具、完整 Static、severity、非空 counts、零失敗／零跳過、timeout、cleanup 與 candidate hash；不注入上游檔案。Source-only 仍 `releaseEligible=false`。
+- 執行入口以核實的 Pester module 路徑執行固定完整 suite，從實際 Pester result 取得 discovery／execution、block／container failure、case identity 與 counts；不能使用固定數字或合成 sidecar。工具 setup 與 source execution 分離，執行期間不下載。
+- approved-source resolver 已取得核實的 Pester 6.2.0；實跑兩組 suite 的 15 cases 都因舊 `Should Be/Throw` 呼叫失敗。改用兩個 framework-independent assertion helpers，保留相同正負 assertions，兼容既有 Pester 4 authority lane 與正式 Pester 6；兩個版本都必須實跑驗證。
+- 交付／回復：同一 authority PR 完成三組 regression 與 CI，再由 human review 正常合併；之後才套用正式來源。回復以正常 revert PR 恢復舊行為，production pin／USER scope 均不變。成功以實際 native SourceValidation 證據為準。
+
 ## 4. 交付與驗證
 
 - 本機目標測試：license、third-party adapter、三組 authority regression；必要 catalog 與 source acquisition regression；`git diff --check`。

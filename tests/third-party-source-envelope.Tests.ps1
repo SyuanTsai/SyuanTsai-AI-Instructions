@@ -1,5 +1,16 @@
 Describe 'Third-party raw package source dispatch envelope' {
     BeforeAll {
+        function Assert-RawTestEqual {
+            param($Actual,$Expected)
+            if ($Actual -cne $Expected) { throw "Raw source assertion failed: expected [$Expected], actual [$Actual]." }
+        }
+        function Assert-RawTestThrows {
+            param([scriptblock]$Action)
+            $rejected=$false
+            try { & $Action | Out-Null } catch { $rejected=$true }
+            if (-not $rejected) { throw 'The invalid raw source operation must throw.' }
+        }
+
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-source-acquisition.psm1') -Force
         $script:EnvelopeCli=Join-Path $PSScriptRoot '../scripts/Validate-ThirdPartySkillSource.ps1'
     }
@@ -42,30 +53,30 @@ Describe 'Third-party raw package source dispatch envelope' {
     It 'InterT10_emits_the_canonical_package_envelope_and_raw_evidence' {
         $output=@(& $script:EnvelopeCli @dispatch)
         $envelope=($output -join "`n")|ConvertFrom-Json
-        $envelope.candidateIdentity | Should Be ('b'*64)
-        $envelope.activeSkills[0] | Should Be 'sample'
-        $envelope.decision | Should Be 'PASS'
-        $envelope.adapterStatus | Should Be 'passed'
+        Assert-RawTestEqual ($envelope.candidateIdentity) (('b'*64))
+        Assert-RawTestEqual ($envelope.activeSkills[0]) ('sample')
+        Assert-RawTestEqual ($envelope.decision) ('PASS')
+        Assert-RawTestEqual ($envelope.adapterStatus) ('passed')
         $raw=Get-Content -Raw $dispatch.OutputPath|ConvertFrom-Json
-        $raw.releaseEligible | Should Be $false
-        $raw.adoptionApproved | Should Be $true
-        $raw.archiveProjectionVerified | Should Be $true
+        Assert-RawTestEqual ($raw.releaseEligible) ($false)
+        Assert-RawTestEqual ($raw.adoptionApproved) ($true)
+        Assert-RawTestEqual ($raw.archiveProjectionVerified) ($true)
     }
 
     # Scenario: Dispatch supplies a different active inventory, candidate root or non-package stage.
     # Purpose: Reject replay and prevent the utility from claiming scanner or lifecycle results.
     It 'InterT20_rejects_mismatched_supervisor_context' {
         $env:STANDARD_VALIDATION_ACTIVE_SKILLS='other'
-        { & $script:EnvelopeCli @dispatch } | Should Throw
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch }
         $env:STANDARD_VALIDATION_ACTIVE_SKILLS='sample'
         $env:STANDARD_VALIDATION_STAGE_ID='skillspector-static'
-        { & $script:EnvelopeCli @dispatch } | Should Throw
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch }
         $env:STANDARD_VALIDATION_STAGE_ID='package-validation'
         $env:STANDARD_VALIDATION_TOOL_ID='skillspector-static'
-        { & $script:EnvelopeCli @dispatch } | Should Throw
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch }
         $env:STANDARD_VALIDATION_TOOL_ID='package-adapter'
         $env:STANDARD_VALIDATION_CANDIDATE_ROOT=Join-Path $caseRoot 'different-candidate'
-        { & $script:EnvelopeCli @dispatch } | Should Throw
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch }
     }
 
     # Scenario: The source runner checks an intact candidate before adoption and license review are complete.
@@ -76,15 +87,15 @@ Describe 'Third-party raw package source dispatch envelope' {
         [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
         $output=@(& $script:EnvelopeCli @dispatch)
         $envelope=($output -join "`n")|ConvertFrom-Json
-        $envelope.candidateIdentity | Should Be ('b'*64)
-        $envelope.activeSkills[0] | Should Be 'sample'
-        $envelope.decision | Should Be 'PASS'
-        $envelope.rawSourceEvidence.adoptionApproved | Should Be $false
-        $envelope.rawSourceEvidence.releaseEligible | Should Be $false
+        Assert-RawTestEqual ($envelope.candidateIdentity) (('b'*64))
+        Assert-RawTestEqual ($envelope.activeSkills[0]) ('sample')
+        Assert-RawTestEqual ($envelope.decision) ('PASS')
+        Assert-RawTestEqual ($envelope.rawSourceEvidence.adoptionApproved) ($false)
+        Assert-RawTestEqual ($envelope.rawSourceEvidence.releaseEligible) ($false)
         $raw=Get-Content -Raw $dispatch.OutputPath|ConvertFrom-Json
-        $raw.archiveProjectionVerified | Should Be $true
-        $raw.adoptionApproved | Should Be $false
-        $raw.releaseEligible | Should Be $false
+        Assert-RawTestEqual ($raw.archiveProjectionVerified) ($true)
+        Assert-RawTestEqual ($raw.adoptionApproved) ($false)
+        Assert-RawTestEqual ($raw.releaseEligible) ($false)
     }
 
     # Scenario: An adoption caller explicitly requires approval for a candidate that remains pending.
@@ -93,8 +104,8 @@ Describe 'Third-party raw package source dispatch envelope' {
         $descriptor.reviewState='candidate';$descriptor.licenseReview='pending'
         $descriptor.reviewEvidence=@();$descriptor.licenseEvidence=@()
         [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
-        { & $script:EnvelopeCli @dispatch -RequireApproved } | Should Throw
-        Test-Path -LiteralPath $dispatch.OutputPath | Should Be $false
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch -RequireApproved }
+        Assert-RawTestEqual (Test-Path -LiteralPath $dispatch.OutputPath) ($false)
     }
 
     # Scenario: A descriptor claims approval without accepted license evidence.
@@ -102,7 +113,7 @@ Describe 'Third-party raw package source dispatch envelope' {
     It 'InterT40_rejects_an_unsubstantiated_approved_claim_in_source_dispatch' {
         $descriptor.licenseReview='pending';$descriptor.licenseEvidence=@()
         [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
-        { & $script:EnvelopeCli @dispatch } | Should Throw
-        Test-Path -LiteralPath $dispatch.OutputPath | Should Be $false
+        Assert-RawTestThrows { & $script:EnvelopeCli @dispatch }
+        Assert-RawTestEqual (Test-Path -LiteralPath $dispatch.OutputPath) ($false)
     }
 }

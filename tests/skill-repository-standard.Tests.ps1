@@ -8,6 +8,7 @@ Describe 'SYP258 source validation result gate' {
             [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding($false)))
         }
         function New-SourceGateFixture {
+            param([switch] $CentralRawTests)
             $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $runId = 'c' * 32
             $runRoot = Join-Path $root ('runs/' + $runId)
@@ -18,8 +19,11 @@ Describe 'SYP258 source validation result gate' {
                 [void][IO.Directory]::CreateDirectory($skillRoot)
                 [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), ('fixture ' + $id), (New-Object Text.UTF8Encoding($false)))
             }
-            [void][IO.Directory]::CreateDirectory((Join-Path $snapshot 'tests'))
-            [IO.File]::WriteAllText((Join-Path $snapshot 'tests/Fixture.Tests.ps1'), '# source gate case fixture', (New-Object Text.UTF8Encoding($false)))
+            if (-not $CentralRawTests) {
+                [void][IO.Directory]::CreateDirectory((Join-Path $snapshot 'tests'))
+                [IO.File]::WriteAllText((Join-Path $snapshot 'tests/Fixture.Tests.ps1'), '# source gate case fixture', (New-Object Text.UTF8Encoding($false)))
+            }
+            $fixtureAuthority = if ($CentralRawTests) { (git -C (Split-Path -Parent $PSScriptRoot) rev-parse HEAD).Trim() } else { 'e' * 40 }
             $inventory = Get-StandardValidationInventory -Root $snapshot -Context 'source gate fixture'
             $contentHash = Get-StandardValidationInventorySha256 -Inventory $inventory
             $caseSnapshotRows=@($inventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{ path=$_.path; sha256=$_.sha256 } })
@@ -75,6 +79,17 @@ Describe 'SYP258 source validation result gate' {
                 staticAnalyzer=[pscustomobject]@{command=$toolPath;arguments=@()}
                 frozenFiles=$frozen;toolReceipts=$receipts
             }
+            $centralTestFiles=@('third-party-skill-source.Tests.ps1','third-party-source-envelope.Tests.ps1')
+            $centralBindings=@()
+            if ($CentralRawTests) {
+                $sourceSpec | Add-Member -NotePropertyName testOwnership -NotePropertyValue 'central-third-party-raw-skill-v1'
+                foreach ($file in $centralTestFiles) {
+                    $testPath=Join-Path $PSScriptRoot $file
+                    $testHash=Get-StandardValidationFileSha256 -Path $testPath -Context 'central fixture test'
+                    $centralBindings += [pscustomobject]@{path=('tests/'+$file);sha256=$testHash}
+                    $sourceSpec.frozenFiles += [pscustomobject]@{path=$testPath;sha256=$testHash}
+                }
+            }
             $adapterPath=Join-Path $runRoot 'source-adapter.json'
             Write-SourceGateFixtureJson $adapterPath ([pscustomobject]@{
                 schemaVersion=2;adapter='standard-core-adapter-v2';skillsRoot='skills';activeSkills=$skills;sourceValidation=$sourceSpec
@@ -93,6 +108,9 @@ Describe 'SYP258 source validation result gate' {
             foreach ($dispatch in $dispatches) {
                 $eventId = [guid]::NewGuid().ToString()
                 $envelope = [pscustomobject]@{ schemaVersion=1; status='passed'; decision='PASS'; candidateIdentity=$candidateId; activeSkills=$skills; findings=@(); analyzerCompleteness='complete'; skillId=$dispatch.skill; skillInventorySha256=$null }
+                if ($CentralRawTests -and $dispatch.tool -ceq 'package-adapter') {
+                    $envelope | Add-Member -NotePropertyName rawSourceEvidence -NotePropertyValue ([pscustomobject]@{contract='third-party-raw-skill-source-v1';validationKind='third-party-package-only';status='passed';releaseEligible=$false;archiveProjectionVerified=$true;candidateIdentity=[pscustomobject]@{repository='https://example.com/example/skills.git';resolvedCommit=('a'*40)};skills=@($skills | ForEach-Object {[pscustomobject]@{id=$_;sourcePath=('skills/'+$_)}})})
+                }
                 if ($null -ne $dispatch.skill) {
                     $skillInventory = Get-StandardValidationInventory -Root (Join-Path $snapshot ('skills/' + $dispatch.skill)) -Context 'source gate skill fixture'
                     $envelope.skillInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $skillInventory
@@ -130,8 +148,9 @@ Describe 'SYP258 source validation result gate' {
             $casePath=Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
             $caseRows=@(1..2 | ForEach-Object {
                 $expandedPath='Fixture.UnitT' + $_
-                $tuple=ConvertTo-Json -InputObject ([object[]]@('FIXTURE.TESTS.PS1', $_, $expandedPath)) -Compress -Depth 3
-                [pscustomobject]@{ identity=[Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple)); sourceFile='Fixture.Tests.ps1'; sourceStartOffset=$_; sourceStartLine=$_; expandedPath=$expandedPath; result='Passed'; identityError=$null }
+                $caseFile=if($CentralRawTests){$centralTestFiles[$_-1]}else{'Fixture.Tests.ps1'}
+                $tuple=ConvertTo-Json -InputObject ([object[]]@($caseFile.ToUpperInvariant(), $_, $expandedPath)) -Compress -Depth 3
+                [pscustomobject]@{ identity=[Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple)); sourceFile=$caseFile; sourceStartOffset=$_; sourceStartLine=$_; expandedPath=$expandedPath; result='Passed'; identityError=$null }
             })
             Write-SourceGateFixtureJson $casePath ([pscustomobject]@{
                 schemaVersion=1; report='standard-core-pester-case-inventory-v1'; coreRunId=$runId
@@ -142,20 +161,29 @@ Describe 'SYP258 source validation result gate' {
                 reportedCounts=[pscustomobject]@{Passed=2;Failed=0;Skipped=0;Inconclusive=0;NotRun=0};shardIdentity='core-full';shardCaseIdentities=@($caseRows.identity)
                 shardUnion=[pscustomobject]@{discoveryCount=2;executionUnionCount=2;complete=$true};discoveryCases=$caseRows;executionCases=$caseRows;complete=$true;errors=@()
             })
+            if ($CentralRawTests) {
+                $cases=Get-Content -Raw $casePath | ConvertFrom-Json
+                $cases.runScope='complete-central-raw-skill-suite'
+                foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) { $cases.$field=$centralTestFiles }
+                $cases | Add-Member -NotePropertyName testSourceIdentity -NotePropertyValue ([pscustomobject]@{ownership='central-third-party-raw-skill-v1';root=(Split-Path -Parent $PSScriptRoot);authorityRevision=$fixtureAuthority;files=$centralBindings})
+                Write-SourceGateFixtureJson $casePath $cases
+            }
             $caseBinding=[pscustomobject]@{path=$casePath;sha256=Get-StandardValidationFileSha256 -Path $casePath -Context 'fixture case ledger'}
-            return [pscustomobject]@{
+            $fixtureReport=[pscustomobject]@{
                 schemaVersion=2; evidence='standard-core-validation-evidence-v2'; generatedAt='2026-01-01T00:00:01Z'; state='PASS'; exitCode=0; runId=$runId; releaseEligible=$false; contentMode='immutable-source'; failure=$null
                 candidate=[pscustomobject]@{ repository='https://example.com/example/skills.git'; sourceRevision='a' * 40; baseRevision='b' * 40; contentSha256=$contentHash; inventory=$inventory; activeSkills=$skills; contentMode='immutable-source'; eventName='pull_request' }
-                authority=[pscustomobject]@{ repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision='e' * 40; contentMode='source'; runnerSha256='3' * 64; contractSha256='4' * 64 }
+                authority=[pscustomobject]@{ repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision=$fixtureAuthority; contentMode='source'; runnerSha256='3' * 64; contractSha256='4' * 64 }
                 adapter=[pscustomobject]@{ schemaVersion=2; identity='standard-core-adapter-v2'; sha256=$adapterHash }
                 artifacts=[pscustomobject]@{ runId=$runId; root=$root; outputPath=Join-Path $root 'result.json'; runRoot=$runRoot; snapshotRoot=$snapshot }
-                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision='e' * 40; activeSkills=$skills; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$frozen; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
+                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision=$fixtureAuthority; activeSkills=$skills; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$sourceSpec.frozenFiles; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
                 checks=$checks
             }
+            if ($CentralRawTests) { $fixtureReport.sourceValidation | Add-Member -NotePropertyName testOwnership -NotePropertyValue 'central-third-party-raw-skill-v1' }
+            return $fixtureReport
         }
         function Invoke-SourceGateFixture {
-            param($Report, [int] $ExitCode=0)
-            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision ('e' * 40) -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode
+            param($Report, [int] $ExitCode=0, [string] $ExpectedAuthorityRevision=('e'*40))
+            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision $ExpectedAuthorityRevision -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode
         }
         function Set-SourceGateEnvelope {
             param($Report, [int] $Index, [scriptblock] $Mutate)
@@ -205,6 +233,53 @@ Describe 'SYP258 source validation result gate' {
     It 'UnitT20_accepts_one_complete_two_package_candidate_run' {
         $report=New-SourceGateFixture
         if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete candidate-bound source evidence must pass.' }
+    }
+
+    Context 'Centrally owned raw source tests' {
+    BeforeEach {
+        # Unit fixtures mock only the authority Git transport. Actual test bytes and frozen hash checks remain real.
+        $script:RawFixtureRevision=(git -C (Split-Path -Parent $PSScriptRoot) rev-parse HEAD).Trim()
+        Mock Invoke-StandardCoreGit {
+            param($RepositoryRoot,$WorkingDirectory,$Arguments)
+            switch ($Arguments[0]) {
+                'rev-parse' {return [pscustomobject]@{stdout=$script:RawFixtureRevision;exitCode=0}}
+                'ls-files' {return [pscustomobject]@{stdout="tests/third-party-skill-source.Tests.ps1`ntests/third-party-source-envelope.Tests.ps1`n";exitCode=0}}
+                'diff' {return [pscustomobject]@{stdout='';exitCode=0}}
+                default {throw 'Unexpected authority Git fixture command.'}
+            }
+        }
+    }
+    # Scenario: The unmodified raw source has no upstream Pester files and its package stage binds the full frozen central suite.
+    # Purpose: Keep candidate bytes intact while proving centrally owned tests under the same reviewed authority.
+    It 'UnitT25_accepts_complete_frozen_central_raw_tests_without_upstream_test_files' {
+        $report=New-SourceGateFixture -CentralRawTests
+        if (Test-Path (Join-Path $report.artifacts.snapshotRoot 'tests')) { throw 'The raw fixture must contain no invented source tests.' }
+        if ((Invoke-SourceGateFixture $report -ExpectedAuthorityRevision $report.authority.revision) -ne $true) { throw 'Complete central raw ownership evidence must pass.' }
+    }
+
+    # Scenario: One binding of an otherwise complete central raw suite is replaced or a required case is omitted.
+    # Purpose: Prevent the ownership selector from becoming a test-filter, foreign-authority or raw-package bypass.
+    It 'UnitT27_rejects_<Name>_from_central_raw_test_ownership' -TestCases @(
+        @{Name='wrong_test_authority';Change={param($r) Set-SourceGateCases $r {param($c) $c.testSourceIdentity.authorityRevision='0'*40}}},
+        @{Name='foreign_test_root';Change={param($r) Set-SourceGateCases $r {param($c) $c.testSourceIdentity.root='foreign-root'}}},
+        @{Name='changed_test_hash';Change={param($r) Set-SourceGateCases $r {param($c) $c.testSourceIdentity.files[0].sha256='0'*64}}},
+        @{Name='missing_test_file';Change={param($r) Set-SourceGateCases $r {param($c) $c.testFileInventory=@($c.testFileInventory[0])}}},
+        @{Name='missing_discovered_case';Change={param($r) Set-SourceGateCases $r {param($c) $c.discoveryCases=@($c.discoveryCases[0])}}},
+        @{Name='unfrozen_central_test';Change={param($r) $r.sourceValidation.frozenFiles=@($r.sourceValidation.frozenFiles | Where-Object {$_.path -notmatch 'third-party-skill-source.Tests.ps1$'})}},
+        @{Name='not_raw_package';Change={param($r) Set-SourceGateEnvelope $r 0 {param($e) $e.PSObject.Properties.Remove('rawSourceEvidence')}}},
+        @{Name='wrong_raw_candidate';Change={param($r) Set-SourceGateEnvelope $r 0 {param($e) $e.rawSourceEvidence.candidateIdentity.resolvedCommit='0'*40}}},
+        @{Name='wrong_raw_repository';Change={param($r) Set-SourceGateEnvelope $r 0 {param($e) $e.rawSourceEvidence.candidateIdentity.repository='https://example.com/example/other.git'}}},
+        @{Name='ordinary_source_substitution';Change={param($r) $r.sourceValidation.PSObject.Properties.Remove('testOwnership')}}
+    ) {
+        param($Name,$Change)
+        $report=New-SourceGateFixture -CentralRawTests
+        $revision=$report.authority.revision
+        if ((Invoke-SourceGateFixture $report -ExpectedAuthorityRevision $revision) -ne $true) { throw 'Complete raw baseline must pass before mutation.' }
+        & $Change $report
+        $rejected=$false
+        try { Invoke-SourceGateFixture $report -ExpectedAuthorityRevision $revision | Out-Null } catch {$rejected=$true}
+        if (-not $rejected) { throw ('Central raw test substitution was accepted: '+$Name) }
+    }
     }
 
     # Scenario: A complete report is altered in one required binding, process, package coverage or repository result.
@@ -4575,3 +4650,40 @@ Describe 'Third-party raw Skill authority contract' {
 # The same authority regression entry executes actual adapter behavior and negative fixtures.
 . (Join-Path $PSScriptRoot 'third-party-skill-source.Tests.ps1')
 . (Join-Path $PSScriptRoot 'third-party-source-envelope.Tests.ps1')
+
+Describe 'Third-party source Pester case evidence' {
+    BeforeAll {
+        $entry=Join-Path $PSScriptRoot '../scripts/Invoke-ThirdPartySourceChecks.ps1'
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($entry,[ref]$tokens,[ref]$errors)
+        if (@($errors).Count) {throw 'The source Pester evidence entry must parse.'}
+        $function=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-ThirdPartySourcePesterCase'},$true))
+        if ($function.Count -ne 1) {throw 'The actual case evidence function must exist exactly once.'}
+        . ([scriptblock]::Create($function[0].Extent.Text))
+    }
+    # Scenario: A discovered Pester test supplies its actual script block and expanded result identity.
+    # Purpose: Bind case identity to real file/offset metadata rather than a fixed counter or invented file.
+    It 'UnitT10_records_the_actual_source_block_and_expanded_case_identity' {
+        $block={ 'inert case fixture' }
+        $test=[pscustomobject]@{ScriptBlock=$block;ExpandedPath='Fixture.UnitT10';Result='Passed'}
+        $file=[IO.Path]::GetFileName($block.Ast.Extent.File)
+        $case=New-ThirdPartySourcePesterCase -Test $test -TestRoot $PSScriptRoot -TestFiles @($file)
+        $tuple=[Text.UTF8Encoding]::new($false).GetString([Convert]::FromBase64String($case.identity)) | ConvertFrom-Json
+        if ($tuple[0] -cne $file.ToUpperInvariant() -or $tuple[1] -ne $block.Ast.Extent.StartOffset -or $tuple[2] -cne $test.ExpandedPath -or $case.result -cne 'Passed') {throw 'Case identity does not bind the actual Pester result metadata.'}
+    }
+    # Scenario: A test has an empty expanded name, foreign source root or missing script block.
+    # Purpose: Fail source evidence recording instead of assigning fabricated identities to incomplete metadata.
+    It 'UnitT20_rejects_missing_or_foreign_Pester_case_metadata' {
+        $block={ 'inert case fixture' }
+        $file=[IO.Path]::GetFileName($block.Ast.Extent.File)
+        foreach ($bad in @(
+            @{Test=[pscustomobject]@{ScriptBlock=$block;ExpandedPath='';Result='Passed'};Root=$PSScriptRoot},
+            @{Test=[pscustomobject]@{ScriptBlock=$block;ExpandedPath='Fixture';Result='Passed'};Root=$TestDrive},
+            @{Test=[pscustomobject]@{ScriptBlock=$null;ExpandedPath='Fixture';Result='Passed'};Root=$PSScriptRoot}
+        )) {
+            $rejected=$false
+            try {New-ThirdPartySourcePesterCase -Test $bad.Test -TestRoot $bad.Root -TestFiles @($file) | Out-Null} catch {$rejected=$true}
+            if (-not $rejected) {throw 'Incomplete or foreign case metadata was accepted.'}
+        }
+    }
+}
