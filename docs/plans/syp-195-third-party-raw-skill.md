@@ -48,6 +48,17 @@
 - Red：新 adapter 不存在／缺少行為而失敗；Green：共用 acquisition 的 inventory 與 portable frontmatter validator，加 strict descriptor 驗證；Refactor：保留正負 fixture 與既有 modules 的安全限制。
 - authority 三組受影響 regression 同 PR 驗證新契約仍要求真實 source 工具且 `releaseEligible=false` 的 package-only 報告不能代替 SourceValidation。
 
+### 3.3 來源驗證與採用批准分離（2026-10-08 修正）
+
+- 已核實：使用者改以 2026-10-08 當前最新版本為目標；即時 Git 遠端 HEAD 與 GitHub commits/main API 都解析為 `d1376371965f513d99cc9ec388835d255c5c88d5`、manifest `2.6.64`。重新下載的 archive SHA-256 與既有固定候選相同。新增查詢與 bytes 綁定紀錄，目標仍是完整原始 Skill。
+- 問題：`Validate-ThirdPartySkillSource.ps1 -SourceValidationEnvelope` 強制 `RequireApproved`，在 package stage 前要求 descriptor 已有人工與授權批准。這將來源檢查與正式採用批准混為同一門檻，違反既有 Standard §8.1.2 的 source-only／`releaseEligible=false` 界線。
+- 目標檔案：`docs/standards/third-party-raw-skill-sources.md`、`scripts/Validate-ThirdPartySkillSource.ps1`、`tests/third-party-source-envelope.Tests.ps1`、三組 authority regression 與交付 README。descriptor schema 與上游 bytes／hash 不變。
+- 改變：SourceValidation package envelope 接受完整且有效的 candidate/pending descriptor；保留實際 supervisor context、同候選 inventory、archive／Skill／legal bytes 綁定及所有原有工具／Static／repository checks。source report 必須保留 `adoptionApproved=false` 與 `releaseEligible=false`；正式採用入口的明確 `RequireApproved` 仍拒絕 pending，假 approved claim 仍拒絕。
+- TDD：先改為 pending 可接受來源檢查、顯式採用批准仍拒絕 pending、假批准仍拒絕的行為測試，觀察現有強制前置產生的 Red；再以移除 envelope 的隱含 `RequireApproved` 作最小 Green。同步 normative boundary 與 authority regression，防止錯誤門檻復原。
+- 相容性／回復：既有已批准 descriptor 仍可檢查，`RequireApproved` 介面不變；變更不啟用正式 Catalog 或 USER scope。回復使用正常修正／revert PR，保留 source-only 與正式採用批准的分離。
+- 驗證：目標 envelope／raw-source suite、三組 authority regression、licensing inventory 與最新 HEAD CI；正式 raw source tools 在中央契約正常 review／merge 後執行，不以本次 package check 或 fixtures 冒充實際 SourceValidation。
+- 授權查證與來源工具證據各自保留；證據不足不自動等同必須換版或 Fork。只有證據確認原路徑無法滿足採用條件時，才提出來源變更決策。
+
 ## 4. 交付與驗證
 
 - 本機目標測試：license、third-party adapter、三組 authority regression；必要 catalog 與 source acquisition regression；`git diff --check`。

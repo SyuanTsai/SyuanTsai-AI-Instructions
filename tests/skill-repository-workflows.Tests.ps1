@@ -1148,5 +1148,7 @@ Describe 'Third-party raw Skill authority routing' {
         $raw | Should Match 'one candidate, authority and fresh RunId'
         $raw | Should Match 'typed general/Pester evidence remain mandatory'
         $raw | Should Match 'separately reviewed Catalog/source-pin/Lock'
+        $raw | Should Match 'Source checks do not authorize adoption'
+        $raw | Should Match 'explicit adoption caller.*MUST.*reject a pending descriptor'
     }
 }

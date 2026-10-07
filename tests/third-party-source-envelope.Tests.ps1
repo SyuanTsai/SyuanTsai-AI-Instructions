@@ -48,6 +48,7 @@ Describe 'Third-party raw package source dispatch envelope' {
         $envelope.adapterStatus | Should Be 'passed'
         $raw=Get-Content -Raw $dispatch.OutputPath|ConvertFrom-Json
         $raw.releaseEligible | Should Be $false
+        $raw.adoptionApproved | Should Be $true
         $raw.archiveProjectionVerified | Should Be $true
     }
 
@@ -59,13 +60,49 @@ Describe 'Third-party raw package source dispatch envelope' {
         $env:STANDARD_VALIDATION_ACTIVE_SKILLS='sample'
         $env:STANDARD_VALIDATION_STAGE_ID='skillspector-static'
         { & $script:EnvelopeCli @dispatch } | Should Throw
+        $env:STANDARD_VALIDATION_STAGE_ID='package-validation'
+        $env:STANDARD_VALIDATION_TOOL_ID='skillspector-static'
+        { & $script:EnvelopeCli @dispatch } | Should Throw
+        $env:STANDARD_VALIDATION_TOOL_ID='package-adapter'
+        $env:STANDARD_VALIDATION_CANDIDATE_ROOT=Join-Path $caseRoot 'different-candidate'
+        { & $script:EnvelopeCli @dispatch } | Should Throw
     }
 
-    # Scenario: A caller omits RequireApproved while dispatching a candidate descriptor through the source route.
-    # Purpose: The source envelope must automatically require approved central review and legal disposition.
-    It 'InterT30_rejects_candidate_state_in_the_formal_source_route' {
+    # Scenario: The source runner checks an intact candidate before adoption and license review are complete.
+    # Purpose: Collect source evidence without requiring or granting release or adoption approval.
+    It 'InterT30_checks_a_pending_candidate_without_granting_adoption_approval' {
         $descriptor.reviewState='candidate';$descriptor.licenseReview='pending'
+        $descriptor.reviewEvidence=@();$descriptor.licenseEvidence=@()
+        [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        $output=@(& $script:EnvelopeCli @dispatch)
+        $envelope=($output -join "`n")|ConvertFrom-Json
+        $envelope.candidateIdentity | Should Be ('b'*64)
+        $envelope.activeSkills[0] | Should Be 'sample'
+        $envelope.decision | Should Be 'PASS'
+        $envelope.rawSourceEvidence.adoptionApproved | Should Be $false
+        $envelope.rawSourceEvidence.releaseEligible | Should Be $false
+        $raw=Get-Content -Raw $dispatch.OutputPath|ConvertFrom-Json
+        $raw.archiveProjectionVerified | Should Be $true
+        $raw.adoptionApproved | Should Be $false
+        $raw.releaseEligible | Should Be $false
+    }
+
+    # Scenario: An adoption caller explicitly requires approval for a candidate that remains pending.
+    # Purpose: Source validation eligibility must not bypass the separate adoption approval requirement.
+    It 'InterT35_rejects_pending_adoption_when_approval_is_explicitly_required' {
+        $descriptor.reviewState='candidate';$descriptor.licenseReview='pending'
+        $descriptor.reviewEvidence=@();$descriptor.licenseEvidence=@()
+        [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        { & $script:EnvelopeCli @dispatch -RequireApproved } | Should Throw
+        Test-Path -LiteralPath $dispatch.OutputPath | Should Be $false
+    }
+
+    # Scenario: A descriptor claims approval without accepted license evidence.
+    # Purpose: Accepting pending source checks must not accept fabricated approved adoption claims.
+    It 'InterT40_rejects_an_unsubstantiated_approved_claim_in_source_dispatch' {
+        $descriptor.licenseReview='pending';$descriptor.licenseEvidence=@()
         [IO.File]::WriteAllText($descriptorPath,($descriptor|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
         { & $script:EnvelopeCli @dispatch } | Should Throw
+        Test-Path -LiteralPath $dispatch.OutputPath | Should Be $false
     }
 }

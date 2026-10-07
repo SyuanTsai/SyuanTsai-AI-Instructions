@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "documentType": "source-target-resolution",
+  "requestedAsOfLocalDate": "2026-10-08",
+  "timezone": "Australia/Sydney",
+  "verifiedAtUtc": "2026-10-07T13:52:30Z",
+  "verifiedAtLocal": "2026-10-08T00:52:30+11:00",
+  "repository": "https://github.com/cathrynlavery/diagram-design.git",
+  "defaultBranch": "main",
+  "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5",
+  "manifestVersion": "2.6.64",
+  "upstreamCommittedAtUtc": "2026-10-06T16:12:49Z",
+  "lookups": [
+    {
+      "method": "git-ls-remote-symref-HEAD",
+      "branch": "refs/heads/main",
+      "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5"
+    },
+    {
+      "method": "github-live-commits-api",
+      "url": "https://api.github.com/repos/cathrynlavery/diagram-design/commits/main",
+      "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5"
+    }
+  ],
+  "archiveUrl": "https://codeload.github.com/cathrynlavery/diagram-design/zip/d1376371965f513d99cc9ec388835d255c5c88d5",
+  "archiveSha256": "dbc9d20de788c82f0d34031df296d77df93272b58280a0625074254d1cd350fc",
+  "skillContentSha256": "ad655b3749a92dbbb9da3a5c42168eeb350b50221cbfb72e3cbf232039067e8f",
+  "freshArchiveAcquired": true,
+  "archiveProjectionVerified": true,
+  "skillFileCount": 279,
+  "packageAndLegalFileCount": 281,
+  "packageIntegrityReport": "candidate/package-integrity.json",
+  "packageIntegrityReportSha256": "a9ea780b338b128a4f3232ae66dbfd92e5d0e133376f8159318d0c4b2224a3f2",
+  "candidateChanged": false,
+  "auditReuse": {
+    "reason": "The full commit, reacquired archive and complete Skill content hashes are identical to the reviewed candidate.",
+    "maliciousContentReportSha256": "6d289fad53400e895c4f5dafd3fafa0cfe64952ba0e82bc5b267702a74547733"
+  },
+  "reviewState": "candidate",
+  "licenseReview": "pending",
+  "adoptionApproved": false,
+  "releaseEligible": false
+}

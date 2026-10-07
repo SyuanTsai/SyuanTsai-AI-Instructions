@@ -19,7 +19,6 @@ if ($SourceValidationEnvelope) {
     }
     $comparison=if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {[StringComparison]::OrdinalIgnoreCase} else {[StringComparison]::Ordinal}
     if (-not [string]::Equals([IO.Path]::GetFullPath($SourceRoot),[IO.Path]::GetFullPath($env:STANDARD_VALIDATION_CANDIDATE_ROOT),$comparison)) { throw 'Source envelope candidate root mismatch.' }
-    $RequireApproved=$true
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath=Join-Path (Get-Location).Path 'raw-source-report.json' }
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) { throw 'An explicit standalone report OutputPath is required.' }

@@ -1541,10 +1541,12 @@ Describe 'Third-party raw Skill tool boundary' {
         $text=Get-Content -Raw (Join-Path $root 'scripts/third-party-skill-source.psm1')
         $text | Should Match "validationKind='third-party-package-only'"
         $text | Should Match 'releaseEligible=\$false'
-        $tokens=$null;$errors=$null
-        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/third-party-skill-source.psm1'),[ref]$tokens,[ref]$errors)
-        @($errors).Count | Should Be 0
-        $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
-        @($commands | Where-Object { $_ -in @('Invoke-WebRequest','Invoke-RestMethod','Start-Process','Invoke-Expression','git','python','npm','go') }).Count | Should Be 0
+        foreach ($relative in @('scripts/third-party-skill-source.psm1','scripts/Validate-ThirdPartySkillSource.ps1')) {
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root $relative),[ref]$tokens,[ref]$errors)
+            @($errors).Count | Should Be 0
+            $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+            @($commands | Where-Object { $_ -in @('Invoke-WebRequest','Invoke-RestMethod','Start-Process','Invoke-Expression','git','python','npm','go') }).Count | Should Be 0
+        }
     }
 }

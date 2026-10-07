@@ -17,6 +17,8 @@
 
 只投影 `skills/diagram-design/**` 的完整 279 個檔案及必要原始授權文件／receipt。來源的 commands、hooks、Plugin manifest、MCP、根目錄維護 scripts 與其他 assets 不納入安裝。中央保存 metadata、validator、驗收原稿與成果，未保存外部 Skill source。
 
+使用者於 2026-10-08 指定以當前最新版本為目標。[本次即時查詢紀錄](source-target-20261008.json) 的 Git 遠端 HEAD 與 GitHub API 都解析為以上同一 commit／manifest 版本；重新下載及完整 package 比對通過。這是新的目標查詢時間，沒有產生不同的 source bytes，既有固定候選稽核仍僅對同一 SHA／archive／Skill hash 適用。
+
 ## 證據索引
 
 - [候選 Catalog](candidate/catalog/skills-catalog.json)、[sources](candidate/catalog/skills-catalog.sources.json)、[Lock](candidate/catalog/skills-catalog-lock.json)：在既有中央資料上增加一個來源與非預設 `diagram-design` profile；其餘 pin 保留。
@@ -35,9 +37,9 @@
 ## 正式採用與 SYP-259 接收
 
 1. 完成 PR #76 的最新 HEAD required CI 與 human review，依中央 AGENTS.md 正常 merge authority 變更。記錄最終 merge SHA；目前尚無 merge SHA，不以分支 commit 代替。
-2. 補齊原始套件必要授權／notice 與未證實素材的可用權利，作實際 license review；只禁用圖示不能掩蓋套件再散布權利缺口。依此結論處理完整套件，不自行裁掉檔案。
+2. 授權查證與來源技術驗證各自進行。補齊原始套件必要授權／notice 與未證實素材的可用權利，作實際 license review；證據不足不自動等同必須改 pin 或 Fork。只禁用圖示不能掩蓋必要套件權利缺口，正式採用前須依實際用途與完整套件查證結論處理，不自行裁掉檔案。
 3. 以同一固定來源、descriptor、原始 archive 與最新已 merge authority 建立 fresh RunId 的 canonical `-SourceValidation`。凍結 adapter、module closure、schema、descriptor、archive 和工具 receipts；實際執行 skill-validator、skill-tools、完整 SkillSpector Static no-LLM、中央 raw ownership general／Pester checks。任何 severity／coverage 失敗保持阻擋，不能降級為 ordinary Core-only PASS。
-4. `Validate-ThirdPartySkillSource.ps1 -SourceValidationEnvelope` 會強制 `RequireApproved`；現在的 pending descriptor 應被拒絕。尚未產生的正式 source CI／receipt／review 證據明列未完成，不填入猜測值。
+4. `Validate-ThirdPartySkillSource.ps1 -SourceValidationEnvelope` 只產生來源檢查的 package-stage envelope；完整且有效的 candidate/pending descriptor 可以接受來源檢查，報告仍保留 `adoptionApproved=false` 與 `releaseEligible=false`。正式採用時顯式 `RequireApproved` 仍拒絕 pending，假 approved claim 仍被拒絕。本次修正有實際 Red／Green 行為測試；尚未產生的正式 source CI／receipt／review 證據明列未完成，不填入猜測值。
 5. 通過本單交付條件後，SYP-259 重新讀取四张前置 SYP-195／215／216／275、latest central/source、個人選取与實際已授權主機。以本候選差異重建正式 Catalog／sources／Lock，做部署時 CI、review、normal merge 後才生效。
 6. 真實 USER scope 安裝、記憶入口切換及一次性更新由 SYP-259 執行。本次工作的電腦不自動成為部署目標。保留 notify-only，先產生 install/update/remove/preserve/ownership 清單與備份；正式執行後重驗 hash、discovery、冪等與回復。
 

@@ -2,6 +2,8 @@
 
 這份中央查證與 ASTRA 惡意內容結論分開；不修改原始 ASTRA 報告，也不宣稱具備未證實的 rights。原始 `LICENSE`（MIT）與 `THIRD_PARTY_LICENSES.md` 按 exact bytes/hash 保存並交付。完整再散布／第三方 notice 確認尚未完成，descriptor 維持 pending。
 
+2026-10-08 澄清：本文件列的是尚待核實的證據，不是已確認違法、三種品牌都必須另取許可或必須 Fork 的結論。Apache 政策明示 graphic logos 的 Apache copyright license；Dagster 公開 brand assets 與使用 guidelines。依精確素材、既有授權／notice 與實際使用方式逐項判斷；來源技術檢查可在 candidate/pending 狀態進行，正式採用批准另行要求完整必要證據。[最新目標查詢](source-target-20261008.json) 仍解析為同一固定版本。
+
 ## 精確來源的補充證據
 
 固定 commit 的 [scripts/build-icons.py](https://github.com/cathrynlavery/diagram-design/blob/d1376371965f513d99cc9ec388835d255c5c88d5/scripts/build-icons.py#L147) 第 147～149 行補出以下原始 URL。該根目錄 script 僅作文字證據讀取，未執行，也不納入採用 Skill。[實際比對](brand-glyph-provenance.json) 確認三份來源的 ordered path d 與 bundled glyph 一致（只正規化空白）；這不證明變色、其他屬性或再散布權利。

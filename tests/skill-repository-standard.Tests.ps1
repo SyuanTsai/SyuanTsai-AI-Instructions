@@ -4567,6 +4567,9 @@ Describe 'Third-party raw Skill authority contract' {
         $raw | Should Match 'skill-validator'
         $raw | Should Match 'SkillSpector Static'
         $raw | Should Match 'Human Approval'
+        $raw | Should Match 'Source-only checks.*MUST NOT.*require adoption approval before collecting source evidence'
+        $raw | Should Match 'candidate/pending descriptor.*MUST.*eligible.*-SourceValidation'
+        $raw | Should Match 'adoptionApproved=false'
     }
 }
 # The same authority regression entry executes actual adapter behavior and negative fixtures.
