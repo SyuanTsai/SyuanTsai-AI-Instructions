@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "contract": "third-party-raw-skill-source-v1",
+  "sourceId": "diagram-design-upstream",
+  "repository": "https://github.com/cathrynlavery/diagram-design.git",
+  "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5",
+  "archiveSha256": "dbc9d20de788c82f0d34031df296d77df93272b58280a0625074254d1cd350fc",
+  "reviewState": "candidate",
+  "reviewEvidence": [],
+  "licenseReview": "pending",
+  "licenseEvidence": [],
+  "skills": [
+    {
+      "id": "diagram-design",
+      "sourcePath": "skills/diagram-design",
+      "targetPath": ".agents/skills/diagram-design",
+      "contentSha256": "ad655b3749a92dbbb9da3a5c42168eeb350b50221cbfb72e3cbf232039067e8f",
+      "upstreamMetadata": {
+        "sourceInventory": "absent",
+        "openaiInterface": "absent"
+      },
+      "hostInterface": {
+        "displayName": "Diagram Design",
+        "shortDescription": "Redraw diagrams from maintained Mermaid source",
+        "defaultPrompt": "Use $diagram-design to redraw this maintained Mermaid source and retain its fidelity ledger."
+      }
+    }
+  ],
+  "licenseDocuments": [
+    {
+      "path": "LICENSE",
+      "sha256": "bb7e12e91fecef43024111123ff784cec6c485585561d8b552557c0173b3ed29"
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES.md",
+      "sha256": "ad931154e2f91bf545fc9c442666a2159aa56c0af3cca0b7246e02c6efeab6ba"
+    }
+  ]
+}

@@ -65,6 +65,22 @@ Describe 'License delivery packages' {
         $package.Files[0].sourcePath | Should Be 'LICENSE'
     }
 
+    # Scenario: A selected raw Skill inherits a root third-party license document.
+    # Purpose: Preserve upstream legal declarations and their exact bytes in acquisition and delivery.
+    It 'UnitT27_preserves_third_party_license_text_and_omits_executable_names' {
+        Write-LicenseFixture $root 'LICENSE' 'root grant'
+        Write-LicenseFixture $root 'THIRD_PARTY_LICENSES.md' "attributions`r`n"
+        Write-LicenseFixture $root 'THIRD_PARTY_LICENSES.py' 'not a legal document'
+        $package = New-LicenseFixturePackage $root
+        ($package.Files.sourcePath -contains 'THIRD_PARTY_LICENSES.md') | Should Be $true
+        ($package.Files.sourcePath -contains 'THIRD_PARTY_LICENSES.py') | Should Be $false
+        $document = $package.Files | Where-Object sourcePath -eq 'THIRD_PARTY_LICENSES.md'
+        [Convert]::ToBase64String($document.bytes) | Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $root 'THIRD_PARTY_LICENSES.md'))))
+        $selected = @(Select-LicenseDeliveryDocumentPaths -ArtifactPaths @('skills/one/SKILL.md') -SourcePaths @('LICENSE','THIRD_PARTY_LICENSES.md','THIRD_PARTY_LICENSES.py'))
+        ($selected -contains 'THIRD_PARTY_LICENSES.md') | Should Be $true
+        ($selected -contains 'THIRD_PARTY_LICENSES.py') | Should Be $false
+    }
+
     # Scenario: An old immutable source has no licensing declarations.
     # Purpose: Preserve legacy compatibility while explicitly reporting missing evidence.
     It 'UnitT30_reports_missing_licenses_without_inventing_a_grant' {

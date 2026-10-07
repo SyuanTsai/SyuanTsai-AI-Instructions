@@ -96,7 +96,7 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。legacy manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；canonical manifest v3 才允許 `skills/<artifactId>/...` source 對應到 `.agents/skills/<artifactId>/...` target。未知 mapping／schema version 必須 fail closed，target projection 不隨 source root 自動改名。Manifest v2/v3 都不使用 Git submodule metadata。
 
-User Skills manifest v2 的一般 Skill payload 必須使用 `skills/<skillId>/...` source 對應到 `.agents/skills/<skillId>/...` target；同一個 Skill 的 `.ai-instructions-licenses/source/**` delivery entries 可保留實際來源 Repository 的 `LICENSE`、`NOTICE`、`LICENSES/**` 等 license provenance，`delivery.json` 則必須使用 `.ai-instructions-generated/delivery.json` synthetic source path。這些例外只適用於明確的 license delivery target，validator 仍會拒絕把根目錄 license source 套用到一般 Skill payload。
+User Skills manifest v2 的一般 Skill payload 必須使用 `skills/<skillId>/...` source 對應到 `.agents/skills/<skillId>/...` target；同一個 Skill 的 `.ai-instructions-licenses/source/**` delivery entries 可保留實際來源 Repository 的 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES/**` 等 license provenance，`delivery.json` 則必須使用 `.ai-instructions-generated/delivery.json` synthetic source path。這些例外只適用於明確的 license delivery target，validator 仍會拒絕把根目錄 license source 套用到一般 Skill payload。
 
 ## 個人設定 schema v4、runtime v2、安裝與升級
 

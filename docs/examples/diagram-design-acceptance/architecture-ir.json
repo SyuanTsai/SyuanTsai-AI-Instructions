@@ -1,0 +1,125 @@
+{
+  "source": "/in/architecture.mmd",
+  "diagrams_total": 1,
+  "diagrams": [
+    {
+      "index": 0,
+      "kind": "flowchart",
+      "source_line": 1,
+      "direction": "LR",
+      "analysis": {
+        "nodes_total": 3,
+        "nodes_drawable": 3,
+        "containers": 0,
+        "leaves": 3,
+        "edges_total": 2,
+        "edges_labeled": 2,
+        "edges_dangling": 0,
+        "max_depth": 0,
+        "shapes": {
+          "rect": 2,
+          "cylinder": 1
+        },
+        "has_cycle": false,
+        "hubs": [
+          {
+            "id": "API",
+            "label": "應用服務",
+            "degree": 2
+          },
+          {
+            "id": "UI",
+            "label": "使用者介面",
+            "degree": 1
+          },
+          {
+            "id": "DB",
+            "label": "資料庫",
+            "degree": 1
+          }
+        ],
+        "entry_points": [
+          "使用者介面"
+        ],
+        "terminals": [
+          "資料庫"
+        ],
+        "orphans": [],
+        "type_candidates": [
+          "architecture"
+        ],
+        "collapsible_groups": [],
+        "over_node_budget": false,
+        "over_edge_budget": false
+      },
+      "discarded": {
+        "style_directives": 0,
+        "click_handlers": 0
+      },
+      "fragments": [],
+      "notes": [],
+      "nodes": [
+        {
+          "id": "UI",
+          "label": "使用者介面",
+          "shape": "rect",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 0,
+          "out_degree": 1
+        },
+        {
+          "id": "API",
+          "label": "應用服務",
+          "shape": "rect",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 1,
+          "out_degree": 1
+        },
+        {
+          "id": "DB",
+          "label": "資料庫",
+          "shape": "cylinder",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 1,
+          "out_degree": 0
+        }
+      ],
+      "edges": [
+        {
+          "id": "e1",
+          "source": "UI",
+          "target": "API",
+          "label": "HTTPS",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 1
+        },
+        {
+          "id": "e2",
+          "source": "API",
+          "target": "DB",
+          "label": "讀寫",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 2
+        }
+      ]
+    }
+  ]
+}

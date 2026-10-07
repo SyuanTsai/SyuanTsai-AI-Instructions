@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "validationKind": "isolated-mermaid-extractor-acceptance",
+  "releaseEligible": false,
+  "sourceRevision": "d1376371965f513d99cc9ec388835d255c5c88d5",
+  "archiveSha256": "dbc9d20de788c82f0d34031df296d77df93272b58280a0625074254d1cd350fc",
+  "skillContentSha256": "ad655b3749a92dbbb9da3a5c42168eeb350b50221cbfb72e3cbf232039067e8f",
+  "runtimeImage": "docker.io/library/python@sha256:cfe2e24a75302a15934d37c2d86412893c0aa934dc3a97cbb439d04c01890ca9",
+  "runtimeVersion": "Python 3.14.8",
+  "isolation": {
+    "network": "none",
+    "user": "65534:65534",
+    "readOnlyRoot": true,
+    "capabilities": "ALL dropped",
+    "hostEnvironmentPassed": [],
+    "mounts": [
+      "audited Skill readonly",
+      "acceptance inputs readonly",
+      "owned outputs writable"
+    ],
+    "pidsLimit": 32,
+    "memoryMiB": 256
+  },
+  "cases": [
+    {
+      "id": "architecture",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "inputSha256": "7ceddd18eda7eb7eaa2af1a51e1d381a508f1a5d372c936a94bab85398350940",
+      "output": "architecture-ir.json",
+      "status": "passed"
+    },
+    {
+      "id": "flowchart",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "inputSha256": "e75186611520bbce79dfda46b8f57c7b4ad215a3b8ef62a93a9a3ce63827bc05",
+      "output": "flowchart-ir.json",
+      "status": "passed"
+    },
+    {
+      "id": "sequence",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "inputSha256": "c2b19ee56f322a1c6f53ef40c3d35416ffd4d583ec23ef36f99a798a22cde215",
+      "output": "sequence-ir.json",
+      "status": "passed"
+    },
+    {
+      "id": "unsupported",
+      "exitCode": 2,
+      "expectedExitCode": 2,
+      "inputSha256": "169145524e417ee68610565ee969c7d4e10f2bf63d65a6bc7d99f5a50d6e865d",
+      "output": "unsupported-ir.json",
+      "status": "passed"
+    },
+    {
+      "id": "untrusted-label",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "inputSha256": "0414ce54af6973758272deee10fe1c0e403b935584c302a96e03562a82a27f6d",
+      "output": "untrusted-label-ir.json",
+      "status": "passed"
+    }
+  ]
+}

@@ -10,7 +10,7 @@ function Assert-LicenseRelativePath {
 
 function Test-LicenseDocumentName {
     param([string] $Name)
-    return $Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or $Name -ieq 'licensing-scope.json'
+    return $Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|THIRD_PARTY_LICENSES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or $Name -ieq 'licensing-scope.json'
 }
 
 function Get-LicenseAncestorPaths {

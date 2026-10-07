@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "contract": "third-party-raw-skill-source-v1",
+  "sourceId": "external-diagrams",
+  "repository": "https://github.com/example/diagram-skills.git",
+  "resolvedCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "archiveSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reviewState": "candidate",
+  "reviewEvidence": [],
+  "licenseReview": "pending",
+  "licenseEvidence": [],
+  "skills": [{
+    "id": "sample-diagrams",
+    "sourcePath": "skills/sample-diagrams",
+    "targetPath": ".agents/skills/sample-diagrams",
+    "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "upstreamMetadata": {"sourceInventory": "absent", "openaiInterface": "absent"},
+    "hostInterface": {
+      "displayName": "Sample Diagram Design",
+      "shortDescription": "Redraw diagrams from maintained source",
+      "defaultPrompt": "Use $sample-diagrams to redraw the supplied Mermaid source."
+    }
+  }],
+  "licenseDocuments": [{"path": "LICENSE", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+}

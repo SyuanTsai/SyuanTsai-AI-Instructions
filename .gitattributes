@@ -1,2 +1,4 @@
 catalog/**/*.json text eol=lf
 docs/standards/trust-anchors/*.xml text eol=lf
+docs/delivery/syp-195/**/*.json text eol=lf
+docs/examples/diagram-design-acceptance/* text eol=lf

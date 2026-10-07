@@ -1138,3 +1138,17 @@ gh release create v1.0.0
         Assert-Match $errorMessage 'without exactly one canonical' 'A canonical command in another Setext section must not authorize a release command.'
     }
 }
+Describe 'Third-party raw Skill authority routing' {
+    # Scenario: The alternate ownership adapter remains beneath the canonical source gate.
+    # Purpose: Prevent a new package utility from becoming a parallel workflow or approval gate.
+    It 'UnitT10_routes_raw_packages_to_existing_core_source_validation' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $raw=Get-Content -Raw (Join-Path $root 'docs/standards/third-party-raw-skill-sources.md')
+        $raw | Should Match 'sourceValidation.packageAdapter'
+        $raw | Should Match 'one candidate, authority and fresh RunId'
+        $raw | Should Match 'typed general/Pester evidence remain mandatory'
+        $raw | Should Match 'separately reviewed Catalog/source-pin/Lock'
+        $raw | Should Match 'Source checks do not authorize adoption'
+        $raw | Should Match 'explicit adoption caller.*MUST.*reject a pending descriptor'
+    }
+}

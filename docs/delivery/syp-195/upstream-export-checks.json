@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "validationKind": "isolated-upstream-export-and-self-check",
+  "releaseEligible": false,
+  "sourceRevision": "d1376371965f513d99cc9ec388835d255c5c88d5",
+  "skillContentSha256": "ad655b3749a92dbbb9da3a5c42168eeb350b50221cbfb72e3cbf232039067e8f",
+  "runtimeImage": "docker.io/library/python@sha256:cfe2e24a75302a15934d37c2d86412893c0aa934dc3a97cbb439d04c01890ca9",
+  "network": "none",
+  "cases": [
+    {
+      "id": "architecture",
+      "selfCheckExitCode": 0,
+      "exportExitCode": 0,
+      "wellFormedXml": true,
+      "allTextPreserved": true,
+      "externalGoogleFontsImport": true,
+      "offlinePortableAcceptance": false,
+      "reason": "The unmodified exporter always injects an external font import; published static acceptance uses the separately authored, fully inline SVG."
+    },
+    {
+      "id": "flowchart",
+      "selfCheckExitCode": 0,
+      "exportExitCode": 0,
+      "wellFormedXml": true,
+      "allTextPreserved": true,
+      "externalGoogleFontsImport": true,
+      "offlinePortableAcceptance": false,
+      "reason": "The unmodified exporter always injects an external font import; published static acceptance uses the separately authored, fully inline SVG."
+    },
+    {
+      "id": "sequence",
+      "selfCheckExitCode": 0,
+      "exportExitCode": 0,
+      "wellFormedXml": true,
+      "allTextPreserved": true,
+      "externalGoogleFontsImport": true,
+      "offlinePortableAcceptance": false,
+      "reason": "The unmodified exporter always injects an external font import; published static acceptance uses the separately authored, fully inline SVG."
+    }
+  ],
+  "arbitraryHtmlSanitizationVerified": false,
+  "pngAutomationExecuted": false
+}

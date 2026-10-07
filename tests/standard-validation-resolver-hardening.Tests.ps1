@@ -1533,3 +1533,20 @@ catch {
         Assert-PesterBoundaryError { Assert-ApprovedPesterManifest -Path $manifestPath -Version '6.2.0' } 'initialization hooks' 'RequiredAssemblies was not rejected.'
     }
 }
+Describe 'Third-party raw Skill tool boundary' {
+    # Scenario: The package adapter validates inert bytes and reports the remaining canonical gate.
+    # Purpose: Keep package-only results release-ineligible and avoid hidden download/execution fallback.
+    It 'UnitT10_keeps_the_adapter_inert_and_release_ineligible' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $text=Get-Content -Raw (Join-Path $root 'scripts/third-party-skill-source.psm1')
+        $text | Should Match "validationKind='third-party-package-only'"
+        $text | Should Match 'releaseEligible=\$false'
+        foreach ($relative in @('scripts/third-party-skill-source.psm1','scripts/Validate-ThirdPartySkillSource.ps1')) {
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root $relative),[ref]$tokens,[ref]$errors)
+            @($errors).Count | Should Be 0
+            $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
+            @($commands | Where-Object { $_ -in @('Invoke-WebRequest','Invoke-RestMethod','Start-Process','Invoke-Expression','git','python','npm','go') }).Count | Should Be 0
+        }
+    }
+}

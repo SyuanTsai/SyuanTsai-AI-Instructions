@@ -1,0 +1,8 @@
+sequenceDiagram
+    participant UI as 使用者介面
+    participant API as 應用服務
+    participant DB as 資料庫
+    UI->>API: 提交資料
+    API->>DB: 寫入資料
+    DB-->>API: 儲存成功
+    API-->>UI: 完成回應

@@ -14,7 +14,7 @@
 
 ## 收集與來源證據
 
-`scripts/license-delivery.psm1` 收集每個選取檔案的祖先目錄中的 `LICENSE`、`LICENCE`、`COPYING`、`NOTICE`、`THIRD_PARTY_NOTICES`、`PROVENANCE`、`licensing-scope.json`，以及 `LICENSES/**`。文字檔名可使用 `-`／`_` 後綴與 `.md`、`.txt`、`.rst`、`.html` 副檔名。`LICENSE-SCOPE.md` 亦會保留。符號連結、junction、escaping path 與不支援的根目錄 scope schema 會停止封裝。
+`scripts/license-delivery.psm1` 收集每個選取檔案的祖先目錄中的 `LICENSE`、`LICENCE`、`COPYING`、`NOTICE`、`THIRD_PARTY_NOTICES`、`THIRD_PARTY_LICENSES`、`PROVENANCE`、`licensing-scope.json`，以及 `LICENSES/**`。文字檔名可使用 `-`／`_` 後綴與 `.md`、`.txt`、`.rst`、`.html` 副檔名。`LICENSE-SCOPE.md` 亦會保留。符號連結、junction、escaping path 與不支援的根目錄 scope schema 會停止封裝。
 
 收據 schemaVersion 1 包含 `sourceRepository`、完整 `sourceCommit`、`artifactId`、`status`、選取來源 `artifacts`，以及逐份 `documents` 的 `sourcePath`、封裝內 `relativePath`、SHA-256。收據不包含產生時間；相同來源可重複同步而不產生內容變更。
 
@@ -37,3 +37,4 @@ Repository manifest 會保留 customized／unmanaged 檔案並列出略過路徑
 Repository Instructions 與 Skill 的授權副本依完整來源 commit 分目錄保存。若仍有同一 Instructions family 或 Skill 的舊版受管檔案，保留其舊版授權與收據；包括來源已移除、但本機仍保留自訂內容的檔案。最後一個舊版檔案退場後，才依既有 ownership 規則清除未修改的舊授權副本。Runtime 採整包替換；user Skills updater 遇到受管檔案修改會拒絕整次更新，因此這兩種安裝沿用單一授權目錄，授權與所屬內容在同一交易中更新。
 
 不提升既有 runtime bundle v2、Repository manifest v2 或 user manifest v2 的 schema，也不強迫舊 bundle 具有新目錄；user manifest v1 仍可由相容 runtime 讀取。新 installer 會把實際遞送檔案加入 inventory；舊來源聲明缺失的問題仍須在對應 source Repository 完成來源審查、授權與 pin 更新。本功能不修改 production Catalog／Lock pins，也不解決既有八個 `NOASSERTION` 歷史檔案的權利確認。
+同名前綴的可執行檔（例如 `THIRD_PARTY_LICENSES.py`）不屬於授權文件。文件名稱或存在本身不構成授權 grant，亦不滿足待完成的法律 review。

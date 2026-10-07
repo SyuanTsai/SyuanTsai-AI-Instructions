@@ -103,6 +103,10 @@ For an adopted surface, the executable adapter MUST receive the immutable `Sourc
 
 Source repositories **MUST NOT** add a local Plugin/marketplace policy to compensate for a missing central decision. A requested new upstream feature is an extension proposal: update this decision record, the normative Standard if semantics change, all affected authority regressions, and the applicable repository adapters in one reviewed change.
 
+## 4.1 Raw third-party Skill ownership
+
+An external raw Skill with no source-owned inventory or OpenAI interface metadata uses the separate central [`third-party-raw-skill-sources.md`](third-party-raw-skill-sources.md) contract and strict adoption descriptor. This is an explicit metadata-ownership adaptation, not Plugin adoption. The original package is retained in full, no upstream file is fabricated, and the canonical SourceValidation, security, licensing, review and deployment gates remain applicable.
+
 ## 5. Conformance and regression requirements
 
 SYP-193 is complete only when the central authority proves:

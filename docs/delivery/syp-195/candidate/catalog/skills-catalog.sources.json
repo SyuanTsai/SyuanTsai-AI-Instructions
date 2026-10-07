@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "syuantsai-agent-skills",
+  "sources": [
+    {
+      "id": "general",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "7f8a3c3c8d535b2a0f8892103482bf2e942217c1",
+      "resolvedVersion": "main@7f8a3c3c"
+    },
+    {
+      "id": "code-collaboration",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "0b18e7f02d90e03c3b7b7b3268a5c18a206a761d",
+      "resolvedVersion": "main@0b18e7f0"
+    },
+    {
+      "id": "knowledge-content",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "14a667abd9489635d333ab2c18a02ab8f3c274cf",
+      "resolvedVersion": "main@14a667ab"
+    },
+    {
+      "id": "atlassian-ecosystem",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "22cc97cbbc6c078069516b21acbd33f8cc58eb54",
+      "resolvedVersion": "main@22cc97cb"
+    },
+    {
+      "id": "diagram-design-upstream",
+      "requestedRef": "d1376371965f513d99cc9ec388835d255c5c88d5",
+      "requestedRefType": "commit",
+      "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5",
+      "resolvedVersion": "2.6.64"
+    }
+  ]
+}
