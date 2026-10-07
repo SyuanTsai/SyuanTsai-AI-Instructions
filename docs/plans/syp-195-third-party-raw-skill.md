@@ -22,10 +22,11 @@
 
 ### 2.2 必要授權文件交付
 
-- 目標：`scripts/license-delivery.psm1`、`tests/license-delivery.Tests.ps1`、`docs/license-delivery.md`。
+- 目標：`scripts/license-delivery.psm1`、`scripts/skills-catalog-contract.psm1`、兩組直接回歸與 manifest 範例、`docs/license-delivery.md`／Catalog README。
 - 現況：`THIRD_PARTY_NOTICES` 會交付，但 `THIRD_PARTY_LICENSES.md` 不會。
 - 改變：辨識明確 `THIRD_PARTY_LICENSES` 文件名稱及既有文字副檔名，保留原始 bytes／source path／receipt；不以檔名推論 license grant，不把同名前綴程式當授權文字。
 - 影響：所有 consumer 共用授權交付 module；對既有檔案分類維持相容。
+- 隔離安裝重現 manifest provenance classifier 仍拒絕 `THIRD_PARTY_LICENSES.md`；同一檔名規則同步修正，保留程式副檔名拒絕。既有 JSON schema 的安全 license source path 已涵蓋此文件，不改 schema shape 或版本；範例與 parser/schema 回歸同 PR 驗證。
 
 ### 2.3 文件與候選維護規則
 

@@ -125,7 +125,7 @@ function Test-IsLicenseDeliverySourcePath {
 
     $segments = @($path.Split('/'))
     $fileName = $segments[$segments.Count - 1]
-    $isNamedLicenseDocument = $fileName -imatch '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or
+    $isNamedLicenseDocument = $fileName -imatch '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|THIRD_PARTY_LICENSES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or
         $fileName -ieq 'licensing-scope.json'
     $isInsideLicenseDirectory = @($segments | Where-Object { $_ -ieq 'LICENSES' }).Count -gt 0
     return $isNamedLicenseDocument -or $isInsideLicenseDirectory

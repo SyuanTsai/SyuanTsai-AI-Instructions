@@ -196,9 +196,16 @@ function Get-TestRawSha256 {
         }
         $licenseEntry = & $newEntry 'LICENSE' '.agents/skills/work-with-jira/.ai-instructions-licenses/source/LICENSE'
         $receiptEntry = & $newEntry '.ai-instructions-generated/delivery.json' '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
-        $manifest.files = @($base,$licenseEntry,$receiptEntry)
+        $thirdPartyEntry = & $newEntry 'THIRD_PARTY_LICENSES.md' '.agents/skills/work-with-jira/.ai-instructions-licenses/source/THIRD_PARTY_LICENSES.md'
+        $manifest.files = @($base,$licenseEntry,$thirdPartyEntry,$receiptEntry)
 
         { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+
+        $thirdPartyEntry.sourcePath = 'THIRD_PARTY_LICENSES.py'
+        $thirdPartyEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/THIRD_PARTY_LICENSES.py'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+        $thirdPartyEntry.sourcePath = 'THIRD_PARTY_LICENSES.md'
+        $thirdPartyEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/THIRD_PARTY_LICENSES.md'
 
         $licenseEntry.targetPath = '.agents/skills/work-with-jira/references/LICENSE'
         { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw

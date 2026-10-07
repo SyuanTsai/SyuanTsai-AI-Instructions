@@ -14,8 +14,8 @@
       "collapses": [],
       "drops": [],
       "semanticOrderVerified": true,
-      "htmlSha256": "90a221d5a3baf89c3b166ac1e49b9c6df5723ea5cffd6a26c8764f4ff2eb3cf9",
-      "svgSha256": "cef0affcf517f322b7813161ad1ed9306915cb71357596662f7e581f50b36bed",
+      "htmlSha256": "2fd974b6a451562ab7c6121a19c9e7173f064a404b628beab349227279b0aafb",
+      "svgSha256": "e8942a12952ced59c08d302cfd24ab64a7808364f91ed38b43b3206ee707b072",
       "visualInspection": "passed"
     },
     {
@@ -29,8 +29,8 @@
       "collapses": [],
       "drops": [],
       "semanticOrderVerified": true,
-      "htmlSha256": "6046febc35bf96030fed3fb9af9467c5c054fb800fc400c0d2671b68b531a8d8",
-      "svgSha256": "4df09b415c23ef28495b2188f107629e913c84549bf220fc9267fdb1cb84196f",
+      "htmlSha256": "aad8ce114b514d47ea9879968642940c7075c68592dfccebc7326b23a098e5af",
+      "svgSha256": "7830fa660363bce5fa849b66f72b99d64d770ca750df065e57fbdf1685f139bb",
       "visualInspection": "passed"
     },
     {
@@ -44,8 +44,8 @@
       "collapses": [],
       "drops": [],
       "semanticOrderVerified": true,
-      "htmlSha256": "716ae3046651c6b0ae677151e3e9a7e80dc82f228a5838714b7d4f9db7523201",
-      "svgSha256": "dcff50ec0608c994081339f35fee6791dc4ab8682af5041d76dd1f8a136cf199",
+      "htmlSha256": "793bc6b4cb3be1b075becca4a1e8f98b5e5fefdf946fa9877f715b1e0d464ae2",
+      "svgSha256": "12feb4c49355c97a4f723c53c3d0fc090bee2687a9abf8861e271f7028e3220a",
       "visualInspection": "passed"
     }
   ]

@@ -268,6 +268,126 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/delivery/syp-195/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/brand-glyph-provenance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/candidate/catalog/skills-catalog-lock.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/candidate/catalog/skills-catalog.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/candidate/catalog/skills-catalog.sources.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/candidate/package-integrity.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/candidate/raw-source-descriptor.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/capabilities-and-safety.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/license-assessment.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/managed-acceptance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/static-artifact-inspection.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/upstream-export-checks.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-195/verify-managed-candidate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/diagram-design-document-workflow.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/architecture-ir.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/architecture.html",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/architecture.mmd",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/architecture.svg",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/browser-acceptance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/extractor-acceptance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/fidelity-ledger.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/flowchart-ir.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/flowchart.html",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/flowchart.mmd",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/flowchart.svg",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/sequence-ir.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/sequence.html",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/sequence.mmd",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/examples/diagram-design-acceptance/sequence.svg",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/license-delivery.md",
       "license": "Apache-2.0"
     },
@@ -300,6 +420,10 @@
       "license": "NOASSERTION"
     },
     {
+      "path": "docs/plans/syp-195-third-party-raw-skill.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/README.md",
       "license": "Apache-2.0"
     },
@@ -325,6 +449,10 @@
     },
     {
       "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-verify-data-access-performance.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/examples/third-party-raw-skill-source-v1.json",
       "license": "Apache-2.0"
     },
     {
@@ -380,6 +508,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/third-party-raw-skill-source-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/schemas/upstream-adapter-v1.schema.json",
       "license": "Apache-2.0"
     },
@@ -401,6 +533,10 @@
     },
     {
       "path": "docs/standards/standard-validation-contract-v1.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/third-party-raw-skill-sources.md",
       "license": "Apache-2.0"
     },
     {
@@ -521,6 +657,10 @@
     },
     {
       "path": "scripts/Test-StandardEntryPointResult.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Validate-ThirdPartySkillSource.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -657,6 +797,10 @@
     },
     {
       "path": "scripts/test-syp101-production-smoke.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/third-party-skill-source.psm1",
       "license": "Apache-2.0"
     },
     {
@@ -909,6 +1053,14 @@
     },
     {
       "path": "tests/test_routine_semantic_prompt_envelope.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/third-party-skill-source.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/third-party-source-envelope.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

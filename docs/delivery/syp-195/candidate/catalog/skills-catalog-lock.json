@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 2,
+  "catalogId": "syuantsai-agent-skills",
+  "catalogSha256": "8ae463407cf8c00a724b9e26aac711f23383d911a35608e2eea8d3a10aecfc3e",
+  "sources": [
+    {
+      "id": "atlassian-ecosystem",
+      "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "22cc97cbbc6c078069516b21acbd33f8cc58eb54",
+      "resolvedVersion": "main@22cc97cb",
+      "archiveSha256": "d9c08f473622df29fc83c057279aa58e0a55f6929d6a72100100dea2aae7b4f8"
+    },
+    {
+      "id": "code-collaboration",
+      "repository": "https://github.com/SyuanTsai/Skill-Code-Collaboration.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "0b18e7f02d90e03c3b7b7b3268a5c18a206a761d",
+      "resolvedVersion": "main@0b18e7f0",
+      "archiveSha256": "8c052b4ad972e5c5abb4079ce51704a6379df5e7e37ded8723fc044155d84646"
+    },
+    {
+      "id": "general",
+      "repository": "https://github.com/SyuanTsai/Skill-General.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "7f8a3c3c8d535b2a0f8892103482bf2e942217c1",
+      "resolvedVersion": "main@7f8a3c3c",
+      "archiveSha256": "41575ef7a11117304a3cb2ba94587aa9fdf02df5857b1b91a9e3ac1eed1d4ce9"
+    },
+    {
+      "id": "knowledge-content",
+      "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
+      "requestedRef": "main",
+      "requestedRefType": "branch",
+      "resolvedCommit": "14a667abd9489635d333ab2c18a02ab8f3c274cf",
+      "resolvedVersion": "main@14a667ab",
+      "archiveSha256": "9f7299acb20e2310df19fd8b3ead86eca0674895a81976872b1516a40eb13df2"
+    },
+    {
+      "id": "diagram-design-upstream",
+      "repository": "https://github.com/cathrynlavery/diagram-design.git",
+      "requestedRef": "d1376371965f513d99cc9ec388835d255c5c88d5",
+      "requestedRefType": "commit",
+      "resolvedCommit": "d1376371965f513d99cc9ec388835d255c5c88d5",
+      "resolvedVersion": "2.6.64",
+      "archiveSha256": "dbc9d20de788c82f0d34031df296d77df93272b58280a0625074254d1cd350fc"
+    }
+  ],
+  "skills": [
+    {
+      "id": "capture-private-course-knowledge",
+      "sourceId": "knowledge-content",
+      "sourcePath": "skills/capture-private-course-knowledge",
+      "contentSha256": "80c7f292cc618cdd3a6cc1ca359d8d711e643d15fc41cc37eef05f694e9e9c54",
+      "targetPath": ".agents/skills/capture-private-course-knowledge"
+    },
+    {
+      "id": "configure-bitbucket-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/configure-bitbucket-api-access",
+      "contentSha256": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+      "targetPath": ".agents/skills/configure-bitbucket-api-access"
+    },
+    {
+      "id": "configure-confluence-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/configure-confluence-api-access",
+      "contentSha256": "50cedfcc6dc8630831bab479ed037377b34b2adb4e290230f9fb7edf018b3205",
+      "targetPath": ".agents/skills/configure-confluence-api-access"
+    },
+    {
+      "id": "configure-jira-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/configure-jira-api-access",
+      "contentSha256": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+      "targetPath": ".agents/skills/configure-jira-api-access"
+    },
+    {
+      "id": "investigate-datadog-logs",
+      "sourceId": "general",
+      "sourcePath": "skills/investigate-datadog-logs",
+      "contentSha256": "7fd6b4d429ef30ba8f5466213a21828b70bfd532c73f0234cf6b73f33f9ef043",
+      "targetPath": ".agents/skills/investigate-datadog-logs"
+    },
+    {
+      "id": "manage-notion-ai-memory",
+      "sourceId": "general",
+      "sourcePath": "skills/manage-notion-ai-memory",
+      "contentSha256": "aacb1056d1270a1835c4ff82de13721b5d3b17583303a4899c6b12ad8e0e38bd",
+      "targetPath": ".agents/skills/manage-notion-ai-memory"
+    },
+    {
+      "id": "manage-task-handoff",
+      "sourceId": "general",
+      "sourcePath": "skills/manage-task-handoff",
+      "contentSha256": "6423d8df1de116f69d21af9bace264bf2acb497f35378c795e636ef7217c3bc8",
+      "targetPath": ".agents/skills/manage-task-handoff"
+    },
+    {
+      "id": "plan-production-change",
+      "sourceId": "general",
+      "sourcePath": "skills/plan-production-change",
+      "contentSha256": "668b073d5e957bf48a82acfb4908cf651656ca405a3bacfa4222aee30811bb59",
+      "targetPath": ".agents/skills/plan-production-change"
+    },
+    {
+      "id": "publish-requirements-to-confluence",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/publish-requirements-to-confluence",
+      "contentSha256": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+      "targetPath": ".agents/skills/publish-requirements-to-confluence"
+    },
+    {
+      "id": "review-bitbucket-pull-request",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/review-bitbucket-pull-request",
+      "contentSha256": "438ba4a153ac366aeb23daf08ae190eeb33c228a937b239083c6ef82fb53c4e2",
+      "targetPath": ".agents/skills/review-bitbucket-pull-request"
+    },
+    {
+      "id": "verify-data-access-performance",
+      "sourceId": "general",
+      "sourcePath": "skills/verify-data-access-performance",
+      "contentSha256": "23c4d2eda7d1b11e2180a8f085fa44103fcc3f9a136c3b0e5a776efece3ce045",
+      "targetPath": ".agents/skills/verify-data-access-performance"
+    },
+    {
+      "id": "work-with-jira",
+      "sourceId": "atlassian-ecosystem",
+      "sourcePath": "skills/work-with-jira",
+      "contentSha256": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+      "targetPath": ".agents/skills/work-with-jira"
+    },
+    {
+      "id": "write-copilot-implementation-prompt",
+      "sourceId": "code-collaboration",
+      "sourcePath": "skills/write-copilot-implementation-prompt",
+      "contentSha256": "ba7b5430038b4f385ac21cf527bc7f82faa54f1eeed7c3650814a9e98ed74dee",
+      "targetPath": ".agents/skills/write-copilot-implementation-prompt"
+    },
+    {
+      "id": "diagram-design",
+      "sourceId": "diagram-design-upstream",
+      "sourcePath": "skills/diagram-design",
+      "targetPath": ".agents/skills/diagram-design",
+      "contentSha256": "ad655b3749a92dbbb9da3a5c42168eeb350b50221cbfb72e3cbf232039067e8f"
+    }
+  ]
+}

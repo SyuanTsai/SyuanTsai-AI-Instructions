@@ -8,7 +8,7 @@
   "cases": [
     {
       "id": "architecture-html",
-      "sourceSha256": "90a221d5a3baf89c3b166ac1e49b9c6df5723ea5cffd6a26c8764f4ff2eb3cf9",
+      "sourceSha256": "2fd974b6a451562ab7c6121a19c9e7173f064a404b628beab349227279b0aafb",
       "screenshotSha256": "69b96d4eb6b534e35ae0d51b26896d5328ae33f29c3bea128a6bd9dff5de53d7",
       "viewport": "1100x900",
       "status": "rendered",
@@ -16,7 +16,7 @@
     },
     {
       "id": "architecture-svg",
-      "sourceSha256": "cef0affcf517f322b7813161ad1ed9306915cb71357596662f7e581f50b36bed",
+      "sourceSha256": "e8942a12952ced59c08d302cfd24ab64a7808364f91ed38b43b3206ee707b072",
       "screenshotSha256": "0c2478461a0a662a3301114bced10eb6d0718759278a6bb5954bb13a6802c630",
       "viewport": "1100x900",
       "status": "rendered",
@@ -24,7 +24,7 @@
     },
     {
       "id": "flowchart-html",
-      "sourceSha256": "6046febc35bf96030fed3fb9af9467c5c054fb800fc400c0d2671b68b531a8d8",
+      "sourceSha256": "aad8ce114b514d47ea9879968642940c7075c68592dfccebc7326b23a098e5af",
       "screenshotSha256": "74055abf52dee8ea54eb8aa4b9ad2abb5f81ce84f08bb9eb090cc60370e5da64",
       "viewport": "1100x900",
       "status": "rendered",
@@ -32,7 +32,7 @@
     },
     {
       "id": "flowchart-svg",
-      "sourceSha256": "4df09b415c23ef28495b2188f107629e913c84549bf220fc9267fdb1cb84196f",
+      "sourceSha256": "7830fa660363bce5fa849b66f72b99d64d770ca750df065e57fbdf1685f139bb",
       "screenshotSha256": "881c99ba96ef8f34d0dceff6121783505041c1c82201c963e99e32cdc6d016d5",
       "viewport": "1100x900",
       "status": "rendered",
@@ -40,7 +40,7 @@
     },
     {
       "id": "sequence-html",
-      "sourceSha256": "716ae3046651c6b0ae677151e3e9a7e80dc82f228a5838714b7d4f9db7523201",
+      "sourceSha256": "793bc6b4cb3be1b075becca4a1e8f98b5e5fefdf946fa9877f715b1e0d464ae2",
       "screenshotSha256": "158e2f093aed4959c40c71ecdc976a2d1d7dc49aabf96b8f19c8c5e73a0904bd",
       "viewport": "1100x900",
       "status": "rendered",
@@ -48,7 +48,7 @@
     },
     {
       "id": "sequence-svg",
-      "sourceSha256": "dcff50ec0608c994081339f35fee6791dc4ab8682af5041d76dd1f8a136cf199",
+      "sourceSha256": "12feb4c49355c97a4f723c53c3d0fc090bee2687a9abf8861e271f7028e3220a",
       "screenshotSha256": "79d6c6ad578ba2dab09e884180155f41715a3d1dbb57a690476cd2f9862498b1",
       "viewport": "1100x900",
       "status": "rendered",

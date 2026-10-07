@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "validationKind": "brand-glyph-provenance-comparison",
+  "releaseEligible": false,
+  "upstreamRevision": "d1376371965f513d99cc9ec388835d255c5c88d5",
+  "cases": [
+    {
+      "id": "hop",
+      "bundledPathCount": 1,
+      "sourcePathCount": 1,
+      "pathGeometryMatches": true,
+      "sourceSha256": "290b8cca6b42580f7ac04c128ec3e2e700ce4c0da81e3f919b586c93575c80ba",
+      "copyrightAndRedistributionReview": "pending",
+      "method": "Exact ordered path d comparison with whitespace normalization only; no SVG execution; color and attributes are not licensed by this comparison."
+    },
+    {
+      "id": "pentaho",
+      "bundledPathCount": 3,
+      "sourcePathCount": 3,
+      "pathGeometryMatches": true,
+      "sourceSha256": "68f969a00a534867e13e476f68aa7916cdd0d8688603085ef95655e4f5a9e4ae",
+      "copyrightAndRedistributionReview": "pending",
+      "method": "Exact ordered path d comparison with whitespace normalization only; no SVG execution; color and attributes are not licensed by this comparison."
+    },
+    {
+      "id": "dagster",
+      "bundledPathCount": 9,
+      "sourcePathCount": 9,
+      "pathGeometryMatches": true,
+      "sourceSha256": "96fbbaad6a3da77722aa0d9d27f999c75a83bc5a5eca71f29d4c7e1020a2f87f",
+      "copyrightAndRedistributionReview": "pending",
+      "method": "Exact ordered path d comparison with whitespace normalization only; no SVG execution; color and attributes are not licensed by this comparison."
+    }
+  ]
+}
