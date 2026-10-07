@@ -1,0 +1,194 @@
+{
+  "source": "/in/flowchart.mmd",
+  "diagrams_total": 1,
+  "diagrams": [
+    {
+      "index": 0,
+      "kind": "flowchart",
+      "source_line": 1,
+      "direction": "TD",
+      "analysis": {
+        "nodes_total": 5,
+        "nodes_drawable": 5,
+        "containers": 0,
+        "leaves": 5,
+        "edges_total": 5,
+        "edges_labeled": 2,
+        "edges_dangling": 0,
+        "max_depth": 0,
+        "shapes": {
+          "rect": 2,
+          "stadium": 2,
+          "rhombus": 1
+        },
+        "has_cycle": false,
+        "hubs": [
+          {
+            "id": "Valid",
+            "label": "資料有效？",
+            "degree": 3
+          },
+          {
+            "id": "Save",
+            "label": "儲存資料",
+            "degree": 2
+          },
+          {
+            "id": "Reject",
+            "label": "回報錯誤",
+            "degree": 2
+          },
+          {
+            "id": "End",
+            "label": "完成",
+            "degree": 2
+          },
+          {
+            "id": "Start",
+            "label": "開始",
+            "degree": 1
+          }
+        ],
+        "entry_points": [
+          "開始"
+        ],
+        "terminals": [
+          "完成"
+        ],
+        "orphans": [],
+        "type_candidates": [
+          "flowchart",
+          "architecture"
+        ],
+        "collapsible_groups": [],
+        "over_node_budget": false,
+        "over_edge_budget": false
+      },
+      "discarded": {
+        "style_directives": 0,
+        "click_handlers": 0
+      },
+      "fragments": [],
+      "notes": [],
+      "nodes": [
+        {
+          "id": "Start",
+          "label": "開始",
+          "shape": "stadium",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 0,
+          "out_degree": 1
+        },
+        {
+          "id": "Valid",
+          "label": "資料有效？",
+          "shape": "rhombus",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 1,
+          "out_degree": 2
+        },
+        {
+          "id": "Save",
+          "label": "儲存資料",
+          "shape": "rect",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 1,
+          "out_degree": 1
+        },
+        {
+          "id": "Reject",
+          "label": "回報錯誤",
+          "shape": "rect",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 1,
+          "out_degree": 1
+        },
+        {
+          "id": "End",
+          "label": "完成",
+          "shape": "stadium",
+          "parent": null,
+          "depth": 0,
+          "container": false,
+          "children": [],
+          "fields": [],
+          "in_degree": 2,
+          "out_degree": 0
+        }
+      ],
+      "edges": [
+        {
+          "id": "e1",
+          "source": "Start",
+          "target": "Valid",
+          "label": "",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 1
+        },
+        {
+          "id": "e2",
+          "source": "Valid",
+          "target": "Save",
+          "label": "是",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 2
+        },
+        {
+          "id": "e3",
+          "source": "Valid",
+          "target": "Reject",
+          "label": "否",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 3
+        },
+        {
+          "id": "e4",
+          "source": "Save",
+          "target": "End",
+          "label": "",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 4
+        },
+        {
+          "id": "e5",
+          "source": "Reject",
+          "target": "End",
+          "label": "",
+          "style": "solid",
+          "arrowhead": "arrow",
+          "bidirectional": false,
+          "undirected": false,
+          "order": 5
+        }
+      ]
+    }
+  ]
+}

@@ -4554,3 +4554,21 @@ jobs:
         }
     }
 }
+Describe 'Third-party raw Skill authority contract' {
+    # Scenario: Raw third-party ownership is explicitly adapted by central policy.
+    # Purpose: Preserve source tools and security gates while avoiding fabricated upstream metadata.
+    It 'UnitT10_keeps_raw_ownership_separate_from_source_validation_and_release' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $raw=Get-Content -Raw (Join-Path $root 'docs/standards/third-party-raw-skill-sources.md')
+        $standard | Should Match 'third-party-raw-skill-sources.md'
+        $raw | Should Match 'releaseEligible=false'
+        $raw | Should Match '-SourceValidation'
+        $raw | Should Match 'skill-validator'
+        $raw | Should Match 'SkillSpector Static'
+        $raw | Should Match 'Human Approval'
+    }
+}
+# The same authority regression entry executes actual adapter behavior and negative fixtures.
+. (Join-Path $PSScriptRoot 'third-party-skill-source.Tests.ps1')
+. (Join-Path $PSScriptRoot 'third-party-source-envelope.Tests.ps1')

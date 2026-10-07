@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "generation": "Agent-authored redraw from actual isolated extractor IR; no renderer conversion",
+  "profile": "neutral-acceptance",
+  "cases": [
+    {
+      "id": "architecture",
+      "sourceSha256": "7ceddd18eda7eb7eaa2af1a51e1d381a508f1a5d372c936a94bab85398350940",
+      "sourceNodes": 3,
+      "drawnNodes": 3,
+      "sourceEdges": 2,
+      "drawnEdges": 2,
+      "merges": [],
+      "collapses": [],
+      "drops": [],
+      "semanticOrderVerified": true,
+      "htmlSha256": "90a221d5a3baf89c3b166ac1e49b9c6df5723ea5cffd6a26c8764f4ff2eb3cf9",
+      "svgSha256": "cef0affcf517f322b7813161ad1ed9306915cb71357596662f7e581f50b36bed",
+      "visualInspection": "passed"
+    },
+    {
+      "id": "flowchart",
+      "sourceSha256": "e75186611520bbce79dfda46b8f57c7b4ad215a3b8ef62a93a9a3ce63827bc05",
+      "sourceNodes": 5,
+      "drawnNodes": 5,
+      "sourceEdges": 5,
+      "drawnEdges": 5,
+      "merges": [],
+      "collapses": [],
+      "drops": [],
+      "semanticOrderVerified": true,
+      "htmlSha256": "6046febc35bf96030fed3fb9af9467c5c054fb800fc400c0d2671b68b531a8d8",
+      "svgSha256": "4df09b415c23ef28495b2188f107629e913c84549bf220fc9267fdb1cb84196f",
+      "visualInspection": "passed"
+    },
+    {
+      "id": "sequence",
+      "sourceSha256": "c2b19ee56f322a1c6f53ef40c3d35416ffd4d583ec23ef36f99a798a22cde215",
+      "sourceNodes": 3,
+      "drawnNodes": 3,
+      "sourceEdges": 4,
+      "drawnEdges": 4,
+      "merges": [],
+      "collapses": [],
+      "drops": [],
+      "semanticOrderVerified": true,
+      "htmlSha256": "716ae3046651c6b0ae677151e3e9a7e80dc82f228a5838714b7d4f9db7523201",
+      "svgSha256": "dcff50ec0608c994081339f35fee6791dc4ab8682af5041d76dd1f8a136cf199",
+      "visualInspection": "passed"
+    }
+  ]
+}

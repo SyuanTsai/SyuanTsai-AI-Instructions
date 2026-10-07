@@ -111,10 +111,12 @@ Rename **MUST** 使用新 stable ID 並由 central Catalog lifecycle 處理 tomb
 
 ### 4.4 Required files
 
-每個 active Skill package **MUST** 包含：
+每個 owned-source active Skill package **MUST** 包含：
 
 - `SKILL.md`；
 - `agents/openai.yaml`。
+
+未提供 source-owned inventory／interface metadata 的第三方原始 Skill，只能透過中央 [`third-party-raw-skill-sources.md`](third-party-raw-skill-sources.md) 的明確 opt-in 契約採用。此路徑以中央 descriptor 記錄 ownership、完整原始 package inventory／hash、介面資料與授權／review 狀態；不得假造上游文件或修改 raw bytes。除該契約明列的 metadata ownership 差異外，portable package、正式 SourceValidation、安全與 lifecycle 門檻全部保留。
 
 Skill-specific `scripts/`、`references/`、`assets/` **MAY** 存在。Repository root script **SHOULD** 僅處理 repository-level validation、release、pin/provenance、orchestration 或 adapters；Skill 自己的 domain implementation **SHOULD** 保持在 Skill package 內。
 
@@ -157,7 +159,7 @@ Optional `interface` / dependency string fields 若存在，也 **MUST** 遵守�
 
 ### 5.1 Source-owned inventory
 
-Source repository **MUST** 提供 `catalog/source.json`，至少包含：
+Owned source repository **MUST** 提供 `catalog/source.json`，至少包含：
 
 ```json
 {

@@ -1,0 +1,6 @@
+flowchart TD
+    Start(["開始"]) --> Valid{"資料有效？"}
+    Valid -->|是| Save["儲存資料"]
+    Valid -->|否| Reject["回報錯誤"]
+    Save --> End(["完成"])
+    Reject --> End

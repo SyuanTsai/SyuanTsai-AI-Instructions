@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "purpose": "HTML and SVG visual acceptance screenshots; not Skill PNG automation validation",
+  "browserVersion": "154.0.8037.98",
+  "browserSha256": "6849d2982038de9f9489a7b3858f3b785b7fec06a842c93c517281d21995c8ca",
+  "profile": "fresh owned profile per case",
+  "network": "no external resources in artifacts; background networking disabled and hostname resolution denied",
+  "cases": [
+    {
+      "id": "architecture-html",
+      "sourceSha256": "90a221d5a3baf89c3b166ac1e49b9c6df5723ea5cffd6a26c8764f4ff2eb3cf9",
+      "screenshotSha256": "69b96d4eb6b534e35ae0d51b26896d5328ae33f29c3bea128a6bd9dff5de53d7",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    },
+    {
+      "id": "architecture-svg",
+      "sourceSha256": "cef0affcf517f322b7813161ad1ed9306915cb71357596662f7e581f50b36bed",
+      "screenshotSha256": "0c2478461a0a662a3301114bced10eb6d0718759278a6bb5954bb13a6802c630",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    },
+    {
+      "id": "flowchart-html",
+      "sourceSha256": "6046febc35bf96030fed3fb9af9467c5c054fb800fc400c0d2671b68b531a8d8",
+      "screenshotSha256": "74055abf52dee8ea54eb8aa4b9ad2abb5f81ce84f08bb9eb090cc60370e5da64",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    },
+    {
+      "id": "flowchart-svg",
+      "sourceSha256": "4df09b415c23ef28495b2188f107629e913c84549bf220fc9267fdb1cb84196f",
+      "screenshotSha256": "881c99ba96ef8f34d0dceff6121783505041c1c82201c963e99e32cdc6d016d5",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    },
+    {
+      "id": "sequence-html",
+      "sourceSha256": "716ae3046651c6b0ae677151e3e9a7e80dc82f228a5838714b7d4f9db7523201",
+      "screenshotSha256": "158e2f093aed4959c40c71ecdc976a2d1d7dc49aabf96b8f19c8c5e73a0904bd",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    },
+    {
+      "id": "sequence-svg",
+      "sourceSha256": "dcff50ec0608c994081339f35fee6791dc4ab8682af5041d76dd1f8a136cf199",
+      "screenshotSha256": "79d6c6ad578ba2dab09e884180155f41715a3d1dbb57a690476cd2f9862498b1",
+      "viewport": "1100x900",
+      "status": "rendered",
+      "visualReview": "passed"
+    }
+  ]
+}
