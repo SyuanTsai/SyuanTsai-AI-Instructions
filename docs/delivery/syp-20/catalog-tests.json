@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "issue": "SYP-20",
   "acceptanceOwner": "SYP-259",
-  "observedAt": "2026-10-08T02:40:12.9376727+00:00",
+  "observedAt": "2026-10-08T02:54:28.2296294+00:00",
   "centralBase": "14ee2535e43e7c5b4d0992594aa01b31e8f3aa5c",
   "sourceMerge": "191db6b3380eee697285dc5a4e3a3390ec8379c3",
   "powerShellVersion": "7.6.6",
@@ -322,7 +322,7 @@
     },
     {
       "path": "catalog/skills-catalog-lock.json",
-      "sha256": "acd8a72c43775d8811d0f58cec17b9109885a376184fde7b73c1deed63e9aa87"
+      "sha256": "0b44d59ba9fafa419f577574a493dcbd3276300f3cac2d7f9839a38dc2ab56c7"
     },
     {
       "path": "catalog/skills-catalog.json",
