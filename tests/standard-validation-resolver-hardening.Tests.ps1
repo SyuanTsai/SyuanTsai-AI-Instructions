@@ -469,10 +469,11 @@ Version: this line also belongs to the description body
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
         Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
 
-        # An invalid .exe can enter Windows application-error handling and wait for
-        # a hidden UI. An unregistered extension reaches the same process-launch
-        # failure deterministically without invoking that host-specific handler.
-        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.invalid' } else { 'invalid-native' })
+        # Unknown extensions can open Windows' application picker. Use an invalid
+        # executable and suppress error UI only on this test's thread, restoring
+        # the previous flags after the real launch attempt.
+        $isWindowsFixture = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        $invalidNativePath = Join-Path $TestDrive $(if ($isWindowsFixture) { 'invalid-native.exe' } else { 'invalid-native' })
         [IO.File]::WriteAllBytes($invalidNativePath, [byte[]]@(0, 1, 2, 3))
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
             $chmodCommand = Assert-Command -Name 'chmod'
@@ -482,8 +483,31 @@ Version: this line also belongs to the description body
         }
         $global:LASTEXITCODE = 0
         $launchError = $null
-        try { Invoke-CheckedCommand -Command $invalidNativePath -Arguments @('--probe') | Out-Null }
-        catch { $launchError = $_.Exception.Message }
+        [uint32]$previousNativeErrorMode = 0
+        [uint32]$discardedNativeErrorMode = 0
+        $restoreNativeErrorMode = $false
+        try {
+            if ($isWindowsFixture) {
+                if ($null -eq ('StandardResolverFixtureErrorMode' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class StandardResolverFixtureErrorMode {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetThreadErrorMode(uint mode, out uint oldMode);
+}
+'@
+                }
+                if (-not [StandardResolverFixtureErrorMode]::SetThreadErrorMode(0x8003, [ref]$previousNativeErrorMode)) { throw 'Could not suppress test-thread native error UI.' }
+                $restoreNativeErrorMode = $true
+                if (-not [StandardResolverFixtureErrorMode]::SetThreadErrorMode(($previousNativeErrorMode -bor 0x8003), [ref]$discardedNativeErrorMode)) { throw 'Could not preserve existing native error flags.' }
+            }
+            try { Invoke-CheckedCommand -Command $invalidNativePath -Arguments @('--probe') | Out-Null }
+            catch { $launchError = $_.Exception.Message }
+        }
+        finally {
+            if ($restoreNativeErrorMode -and -not [StandardResolverFixtureErrorMode]::SetThreadErrorMode($previousNativeErrorMode, [ref]$discardedNativeErrorMode)) { throw 'Could not restore test-thread native error mode.' }
+        }
         Assert-True (-not [string]::IsNullOrWhiteSpace($launchError)) 'A native launch failure must not inherit a stale successful exit code.'
 
         $pythonCommand = Assert-Command -Name 'python'
