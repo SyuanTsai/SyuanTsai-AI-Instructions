@@ -213,6 +213,33 @@ Describe 'SYP280 runner inventory performance and compatibility' -Tag 'SYP280' {
         finally { $script:StandardValidationTimingEnabled=$false; [Console]::SetError($previousError); $capture.Dispose() }
     }
 
+    # Scenario: Cancellation is requested before any child process can start.
+    # Purpose: Keep the original cancellation result and label its phase terminal correctly.
+    It 'UnitT29_retains_pre_start_cancellation_result_and_timing' {
+        $cancellation = Join-Path $TestDrive 'syp280-pre-start-cancellation.txt'
+        [IO.File]::WriteAllText($cancellation, 'cancel', [Text.UTF8Encoding]::new($false))
+        $capture = [IO.StringWriter]::new()
+        $previousError = [Console]::Error
+        $previousTiming = $script:StandardValidationTimingEnabled
+        try {
+            [Console]::SetError($capture)
+            $script:StandardValidationTimingEnabled = $true
+            $result = Invoke-StandardValidationProcess -Command 'fixture-never-launch' -Arguments @('fixture') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 1 -CancellationPath $cancellation
+            if ($result.status -cne 'cancelled' -or $result.exitCode -ne -1 -or $null -ne $result.processId -or -not $result.cleanedUp) {
+                throw 'Pre-start cancellation must retain its original result without launching a child.'
+            }
+            $records = @($capture.ToString().Trim().Split([char]10) | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            if ($records.Count -ne 2 -or $records[0].state -cne 'started' -or $records[-1].phase -cne 'child-process' -or $records[-1].state -cne 'cancelled') {
+                throw 'Pre-start cancellation needs a cancelled timing terminal.'
+            }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled = $previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+        }
+    }
+
     # Scenario: A child changes one protected input, including equal-length bytes with the original mtime.
     # Purpose: Exercise the actual command wrapper's next integrity boundary; a malformed envelope cannot produce a false-positive rejection.
     It 'InterT30_rejects_child_mutation_of_<Mutation>' -TestCases @(

@@ -3671,6 +3671,7 @@ function Invoke-StandardValidationProcess {
     $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
     try {
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            $status = 'cancelled'
             return [pscustomobject][ordered]@{
                 startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
                 status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true
