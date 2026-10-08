@@ -90,11 +90,12 @@ $script:StandardValidationExitCodes = [ordered]@{
     INVALID = 30
     CANCELLED = 40
 }
-# Timing stays outside canonical evidence. Function-only imports keep automatic
-# diagnostics quiet; tests can still exercise the timing helpers explicitly.
+# Full SourceValidation timing stays outside canonical evidence. Ordinary Core
+# keeps its established progress stream; function-only imports stay quiet.
+# Tests can still exercise the timing helpers explicitly.
 $script:StandardValidationTimingStage = 'validation'
 $script:StandardValidationClosureTiming = $null
-$script:StandardValidationTimingEnabled = -not [bool]$DefineFunctionsOnly
+$script:StandardValidationTimingEnabled = [bool]$SourceValidation -and -not [bool]$DefineFunctionsOnly
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationLaunchBinding = $null
