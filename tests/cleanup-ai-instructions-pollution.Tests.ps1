@@ -289,8 +289,8 @@ Describe 'tracked AI instructions pollution cleanup' {
     }
 
     # Scenario: Manifest-proven pollution includes a Unicode-named file in a recursively managed Skill.
-    # Purpose: Enumerate Git paths without quotePath escaping and stage every exact managed resource deletion.
-    It 'InterT62_cleans_a_manifest_owned_Unicode_Skill_resource' {
+    # Purpose: Keep tracked Skill payload and index entries intact while staging only Instructions pollution deletions.
+    It 'InterT62_protects_a_tracked_manifest_owned_Unicode_Skill_resource' {
         $targetRoot = Join-Path $TestDrive 'unicode-skill-pollution'
         New-PollutedTestRepository -Path $targetRoot
         $skillRoot = Join-Path $targetRoot '.agents\skills\unicode-skill'
@@ -324,8 +324,8 @@ Describe 'tracked AI instructions pollution cleanup' {
         $result.ExitCode | Should Be 0
         $skillDeletion = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status','--','.agents/skills/unicode-skill/SKILL.md'))
         $unicodeDeletion = @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('-c','core.quotePath=false','diff','--cached','--name-status','--',$unicodeRelativePath))
-        ($skillDeletion.Count -eq 1 -and [string]$skillDeletion[0] -match '^D(?:\s|$)') | Should Be $true
-        ($unicodeDeletion.Count -eq 1 -and [string]$unicodeDeletion[0] -match '^D(?:\s|$)') | Should Be $true
+        $skillDeletion.Count | Should Be 0
+        $unicodeDeletion.Count | Should Be 0
         Test-Path -LiteralPath (Join-Path $skillRoot $unicodeFileName) -PathType Leaf | Should Be $true
     }
 

@@ -782,6 +782,10 @@ $trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('-c
 $gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
+    if ([string]$manifestTargetPath -like '.agents/skills/*') {
+        Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
+        continue
+    }
     foreach ($actualTrackedPath in $trackedPaths) {
         if ($gitPathComparer.Equals([string]$manifestTargetPath,[string]$actualTrackedPath)) {
             $trackedManagedEntries.Add([pscustomobject]@{ ManifestPath=[string]$manifestTargetPath; IndexPath=[string]$actualTrackedPath })

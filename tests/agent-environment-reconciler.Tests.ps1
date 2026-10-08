@@ -11,7 +11,8 @@ function New-TestDesiredState {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [string[]] $SkillIds = @('alpha'),
-        [hashtable] $Aliases = @{}
+        [hashtable] $Aliases = @{},
+        [hashtable] $Resources = @{}
     )
     $files = @()
     $catalogSkills = @()
@@ -28,6 +29,18 @@ function New-TestDesiredState {
             sourceCommit='0123456789abcdef0123456789abcdef01234567'; sourceVersion='test'
             sourcePath=".agents/skills/$skillId/SKILL.md"; targetPath=".agents/skills/$skillId/SKILL.md"
             sha256=$sha; stagedPath=$stagedPath
+        }
+        $skillEntry=$files[-1]
+        foreach($relative in $Resources.Keys) {
+            $resourcePath=Join-Path $stagedRoot $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $resourcePath) | Out-Null
+            [IO.File]::WriteAllBytes($resourcePath,[byte[]]$Resources[$relative])
+            $resource=$skillEntry.PSObject.Copy()
+            $resource.sourcePath=".agents/skills/$skillId/$relative"
+            $resource.targetPath=$resource.sourcePath
+            $resource.sha256=(Get-FileHash -LiteralPath $resourcePath).Hash.ToLowerInvariant()
+            $resource.stagedPath=$resourcePath
+            $files+=$resource
         }
         $skillAliases = if ($Aliases.ContainsKey($skillId)) { @($Aliases[$skillId]) } else { @() }
         $catalogSkills += [pscustomobject]@{ id=$skillId; lifecycle=[pscustomobject]@{ status='active'; aliases=$skillAliases } }
@@ -106,6 +119,30 @@ function Assert-TestRecoveryConcurrentResult {
 }
 
 Describe 'user-scoped Agent Skills reconciliation' {
+    # Scenario: USER receives nested scripts, references and binary assets and then an updated resource inventory.
+    # Purpose: Verify raw bytes, resource update/prune, complete ownership and a stable second apply in USER.
+    It 'InterT01_reconciles_recursive_resources_and_binary_bytes_only_in_USER' {
+        # Given
+        $userHome=Join-Path $TestDrive 'resource-user'
+        $initial=New-TestDesiredState -Root (Join-Path $TestDrive 'resource-initial') -Resources @{
+            'assets/nested/data.bin'=[byte[]]@(0,10,13,128,255)
+            'references/details.md'=[Text.Encoding]::UTF8.GetBytes('reference v1')
+            'scripts/probe.ps1'=[Text.Encoding]::UTF8.GetBytes('Write-Output sample')
+        }
+        # When / Then
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        foreach($entry in $initial.Files){ (Get-FileHash (Join-Path $userHome $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
+        $next=New-TestDesiredState -Root (Join-Path $TestDrive 'resource-next') -Resources @{
+            'assets/nested/data.bin'=[byte[]]@(255,0,10,128)
+            'scripts/probe.ps1'=[Text.Encoding]::UTF8.GetBytes('Write-Output updated')
+        }
+        (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        Test-Path (Join-Path $userHome '.agents/skills/alpha/references/details.md') | Should Be $false
+        foreach($entry in $next.Files){ (Get-FileHash (Join-Path $userHome $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
+        $before=(Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash
+        (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'current'
+        (Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash | Should Be $before
+    }
     BeforeEach {
         $userHome = Join-Path $TestDrive ('home-' + [Guid]::NewGuid().ToString('N'))
         $staging = Join-Path $TestDrive ('staging-' + [Guid]::NewGuid().ToString('N'))

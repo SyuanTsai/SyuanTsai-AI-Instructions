@@ -215,6 +215,27 @@ function Invoke-BootstrapScript {
     return $output
 }
 
+function Install-TestHistoricalRepoSkills {
+    param([string]$SourceRoot, [string]$TargetRoot)
+    $manifestPath = Join-Path $TargetRoot $script:ManifestPath
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $SourceRoot '.agents/skills') -File -Recurse -Force | Where-Object Name -ne '.gitkeep')
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($SourceRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+        $full = Join-Path $TargetRoot $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $full) | Out-Null
+        [IO.File]::Copy($file.FullName,$full,$true)
+        $manifest.files = @($manifest.files) + [pscustomobject][ordered]@{
+            artifactType='skill'; artifactId=$relative.Split('/')[2]; sourceId='test-skills'
+            sourceRepository='https://example.com/test-skills.git'; sourceRef='main'; sourceCommit=('b'*40)
+            sourceVersion='test@bbbbbbbb'; sourcePath=$relative; targetPath=$relative
+            sha256=(Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    [IO.File]::WriteAllText($manifestPath,($manifest|ConvertTo-Json -Depth 10).Replace("`r`n","`n") + "`n")
+    [IO.File]::AppendAllText((Join-Path $TargetRoot '.git/info/exclude'),"`n/.agents/skills/`n")
+}
+
 Describe 'bootstrap-ai-instructions' {
     BeforeEach {
         $archiveRoot = Join-Path $TestDrive 'archive'
@@ -356,44 +377,22 @@ Describe 'bootstrap-ai-instructions' {
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
-    # Scenario: A selected shared Skill contains nested text and binary resources, then removes one managed resource in a later source version.
-    # Purpose: Preserve recursive byte-safe synchronization and safely remove only unchanged manifest-owned files.
-    It 'InterT15_recursively_syncs_shared_Skill_files_and_removes_deleted_managed_resources' {
+    # Scenario: A legacy composed source contains nested text and binary Skill resources.
+    # Purpose: Enforce Instructions-only output while USER resource synchronization remains tested in the reconciler suite.
+    It 'InterT15_never_projects_shared_Skill_resources_into_a_consumer' {
         # Given
-        $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\write-project-prompt'
-        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
-        New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'assets') | Out-Null
-        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value "---`nname: write-project-prompt`ndescription: Write a project prompt.`n---`n`n# Write project prompt"
-        Set-TestText -Path (Join-Path $sourceSkillPath 'references\format.md') -Value '# Prompt format'
-        [System.IO.File]::WriteAllBytes((Join-Path $sourceSkillPath 'assets\preview.bin'), [byte[]]@(0x80))
-        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
-
+        $skillPath = Join-Path $sourceRoot '.agents/skills/write-project-prompt'
+        New-Item -ItemType Directory -Force -Path (Join-Path $skillPath 'assets') | Out-Null
+        Set-TestText (Join-Path $skillPath 'SKILL.md') '# Shared Skill'
+        [IO.File]::WriteAllBytes((Join-Path $skillPath 'assets/preview.bin'),[byte[]]@(0x80))
+        Compress-TestSource $sourceRoot $sourceArchive
         # When
-        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
-
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
         # Then
-        $targetSkillPath = Join-Path $targetRoot '.agents\skills\write-project-prompt'
-        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Match '# Write project prompt$'
-        (Get-Content -Raw (Join-Path $targetSkillPath 'references\format.md')).Trim() | Should Be '# Prompt format'
-        [System.IO.File]::ReadAllBytes((Join-Path $targetSkillPath 'assets\preview.bin'))[0] | Should Be 0x80
-        Test-Path -LiteralPath (Join-Path $targetRoot '.agents\skills\.gitkeep') | Should Be $false
+        Test-Path (Join-Path $targetRoot '.agents/skills/write-project-prompt') | Should Be $false
         $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
-        @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/write-project-prompt/SKILL.md' }).Count | Should Be 1
-        @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/write-project-prompt/references/format.md' }).Count | Should Be 1
-
-        # Given a changed skill and a removed managed reference
-        Set-TestText -Path (Join-Path $sourceSkillPath 'SKILL.md') -Value "---`nname: write-project-prompt`ndescription: Write a project prompt.`n---`n`n# Write project prompt v2"
-        [System.IO.File]::WriteAllBytes((Join-Path $sourceSkillPath 'assets\preview.bin'), [byte[]]@(0x81))
-        Remove-Item -LiteralPath (Join-Path $sourceSkillPath 'references\format.md')
-        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
-
-        # When
-        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
-
-        # Then
-        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Match '# Write project prompt v2$'
-        [System.IO.File]::ReadAllBytes((Join-Path $targetSkillPath 'assets\preview.bin'))[0] | Should Be 0x81
-        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\format.md') | Should Be $false
+        @($manifest.files | Where-Object artifactType -eq 'skill').Count | Should Be 0
+        (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
     }
 
     # Scenario: A selected shared Skill contains a Unicode-named resource and a no-op bootstrap revalidates its stored recovery evidence.
@@ -409,7 +408,7 @@ Describe 'bootstrap-ai-instructions' {
         $firstOutput = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
         $secondOutput = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
-        (Get-Content -Raw -LiteralPath (Join-Path (Join-Path $targetRoot '.agents\skills\unicode-resource\references') $unicodeFileName)).Trim() | Should Be '# Unicode path content'
+        Test-Path -LiteralPath (Join-Path $targetRoot '.agents/skills/unicode-resource') | Should Be $false
         ($firstOutput -join [Environment]::NewLine) | Should Match 'PersonalAgent recovery evidence updated'
         ($secondOutput -join [Environment]::NewLine) | Should Not Match 'PersonalAgent recovery evidence updated'
         @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs') |
@@ -417,8 +416,8 @@ Describe 'bootstrap-ai-instructions' {
     }
 
     # Scenario: A product Repository tracks a customized Skill at a path also present in the selected shared source.
-    # Purpose: Back up and untrack the reserved artifact before replacing it with the immutable shared Skill.
-    It 'InterT20_backs_up_and_migrates_a_tracked_customized_Skill' {
+    # Purpose: Preserve tracked project content, including its shared-name collision, while Instructions update.
+    It 'InterT20_preserves_a_tracked_project_Skill' {
         # Given
         $sourceSkillPath = Join-Path $sourceRoot '.agents\skills\existing-skill'
         New-Item -ItemType Directory -Force -Path (Join-Path $sourceSkillPath 'references') | Out-Null
@@ -436,11 +435,11 @@ Describe 'bootstrap-ai-instructions' {
         $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
 
         # Then
-        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Shared skill'
-        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\shared.md') | Should Be $true
-        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.agents/skills/existing-skill/SKILL.md')).Count | Should Be 0
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'chore: stop tracking local AI instructions'
-        ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated.*\.agents/skills/existing-skill/SKILL\.md'
+        (Get-Content -Raw (Join-Path $targetSkillPath 'SKILL.md')).Trim() | Should Be '# Project skill'
+        Test-Path -LiteralPath (Join-Path $targetSkillPath 'references\shared.md') | Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.agents/skills/existing-skill/SKILL.md')).Count | Should Be 1
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('log','-1','--pretty=%s')) | Should Be 'add project skill'
+        ($output -join [Environment]::NewLine) | Should Not Match 'remediation commit created'
     }
 
     # Scenario: A tracked AGENTS.md is missing from the worktree when bootstrap starts.
@@ -881,7 +880,7 @@ exit /b 0
     }
 
     # Scenario: A legacy manifest, Copilot Instructions, and the retired custom FELO Skill are tracked together.
-    # Purpose: Migrate the supported runtime, delete the retired implementation, and replace schema-v1 ownership evidence.
+    # Purpose: Migrate Instructions and their legacy ownership evidence while protecting tracked Skills.
     It 'InterT110_migrates_tracked_Copilot_legacy_manifest_and_retired_custom_FELO' {
         # Given
         $copilotPath = Join-Path $targetRoot '.github\copilot-instructions.md'
@@ -912,8 +911,9 @@ exit /b 0
 
         # Then
         (Get-Content -Raw -LiteralPath $copilotPath).Trim() | Should Be '# Copilot English Base'
-        Test-Path -LiteralPath $retiredSkillPath | Should Be $false
-        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.github/copilot-instructions.md','.agents/skills/search-with-felo',$script:ManifestPath)).Count | Should Be 0
+        Test-Path -LiteralPath $retiredSkillPath | Should Be $true
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.github/copilot-instructions.md',$script:ManifestPath)).Count | Should Be 0
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('ls-files','--','.agents/skills/search-with-felo')).Count | Should Be 2
         (Get-Content -Raw -Encoding UTF8 -LiteralPath $legacyManifestPath | ConvertFrom-Json).schemaVersion | Should Be 2
         ($output -join [Environment]::NewLine) | Should Match 'Backed up and migrated'
     }
@@ -1024,7 +1024,7 @@ exit /b 0
 
         # Then
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headAfterFirst
-        Test-Path -LiteralPath $retiredPath | Should Be $false
+        Test-Path -LiteralPath $retiredPath | Should Be $true
         (Get-Content -Raw -LiteralPath $officialPath).Trim() | Should Be '# Official FELO sentinel'
         ($secondOutput -join [Environment]::NewLine) | Should Match 'up to date'
         ($secondOutput -join [Environment]::NewLine) | Should Not Match 'remediation commit created'
@@ -1130,6 +1130,7 @@ exit /b 0
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        Install-TestHistoricalRepoSkills -SourceRoot $sourceRoot -TargetRoot $targetRoot
         $manifestPath = Join-Path $targetRoot $script:ManifestPath
         $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
         $manifest.schemaVersion = 3
@@ -2110,6 +2111,8 @@ description: Verify raw bytes.
 
         Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $runtimeConfigurationPath
 
+        Install-TestHistoricalRepoSkills -SourceRoot $sourceRoot -TargetRoot $targetRoot
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $runtimeConfigurationPath | Out-Null
         $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
         $entry = @($manifest.files | Where-Object { $_.targetPath -eq '.agents/skills/raw-byte-skill/references/data.txt' })[0]
         $targetSkillFile = Join-Path $targetRoot '.agents\skills\raw-byte-skill\references\data.txt'
@@ -2121,7 +2124,7 @@ description: Verify raw bytes.
         (Get-FileHash -LiteralPath $targetSkillFile -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be ([string]$entry.sha256)
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'stash@{0}')) | Should Be $stashBefore
         ($output -join [Environment]::NewLine) | Should Match 'up to date'
-        ($output -join [Environment]::NewLine) | Should Not Match 'customized or unmanaged'
+        ($output -join [Environment]::NewLine) | Should Match 'USER.*unavailable'
     }
 
     # Scenario: A target path is blocked after an earlier managed file has already been copied.

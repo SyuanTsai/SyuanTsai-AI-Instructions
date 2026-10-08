@@ -1,13 +1,14 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string] $SourceArchivePath,
     [string] $TargetRoot,
-    [Parameter(Mandatory = $true)]
     [string] $ConfigurationPath,
-    [Parameter(Mandatory = $true)]
     [string] $ProvenancePath,
-    [string] $GitExecutable = 'git'
+    [string] $GitExecutable = 'git',
+    [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
+    [switch] $WhatIf,
+    [int] $FailureAfterSkillRemovalCount = 0,
+    [string] $RecoverSkillMigration
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +28,7 @@ Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'license-delivery.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -1438,7 +1440,13 @@ function Set-ManagedGitInfoExclude {
         if (-not (Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right $updatedBytes)) {
             $Snapshot.AppliedBytes = $updatedBytes
             $Snapshot.MutationApplied = $true
-            try { Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $updatedBytes }
+            try {
+                if ($null -ne $script:SkillMigrationJournalContext) {
+                    $context=$script:SkillMigrationJournalContext
+                    Save-SkillMigrationJournal $context.Snapshot $Snapshot $context.Path $context.GitState 'mutating'
+                }
+                Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $updatedBytes
+            }
             catch {
                 try { $Snapshot.AppliedBytes = [byte[]](Read-GitInfoExcludeStreamBytes -Stream $handle.Stream) }
                 catch { }
@@ -1586,6 +1594,9 @@ function Convert-ManifestEntryForSchema {
 function Copy-ExistingManifestEntry {
     param([Parameter(Mandatory = $true)][object] $Entry)
 
+    if ($null -eq $Entry.PSObject.Properties['artifactType']) {
+        return [pscustomobject][ordered]@{sourcePath=$Entry.sourcePath; targetPath=$Entry.targetPath; sha256=$Entry.sha256}
+    }
     return [pscustomobject][ordered]@{
         artifactType = [string] $Entry.artifactType
         artifactId = [string] $Entry.artifactId
@@ -1865,8 +1876,15 @@ function Set-TargetMutationFileBytes {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
     )
 
+    if ($RelativePath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Consumer write boundary rejects shared Skill installation; use the USER reconciler.'
+    }
     $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
     if ([bool]$state.MutationApplied) { throw "Target mutation state was already applied: $RelativePath" }
+    if ($null -ne $script:SkillMigrationJournalContext) {
+        $context = $script:SkillMigrationJournalContext
+        Save-SkillMigrationJournal $Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating' $RelativePath 'file' $Bytes
+    }
     Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
     $stream = $null
     $restoreReadOnly = $false
@@ -2389,6 +2407,84 @@ function Update-PersonalAgentStash {
     return $newStashHash
 }
 
+function Save-SkillMigrationJournal {
+    param([object]$Snapshot, [object]$ExcludeSnapshot, [string]$Path, [object]$GitState, [string]$Phase,
+        [string]$PendingPath, [string]$PendingType='missing', [byte[]]$PendingBytes)
+    $states = @(
+        foreach ($state in $Snapshot.FileStates) {
+            $pending = [string]$state.RelativePath -ceq $PendingPath
+            [ordered]@{relativePath=$state.RelativePath; originalType=$state.OriginalType
+                backupName=$(if ($state.BackupPath) { Split-Path -Leaf $state.BackupPath } else { $null })
+                backupSha256=$(if ($state.BackupPath) { Get-RawContentHash $state.BackupPath } else { $null })
+                mutationApplied=([bool]$state.MutationApplied -or $pending)
+                appliedType=$(if ($pending) { $PendingType } else { $state.AppliedType })
+                appliedBase64=$(if ($pending -and $null -ne $PendingBytes) { [Convert]::ToBase64String($PendingBytes) }
+                    elseif ($null -ne $state.AppliedBytes) { [Convert]::ToBase64String([byte[]]$state.AppliedBytes) } else { $null })}
+        }
+    )
+    $document = [ordered]@{schemaVersion=1; targetRoot=$Snapshot.TargetRoot; phase=$Phase; head=$GitState.head; indexSha256=$GitState.indexSha256
+        states=$states; exclude=$ExcludeSnapshot}
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($document | ConvertTo-Json -Depth 14) + "`n")
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    [IO.File]::Move($temporary,$Path,$true)
+}
+
+function Restore-SkillMigrationJournal {
+    param([string]$Repository, [string]$Path)
+    $journalPath = [IO.Path]::GetFullPath($Path)
+    $backupRoot = Split-Path -Parent $journalPath
+    $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/')) + [IO.Path]::DirectorySeparatorChar
+    if (-not $backupRoot.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $backupRoot) -cne 'target-backup' -or (Split-Path -Leaf $journalPath) -cne 'skill-migration.json') { throw 'Unsafe Skill migration recovery location.' }
+    Assert-ManagedPathDoesNotCrossReparsePoint -Root $tempPrefix.TrimEnd([char[]]@('\','/')) -Path $journalPath -Context 'Skill migration recovery'
+    $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+    if ($journal.schemaVersion -ne 1 -or [string]$journal.targetRoot -cne $Repository -or $journal.phase -notin @('mutating','applied','rolled-back','recovered')) { throw 'Skill migration journal identity is invalid.' }
+    $gitState = Get-RepoSkillMigrationGitState -Repository $Repository -GitExecutable $GitExecutable
+    if ($gitState.head -cne $journal.head -or $gitState.indexSha256 -cne $journal.indexSha256) { throw 'Skill migration recovery preserved concurrent Git changes.' }
+    $states = @()
+    $seen = @{}
+    foreach ($state in $journal.states) {
+        if ($state.mutationApplied -isnot [bool]) { throw 'Invalid Skill migration recovery mutation flag.' }
+        $relative = [string]$state.relativePath
+        if ((-not (Test-IsAllowedManagedPath $relative) -and $relative -cne '.codex/ai-instructions.manifest.json') -or
+            $seen.ContainsKey($relative) -or $state.originalType -notin @('file','missing')) { throw 'Invalid Skill migration recovery path/state.' }
+        $seen[$relative]=$true
+        $target = [IO.Path]::GetFullPath((Join-Path $Repository $relative))
+        Assert-ManagedPathDoesNotCrossReparsePoint -Root $Repository -Path $target -Context 'Skill migration recovery target'
+        $backup = $null
+        if ($state.originalType -eq 'file') {
+            if ([string]$state.backupName -cnotmatch '^\d{6}\.bin$' -or [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid Skill migration backup inventory.' }
+            $backup = Join-Path $backupRoot $state.backupName
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $backupRoot -Path $backup -Context 'Skill migration recovery backup'
+            if ((Get-RawContentHash $backup) -cne [string]$state.backupSha256) { throw 'Skill migration recovery backup hash mismatch.' }
+        }
+        $applied = [bool]$state.mutationApplied
+        if ($applied -and $state.appliedType -notin @('file','missing')) { throw 'Invalid applied Skill migration recovery state.' }
+        # Intent is durable before mutation; a crash may leave the original state untouched.
+        if ($applied -and (($state.originalType -eq 'file' -and (Test-Path -LiteralPath $target -PathType Leaf) -and
+            (Get-RawContentHash $target) -ceq [string]$state.backupSha256) -or
+            ($state.originalType -eq 'missing' -and -not (Test-Path -LiteralPath $target)))) { $applied=$false }
+        $states += [pscustomobject]@{RelativePath=$relative; TargetPath=$target; OriginalType=$state.originalType; BackupPath=$backup
+            MutationApplied=$applied; AppliedType=$state.appliedType
+            AppliedBytes=$(if ($null -ne $state.appliedBase64) { [Convert]::FromBase64String($state.appliedBase64) } else { $null })}
+    }
+    $snapshot = [pscustomobject]@{TargetRoot=$Repository; FileStates=$states; CreatedDirectories=@()}
+    $exclude = $journal.exclude
+    if ([string]$exclude.Repository -cne $Repository -or [string]$exclude.Path -cne (Get-GitInfoExcludePath $Repository)) { throw 'Invalid Skill migration exclude recovery target.' }
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $exclude.Path
+    if ([bool]$exclude.MutationApplied -and (Test-Path -LiteralPath $exclude.Path -PathType Leaf) -and
+        (Test-GitInfoExcludeBytesEqual -Left ([IO.File]::ReadAllBytes($exclude.Path)) -Right ([byte[]]$exclude.Bytes))) {
+        $exclude.MutationApplied=$false
+    }
+    Restore-TargetMutationSnapshot -Snapshot $snapshot
+    Restore-GitInfoExcludeSnapshot -Snapshot $exclude
+    Save-SkillMigrationJournal $snapshot $exclude $journalPath $gitState 'recovered'
+    Write-Output "Skill migration recovery verified: $journalPath"
+}
+
+$script:SkillMigrationJournalContext = $null
 $syncStartPath = Get-FullPathWithoutTrailingSeparator -Path (Get-Location).Path
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     $previousErrorActionPreference = $ErrorActionPreference
@@ -2431,6 +2527,20 @@ if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
 
 if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
     Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
+    return
+}
+
+if (-not [string]::IsNullOrWhiteSpace($RecoverSkillMigration)) {
+    $recoveryLock = Open-RepositoryOperationLock $targetRootPath
+    $recoveryIndexLock = $null
+    try {
+        $recoveryIndexLock = Open-RepositoryIndexTransactionLock $targetRootPath
+        Restore-SkillMigrationJournal $targetRootPath $RecoverSkillMigration
+    }
+    finally {
+        if ($recoveryIndexLock) { $recoveryIndexLock.Stream.Dispose(); Remove-Item -LiteralPath $recoveryIndexLock.Path -Force }
+        $recoveryLock.Dispose()
+    }
     return
 }
 
@@ -2507,8 +2617,10 @@ $repositoryOperationLock = $null
 $repositoryIndexLock = $null
 $remediationTransaction = $null
 try {
-    $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
-    $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
+    if (-not $WhatIf) {
+        $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
+    }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
             Write-Output "Backed up and migrated tracked Agent artifacts: $($remediationTransaction.Paths -join ', '). Backup: $($remediationTransaction.Backup.Root)"
@@ -2658,6 +2770,7 @@ if ($manifestExists) {
 
     if ($manifestSchemaVersion -eq 1) {
         foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
+            if ([string]$targetPath -like '.agents/skills/*') { continue }
             $entry = $manifestEntriesByTarget[$targetPath]
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
             if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
@@ -2669,7 +2782,7 @@ if ($manifestExists) {
     }
 }
 
-$repositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $targetRootPath
+if (-not $WhatIf) { $repositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $targetRootPath }
 $gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
 $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPathComparer
 foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files'))) {
@@ -2678,16 +2791,16 @@ foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if ($trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
+        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
-if ($trackedPollutionPaths.Count -gt 0) {
+if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
     throw "Tracked reserved Agent artifacts remain after controlled remediation: $($trackedPollutionPaths -join ', ')."
 }
 
 $stagedManagedPaths = @(
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath)) {
+        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
             [string]$targetPath
         }
     }
@@ -2774,46 +2887,45 @@ try {
         }
     }
 
-    $sourceSkillsPath = Join-Path $sourceRootPath $sharedSkillsSource.Replace('/', '\')
-    if (-not (Test-Path -LiteralPath $sourceSkillsPath -PathType Container)) {
-        throw "Shared Agent Skill directory is missing from GitHub archive: $sharedSkillsSource"
-    }
+    # Consumer scope is Instructions-only, including direct and legacy composed archives.
+    # Shared Skill sources remain available to the USER reconciler and migration evidence.
 
-    $unexpectedRootSkillFiles = @(
-        Get-ChildItem -LiteralPath $sourceSkillsPath -File |
-            Where-Object { $_.Name -ne '.gitkeep' }
+    $trustedSkills = @(
+        foreach ($skill in @($provenance.skills)) {
+            if ($null -eq $skill.PSObject.Properties['files']) {
+                $legacySource = Join-Path $sourceRootPath ".agents/skills/$($skill.id)"
+                $inventory = @()
+                if (Test-Path -LiteralPath $legacySource -PathType Container) {
+                    $inventory = @(Get-ChildItem -LiteralPath $legacySource -File -Recurse -Force | Where-Object Name -ne '.gitkeep' | ForEach-Object {
+                        [pscustomobject]@{targetPath=(Get-RepositoryRelativePath $sourceRootPath $_.FullName); sha256=(Get-RawContentHash $_.FullName)}
+                    })
+                }
+                $skill | Add-Member -NotePropertyName files -NotePropertyValue $inventory
+            }
+            $skill
+        }
     )
-    if ($unexpectedRootSkillFiles.Count -gt 0) {
-        throw "Shared Agent Skill files must be inside a named skill directory: $($unexpectedRootSkillFiles.Name -join ', ')"
+    foreach ($readiness in @(Get-UserSharedSkillsReadiness -UserHome $UserHome -CatalogId $provenance.catalogId -TrustedSkills $trustedSkills)) {
+        if (-not $readiness.ready) { Write-Output "USER Skill repair/update required for $($readiness.id): $($readiness.reason). REPO fallback is disabled." }
     }
-
-    $sourceSkillDirectories = @(Get-ChildItem -LiteralPath $sourceSkillsPath -Directory | Sort-Object Name)
-    foreach ($sourceSkillDirectory in $sourceSkillDirectories) {
-        if ($sourceSkillDirectory.Name -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
-            throw "Invalid shared Agent Skill directory name: $($sourceSkillDirectory.Name)"
-        }
-
-        $sourceSkillDefinition = Join-Path $sourceSkillDirectory.FullName 'SKILL.md'
-        if (-not (Test-Path -LiteralPath $sourceSkillDefinition -PathType Leaf)) {
-            throw "Shared Agent Skill is missing SKILL.md: $($sourceSkillDirectory.Name)"
-        }
-
-        $sourceSkillFiles = @(
-            Get-ChildItem -LiteralPath $sourceSkillDirectory.FullName -Recurse -File -Force |
-                Where-Object { $_.Name -ne '.gitkeep' } |
-                Sort-Object FullName
-        )
-        foreach ($sourceSkillFile in $sourceSkillFiles) {
-            $sourceRelativePath = Get-RepositoryRelativePath -RepositoryRoot $sourceRootPath -FullPath $sourceSkillFile.FullName
-            $desiredEntries.Add([pscustomobject]@{
-                FamilyName = $sharedSkillsFamilyName
-                SourcePath = $sourceRelativePath
-                TargetPath = $sourceRelativePath
-                SourceFullPath = $sourceSkillFile.FullName
-                Sha256 = Get-RawContentHash -Path $sourceSkillFile.FullName
-            })
+    $skillMigration = @()
+    if ($manifestExists -and $manifestSchemaVersion -in @(2,3)) {
+        $skillMigration = @(Get-RepoSharedSkillsMigrationPlan -Repository $targetRootPath -Manifest $manifest -TrustedSkills $trustedSkills -UserHome $UserHome -GitExecutable $GitExecutable)
+    }
+    $migrationById = @{}
+    foreach ($skill in $skillMigration) {
+        $migrationById[[string]$skill.id] = $skill
+        $disposition = if ($skill.removable) { 'retire verified ignored/untracked copy' } else { "preserve: $($skill.reason)" }
+        Write-Output "Skill migration $($skill.id): $disposition"
+    }
+    $existingSkillsRoot = Join-Path $targetRootPath '.agents/skills'
+    if ((Test-Path -LiteralPath $existingSkillsRoot -PathType Container) -and
+        -not ((Get-Item -Force -LiteralPath $existingSkillsRoot).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        foreach ($directory in @(Get-ChildItem -Directory -Force -LiteralPath $existingSkillsRoot)) {
+            if (-not $migrationById.ContainsKey($directory.Name)) { Write-Output "Repository Skill preserved without provable shared ownership: $($directory.Name)" }
         }
     }
+    $retainLegacyManifest = $manifestExists -and $manifestSchemaVersion -eq 1 -and @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' }).Count -gt 0
 
     $desiredEntriesByTarget = @{}
     foreach ($entry in $desiredEntries) {
@@ -2847,45 +2959,36 @@ try {
              -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
              $baseTargetMatchesDesired)
     }
-    $eligibleSkillIds = @{}
-    foreach ($sourceSkillDirectory in $sourceSkillDirectories) {
-        $skillId = [string]$sourceSkillDirectory.Name
-        $skillPrefix = ".agents/skills/$skillId/"
-        $skillBasePath = $skillPrefix + 'SKILL.md'
-        $skillBaseFullPath = Join-Path $targetRootPath $skillBasePath.Replace('/','\')
-        $skillManifestOwned = @($manifestEntriesByTarget.Keys | Where-Object { ([string]$_).StartsWith($skillPrefix,[System.StringComparison]::Ordinal) }).Count -gt 0
-        $skillHasTrackedPath = @($trackedPaths | Where-Object {
-            $trackedPath = [string]$_
-            $trackedPath.Length -gt $skillPrefix.Length -and
-                $gitPathComparer.Equals($trackedPath.Substring(0,$skillPrefix.Length),$skillPrefix)
-        }).Count -gt 0
-        $skillBaseMatchesDesired = $false
-        if ((Test-Path -LiteralPath $skillBaseFullPath -PathType Leaf) -and
-            -not $skillHasTrackedPath -and
-            $desiredEntriesByTarget.ContainsKey($skillBasePath)) {
-            $skillBaseMatchesDesired =
-                (Get-ManagedContentHash -Path $skillBaseFullPath -TargetPath $skillBasePath) -ceq
-                [string]$desiredEntriesByTarget[$skillBasePath].Sha256
-        }
-        $eligibleSkillIds[$skillId] =
-            -not $skillHasTrackedPath -and
-            ($skillManifestOwned -or -not (Test-Path -LiteralPath $skillBaseFullPath -PathType Leaf) -or $skillBaseMatchesDesired)
-    }
-
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
     $removedPaths = New-Object System.Collections.Generic.List[string]
     $skippedPaths = New-Object System.Collections.Generic.List[string]
     $nextManifestEntries = New-Object System.Collections.Generic.List[object]
 
+    if ($WhatIf) {
+        Write-Output 'WhatIf: consumer Instructions-only synchronization; shared Skills will never be installed in REPO.'
+        return
+    }
+
     $mutationPaths = @(
         @($desiredEntries | ForEach-Object { [string]$_.TargetPath })
-        @($manifestEntriesByTarget.Keys)
+        @($manifestEntriesByTarget.Keys | Where-Object {
+            if ([string]$_ -notlike '.agents/skills/*') { $true }
+            else { $id=([string]$_).Split('/')[2]; $migrationById.ContainsKey($id) -and $migrationById[$id].removable }
+        })
         $manifestRelativePath
     )
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
     $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot
     $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath
+    $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
+    $migrationGitState = $null
+    if (@($skillMigration | Where-Object removable).Count -gt 0) {
+        $migrationGitState = Get-RepoSkillMigrationGitState -Repository $targetRootPath -GitExecutable $GitExecutable
+        $preserveWorkingPath = $true
+        $script:SkillMigrationJournalContext = [pscustomobject]@{Snapshot=$mutationSnapshot; ExcludeSnapshot=$excludeSnapshot; Path=$migrationJournalPath; GitState=$migrationGitState}
+        Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'
+    }
 
     try {
         foreach ($desiredEntry in @($desiredEntries | Sort-Object TargetPath)) {
@@ -2895,10 +2998,6 @@ try {
         $managedEntry = $null
 
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
-        if ($targetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) {
-            $skillId = @($targetPath.Split('/'))[2]
-            $entryIsEligible = $eligibleSkillIds.ContainsKey($skillId) -and [bool]$eligibleSkillIds[$skillId]
-        }
         if (-not $entryIsEligible) {
             $skippedPaths.Add($targetPath)
             continue
@@ -2908,6 +3007,7 @@ try {
         $desiredManifestSchemaVersion = 2
         if ($manifestExists) { $desiredManifestSchemaVersion = [int]$manifestSchemaVersion }
         $desiredManifestEntry = Convert-ManifestEntryForSchema -Entry $desiredManifestEntry -SchemaVersion $desiredManifestSchemaVersion
+        if ($retainLegacyManifest) { $desiredManifestEntry = $desiredManifestEntry | Select-Object sourcePath,targetPath,sha256 }
 
         if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
@@ -2981,6 +3081,22 @@ try {
         }
 
         $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
+        if ($managedTargetPath.StartsWith('.agents/skills/',[StringComparison]::Ordinal)) {
+            $id = $managedTargetPath.Split('/')[2]
+            if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {
+                Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -RemovedPaths @($removedPaths) -GitExecutable $GitExecutable
+                Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating' $managedTargetPath
+                Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
+                $removedPaths.Add($managedTargetPath)
+                Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'
+                if ($FailureAfterSkillRemovalCount -gt 0 -and @($removedPaths | Where-Object { $_ -like '.agents/skills/*' }).Count -eq $FailureAfterSkillRemovalCount) { throw 'Injected Skill migration failure.' }
+                continue
+            }
+            $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
+            $skippedPaths.Add($managedTargetPath)
+            Write-Output "USER Skill migration unavailable; repair USER installation and ownership before retiring: $managedTargetPath"
+            continue
+        }
         $targetFullPath = Join-Path $targetRootPath $managedTargetPath.Replace('/', '\')
         if (Test-LicenseDeliveryTargetPath $managedTargetPath) {
             $owner = Get-LicenseDeliveryOwner $managedTargetPath
@@ -3026,6 +3142,9 @@ try {
             lockSha256 = [string] $provenance.lockSha256
             files = @($nextManifestEntries | Sort-Object targetPath)
         }
+        if ($retainLegacyManifest) {
+            $manifestObject = [ordered]@{schemaVersion=1; sourceRepository=$manifest.sourceRepository; sourceRef=$manifest.sourceRef; files=@($nextManifestEntries | Sort-Object targetPath)}
+        }
         $manifestJson = ($manifestObject | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
         $existingManifestJson = if ($manifestExists) {
             ([System.IO.File]::ReadAllText($manifestFullPath)).Replace("`r`n", "`n").Replace("`r", "`n")
@@ -3044,6 +3163,7 @@ try {
         $managedExcludePaths = @($nextManifestEntries | ForEach-Object { [string]$_.targetPath })
         if ($shouldWriteManifest) { $managedExcludePaths += $manifestRelativePath }
         Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot
+        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'applied' }
     }
     catch {
         $mutationError = $_
@@ -3052,6 +3172,7 @@ try {
         catch { $rollbackErrors.Add($_.Exception.Message) }
         try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
         catch { $rollbackErrors.Add($_.Exception.Message) }
+        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
         if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
             throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
@@ -3076,6 +3197,7 @@ try {
     try {
         $stashPaths = New-Object System.Collections.Generic.List[string]
         foreach ($manifestEntry in $nextManifestEntries) {
+            if ([string]$manifestEntry.targetPath -like '.agents/skills/*') { continue }
             $targetPath = [string]$manifestEntry.targetPath
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
             if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
@@ -3113,6 +3235,7 @@ try {
         catch { $rollbackErrors.Add($_.Exception.Message) }
         try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
         catch { $rollbackErrors.Add($_.Exception.Message) }
+        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
         if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
             throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
@@ -3122,6 +3245,7 @@ try {
 
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
     else { Write-Output "AI instructions synchronized as local ignored runtime artifacts without Git commit: $($changedPaths -join ', ')" }
+    if ($migrationGitState) { Write-Output "Skill migration transaction retained. Backup and recovery journal: $migrationJournalPath" }
 }
 catch {
     $syncError = $_
@@ -3135,6 +3259,7 @@ catch {
 }
 finally {
     $resolvedWorkingPath = [System.IO.Path]::GetFullPath($workingPath)
+    $script:SkillMigrationJournalContext = $null
     $expectedPrefix = $tempRootPath.TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $resolvedWorkingPath.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Unsafe temporary cleanup path: $resolvedWorkingPath"

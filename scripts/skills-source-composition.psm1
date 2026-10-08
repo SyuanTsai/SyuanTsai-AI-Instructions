@@ -107,7 +107,8 @@ function New-ComposedBootstrapSource {
     param(
         [Parameter(Mandatory = $true)][string] $InstructionSourceRoot,
         [Parameter(Mandatory = $true)][object] $ResolvedSkills,
-        [Parameter(Mandatory = $true)][string] $DestinationRoot
+        [Parameter(Mandatory = $true)][string] $DestinationRoot,
+        [switch] $InstructionsOnly
     )
 
     $instructionRoot = [System.IO.Path]::GetFullPath($InstructionSourceRoot)
@@ -130,6 +131,7 @@ function New-ComposedBootstrapSource {
     New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
 
     $seenSkillIds = @{}
+    $skillInventories = @{}
     foreach ($skill in @($ResolvedSkills | Sort-Object id)) {
         $skillId = [string] $skill.id
         if ($skillId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
@@ -161,13 +163,26 @@ function New-ComposedBootstrapSource {
         })
         $licenses = New-LicenseDeliveryPackage -SourceRoot $sourceRoot -ArtifactPaths $artifactPaths `
             -SourceRepository $skill.sourceRepository -SourceCommit $skill.sourceCommit -ArtifactId $skillId
-        Copy-Item -LiteralPath $skillRoot -Destination $targetSkillRoot -Recurse -Force
-        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot (Join-Path $targetSkillRoot ".ai-instructions-licenses/$($skill.sourceCommit)")
+        $files = @(
+            foreach ($file in @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force)) {
+                $relative = $file.FullName.Substring($skillRoot.TrimEnd([char[]]@('\','/')).Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                [pscustomobject]@{targetPath="$targetPath/$relative"; sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()}
+            }
+            foreach ($file in @($licenses.Files)) {
+                [pscustomobject]@{targetPath="$targetPath/.ai-instructions-licenses/$($file.relativePath)"; sha256=$file.sha256}
+            }
+        )
+        $skillInventories[$skillId] = $files
+        if (-not $InstructionsOnly) {
+            Copy-Item -LiteralPath $skillRoot -Destination $targetSkillRoot -Recurse -Force
+            Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot (Join-Path $targetSkillRoot ".ai-instructions-licenses/$($skill.sourceCommit)")
+        }
     }
 
     return [pscustomobject][ordered]@{
         RootPath = $destination
         SkillIds = @($seenSkillIds.Keys | Sort-Object)
+        SkillInventories = $skillInventories
     }
 }
 

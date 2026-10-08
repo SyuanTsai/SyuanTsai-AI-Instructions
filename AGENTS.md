@@ -73,10 +73,10 @@ Base Agent 只描述載入條件：
 - 新增或修改 Skill 時，先在 `catalog/skills-catalog.json` 對應的 external source Repository 依 `docs/standards/skill-repository-standard.md` 維護 stable package、`SKILL.md`、`agents/openai.yaml`、source inventory 與所需資源；合併後才更新 source pin、lock、profiles 或 lifecycle。
 - SYP-155～159 migration 完成前，production Catalog/Lock 可繼續指向 legacy `.agents/skills/<skill-id>` source path；migration 後 canonical source root 為 `skills/<skill-id>`。不得在 SYP-167 階段先修改 production pin 造成 runtime 中斷。
 - Catalog 只列入明確供 AI-Instructions consumers 選取的共用 Skill。`Skill-Darktide-Translate`（SYP-88／SYP-92）維持獨立產品，不得加入本 Repository 的 source、Catalog、profile、lock 或 bootstrap fan-out。
-- bootstrap 必須忽略 instruction archive 中可能存在的 Skill source，並只組合經 Catalog selection、immutable archive hash 與 per-Skill content hash 驗證的 external Skills。
-- Consumer target path 仍依 host/runtime contract 管理；目前 production bootstrap 的受管 Skill target 為 `.agents/skills/<skill-id>/**`。同步支援二進位資源，並沿用 manifest 的 customized／unmanaged 保護與安全移除行為。
+- consumer bootstrap 必須忽略 instruction archive 中的 Skill source，只組合 Instructions；仍驗證 Catalog selection、immutable archive 與完整 external Skill inventory，供 USER 安裝證據及舊副本遷移核對。
+- 共用 Skill target 只在 USER 的 `~/.agents/skills/<skill-id>/**`，由 USER updater 管理完整資源及二進位 bytes。consumer bootstrap 不安裝／更新／重建共用 Skills；USER 缺少、較舊、損壞或不可讀時也不得回退 REPO。專案自有、客製、未受管及 tracked／staged Skills 必須保留；舊 REPO 副本只有完整 ownership、hash、ignored/untracked 與可信 USER inventory 證據齊備時才精確備份／移除。
 
-bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 中的受管 Instructions、Skills 與 manifest 是 branch-independent 的個人本機 runtime artifacts；bootstrap 必須把精確路徑寫入 `.git/info/exclude` 並保留 `PersonalAgent` recovery evidence。正常同步不得 stage、commit 或 push；若 reserved Agent artifact 已被 Git tracked，bootstrap 必須先在 Repository 外完整備份檔案與 Git 狀態，以隔離 index 建立只包含精確 reserved path deletions 的一次性本機 remediation commit，再重建最新 runtime 並繼續同步，且永遠不得自動 push consumer Repository。Reserved 範圍內的 customized／unmanaged artifact 必須先備份再遷移；範圍外 tracked file 或無法安全隔離的狀態仍須 fail closed，不得擴大刪除或納入無關 staged、unstaged、untracked 變更。
+bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標 Repository 中的受管 Instructions 與 manifest 是 branch-independent 的個人本機 runtime artifacts；bootstrap 必須把精確路徑寫入 `.git/info/exclude` 並保留 `PersonalAgent` recovery evidence。正常同步不得 stage、commit 或 push；若 reserved Agent artifact 已被 Git tracked，bootstrap 必須先在 Repository 外完整備份檔案與 Git 狀態，以隔離 index 建立只包含精確 reserved path deletions 的一次性本機 remediation commit，再重建最新 runtime 並繼續同步，且永遠不得自動 push consumer Repository。`.agents/skills/**` 與 `.codex/skills/**` 明確排除於 reserved remediation；不得因同名、相同 hash 或舊 manifest 就移除 tracked／專案自有 Skill。Reserved 範圍內的 customized／unmanaged Instructions artifact 必須先備份再遷移；範圍外 tracked file 或無法安全隔離的狀態仍須 fail closed，不得擴大刪除或納入無關 staged、unstaged、untracked 變更。
 
 ## Agent 職責拆分
 

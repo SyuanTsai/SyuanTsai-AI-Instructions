@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $TargetRoot,
+    [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
+    [switch] $WhatIf,
     [switch] $SkipUpdateCheck,
     [switch] $ValidateOnly,
     [switch] $RecoverInterruptedInstall
@@ -381,7 +383,7 @@ $runtimeReadLock = Open-InstalledRuntimeReadLock
 try { Assert-VerifiedInstalledRuntime | Out-Null }
 finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
-if (-not $SkipUpdateCheck) {
+if (-not $SkipUpdateCheck -and -not $WhatIf) {
     $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
     $enginePath = Join-Path $PSHOME $engineName
     if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { $enginePath = $engineName }
@@ -397,6 +399,8 @@ try {
         CatalogPath = $catalogPath
         LockPath = $lockPath
         ConfigurationPath = $configurationPath
+        UserHome = $UserHome
+        WhatIf = $WhatIf
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) { $arguments.TargetRoot = $TargetRoot }
     & $bootstrapPath @arguments

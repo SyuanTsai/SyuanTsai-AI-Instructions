@@ -6,7 +6,9 @@ param(
     [hashtable] $SourceArchivePaths = @{},
     [string] $InstructionSourceArchivePath,
     [string] $InstructionSourceCommit,
-    [string] $TargetRoot
+    [string] $TargetRoot,
+    [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
+    [switch] $WhatIf
 )
 
 Set-StrictMode -Version Latest
@@ -286,10 +288,10 @@ try {
         $skill | Add-Member -NotePropertyName sourceCommit -NotePropertyValue ([string]$sourcePlan.resolvedCommit) -Force
     }
 
-    New-ComposedBootstrapSource `
+    $composition = New-ComposedBootstrapSource `
         -InstructionSourceRoot $instructionRoot `
         -ResolvedSkills $resolved.Skills `
-        -DestinationRoot $composedRoot | Out-Null
+        -DestinationRoot $composedRoot -InstructionsOnly
 
     New-ComposedBootstrapArchive -SourceRoot $composedRoot -DestinationPath $composedArchive | Out-Null
 
@@ -303,6 +305,7 @@ try {
                 sourceRef = [string]$sourcePlan.requestedRef
                 sourceCommit = [string]$sourcePlan.resolvedCommit
                 sourceVersion = [string]$sourcePlan.resolvedVersion
+                files = @($composition.SkillInventories[[string]$skill.id])
             }
         }
     )
@@ -334,6 +337,8 @@ try {
         SourceArchivePath = $composedArchive
         ConfigurationPath = $routingConfigurationPath
         ProvenancePath = $provenancePath
+        UserHome = $UserHome
+        WhatIf = $WhatIf
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {
         $arguments.TargetRoot = $TargetRoot
