@@ -1,3 +1,314 @@
+Describe 'SYP280 runner inventory performance and compatibility' -Tag 'SYP280' {
+    BeforeAll {
+        $script:Syp280Runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $script:Syp280Runner -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'unused.json') -ArtifactsRoot (Join-Path $TestDrive 'results') -SourceRepository 'https://example.test/source.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+        function New-Syp280BoundaryFixture {
+            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $paths = @{}
+            foreach ($name in @('tool','candidate','snapshot','authority')) {
+                $paths[$name] = Join-Path $root $name
+                [void][IO.Directory]::CreateDirectory($paths[$name])
+            }
+            foreach ($binding in @(@{name='command';relative='tool/command.bin'},@{name='dependency';relative='tool/dependency.bin'},@{name='candidateFile';relative='candidate/SKILL.md'},@{name='snapshotFile';relative='snapshot/SKILL.md'},@{name='receipt';relative='receipt.json'},@{name='adapter';relative='adapter.json'},@{name='archive';relative='archive.zip'},@{name='acquisition';relative='acquisition.json'},@{name='launch';relative='launch.json'},@{name='evidence';relative='evidence.json'})) {
+                $paths[$binding.name] = Join-Path $root $binding.relative
+                [IO.File]::WriteAllText($paths[$binding.name],'0000',[Text.UTF8Encoding]::new($false))
+            }
+            $authority = [ordered]@{}
+            foreach ($field in @('runner','contract','policy','authorityGate','resolver','semanticBridgeModule','semanticBridgeSchema')) {
+                $relative = $field + '.bin'
+                [IO.File]::WriteAllText((Join-Path $paths.authority $relative),'0000',[Text.UTF8Encoding]::new($false))
+                $authority[$field+'Path'] = $relative
+                $authority[$field+'Sha256'] = Get-StandardValidationFileSha256 -Path (Join-Path $paths.authority $relative) -Context 'fixture'
+            }
+            $launcher = [pscustomobject]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+            $receipt = [pscustomobject]@{path=$paths.receipt;sha256=(Get-StandardValidationFileSha256 $paths.receipt 'fixture');installRoot=$paths.tool;executableSha256=(Get-StandardValidationFileSha256 $paths.command 'fixture');installedClosureSha256=(Get-StandardValidationDirectoryClosureSha256 $paths.tool 'fixture');launcher=$launcher}
+            $arguments = @{
+                CommandSpec=[pscustomobject]@{command=$paths.command;arguments=@('fixture');commandSha256=$receipt.executableSha256;toolReceipt=$receipt}
+                RunRoot=(Join-Path $root 'run');ChildWorkingRoot=(Join-Path $root 'children');StageId='fixture';ToolId='fixture';CandidateId='fixture-candidate'
+                SnapshotRoot=$paths.snapshot;ExpectedSnapshotContentSha256=(Get-StandardValidationInventorySha256 (Get-StandardValidationInventory $paths.snapshot 'fixture'))
+                SkillsRoot=$paths.snapshot;ActiveSkillsText='fixture';OriginalCandidateRoot=$paths.candidate
+                ExpectedCandidateContentSha256=(Get-StandardValidationInventorySha256 (Get-StandardValidationInventory $paths.candidate 'fixture'))
+                CandidateArchivePath=$paths.archive;ExpectedCandidateArchiveSha256=(Get-StandardValidationFileSha256 $paths.archive 'fixture')
+                CandidateAcquisitionEvidencePath=$paths.acquisition;ExpectedCandidateAcquisitionEvidenceSha256=(Get-StandardValidationFileSha256 $paths.acquisition 'fixture')
+                AdapterPath=$paths.adapter;ExpectedAdapterSha256=(Get-StandardValidationFileSha256 $paths.adapter 'fixture');TimeoutSeconds=10
+            }
+            [pscustomobject]@{paths=$paths;authority=[pscustomobject]$authority;arguments=$arguments;launch=[pscustomobject]@{verified=$true;path=$paths.launch;sha256=(Get-StandardValidationFileSha256 $paths.launch 'fixture')};evidence=[pscustomobject]@{path=$paths.evidence;context='fixture';sha256=(Get-StandardValidationFileSha256 $paths.evidence 'fixture')}}
+        }
+        function Invoke-Syp280Mutation {
+            param($Fixture,[string]$Mutation)
+            $paths=$Fixture.paths
+            switch ($Mutation) {
+                'add' { [IO.File]::WriteAllText((Join-Path $paths.tool 'added.bin'),'0000') }
+                'delete' { Remove-Item -LiteralPath $paths.dependency }
+                'rename' { Move-Item -LiteralPath $paths.dependency -Destination (Join-Path $paths.tool 'renamed.bin') }
+                default {
+                    $path=switch($Mutation){'same-size-mtime'{$paths.dependency};'receipt'{$paths.receipt};'authority'{Join-Path $paths.authority 'runner.bin'};'candidate'{$paths.candidateFile};'snapshot'{$paths.snapshotFile};'archive'{$paths.archive};'acquisition'{$paths.acquisition};'launch'{$paths.launch};'evidence'{$paths.evidence};'adapter'{$paths.adapter}}
+                    $stamp=[IO.File]::GetLastWriteTimeUtc($path)
+                    [IO.File]::WriteAllText($path,'1111',[Text.UTF8Encoding]::new($false))
+                    [IO.File]::SetLastWriteTimeUtc($path,$stamp)
+                    if ((Get-Item -LiteralPath $path).Length -ne 4 -or [IO.File]::GetLastWriteTimeUtc($path) -ne $stamp) { throw 'Mutation must preserve size and mtime.' }
+                }
+            }
+        }
+    }
+
+    # Scenario: The measured installed inventory contains thousands of entries, mostly already ordered.
+    # Purpose: Prevent a quadratic growing-list scan without relying on a fragile stopwatch threshold.
+    It 'UnitT10_bounds_inventory_sort_complexity' {
+        $definition = (Get-Command Sort-StandardValidationInventory).Definition
+        if ($definition -match '\.Insert\s*\(' -or $definition -match 'while\s*\([^)]*\$ordered\.Count') {
+            throw 'Inventory sorting must eliminate the measured quadratic insertion scan.'
+        }
+        if ($definition -notmatch 'SortedDictionary\[string,object\]' -or $definition -notmatch '\[StringComparer\]::Ordinal') {
+            throw 'The runner inventory must use logarithmic insertion with an explicit ordinal comparer.'
+        }
+    }
+
+    # Scenario: A timed diagnostic action succeeds, throws, or reports cancellation.
+    # Purpose: Preserve start/terminal diagnostics and the original failure while excluding host paths from log labels.
+    It 'UnitT15_reports_success_failure_and_cancellation_without_changing_results' {
+        $previousError = [Console]::Error
+        $capture = New-Object IO.StringWriter
+        try {
+            [Console]::SetError($capture)
+            $value = Invoke-StandardValidationTimedPhase -Stage 'fixture' -Phase 'success' -Action { 42 }
+            if ($value -ne 42) { throw 'Timing must preserve the action result.' }
+            foreach ($state in @('FAILED','CANCELLED')) {
+                $failure = $null
+                try { Invoke-StandardValidationTimedPhase -Stage 'fixture' -Phase $state.ToLowerInvariant() -Action { throw "$state|original fixture" } }
+                catch { $failure = $_.Exception.Message }
+                if ($failure -cne "$state|original fixture") { throw 'Timing must retain the original exception.' }
+            }
+            $records = @($capture.ToString().Trim().Split([char]10) | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            if ($records.Count -ne 6) { throw 'Each action needs exactly one start and one terminal diagnostic.' }
+            if (($records.state -join ',') -cne 'started,completed,started,failed,started,cancelled') { throw 'Diagnostic terminal states differ.' }
+            foreach ($record in $records) {
+                if ($record.stage -cne 'fixture' -or $record.elapsedSeconds -lt 0) { throw 'Diagnostic stage/timing is invalid.' }
+            }
+        }
+        finally { [Console]::SetError($previousError); $capture.Dispose() }
+    }
+
+    # Scenario: Entries arrive out of order with mixed case, Unicode, identical paths, and distinct hashes.
+    # Purpose: Preserve the old exact ordinal bytes and reverse arrival order for equal-path entries across cultures.
+    It 'UnitT20_preserves_ordinal_canonical_bytes_and_equal_path_order' {
+        $entries = @('z','A','a',"$([char]0xE9)","e$([char]0x301)",'A',"$([char]0x4E2D)",'z') | ForEach-Object -Begin { $index=0 } -Process {
+            [pscustomobject]@{path=$_;sha256=('{0:x64}' -f $index)}; $index++
+        }
+        $old = New-Object 'Collections.Generic.List[object]'
+        foreach ($entry in $entries) {
+            $at=0
+            while ($at -lt $old.Count -and [string]::Compare([string]$old[$at].path,[string]$entry.path,[StringComparison]::Ordinal) -lt 0) { $at++ }
+            $old.Insert($at,$entry)
+        }
+        $expected = ($old | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+        $previousCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            foreach ($culture in @('en-US','tr-TR','zh-TW')) {
+                [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($culture)
+                $actual = Sort-StandardValidationInventory -Inventory $entries
+                $canonical = ($actual | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+                if (-not [string]::Equals($canonical,$expected,[StringComparison]::Ordinal)) { throw "Ordinal canonical bytes differ in $culture." }
+                if ((Get-StandardValidationInventorySha256 -Inventory $entries) -cne (Get-StandardValidationTextSha256 -Value $expected)) { throw 'Canonical inventory SHA-256 changed.' }
+            }
+        }
+        finally { [Threading.Thread]::CurrentThread.CurrentCulture = $previousCulture }
+    }
+
+    # Scenario: A 16k+ inventory arrives in reverse order with mixed case, Unicode, and duplicate paths.
+    # Purpose: Compare every canonical byte with an independent ordinal string-sort oracle at representative scale.
+    It 'UnitT25_preserves_representative_inventory_bytes' {
+        if ((Get-Command Sort-StandardValidationInventory).Definition -match '\.Insert\s*\(') {
+            throw 'The large regression requires the measured quadratic insertion scan to be removed first.'
+        }
+        $entries = New-Object 'Collections.Generic.List[object]'
+        $byOracleKey = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        $keys = New-Object 'Collections.Generic.List[string]'
+        for ($index = 16559; $index -ge 0; $index--) {
+            $prefix = @('A','a',"$([char]0xE9)","e$([char]0x301)","$([char]0x4E2D)")[$index % 5]
+            $entry = [pscustomobject]@{path=('{0}/{1:d5}.bin' -f $prefix,[int][Math]::Floor($index / 2));sha256=('{0:x64}' -f $index)}
+            # Index descends on arrival. Its fixed-width ascending suffix therefore
+            # represents the old reverse-arrival rule when primary paths are equal.
+            $key = $entry.path + "`t" + ('{0:d5}' -f $index)
+            $entries.Add($entry)
+            $keys.Add($key)
+            $byOracleKey.Add($key,$entry)
+        }
+        # Add a true duplicate path with a different digest after the full inventory.
+        $duplicate = [pscustomobject]@{path=$entries[0].path;sha256=('f' * 64)}
+        $entries.Add($duplicate)
+        $duplicateKey = $duplicate.path + "`t-0001"
+        $keys.Add($duplicateKey)
+        $byOracleKey.Add($duplicateKey,$duplicate)
+        [string[]]$oracleKeys = $keys.ToArray()
+        [Array]::Sort($oracleKeys,[StringComparer]::Ordinal)
+        $expected = ($oracleKeys | ForEach-Object { $entry=$byOracleKey[$_]; "$($entry.path)`t$($entry.sha256)`n" }) -join ''
+        $actual = Sort-StandardValidationInventory -Inventory $entries
+        $canonical = ($actual | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+        if ($actual.Count -ne 16561 -or -not [string]::Equals($expected,$canonical,[StringComparison]::Ordinal)) {
+            throw 'Representative inventory lost entries or changed canonical bytes.'
+        }
+        if ((Get-StandardValidationInventorySha256 -Inventory $entries) -cne (Get-StandardValidationTextSha256 -Value $expected)) {
+            throw 'Representative canonical SHA-256 changed.'
+        }
+    }
+
+    # Scenario: A long phase receives repeated progress updates beyond the diagnostic quota.
+    # Purpose: Keep heartbeat output bounded and free of caller-provided host paths, while retaining its terminal state.
+    It 'UnitT27_bounds_phase_heartbeat_and_redacts_unsafe_labels' {
+        $previousError = [Console]::Error
+        $capture = New-Object IO.StringWriter
+        try {
+            [Console]::SetError($capture)
+            $timing = New-StandardValidationPhase -Stage 'C:/private/fixture' -Phase 'closure'
+            for ($index = 1; $index -le 1000; $index++) {
+                $timing.watch = [pscustomobject]@{Elapsed=[TimeSpan]::FromSeconds($index * 30)}
+                Update-StandardValidationPhase -Timing $timing -Files 1 -Bytes 4
+            }
+            Complete-StandardValidationPhase -Timing $timing -State 'completed'
+            $records = @($capture.ToString().Trim().Split([char]10) | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            if (@($records | Where-Object state -eq 'heartbeat').Count -ne 120 -or $records.Count -ne 122) {
+                throw 'Heartbeat must be rate limited and capped at 120 per phase.'
+            }
+            if ($records[-1].state -cne 'completed' -or $records[-1].files -ne 1000 -or $records[-1].bytes -ne 4000) {
+                throw 'The terminal diagnostic must retain all work counts after the heartbeat cap.'
+            }
+            if ($capture.ToString().Contains('C:/private') -or $records[0].stage -cne 'validation') {
+                throw 'Unsafe stage labels must be redacted.'
+            }
+        }
+        finally { [Console]::SetError($previousError); $capture.Dispose() }
+    }
+
+    # Scenario: A complete closure succeeds, then an empty closure fails with automatic timing enabled.
+    # Purpose: Bind real enumeration/path/hash/sort costs to unchanged closure hashes and preserve failure diagnostics.
+    It 'UnitT28_reports_real_closure_phases_without_changing_hash' {
+        $fixture=New-Syp280BoundaryFixture
+        $empty=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($empty)
+        $previousError=[Console]::Error
+        $capture=New-Object IO.StringWriter
+        $script:StandardValidationTimingEnabled=$true
+        try {
+            [Console]::SetError($capture)
+            $actual=Get-StandardValidationDirectoryClosureSha256 -Root $fixture.paths.tool -Context 'fixture'
+            if($actual -cne $fixture.arguments.CommandSpec.toolReceipt.installedClosureSha256){throw 'Timing changed the closure SHA.'}
+            if([string]::IsNullOrWhiteSpace($capture.ToString())){throw 'Missing automatic closure phase diagnostics.'}
+            $records=@($capture.ToString().Trim().Split([char]10) | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            foreach($phase in @('installed-closure','closure-enumeration','closure-safe-path','closure-path-collision','closure-content-hash','inventory-sort')) {
+                $rows=@($records | Where-Object phase -eq $phase)
+                if($rows.Count -ne 2 -or $rows[0].state -cne 'started' -or $rows[1].state -cne 'completed'){throw "Missing real phase diagnostics: $phase"}
+            }
+            $hashPhase=@($records | Where-Object { $_.phase -ceq 'closure-content-hash' -and $_.state -ceq 'completed' })[0]
+            if($hashPhase.calls -ne 2 -or $hashPhase.files -ne 2 -or $hashPhase.bytes -ne 8){throw 'Hash phase work counts differ.'}
+            if($capture.ToString().Contains($fixture.paths.tool)){throw 'Diagnostics exposed a host path.'}
+            $capture.GetStringBuilder().Clear() | Out-Null
+            $failure=$null
+            try { Get-StandardValidationDirectoryClosureSha256 -Root $empty -Context 'fixture' }
+            catch { $failure=$_.Exception.Message }
+            if($failure -cne 'INVALID|fixture must contain at least one file or approved Unix symlink.'){throw 'Closure timing changed the failure.'}
+            $failedRecords=@($capture.ToString().Trim().Split([char]10) | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            if($failedRecords[-1].phase -cne 'installed-closure' -or $failedRecords[-1].state -cne 'failed'){throw 'Failure needs its terminal diagnostic.'}
+        }
+        finally { $script:StandardValidationTimingEnabled=$false; [Console]::SetError($previousError); $capture.Dispose() }
+    }
+
+    # Scenario: A child changes one protected input, including equal-length bytes with the original mtime.
+    # Purpose: Exercise the actual command wrapper's next integrity boundary; a malformed envelope cannot produce a false-positive rejection.
+    It 'InterT30_rejects_child_mutation_of_<Mutation>' -TestCases @(
+        @{Mutation='none';Pattern=''},@{Mutation='add';Pattern='dependency closure changed'},@{Mutation='delete';Pattern='dependency closure changed'},@{Mutation='rename';Pattern='dependency closure changed'},@{Mutation='same-size-mtime';Pattern='dependency closure changed'},@{Mutation='receipt';Pattern='resolver receipt changed'},@{Mutation='authority';Pattern='central runner changed'},@{Mutation='candidate';Pattern='Candidate content changed'},@{Mutation='snapshot';Pattern='Candidate snapshot changed'},@{Mutation='archive';Pattern='archive changed'},@{Mutation='acquisition';Pattern='candidate acquisition receipt changed'},@{Mutation='launch';Pattern='launch binding changed'},@{Mutation='evidence';Pattern='evidence artifact.*changed'},@{Mutation='adapter';Pattern='Adapter configuration changed'}
+    ) {
+        param($Mutation,$Pattern)
+        $fixture=New-Syp280BoundaryFixture
+        $previousRoot=$script:StandardValidationRepositoryRoot
+        $script:StandardValidationRepositoryRoot=$fixture.paths.authority
+        $script:StandardValidationAuthorityEvidence=$fixture.authority
+        $script:StandardValidationLaunchBinding=$fixture.launch
+        $script:StandardValidationEvidenceArtifactLedger=New-Object 'Collections.Generic.List[object]'
+        $script:StandardValidationEvidenceArtifactLedger.Add($fixture.evidence)
+        $script:Syp280Fixture=$fixture
+        $script:Syp280Mutation=$Mutation
+        Mock Invoke-StandardValidationProcess {
+            if($script:Syp280Mutation -cne 'none'){Invoke-Syp280Mutation -Fixture $script:Syp280Fixture -Mutation $script:Syp280Mutation}
+            [pscustomobject]@{startedAt='2026-01-01T00:00:00Z';endedAt='2026-01-01T00:00:01Z';exitCode=0;status='passed';stdout='{"schemaVersion":1,"status":"passed","decision":"PASS","candidateIdentity":"fixture-candidate"}';stderr='';cleanedUp=$true}
+        }
+        try {
+            $failure=$null
+            $result=$null
+            $boundaryArguments=$fixture.arguments
+            try { $result=Invoke-StandardValidationCommandAndRecord @boundaryArguments }
+            catch { $failure=$_.Exception.Message }
+            if($Mutation -ceq 'none' -and $null -ne $failure){throw "Unmodified fixture must pass: $failure"}
+            Assert-MockCalled Invoke-StandardValidationProcess -Times 1 -Exactly -Scope It
+            if($Mutation -ceq 'none') {
+                if($null -ne $failure -or $result.event.exitCode -ne 0 -or $result.envelope.decision -cne 'PASS'){throw "Unmodified fixture must pass: $failure"}
+            }
+            elseif($null -eq $failure -or $failure -notmatch $Pattern){throw "Expected '$Pattern' for $Mutation; actual '$failure'."}
+        }
+        finally {
+            $script:StandardValidationRepositoryRoot=$previousRoot
+            $script:StandardValidationAuthorityEvidence=$null
+            $script:StandardValidationLaunchBinding=$null
+            $script:StandardValidationEvidenceArtifactLedger=New-Object 'Collections.Generic.List[object]'
+        }
+    }
+
+    # Scenario: A protected artifact changes between capture and the next child invocation.
+    # Purpose: Ensure the pre-child integrity boundary refuses the mutation before launching any process.
+    It 'InterT35_refuses_pre_child_mutation_of_<Mutation>' -TestCases @(
+        @{Mutation='add';Pattern='dependency closure changed'},@{Mutation='delete';Pattern='dependency closure changed'},@{Mutation='rename';Pattern='dependency closure changed'},@{Mutation='same-size-mtime';Pattern='dependency closure changed'},@{Mutation='receipt';Pattern='resolver receipt changed'},@{Mutation='authority';Pattern='central runner changed'},@{Mutation='snapshot';Pattern='Candidate snapshot changed'},@{Mutation='archive';Pattern='archive changed'},@{Mutation='acquisition';Pattern='candidate acquisition receipt changed'},@{Mutation='launch';Pattern='launch binding changed'},@{Mutation='evidence';Pattern='evidence artifact.*changed'}
+    ) {
+        param($Mutation,$Pattern)
+        $fixture=New-Syp280BoundaryFixture
+        $previousRoot=$script:StandardValidationRepositoryRoot
+        $script:StandardValidationRepositoryRoot=$fixture.paths.authority
+        $script:StandardValidationAuthorityEvidence=$fixture.authority
+        $script:StandardValidationLaunchBinding=$fixture.launch
+        $script:StandardValidationEvidenceArtifactLedger=New-Object 'Collections.Generic.List[object]'
+        $script:StandardValidationEvidenceArtifactLedger.Add($fixture.evidence)
+        Mock Invoke-StandardValidationProcess { throw 'A mutated pre-child fixture must never launch.' }
+        try {
+            Invoke-Syp280Mutation -Fixture $fixture -Mutation $Mutation
+            $failure=$null
+            $boundaryArguments=$fixture.arguments
+            try { Invoke-StandardValidationCommandAndRecord @boundaryArguments }
+            catch { $failure=$_.Exception.Message }
+            Assert-MockCalled Invoke-StandardValidationProcess -Times 0 -Exactly -Scope It
+            if($null -eq $failure -or $failure -notmatch $Pattern){throw "Expected '$Pattern' for $Mutation; actual '$failure'."}
+        }
+        finally {
+            $script:StandardValidationRepositoryRoot=$previousRoot
+            $script:StandardValidationAuthorityEvidence=$null
+            $script:StandardValidationLaunchBinding=$null
+            $script:StandardValidationEvidenceArtifactLedger=New-Object 'Collections.Generic.List[object]'
+        }
+    }
+
+    # Scenario: The child exits unsuccessfully or is cancelled while emitting a superficially passing envelope.
+    # Purpose: Retain the actual child exit code and status in raw evidence and refuse a forged success.
+    It 'InterT40_retains_real_child_exit_code_for_<Status>' -TestCases @(
+        @{Status='failed';ExitCode=23;Pattern='FAILED'},@{Status='cancelled';ExitCode=130;Pattern='CANCELLED'}
+    ) {
+        param($Status,$ExitCode,$Pattern)
+        $fixture=New-Syp280BoundaryFixture
+        $script:Syp280Status=$Status
+        $script:Syp280ExitCode=$ExitCode
+        Mock Invoke-StandardValidationProcess {
+            [pscustomobject]@{startedAt='2026-01-01T00:00:00Z';endedAt='2026-01-01T00:00:01Z';exitCode=$script:Syp280ExitCode;status=$script:Syp280Status;stdout='{"schemaVersion":1,"status":"passed","decision":"PASS","candidateIdentity":"fixture-candidate"}';stderr='';cleanedUp=$true}
+        }
+        $failure=$null
+        $boundaryArguments=$fixture.arguments
+        try { Invoke-StandardValidationCommandAndRecord @boundaryArguments }
+        catch { $failure=$_.Exception.Message }
+        if ($null -eq $failure -or $failure -notmatch ('^'+$Pattern+'\|')) { throw 'Non-success child must be refused.' }
+        $event=$script:StandardValidationLastEvent
+        $raw=Get-Content -Raw -LiteralPath $event.outputPath | ConvertFrom-Json
+        if ($event.exitCode -ne $ExitCode -or $raw.process.exitCode -ne $ExitCode -or $raw.process.status -cne $Status) {
+            throw 'Timing or evidence must not replace the real child result.'
+        }
+    }
+}
+
 Describe 'SYP258 source validation result gate' {
     BeforeAll {
         $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'

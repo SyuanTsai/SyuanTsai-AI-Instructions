@@ -90,6 +90,11 @@ $script:StandardValidationExitCodes = [ordered]@{
     INVALID = 30
     CANCELLED = 40
 }
+# Timing stays outside canonical evidence. Function-only imports keep automatic
+# diagnostics quiet; tests can still exercise the timing helpers explicitly.
+$script:StandardValidationTimingStage = 'validation'
+$script:StandardValidationClosureTiming = $null
+$script:StandardValidationTimingEnabled = -not [bool]$DefineFunctionsOnly
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationLaunchBinding = $null
@@ -728,11 +733,23 @@ function Assert-StandardValidationDistinctRoots {
 
 function Get-StandardValidationFileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+    $svMetric = if ($null -ne $script:StandardValidationClosureTiming) { $script:StandardValidationClosureTiming.hash } else { $null }
+    $svMetricStart = [Diagnostics.Stopwatch]::GetTimestamp()
+    try {
+
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "INVALID|$Context file is missing: $Path"
     }
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+
+    }
+    finally {
+        if ($null -ne $svMetric) {
+            $svMetric.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $svMetricStart
+            Update-StandardValidationPhase -Timing $svMetric -Files 1
+        }
+    }
 }
 
 function Get-StandardValidationTextSha256 {
@@ -1341,6 +1358,12 @@ function Assert-StandardValidationToolReceipt {
         [Parameter(Mandatory = $true)][string] $ExpectedToolName,
         [Parameter(Mandatory = $true)][string] $Context
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'receipt-parsing' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     if ([string]::IsNullOrWhiteSpace($ExpectedToolName)) {
         throw "INVALID|$Context has no expected canonical tool role."
@@ -1511,6 +1534,15 @@ function Assert-StandardValidationToolReceipt {
         runId = $receiptRunId
         resolvedAtUtc = $resolvedAtUtc
     }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Assert-StandardValidationToolReceiptUnchanged {
@@ -1519,6 +1551,12 @@ function Assert-StandardValidationToolReceiptUnchanged {
         [Parameter(Mandatory = $true)][string] $CommandPath,
         [Parameter(Mandatory = $true)][string] $Context
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'receipt-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     Assert-StandardValidationRegularFile -Path ([string]$ToolReceipt.path) -Context "$Context resolver receipt"
     if ((Get-StandardValidationFileSha256 -Path ([string]$ToolReceipt.path) -Context "$Context resolver receipt") -cne [string]$ToolReceipt.sha256) {
@@ -1561,6 +1599,15 @@ function Assert-StandardValidationToolReceiptUnchanged {
                 }
             }
         }
+    }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
     }
 }
 
@@ -1876,6 +1923,10 @@ function Assert-StandardValidationAuthoritySnapshot {
 
 function Assert-StandardValidationSafeRelativePath {
     param([Parameter(Mandatory = $true)][string] $Value, [Parameter(Mandatory = $true)][string] $Context)
+    $svMetric = if ($null -ne $script:StandardValidationClosureTiming) { $script:StandardValidationClosureTiming.path } else { $null }
+    $svMetricStart = [Diagnostics.Stopwatch]::GetTimestamp()
+    try {
+
 
     if ([string]::IsNullOrEmpty($Value) -or
         $Value.IndexOf([char]92) -ge 0 -or $Value.IndexOf([char]':') -ge 0 -or $Value.StartsWith('/')) {
@@ -1902,6 +1953,14 @@ function Assert-StandardValidationSafeRelativePath {
             throw "INVALID|$Context must not contain empty, dot, or dot-dot path segments."
         }
     }
+
+    }
+    finally {
+        if ($null -ne $svMetric) {
+            $svMetric.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $svMetricStart
+            Update-StandardValidationPhase -Timing $svMetric -Files 1
+        }
+    }
 }
 
 function Get-StandardValidationAsciiCaseFold {
@@ -1926,6 +1985,10 @@ function Assert-StandardValidationInventoryPathCollision {
         [Parameter(Mandatory = $true)] $AsciiCasePaths,
         [Parameter(Mandatory = $true)][string] $Context
     )
+    $svMetric = if ($null -ne $script:StandardValidationClosureTiming) { $script:StandardValidationClosureTiming.collision } else { $null }
+    $svMetricStart = [Diagnostics.Stopwatch]::GetTimestamp()
+    try {
+
 
     if (-not $OrdinalPaths.Add($Value)) {
         throw "INVALID|$Context contains a duplicate path '$Value'."
@@ -1940,6 +2003,14 @@ function Assert-StandardValidationInventoryPathCollision {
         throw "INVALID|$Context contains ASCII-case-colliding paths '$($AsciiCasePaths[$asciiCase])' and '$Value'."
     }
     $AsciiCasePaths[$asciiCase] = $Value
+
+    }
+    finally {
+        if ($null -ne $svMetric) {
+            $svMetric.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $svMetricStart
+            Update-StandardValidationPhase -Timing $svMetric -Files 1
+        }
+    }
 }
 
 function Get-StandardValidationSymlinkTarget {
@@ -2034,8 +2105,77 @@ function Assert-StandardValidationNoReparsePoints {
     }
 }
 
+function Write-StandardValidationPhaseDiagnostic {
+    param($Timing,[string]$State)
+    if ($Timing.silent) { return }
+    try {
+        $record = [ordered]@{
+            stage = $Timing.stage
+            phase = $Timing.phase
+            state = $State
+            calls = $Timing.calls
+            files = $Timing.files
+            bytes = $Timing.bytes
+            elapsedSeconds = [Math]::Round($(if($Timing.aggregate){$Timing.ticks / [double][Diagnostics.Stopwatch]::Frequency}else{$Timing.watch.Elapsed.TotalSeconds}), 6)
+        }
+        [Console]::Error.WriteLine('[StandardValidation timing] ' + (ConvertTo-Json -InputObject $record -Compress))
+    }
+    catch {
+        # A diagnostic sink must not replace a validation result or exception.
+    }
+}
+
+function New-StandardValidationPhase {
+    param([string]$Stage='validation',[Parameter(Mandatory)][string]$Phase,[switch]$Aggregate,[switch]$Silent)
+    $safeStage = if ($Stage -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') { $Stage } else { 'validation' }
+    $safePhase = if ($Phase -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$') { $Phase } else { 'phase' }
+    $timing = [pscustomobject]@{
+        stage=$safeStage; phase=$safePhase; watch=[Diagnostics.Stopwatch]::StartNew()
+        calls=[long]0; files=[long]0; bytes=[long]0; nextHeartbeat=[double]30; heartbeats=0
+        aggregate=[bool]$Aggregate; ticks=[long]0
+        silent=[bool]$Silent
+    }
+    Write-StandardValidationPhaseDiagnostic -Timing $timing -State 'started'
+    return $timing
+}
+
+function Update-StandardValidationPhase {
+    param([Parameter(Mandatory)]$Timing,[long]$Calls=1,[long]$Files=0,[long]$Bytes=0)
+    $Timing.calls += $Calls
+    $Timing.files += $Files
+    $Timing.bytes += $Bytes
+    if ($Timing.heartbeats -lt 120 -and $Timing.watch.Elapsed.TotalSeconds -ge $Timing.nextHeartbeat) {
+        Write-StandardValidationPhaseDiagnostic -Timing $Timing -State 'heartbeat'
+        $Timing.heartbeats++
+        $Timing.nextHeartbeat = $Timing.watch.Elapsed.TotalSeconds + 30
+    }
+}
+
+function Complete-StandardValidationPhase {
+    param([Parameter(Mandatory)]$Timing,[ValidateSet('completed','failed','cancelled')][string]$State='completed')
+    Write-StandardValidationPhaseDiagnostic -Timing $Timing -State $State
+}
+
+function Invoke-StandardValidationTimedPhase {
+    param([string]$Stage='validation',[Parameter(Mandatory)][string]$Phase,[Parameter(Mandatory)][scriptblock]$Action,[switch]$Silent)
+    $phaseDiagnosticTiming = New-StandardValidationPhase -Stage $Stage -Phase $Phase -Silent:$Silent
+    $phaseDiagnosticTerminalState = 'completed'
+    try { & $Action $phaseDiagnosticTiming }
+    catch {
+        $phaseDiagnosticTerminalState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally { Complete-StandardValidationPhase -Timing $phaseDiagnosticTiming -State $phaseDiagnosticTerminalState }
+}
+
 function Get-StandardValidationInventory {
     param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Context)
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'file-inventory' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     Assert-StandardValidationNoReparsePoints -Root $Root -Context $Context
     $fullRoot = (Get-StandardValidationFullPath -Path $Root -Context $Context).TrimEnd(
@@ -2061,6 +2201,8 @@ function Get-StandardValidationInventory {
             -NfcPaths $nfcPaths `
             -AsciiCasePaths $asciiCasePaths `
             -Context "$Context inventory path"
+        $svPhaseTiming.files++
+        try { $svPhaseTiming.bytes += [long]$file.Length } catch { }
         $entries += [pscustomobject][ordered]@{
             path = $relative
             sha256 = (Get-StandardValidationFileSha256 -Path $file.FullName -Context $Context)
@@ -2069,6 +2211,15 @@ function Get-StandardValidationInventory {
     }
     if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file." }
     return ,(Sort-StandardValidationInventory -Inventory $entries)
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Get-StandardValidationInventorySha256 {
@@ -2084,6 +2235,17 @@ function Get-StandardValidationDirectoryClosureSha256 {
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Context
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'installed-closure' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+    $svPreviousClosureTiming = $script:StandardValidationClosureTiming
+    $script:StandardValidationClosureTiming = [pscustomobject]@{
+        path = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'closure-safe-path' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+        collision = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'closure-path-collision' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+        hash = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'closure-content-hash' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    }
+    try {
+
 
     $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $rootItem = Get-Item -Force -LiteralPath $fullRoot -ErrorAction Stop
@@ -2095,7 +2257,19 @@ function Get-StandardValidationDirectoryClosureSha256 {
     $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    foreach ($item in @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop)) {
+    $svClosureItems = @(Invoke-StandardValidationTimedPhase -Stage $script:StandardValidationTimingStage -Phase 'closure-enumeration' -Silent:(-not $script:StandardValidationTimingEnabled) -Action {
+    param($svEnumerationTiming)
+    $svEnumerated = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop)
+    $svEnumerationTiming.calls = 1
+    $svEnumerationTiming.files = @($svEnumerated | Where-Object { -not $_.PSIsContainer }).Count
+    foreach ($svFile in $svEnumerated) {
+        if ($svFile -is [IO.FileInfo] -and ($svFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            try { $svEnumerationTiming.bytes += [long]$svFile.Length } catch { }
+        }
+    }
+    $svEnumerated
+})
+foreach ($item in $svClosureItems) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             # Preserve safe Unix tool/package symlink layouts while binding
             # each target identity into the revalidated closure.
@@ -2122,6 +2296,11 @@ function Get-StandardValidationDirectoryClosureSha256 {
             -NfcPaths $nfcPaths `
             -AsciiCasePaths $asciiCasePaths `
             -Context $Context
+        $svFileBytes = 0
+        try { $svFileBytes = [long]$item.Length } catch { }
+        $svPhaseTiming.files++
+        $svPhaseTiming.bytes += $svFileBytes
+        $script:StandardValidationClosureTiming.hash.bytes += $svFileBytes
         [void]$entries.Add([pscustomobject][ordered]@{
                 path = $relative
                 sha256 = Get-StandardValidationFileSha256 -Path $item.FullName -Context $Context
@@ -2131,26 +2310,62 @@ function Get-StandardValidationDirectoryClosureSha256 {
     $ordered = Sort-StandardValidationInventory -Inventory $entries
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
     return Get-StandardValidationTextSha256 -Value $canonical
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        foreach($svMetric in @($script:StandardValidationClosureTiming.path,$script:StandardValidationClosureTiming.collision,$script:StandardValidationClosureTiming.hash)) {
+            Complete-StandardValidationPhase -Timing $svMetric -State $svPhaseState
+        }
+        $script:StandardValidationClosureTiming = $svPreviousClosureTiming
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Sort-StandardValidationInventory {
     param([Parameter(Mandatory = $true)] $Inventory)
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'inventory-sort' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
 
-    $ordered = New-Object 'System.Collections.Generic.List[object]'
-    # Enumerate through the PowerShell pipeline so generic List[object]
-    # instances produced during directory-closure capture are treated as
-    # entries rather than as a single array-conversion operand.
+    try {
+
+
+    $groups = New-Object 'System.Collections.Generic.SortedDictionary[string,object]' ([StringComparer]::Ordinal)
+    # Enumerate through the pipeline to preserve generic List[object] entries.
     $inventoryItems = @($Inventory | ForEach-Object { $_ })
     foreach ($entry in $inventoryItems) {
-        $insertAt = 0
-        while ($insertAt -lt $ordered.Count -and
-            [string]::Compare([string]$ordered[$insertAt].path, [string]$entry.path, [StringComparison]::Ordinal) -lt 0) {
-            $insertAt++
+        $svPhaseTiming.files++
+        if ($svPhaseTiming.watch.Elapsed.TotalSeconds -ge $svPhaseTiming.nextHeartbeat) {
+            Update-StandardValidationPhase -Timing $svPhaseTiming -Calls 0
         }
-        $ordered.Insert($insertAt, $entry)
+        $path = [string]$entry.path
+        if (-not $groups.ContainsKey($path)) {
+            $groups.Add($path, (New-Object 'System.Collections.Generic.Stack[object]'))
+        }
+        # The old insertion scan placed a later equal path before earlier ones.
+        # Keep that reverse-arrival order without dropping duplicate entries.
+        $groups[$path].Push($entry)
+    }
+    $ordered = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($group in $groups.Values) {
+        foreach ($entry in $group) { $ordered.Add($entry) }
     }
     return ,$ordered.ToArray()
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
+
 
 function Copy-StandardValidationSnapshot {
     param(
@@ -2430,11 +2645,26 @@ function Assert-StandardValidationSnapshotUnchanged {
         [Parameter(Mandatory = $true)][string] $SnapshotRoot,
         [Parameter(Mandatory = $true)][string] $ExpectedSnapshotContentSha256
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'snapshot-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     $currentInventory = Get-StandardValidationInventory -Root $SnapshotRoot -Context 'candidate snapshot revalidation'
     $currentContentSha256 = Get-StandardValidationInventorySha256 -Inventory $currentInventory
     if ($currentContentSha256 -cne $ExpectedSnapshotContentSha256) {
         throw 'FAILED|Candidate snapshot changed during validation.'
+    }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
     }
 }
 
@@ -3407,6 +3637,12 @@ function Invoke-StandardValidationProcess {
         [switch] $EmitSupervisorProgress,
         [ValidateRange(1, 30)][int] $SupervisorProgressIntervalSeconds = 30
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-process' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     $startedAt = (Get-Date).ToUniversalTime().ToString('o')
     $status = 'failed'
@@ -3772,6 +4008,7 @@ function Invoke-StandardValidationProcess {
         $nextSupervisorProgressSeconds = 0
         $supervisorProgressLines = 0
         while (-not $protectionSetupFailed -and -not $process.HasExited) {
+            Update-StandardValidationPhase -Timing $svPhaseTiming -Calls 0
             if ($EmitSupervisorProgress -and $supervisorProgressLines -lt 240) {
                 $elapsedSeconds = [Math]::Max(0, [int][Math]::Floor($supervisorProgressClock.Elapsed.TotalSeconds))
                 if ($elapsedSeconds -ge $nextSupervisorProgressSeconds) {
@@ -3926,6 +4163,17 @@ function Invoke-StandardValidationProcess {
         outputQuotaDiagnostic = if ($null -eq $outputQuotaDiagnostic) { $null } else { [string]$outputQuotaDiagnostic }
         cleanedUp = [bool]$cleanedUp
     }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        if ($status -eq 'cancelled') { $svPhaseState = 'cancelled' }
+        elseif ($status -ne 'passed') { $svPhaseState = 'failed' }
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function New-StandardValidationOutputReservation {
@@ -4017,6 +4265,12 @@ function Write-StandardValidationJsonReserved {
         [Parameter(Mandatory = $true)][string] $Token,
         [Parameter(Mandatory = $true)] $Value
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'report-write' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     Assert-StandardValidationOutputReservation -Path $Path -Stream $Stream -Token $Token -Context 'Final evidence'
     $json = $Value | ConvertTo-Json -Depth 100
@@ -4035,6 +4289,15 @@ function Write-StandardValidationJsonReserved {
         catch [System.IO.IOException] {
             throw 'FAILED|Final evidence output path could not be revalidated after writing.'
         }
+    }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
     }
 }
 
@@ -4065,6 +4328,12 @@ function Register-StandardValidationEvidenceArtifact {
 }
 
 function Assert-StandardValidationEvidenceArtifacts {
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'evidence-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
     if ($null -eq $script:StandardValidationEvidenceArtifactLedger) { return }
     foreach ($artifact in $script:StandardValidationEvidenceArtifactLedger) {
         try {
@@ -4078,6 +4347,15 @@ function Assert-StandardValidationEvidenceArtifacts {
             throw "FAILED|Previously written validation evidence artifact '$($artifact.context)' changed after it was written."
         }
     }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Write-StandardValidationJsonCreate {
@@ -4086,6 +4364,12 @@ function Write-StandardValidationJsonCreate {
         [Parameter(Mandatory = $true)] $Value,
         [string] $Context = 'artifact output'
     )
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'evidence-write' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
     $parent = [System.IO.Path]::GetDirectoryName($fullPath)
@@ -4097,6 +4381,15 @@ function Write-StandardValidationJsonCreate {
     finally { $stream.Dispose() }
     Register-StandardValidationEvidenceArtifact -Path $fullPath -Context $Context
     return $fullPath
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Write-StandardValidationStageReceipt {
@@ -5797,6 +6090,15 @@ function Invoke-StandardValidationCommandAndRecord {
         [string] $OutputReservationPath,
         [string] $OutputReservationToken
     )
+    $svPreviousStage = $script:StandardValidationTimingStage
+    $script:StandardValidationTimingStage = $StageId
+
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-boundary' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     $eventId = [guid]::NewGuid().ToString()
     $script:StandardValidationLastEvent = $null
@@ -5970,6 +6272,16 @@ function Invoke-StandardValidationCommandAndRecord {
         -SkillInventorySha256 $SkillInventorySha256 `
         -ExpectedActiveSkills $ExpectedActiveSkills
     return [pscustomobject][ordered]@{ event = $event; envelope = $envelope }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        $script:StandardValidationTimingStage = $svPreviousStage
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
+    }
 }
 
 function Assert-StandardValidationApprovalScalar {
@@ -6799,6 +7111,12 @@ function Assert-StandardValidationContractFiles {
 
 function Assert-StandardValidationAuthorityUnchanged {
     param([Parameter(Mandatory = $true)] $Authority)
+    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'authority-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svPhaseTiming.calls = 1
+    $svPhaseState = 'completed'
+
+    try {
+
 
     $checks = @(
         [pscustomobject]@{ path = $Authority.runnerPath; sha256 = $Authority.runnerSha256; context = 'central runner' }
@@ -6834,6 +7152,15 @@ function Assert-StandardValidationAuthorityUnchanged {
                 throw "FAILED|Authority selected file changed during validation: $($entry.path)"
             }
         }
+    }
+
+    }
+    catch {
+        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
     }
 }
 
