@@ -1,0 +1,67 @@
+{
+  "sourceCommit": "b55665174fc4ab02d8cd941348fb4e0394042aec",
+  "sourceTree": "8117924a1edb9045d442cb1ae97145ec48dfcf7a",
+  "command": "pwsh -NoProfile -File SYP20-work/Test-Candidate-b556.ps1",
+  "powerShellVersion": "7.6.6",
+  "pesterVersion": "6.2.0",
+  "total": 13,
+  "passed": 13,
+  "failed": 0,
+  "cases": [
+    {
+      "ExpandedName": "UnitT10_accepts_a_typed_read_request_without_executing_SQL",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT20_rejects_unknown_execution_fields_server",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT20_rejects_unknown_execution_fields_database",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT20_rejects_unknown_execution_fields_token",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT20_rejects_unknown_execution_fields_authorization",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT20_rejects_unknown_execution_fields_policy_override",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT25_rejects_duplicate_case_colliding_fields_and_unknown_version",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT30_rejects_raw_writes_and_mutations_in_a_check_task",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT35_requires_keys_expected_values_and_parameter_bindings",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT40_enforces_the_environment_operation_matrix_in_authorization_records",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT45_rejects_unverified_write_dependencies_and_unlisted_operations",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT50_requires_unknown_commit_state_and_no_automatic_retry",
+      "Result": "Passed"
+    },
+    {
+      "ExpandedName": "UnitT60_validates_success_and_failure_response_shapes",
+      "Result": "Passed"
+    }
+  ],
+  "databaseExecuted": false,
+  "sqlPolicyValidated": false,
+  "canonicalSourceCore": false
+}

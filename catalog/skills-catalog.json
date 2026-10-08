@@ -526,6 +526,31 @@
         "status": "active",
         "aliases": []
       }
+    },
+    {
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      },
+      "source": {
+        "targetPath": ".agents/skills/operate-environment-authorized-sql",
+        "sourcePath": "skills/operate-environment-authorized-sql",
+        "sourceId": "general"
+      },
+      "profiles": [],
+      "dependencies": [],
+      "group": "database-workflows",
+      "id": "operate-environment-authorized-sql",
+      "compatibility": {
+        "requiredCapabilities": [],
+        "platforms": [
+          "windows"
+        ],
+        "shells": [
+          "pwsh>=7"
+        ],
+        "anyOfCapabilities": []
+      }
     }
   ]
 }

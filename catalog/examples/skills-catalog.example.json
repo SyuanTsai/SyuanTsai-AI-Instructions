@@ -500,6 +500,30 @@
         "status": "active",
         "aliases": []
       }
+    },
+    {
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      },
+      "source": {
+        "sourceId": "agent-skills",
+        "path": ".agents/skills/operate-environment-authorized-sql"
+      },
+      "profiles": [],
+      "dependencies": [],
+      "group": "database-workflows",
+      "id": "operate-environment-authorized-sql",
+      "compatibility": {
+        "requiredCapabilities": [],
+        "platforms": [
+          "windows"
+        ],
+        "shells": [
+          "pwsh>=7"
+        ],
+        "anyOfCapabilities": []
+      }
     }
   ]
 }

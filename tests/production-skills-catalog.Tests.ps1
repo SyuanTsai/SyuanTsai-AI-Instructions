@@ -100,9 +100,9 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_thirteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_fourteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 13
+        $activeSkills.Count | Should Be 14
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
@@ -110,6 +110,7 @@ Describe 'production Skills Catalog' {
             'investigate-datadog-logs' = 'general'
             'manage-notion-ai-memory' = 'general'
             'manage-task-handoff' = 'general'
+            'operate-environment-authorized-sql' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
@@ -281,8 +282,14 @@ Describe 'production Skills Catalog' {
         foreach ($source in @($script:catalog.sources)) {
             $matches = @($script:pins.sources | Where-Object { [string]$_.id -eq [string]$source.id })
             $matches.Count | Should Be 1
-            [string]$matches[0].requestedRef | Should Be 'main'
-            [string]$matches[0].requestedRefType | Should Be 'branch'
+            if ($source.id -eq 'general') {
+                [string]$matches[0].requestedRef | Should Be '191db6b3380eee697285dc5a4e3a3390ec8379c3'
+                [string]$matches[0].requestedRefType | Should Be 'commit'
+                [string]$matches[0].resolvedCommit | Should Be ([string]$matches[0].requestedRef)
+            } else {
+                [string]$matches[0].requestedRef | Should Be 'main'
+                [string]$matches[0].requestedRefType | Should Be 'branch'
+            }
             [string]$matches[0].resolvedCommit | Should Match '^[0-9a-f]{40}$'
             [string]$matches[0].resolvedVersion | Should Not BeNullOrEmpty
         }
@@ -311,7 +318,7 @@ Describe 'production Skills Catalog' {
         $script:catalog.schemaVersion | Should Be 2
         $script:lock.schemaVersion | Should Be 2
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $active.Count | Should Be 13
+        $active.Count | Should Be 14
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
             [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"

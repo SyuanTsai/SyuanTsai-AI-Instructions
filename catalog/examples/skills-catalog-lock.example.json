@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "3885666efaf4088512d7cf056f1ee18ee42764cba25707e754f27c9faccb87cf",
+  "catalogSha256": "2c44964db1d79ac09b5375a7f11ae7c09297acf0c4fbdda343d905f57ea1d295",
   "sources": [
     {
       "id": "agent-skills",
@@ -55,6 +55,12 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/manage-task-handoff",
       "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "operate-environment-authorized-sql",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/operate-environment-authorized-sql",
+      "contentSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
     {
       "id": "plan-production-change",

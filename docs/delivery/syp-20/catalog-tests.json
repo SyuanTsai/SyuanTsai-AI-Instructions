@@ -1,0 +1,347 @@
+{
+  "schemaVersion": 1,
+  "issue": "SYP-20",
+  "acceptanceOwner": "SYP-259",
+  "observedAt": "2026-10-08T02:40:12.9376727+00:00",
+  "centralBase": "14ee2535e43e7c5b4d0992594aa01b31e8f3aa5c",
+  "sourceMerge": "191db6b3380eee697285dc5a4e3a3390ec8379c3",
+  "powerShellVersion": "7.6.6",
+  "pesterVersion": "4.10.1",
+  "command": "Invoke-Pester -Script tests/skills-catalog-contract.Tests.ps1,tests/production-skills-catalog.Tests.ps1 -PassThru",
+  "total": 48,
+  "passed": 48,
+  "failed": 0,
+  "skipped": 0,
+  "pending": 0,
+  "cases": [
+    {
+      "Name": "UnitT05_parses_every_checked_in_json_schema_document",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT10_validates_the_complete_catalog_lock_manifest_and_configuration_examples",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT10a_binds_production_catalog_v2_to_canonical_sources_and_lock",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT11_accepts_the_versioned_canonical_source_and_runtime_target_examples",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT14_accepts_v2_license_delivery_provenance_and_rejects_it_on_payload_files",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT12_rejects_unknown_versions_and_noncanonical_versioned_mappings",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT13_preserves_legacy_manifest_read_semantics_during_the_versioned_migration",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT15_accepts_a_rename_with_a_removed_tombstone_and_replacement_alias",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT20_rejects_an_unknown_catalog_schema_version",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT30_rejects_duplicate_stable_skill_ids",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT40_rejects_unsafe_or_non_flat_skill_paths",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT50_rejects_an_unknown_dependency_type",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT52_rejects_invalid_required_and_alternative_capability_declarations",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT54_rejects_invalid_conditional_dependency_contracts",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT55_requires_unique_conditional_capability_contracts_in_one_alternative_set",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT56_rejects_case_variant_enum_values_across_catalog_lock_and_manifest",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT57_rejects_schema_type_and_unknown_managed_manifest_properties",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT58_validates_the_exact_legacy_managed_manifest_v1_shape",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT59_rejects_singleton_arrays_in_manifest_hash_fields",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT60_rejects_instruction_artifacts_that_claim_skill_paths",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT65_keeps_manifest_repository_path_schema_and_parser_behavior_aligned",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT61_rejects_unknown_catalog_source_pin_and_lock_properties",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT62_rejects_case_variant_catalog_lock_identity_fields",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT63_rejects_case_variant_catalog_and_manifest_skill_paths",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT64_rejects_an_unresolved_source_pin",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT70_models_the_jira_api_setup_skill_as_a_conditional_fallback_dependency",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT80_resolves_each_requested_ref_to_an_immutable_commit_and_content_hash",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT82_rejects_lock_skill_entries_missing_required_source_fields",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT83_rejects_non_string_lock_skill_source_ids_before_comparison",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT90_records_per_file_source_skill_version_commit_and_hash_provenance",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT92_keeps_profile_and_include_exclude_selection_in_sync_configuration_v4",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT93_rejects_an_update_interval_outside_the_v4_contract",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT94_rejects_non_stable_profile_and_skill_selection_ids",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "UnitT95_preserves_the_flat_agents_skills_layout_without_submodule_metadata",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT10_uses_the_four_external_Skill_repositories_as_the_only_production_sources",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT12_contains_no_built_in_shared_Skill_source",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT14_keeps_API_setup_Skills_out_of_product_profile_membership",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT13_selects_API_setup_fallbacks_only_when_product_capabilities_are_missing",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT15_maps_fourteen_active_Skills_and_keeps_the_removed_FELO_tombstone",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT16_routes_FELO_workflows_only_to_the_four_official_canonical_Skills",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT17_routes_Bitbucket_API_failures_to_the_setup_Skill_conditionally",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT18_routes_Confluence_API_failures_to_the_setup_Skill_conditionally",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT21_requires_the_exact_capability_tuple_to_suppress_setup_fallbacks",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT19_routes_Notion_memory_through_the_opt_in_ai_memory_profile",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT20_keeps_core_as_the_only_default_profile",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT25_pins_every_production_source_to_a_full_immutable_commit",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT30_tracks_a_complete_lock_for_every_production_source_and_skill",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    },
+    {
+      "Name": "InterT31_binds_production_catalog_and_lock_to_canonical_schema_v2",
+      "Result": "Passed",
+      "Passed": true,
+      "FailureMessage": ""
+    }
+  ],
+  "candidateFiles": [
+    {
+      "path": "catalog/examples/managed-manifest-v2.example.json",
+      "sha256": "57ea82ca93ff935b4188d82e00f6d7c9a163433e9ce13172227ca54da6673eea"
+    },
+    {
+      "path": "catalog/examples/skills-catalog-lock.example.json",
+      "sha256": "81c10739789990c2455798da1fa90d2b5e7a99f579e35d8288e3b29bca3548b1"
+    },
+    {
+      "path": "catalog/examples/skills-catalog.example.json",
+      "sha256": "2c44964db1d79ac09b5375a7f11ae7c09297acf0c4fbdda343d905f57ea1d295"
+    },
+    {
+      "path": "catalog/examples/user-skills-managed-manifest-v1.example.json",
+      "sha256": "93d5ee4aeb433606984c4ae1da8d0afc391811c6633846600a58e2daa422208e"
+    },
+    {
+      "path": "catalog/skills-catalog-lock.json",
+      "sha256": "acd8a72c43775d8811d0f58cec17b9109885a376184fde7b73c1deed63e9aa87"
+    },
+    {
+      "path": "catalog/skills-catalog.json",
+      "sha256": "b03417cc5afa3a7f7f0afc611936ca9643526b7151954e0efd64de27fa10f6bd"
+    },
+    {
+      "path": "catalog/skills-catalog.sources.json",
+      "sha256": "e9bf157fa65c2092f26111633d1d34e62c61235b0b8f5c0d0df802b3fff943be"
+    },
+    {
+      "path": "tests/production-skills-catalog.Tests.ps1",
+      "sha256": "10e2c5a1da5fc2a2b6dbbd11ad1428a4324ecb4e4bcc30c4c930e33e1425f717"
+    },
+    {
+      "path": "tests/skills-catalog-contract.Tests.ps1",
+      "sha256": "3700c8277f73ff1b352fbcc89d5765b7c9f74b31c00d27d674a6a4dedd99c53b"
+    }
+  ],
+  "productionPinEffective": false,
+  "userRuntimeMutated": false,
+  "actualInstallationVerified": false
+}

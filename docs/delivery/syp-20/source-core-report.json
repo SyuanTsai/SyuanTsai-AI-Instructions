@@ -1,0 +1,813 @@
+{
+  "schemaVersion": 2,
+  "evidence": "standard-core-validation-evidence-v2",
+  "generatedAt": "2026-10-07T16:11:55.8903030Z",
+  "runId": "bfdf8e41bd654b5ebb502db42feeb6b9",
+  "state": "PASS",
+  "exitCode": 0,
+  "releaseEligible": false,
+  "contentMode": "immutable-source",
+  "candidate": {
+    "repository": "https://github.com/SyuanTsai/Skill-General.git",
+    "sourceRevision": "b55665174fc4ab02d8cd941348fb4e0394042aec",
+    "baseRevision": "96dd761fc73e555966be44a52ea10a4959a70c45",
+    "contentSha256": "7af7a0fb2fea0c27af3bb4d9b4ccacfeaeba4bafa7c573302695603a0b4f791a",
+    "inventory": [
+      {
+        "path": ".github/workflows/validate.yml",
+        "sha256": "abba6b80fe48f40a62d06534e16399f775965d869003bfd35d62b1413bf91097",
+        "length": 50522
+      },
+      {
+        "path": "LICENSE",
+        "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+        "length": 11558
+      },
+      {
+        "path": "NOTICE",
+        "sha256": "4eb6ea310aee9a5cf6a237bb93868292f2e133c8a5259fa9166523ed6f25afec",
+        "length": 205
+      },
+      {
+        "path": "PROVENANCE.md",
+        "sha256": "f20b509354de1da19e2b368309aa51582f4369b01976e51e85dd51d6281e9f8e",
+        "length": 2482
+      },
+      {
+        "path": "README.md",
+        "sha256": "e9be16e81acf13922dfd4b7af3c255f954aee7f0de7358b6ece6cb813fe67458",
+        "length": 11119
+      },
+      {
+        "path": "REUSE.toml",
+        "sha256": "55d5924803ff45fc2ebcdd7ce191f3c9356689ea90d5c1b6095d36744da24de9",
+        "length": 1232
+      },
+      {
+        "path": "THIRD_PARTY_NOTICES.md",
+        "sha256": "81f154260f0e93ad41337e58c0ca2875a1948467a7e9cc16c1265408495399a2",
+        "length": 1014
+      },
+      {
+        "path": "catalog/source.json",
+        "sha256": "1fc0085e191c4114a62339ea6bf7909329ed03b4db50a1d4aa7f846062d6d63b",
+        "length": 402
+      },
+      {
+        "path": "config/pester-6.2.0-closure.lock.json",
+        "sha256": "afa28517e21fc394bfdde126d8ac2fa2020d6e38599304c096541a4b217e409b",
+        "length": 3652
+      },
+      {
+        "path": "config/standard-v1.json",
+        "sha256": "b8c1fda75fdf15bee2b67f0ac0aa8f201048059f3976d640c16366e6cba378be",
+        "length": 5536
+      },
+      {
+        "path": "docs/plans/SYP-20.md",
+        "sha256": "0a6e19ace2670faf05ee34ecc0996e5c6bb64fedf31d8df6670d7defdcc2f03c",
+        "length": 5566
+      },
+      {
+        "path": "scripts/CorePesterIntegrity.psm1",
+        "sha256": "82ed51c761c6b42ebdba421791ad5a4bfca6282e4e824bf8d3695c76632465a8",
+        "length": 38697
+      },
+      {
+        "path": "scripts/Invoke-CorePester.ps1",
+        "sha256": "e6749cace00f8d75f46a4afef542266a3c26705376e729aae99247964d8ddc73",
+        "length": 33703
+      },
+      {
+        "path": "scripts/Prepare-PesterRuntime.ps1",
+        "sha256": "4361a1d842fd90364405bc8f71c8aef89d6ccf05361fa1c741cd42de837c8d9b",
+        "length": 11437
+      },
+      {
+        "path": "scripts/Test-SkillGeneral.ps1",
+        "sha256": "bc40e61dc84cecc5e7e952a4ddcf26f5df15764e54e09635cfd5ce2cb90f858c",
+        "length": 27500
+      },
+      {
+        "path": "scripts/Validate.ps1",
+        "sha256": "130bc1a6bffb6f4e910f3178701f858e8a2870d6e96d0679dbca2a3ee1340426",
+        "length": 164537
+      },
+      {
+        "path": "skills/investigate-datadog-logs/SKILL.md",
+        "sha256": "12de21156a4da29a8a7da5b1da55599cbadf89aa467255e277c4d6874d22a403",
+        "length": 6727
+      },
+      {
+        "path": "skills/investigate-datadog-logs/agents/openai.yaml",
+        "sha256": "f51beb2555271da838f7f1d4a8ffbfe5295198d1c46f63211641a1112c2451d1",
+        "length": 334
+      },
+      {
+        "path": "skills/manage-notion-ai-memory/SKILL.md",
+        "sha256": "f9423474bf97122b1e6b4db7d0005c9ee828da17b8a775faf42634090f1df7b1",
+        "length": 6678
+      },
+      {
+        "path": "skills/manage-notion-ai-memory/agents/openai.yaml",
+        "sha256": "79def5f0dd6b0e9a6f47f0bb692e3a3bad25c5c62db57e59514bae7a2ed358e2",
+        "length": 497
+      },
+      {
+        "path": "skills/manage-notion-ai-memory/references/index-workflow.md",
+        "sha256": "ba4a8c72ce26c4fea5de85ca462ddeb4c2353ddcff0ec14c91a89160307ed4cd",
+        "length": 10988
+      },
+      {
+        "path": "skills/manage-notion-ai-memory/references/memory-operations.md",
+        "sha256": "d13ac162b91c74993ed2b3fde08600bce4ff8d681af3575a38e4810a93d7b8e7",
+        "length": 6975
+      },
+      {
+        "path": "skills/manage-notion-ai-memory/references/notion-memory-contract.json",
+        "sha256": "c389dbd0240703f9c51cee7b5fe4a86cc9d664efc90453a907f55432ced98ba8",
+        "length": 5312
+      },
+      {
+        "path": "skills/manage-task-handoff/SKILL.md",
+        "sha256": "d8591da4be19b3fc50f56fa924c7a8057cbf76d528d0407bd6f7ae8a2adafb64",
+        "length": 10721
+      },
+      {
+        "path": "skills/manage-task-handoff/agents/openai.yaml",
+        "sha256": "e686f4be41c53c21ab2a6456651394e0e7e1af8bfa0f34525938797040ee11ba",
+        "length": 377
+      },
+      {
+        "path": "skills/manage-task-handoff/references/git-ref-storage-adapter.md",
+        "sha256": "090ce5d494cb3538eb93e4111ea889c96b8bac387e733e570a9a3263af89fb85",
+        "length": 976
+      },
+      {
+        "path": "skills/manage-task-handoff/references/handoff-operations.md",
+        "sha256": "6681b05eb0fd520094ad1f5755bb15fca0eef5816e0de3fb550bb1c3390b7bc2",
+        "length": 6927
+      },
+      {
+        "path": "skills/manage-task-handoff/references/legacy-notion-handoff-contract.json",
+        "sha256": "63c33f55724ad3aaaced8c515cbc5c230cb1f71549339bf16bbecf901bd2b5f7",
+        "length": 4893
+      },
+      {
+        "path": "skills/manage-task-handoff/references/legacy-notion-handoff-operations.md",
+        "sha256": "58ab8439350a0fefb63180195c7afc53fb78a0181a6f2a84ce7d9eb4e5e78d74",
+        "length": 3404
+      },
+      {
+        "path": "skills/manage-task-handoff/references/notion-adapter.md",
+        "sha256": "7af259b9b65b41719e15097a78763ab46b44211ead6e3cd75dc7652bb55fb2ad",
+        "length": 1871
+      },
+      {
+        "path": "skills/manage-task-handoff/references/storage-adapter-contract.md",
+        "sha256": "6f6c456fd81d53dbb3def89c41ae6c60fdf70a45bc02640cb49f36f970fcf49d",
+        "length": 7548
+      },
+      {
+        "path": "skills/manage-task-handoff/references/task-handoff-contract.json",
+        "sha256": "817a7cab8d01a8509cabd53d04224eea951bd853be97cb3114a5ed7a27985c94",
+        "length": 19686
+      },
+      {
+        "path": "skills/manage-task-handoff/scripts/HandoffRecordCore.psm1",
+        "sha256": "7d7ab7a5ed3330a7d41e9f1e73df0426b4c96972a39f25b7c865fafbecaefc33",
+        "length": 66439
+      },
+      {
+        "path": "skills/manage-task-handoff/scripts/LegacyNotionHandoffReplay.psm1",
+        "sha256": "cfbe38deeb459afb0ee316c193358be54d9d90521029ac61fa4592576975480e",
+        "length": 11040
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/SKILL.md",
+        "sha256": "3513512556a4c439491a91c529e9319452a32fd8b9860b017bdcdca840e00bd6",
+        "length": 5633
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/agents/openai.yaml",
+        "sha256": "86c3286173bca580bdf0c8d9e91c6bcc74a09d1895595beeb60b73ba80e2ecef",
+        "length": 275
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/acceptance.md",
+        "sha256": "a252981f8acf6d54820a0be3d8df49b2b35be794a251aab13f49c4412eb4c30f",
+        "length": 2850
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/authorization.schema.json",
+        "sha256": "648520ac111a2020e1b4bb4fc7ce4103f1823b63d34bdefcac95dce77a1d9b23",
+        "length": 15606
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/installation.md",
+        "sha256": "66e717ade34f6b8206164fd06cd1ac1a7635e0048ae2a5d1bae133318646f9c6",
+        "length": 3574
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/request.schema.json",
+        "sha256": "034b1def988ea55e9806084a98502c926b1fbdfa9c0eb19b269e510680bccec9",
+        "length": 11705
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/response.schema.json",
+        "sha256": "f3c6c36f7f025fb98e73de7c71d23f5cfe742f6d9c3a3bae94b6d5ea50ccc549",
+        "length": 5335
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/runtime-acceptance-cases.json",
+        "sha256": "45cedfea316d7297fafebd1534afbffae637609b8131a6d168ad9483bea57eb3",
+        "length": 5975
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/sql-policy.md",
+        "sha256": "3030314e1bd464044db8d503c1fa96415a4bb304bc6f04dba0ab003ec680259c",
+        "length": 3260
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/references/workflow.md",
+        "sha256": "80007f8fe845c8dbf8c6d90fe796968d5f9563669c2ddfdd612b48f23380d6eb",
+        "length": 5905
+      },
+      {
+        "path": "skills/operate-environment-authorized-sql/scripts/Test-Contract.ps1",
+        "sha256": "bb29cf10141c096d499c7dc34b782309139cd05c39d57a3a7eb5054e9d8b617e",
+        "length": 6600
+      },
+      {
+        "path": "skills/plan-production-change/SKILL.md",
+        "sha256": "361e510d092ee3fe22a045494cb001716e0c7dc525a68cc6dcca3099d4295599",
+        "length": 3953
+      },
+      {
+        "path": "skills/plan-production-change/agents/openai.yaml",
+        "sha256": "77d1102e7d89e53dec927c6a09f861ce10585b462ae953a10edc67fa98003f28",
+        "length": 305
+      },
+      {
+        "path": "skills/review-agent-skills/SKILL.md",
+        "sha256": "87079f36c28d6712a708099d3faf579981950b7764a373f647fefb8943635914",
+        "length": 2525
+      },
+      {
+        "path": "skills/review-agent-skills/agents/openai.yaml",
+        "sha256": "ed31944812033be3fe2fdb21f5fff1920623b3178aaae49e5b760e9c8a364cee",
+        "length": 276
+      },
+      {
+        "path": "skills/review-agent-skills/references/forward-testing.md",
+        "sha256": "4e203f6ae1956c1c0b78d066354125d51bb7e06ec5f001a3ab958dbcf2223c54",
+        "length": 1978
+      },
+      {
+        "path": "skills/review-agent-skills/references/review-methodology.md",
+        "sha256": "3d81449044379614d9afec2c0adf368567d1e45f4589a1a3fd08d7ed27570d48",
+        "length": 4223
+      },
+      {
+        "path": "skills/verify-data-access-performance/SKILL.md",
+        "sha256": "242e6790ccf86316984bdf5cb95e66f2f32cf99831f9286c7321c2829e8a887e",
+        "length": 3338
+      },
+      {
+        "path": "skills/verify-data-access-performance/agents/openai.yaml",
+        "sha256": "3781f4e7ed62df5c43f990d121343ff41de3d4e8e5dc44f1192d645b45e6505d",
+        "length": 318
+      },
+      {
+        "path": "tests/CanonicalValidation.Tests.ps1",
+        "sha256": "be6e1a56b3e4f854a79b05c2234e8d47080edcdc7db685cc7e096b5d29fa62fe",
+        "length": 143389
+      },
+      {
+        "path": "tests/CommonToolAuthoritySupport.ps1",
+        "sha256": "ee634704c14861934e0af07027bc0df38e2a2a68c6c9cabe08ea7bf4dad7d4fd",
+        "length": 6491
+      },
+      {
+        "path": "tests/CommonToolAuthorityTransport.Tests.ps1",
+        "sha256": "9c67f26e5e648b450ae001339d8c906bc4ddd1e3dda68d8576fdf7402c5ccfc7",
+        "length": 11286
+      },
+      {
+        "path": "tests/CommonToolReportIntegration.Tests.ps1",
+        "sha256": "0634e9a7b13cc36e81db970e3e6c116e96bcae441740b9c5828e23c765ad8108",
+        "length": 16263
+      },
+      {
+        "path": "tests/CorePesterIntegrity.Tests.ps1",
+        "sha256": "efe0991183b20970354cf01182ef6cb70664b50ae59e1a3629a3da3db98632f8",
+        "length": 24695
+      },
+      {
+        "path": "tests/CorePesterProgress.Tests.ps1",
+        "sha256": "70d756ffc73791c8e8a022d24781728e2ea17879c85dcc13a9d002ff98bd15d5",
+        "length": 14396
+      },
+      {
+        "path": "tests/EnvironmentAuthorizedSql.Tests.ps1",
+        "sha256": "40c36d2561e93e747d299720a35f90abd45086f0a29bdb113c180947fb7d5e81",
+        "length": 7497
+      },
+      {
+        "path": "tests/GitBlobReader.Tests.ps1",
+        "sha256": "c0e55657485cc3da591edda35c1a2d9e17b24dbb5cb6117063fff8a34ca9e122",
+        "length": 7187
+      },
+      {
+        "path": "tests/HandoffArchive.Tests.ps1",
+        "sha256": "2494afdd7f30a8a5402c9728c4f11ce1817d719fad0fb395b12027baca863d7e",
+        "length": 100242
+      },
+      {
+        "path": "tests/HandoffRecordCore.Tests.ps1",
+        "sha256": "402664976bb88267f4487d568879d973f9612e0e711080ba836e9fef2df6546e",
+        "length": 42760
+      },
+      {
+        "path": "tests/ManageNotionAiMemory.Tests.ps1",
+        "sha256": "1f429c1d19dfbfb50b407ec531ae4e3cc41a17a5f39fb2219dc4445565f69fcd",
+        "length": 48430
+      },
+      {
+        "path": "tests/ManageTaskHandoff.Tests.ps1",
+        "sha256": "4926e9fab5d4ee81f8a745daf7a98f348cb04fa4302a33b083b1839a89ba3b6b",
+        "length": 53933
+      },
+      {
+        "path": "tests/OfflineSemanticConsumer.Tests.ps1",
+        "sha256": "59f83d1a781f79d883c4d2e51f2adf049da4789f31cf6f07db8dfaf277d09497",
+        "length": 32046
+      },
+      {
+        "path": "tests/RepositoryPesterEnvelope.Tests.ps1",
+        "sha256": "4dc4741b91bca05f8ea11b042cdff8c6aff73fcc9dfe6f2115ebc31981b5dc99",
+        "length": 6820
+      },
+      {
+        "path": "tests/ReviewAgentSkills.Tests.ps1",
+        "sha256": "64e6c3ad248e6823e4ecc38675da70d41f4e374dc333d99aac9e9b9d93149b37",
+        "length": 4869
+      },
+      {
+        "path": "tests/SemanticBridgeV2Consumer.Tests.ps1",
+        "sha256": "fd62fe92826818249fcadcec149caeb4367d006f965093971269ce0270c36a64",
+        "length": 18591
+      },
+      {
+        "path": "tests/StandardV1Conformance.Tests.ps1",
+        "sha256": "4881e59810685d0d206e733bbe083c38106f0a0560a7e82517cf6c62d43a69b2",
+        "length": 27185
+      },
+      {
+        "path": "tests/Test-SkillGeneral.Tests.ps1",
+        "sha256": "e7d986a59b45779f2416394366b4a533033b0527c3d78e607b4adb594a59ab80",
+        "length": 10787
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/authorization.json",
+        "sha256": "53c370e4cc27b095c7c28ae97b0372eb6ced85d5bcd194de79afac68ad6790a1",
+        "length": 1683
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/delete.json",
+        "sha256": "43f9eb205371417f593de472d8340b436923727f698100b9fc5697fad0abc7fa",
+        "length": 803
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/denied.json",
+        "sha256": "d7b9a164a2930f9ac7e56d3e1fb98a65b53ad8649baf6df505d5ed1dd3c01557",
+        "length": 434
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/read.json",
+        "sha256": "d95355d0bdf0b0a93be7febd7676f7420a0097f39df24caf4c3e82a26e740538",
+        "length": 488
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/success.json",
+        "sha256": "a1f9b32e0f32792aa2210f5ee3bd9c2dacddce68c1ff89be86d22c3d37d6b532",
+        "length": 645
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/uncertain.json",
+        "sha256": "37b5116066a81bd727e29a8aec417c49ad1e5b4692c092882cdc7e35e9be1a46",
+        "length": 461
+      },
+      {
+        "path": "tests/fixtures/environment-authorized-sql/update.json",
+        "sha256": "e9073cc85d5b57dd9b216a886477d996219f5f8d0a83feff01da153067bd16c8",
+        "length": 1011
+      },
+      {
+        "path": "tests/fixtures/manage-notion-ai-memory/fixed-agent-scenarios.json",
+        "sha256": "b4f89489d190cb404310074696ba35e481058b20a8698222c3576e3384b8585f",
+        "length": 97016
+      },
+      {
+        "path": "tests/fixtures/manage-notion-ai-memory/handoff-cases.json",
+        "sha256": "9b0676fc7dc61354285ce1410205ad97f64aeb721f75e6c06591ee88068d8437",
+        "length": 12729
+      },
+      {
+        "path": "tests/fixtures/manage-notion-ai-memory/routing-cases.json",
+        "sha256": "a135c8ae6a6673cdfd5a79ac1c44cf05072d4b1c28e356b1a7807d48b544d12e",
+        "length": 3163
+      },
+      {
+        "path": "tests/fixtures/manage-task-handoff/scenarios.json",
+        "sha256": "9b11f5a759be850c92ff1850521490b3a4b30356ad25ecf75d81418790940f60",
+        "length": 23225
+      },
+      {
+        "path": "tests/helpers/ProviderAgnosticMemoryTargetAdapter.ps1",
+        "sha256": "a60b8482924ec14ccf68d43026d0a6c6bd73ff41a6dee15ca69e604920664841",
+        "length": 6901
+      }
+    ],
+    "activeSkills": [
+      "investigate-datadog-logs",
+      "manage-notion-ai-memory",
+      "manage-task-handoff",
+      "operate-environment-authorized-sql",
+      "plan-production-change",
+      "review-agent-skills",
+      "verify-data-access-performance"
+    ],
+    "contentMode": "immutable-source",
+    "eventName": "pull_request"
+  },
+  "authority": {
+    "repository": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git",
+    "revision": "d54ef2cc83a19fa58f62fdcc6fa290095355d03e",
+    "runnerSha256": "923cd136dec2624945f4440aa13a608d19baf3d0f5b8b286c7230fe3453bb37b",
+    "contractSha256": "ade6b78ecc6e2fcfc5fd47cbe91e9e822182c7014501fb8a82be7c5e9f9a5c9e",
+    "contentMode": "source"
+  },
+  "adapter": {
+    "schemaVersion": 2,
+    "identity": "standard-core-adapter-v2",
+    "sha256": "0f3d7f87547e1e30e0a53a144131f5c30f551eef13aaac5d7d4578fd79474677"
+  },
+  "checks": [
+    {
+      "id": "repository-general",
+      "kind": "general",
+      "executableSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+      "argumentsSha256": "ced1f9c6010ded674fa847cfde1a6530e12d9d7e63366a0f82635242cd792984",
+      "processId": 2540,
+      "startedAt": "2026-10-07T16:07:23.3238619Z",
+      "endedAt": "2026-10-07T16:07:24.4650017Z",
+      "exitCode": 0,
+      "status": "passed",
+      "cleanedUp": true,
+      "stdoutPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\raw\\001-repository-general.stdout.txt",
+      "stdoutSha256": "673b6b56840dace2536e9d986dedabd7a32331c995624cf28b06ba0d8aaa279c",
+      "stderrPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\raw\\001-repository-general.stderr.txt",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "testCounts": null
+    },
+    {
+      "id": "repository-pester",
+      "kind": "pester",
+      "executableSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+      "argumentsSha256": "da3015a69464f3b317a378afbb9d59fe8ef06da4044a8e90fb526187217f9538",
+      "processId": 1860,
+      "startedAt": "2026-10-07T16:07:29.0011886Z",
+      "endedAt": "2026-10-07T16:09:16.0416035Z",
+      "exitCode": 0,
+      "status": "passed",
+      "cleanedUp": true,
+      "stdoutPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\raw\\002-repository-pester.stdout.txt",
+      "stdoutSha256": "792fb96963a1f15deff511930301175b6224b06bbefeff383db6780b9375a2b1",
+      "stderrPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\raw\\002-repository-pester.stderr.txt",
+      "stderrSha256": "c1be120b2fa8c491b94bdab037cfe7f91488df09763942e84daa5f569dd75bc7",
+      "testCounts": {
+        "total": 290,
+        "passed": 290,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  ],
+  "artifacts": {
+    "runId": "bfdf8e41bd654b5ebb502db42feeb6b9",
+    "root": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts",
+    "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\standard-core-validation-v2-report.json",
+    "runRoot": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9",
+    "snapshotRoot": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\candidate"
+  },
+  "failure": null,
+  "sourceValidation": {
+    "status": "passed",
+    "runId": "bfdf8e41bd654b5ebb502db42feeb6b9",
+    "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+    "sourceRevision": "b55665174fc4ab02d8cd941348fb4e0394042aec",
+    "contentSha256": "7af7a0fb2fea0c27af3bb4d9b4ccacfeaeba4bafa7c573302695603a0b4f791a",
+    "authorityRevision": "d54ef2cc83a19fa58f62fdcc6fa290095355d03e",
+    "activeSkills": [
+      "investigate-datadog-logs",
+      "manage-notion-ai-memory",
+      "manage-task-handoff",
+      "operate-environment-authorized-sql",
+      "plan-production-change",
+      "review-agent-skills",
+      "verify-data-access-performance"
+    ],
+    "skillsRoot": "skills",
+    "toolReceipts": [
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skill-validator.json",
+        "sha256": "d6ba87cae1ee9ee647b1d5478ab15e08b67b2e0e0fa29b62746f04579a432804"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skill-tools.json",
+        "sha256": "b867a61187cf885b6ffb79b5e8f39f018bb690d0f69649b49e497a869b5a58bd"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skillspector.json",
+        "sha256": "9b9d1da5f77aa61bbe33705f4969de827475f179c58bbc357d6c987dbbb7e150"
+      }
+    ],
+    "frozenFiles": [
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\powershell\\pwsh.exe",
+        "sha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\Invoke-SkillGeneralValidationChild.ps1",
+        "sha256": "c849c48037f50321c6326cf348a267e06a36bb665de9f1bd7a99b0654a547a4d"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\toolchain.json",
+        "sha256": "bf67034dacd23f41f66adff1c316709a5a48bc8f1692c1a310d8d008e286f7a1"
+      },
+      {
+        "path": "D:\\a\\Skill-General\\Skill-General\\authority\\scripts\\Invoke-StandardValidation.ps1",
+        "sha256": "923cd136dec2624945f4440aa13a608d19baf3d0f5b8b286c7230fe3453bb37b"
+      },
+      {
+        "path": "D:\\a\\Skill-General\\Skill-General\\authority\\scripts\\Validate-UpstreamAdapter.ps1",
+        "sha256": "3b6e6474690b1ae9f9486544b68f50ca29b96f5dbe6aa8d6c6cd8570afad500b"
+      },
+      {
+        "path": "D:\\a\\Skill-General\\Skill-General\\authority\\docs\\standards\\upstream-adapter.json",
+        "sha256": "c4f5133b24841bb9c66182dc3d5a027596f864ec28e410d47249a67b3b97ad31"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\installed\\skill-validator-69e0664981b7429e883ba7b8d0973424\\bin\\skill-validator.exe",
+        "sha256": "1e0515ce065700432cadc926fb8b210953fda66cc50f5af8ba6014e09715b043"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\installed\\skill-tools-46e15fa5f1774e5b84a1a7dbae3b8ce7\\node_modules\\.bin\\skill-tools.cmd",
+        "sha256": "e5187358c81deeb081208b20fde8afcdbadd9a9ed095fb05142b428f1c343015"
+      },
+      {
+        "path": "C:\\hostedtoolcache\\windows\\node\\24.21.0\\x64\\node.exe",
+        "sha256": "ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\installed\\skill-tools-46e15fa5f1774e5b84a1a7dbae3b8ce7\\node_modules\\skill-tools\\dist\\cli.js",
+        "sha256": "ce264a3d37d9b457adf5a76205a310eac282600a3c5bacad0e63b02f9105d8ee"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\installed\\ss-6cdaedf51e63\\venv\\Scripts\\skillspector.exe",
+        "sha256": "ab5b9b87d7d4229f308fbe8ff9a54c060d2e9b008c15f21dc16dca5b60c5e1c0"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skill-validator.json",
+        "sha256": "d6ba87cae1ee9ee647b1d5478ab15e08b67b2e0e0fa29b62746f04579a432804"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skill-tools.json",
+        "sha256": "b867a61187cf885b6ffb79b5e8f39f018bb690d0f69649b49e497a869b5a58bd"
+      },
+      {
+        "path": "D:\\a\\_temp\\skill-general-37636532090-1\\t\\source-tools-bfdf8e41bd654b5ebb502db42feeb6b9\\receipt-skillspector.json",
+        "sha256": "9b9d1da5f77aa61bbe33705f4969de827475f179c58bbc357d6c987dbbb7e150"
+      }
+    ],
+    "events": [
+      {
+        "eventId": "4557fa81-a14c-468e-9dbc-3d21c52b386f",
+        "stageId": "package-validation",
+        "toolId": "package-adapter",
+        "skillId": null,
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "adb58462f9d124ae0438d2dbf0c8922cd1531c2318da8556b11b5f5b182981ed",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-4557fa81-a14c-468e-9dbc-3d21c52b386f.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "0214e464-dace-4f0c-97f0-b1e0bf43bfce",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "investigate-datadog-logs",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "b87564ce9cf33ff0d319d6f3f3de3d3bb1b0e003085d63bbad58ac49efab3bad",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-0214e464-dace-4f0c-97f0-b1e0bf43bfce.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "e9d3586f-d8ac-4d04-ab68-cd9971af3f3a",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "investigate-datadog-logs",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "5eaaa00ce43d492df5bb135508ed61661f03ae9d237d33929f58b2c4eed4befa",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-e9d3586f-d8ac-4d04-ab68-cd9971af3f3a.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "69dbda86-697b-4d0f-ba1c-1cab1d3a005a",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "manage-notion-ai-memory",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "b410c7880744307b891ee0859f2ae788b30c135eff5fae2485d67bdcf4cf1329",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-69dbda86-697b-4d0f-ba1c-1cab1d3a005a.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "522646f7-5d86-45cb-8e03-9a696ac666c4",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "manage-notion-ai-memory",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "1c1cd5536a3c8d59625cafbe15cf1241fc69533654add2a6f5847940a863f371",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-522646f7-5d86-45cb-8e03-9a696ac666c4.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "7084e450-e246-43fc-aa34-6f68188dd567",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "manage-task-handoff",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "1c5ecea75ad1019a5ec997bbd1690874e6125b5eb096ddb62d73b6631e0c8084",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-7084e450-e246-43fc-aa34-6f68188dd567.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "5f51c196-c47d-4e6d-ad22-cf83b1869a54",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "manage-task-handoff",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "53c8bed6e4be2fc160c942efc11010970865ff27b47c87ac3654131b11b4860a",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-5f51c196-c47d-4e6d-ad22-cf83b1869a54.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "ae6d8961-19e0-4e48-ae5f-b4b598ce6ed1",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "operate-environment-authorized-sql",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "573038df3cd482fee0f2cc3c872eb18e8ccac07278360c517178d5391c3774fd",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-ae6d8961-19e0-4e48-ae5f-b4b598ce6ed1.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "06f6f0ce-07f6-446e-92d4-0d9b54ee6efb",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "operate-environment-authorized-sql",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "a25039ede059f57a1f19d36888f4b2c915b716b278c6a5c84d7851f4d11d60ca",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-06f6f0ce-07f6-446e-92d4-0d9b54ee6efb.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "64ca17a8-247a-420c-889c-cd0ced54e137",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "plan-production-change",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "95ebf62583c520ccaf4f5bde2382c510c3dd58ae6e387265c6af0a34ffd33249",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-64ca17a8-247a-420c-889c-cd0ced54e137.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "318d3ee5-24a6-4d2b-9e3f-8078aa19c37e",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "plan-production-change",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "8a32736247bc2ff4ba8d262531b9a7cfb3612e0d20950d60765dff267a4f18ec",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-318d3ee5-24a6-4d2b-9e3f-8078aa19c37e.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "a39a5d49-c49a-47f9-969d-c38e3747da13",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "review-agent-skills",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "184d699c0f72b4818a2514e1a1b5952d579991be585945164e19fd0fcea32270",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-a39a5d49-c49a-47f9-969d-c38e3747da13.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "f6b9dd07-ee6d-42f2-9b5c-e65b9960eb6e",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "review-agent-skills",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "8528553aa67e2c18df15e934f28ef06bd5070f14ec0de4afe14cfdb9cccfc75b",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-f6b9dd07-ee6d-42f2-9b5c-e65b9960eb6e.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "9ea161b9-f876-4f94-a962-4ff199b016e1",
+        "stageId": "package-validation",
+        "toolId": "skill-validator",
+        "skillId": "verify-data-access-performance",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "9cf64c877df8acf525f47de579e4d7af5aca44df930a1848a393be224ed5c0b6",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-9ea161b9-f876-4f94-a962-4ff199b016e1.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "cc60e5a5-27b7-498e-9a3e-79e2094b9cbf",
+        "stageId": "package-validation",
+        "toolId": "skill-tools",
+        "skillId": "verify-data-access-performance",
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "25adaaa4f7de755105341912c773c625cf305a18e0cd4ecc11d05cb46e8b30d2",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\package-validation\\event-cc60e5a5-27b7-498e-9a3e-79e2094b9cbf.json",
+        "cleanedUp": true
+      },
+      {
+        "eventId": "3622747b-73e1-462a-be85-a5e9bf0e1709",
+        "stageId": "skillspector-static",
+        "toolId": "static-analyzer",
+        "skillId": null,
+        "candidateId": "7454c702a0404e3f953ebaa600353e518bb3892f13ef1eaf9c4bafc5b1a96aa0",
+        "commandSha256": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285",
+        "exitCode": 0,
+        "status": "passed",
+        "outputSha256": "e85d04fb0fcf4a4ab09252f902e3097e012e16727c242aa2e6201a2eb0e19c55",
+        "outputPath": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\skillspector-static\\event-3622747b-73e1-462a-be85-a5e9bf0e1709.json",
+        "cleanedUp": true
+      }
+    ],
+    "adapterSnapshot": {
+      "path": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\source-core-adapter.json",
+      "sha256": "0f3d7f87547e1e30e0a53a144131f5c30f551eef13aaac5d7d4578fd79474677"
+    },
+    "pesterCaseInventory": {
+      "path": "D:\\a\\_temp\\skill-general-37636532090-1\\artifacts\\runs\\bfdf8e41bd654b5ebb502db42feeb6b9\\repository-pester-case-inventory-v1.json",
+      "sha256": "753edb85b139cf823cdbdd7bbc16fbe02fdcea0c70db005d145274f836f647be"
+    }
+  }
+}

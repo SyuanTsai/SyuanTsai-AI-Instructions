@@ -2,3 +2,4 @@ catalog/**/*.json text eol=lf
 docs/standards/trust-anchors/*.xml text eol=lf
 docs/delivery/syp-195/**/*.json text eol=lf
 docs/examples/diagram-design-acceptance/* text eol=lf
+docs/delivery/syp-20/*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

@@ -4,10 +4,10 @@
   "sources": [
     {
       "id": "general",
-      "requestedRef": "main",
-      "requestedRefType": "branch",
-      "resolvedCommit": "7f8a3c3c8d535b2a0f8892103482bf2e942217c1",
-      "resolvedVersion": "main@7f8a3c3c"
+      "requestedRef": "191db6b3380eee697285dc5a4e3a3390ec8379c3",
+      "requestedRefType": "commit",
+      "resolvedCommit": "191db6b3380eee697285dc5a4e3a3390ec8379c3",
+      "resolvedVersion": "main@191db6b3"
     },
     {
       "id": "code-collaboration",
