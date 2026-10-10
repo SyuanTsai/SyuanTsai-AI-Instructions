@@ -1,5 +1,118 @@
 Set-StrictMode -Version Latest
 
+if (-not ('CodexAiInstructions.RepositoryRootIdentity' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace CodexAiInstructions
+{
+    public static class RepositoryRootIdentity
+    {
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            internal uint FileAttributes;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            internal uint VolumeSerialNumber;
+            internal uint FileSizeHigh;
+            internal uint FileSizeLow;
+            internal uint NumberOfLinks;
+            internal uint FileIndexHigh;
+            internal uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+        private static extern SafeFileHandle CreateFile(
+            string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+            uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "GetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetInformation(SafeFileHandle handle, out ByHandleFileInformation information);
+
+        // A missing USER directory is a supported Instructions-only state. All other
+        // failures are surfaced so callers can fail closed instead of guessing.
+        public static string TryGetDirectoryIdentity(string path)
+        {
+            using (SafeFileHandle handle = CreateFile(
+                path, FileReadAttributes, FileShareRead | FileShareWrite, IntPtr.Zero,
+                OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero))
+            {
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 2 || error == 3) return null;
+                    throw new Win32Exception(error, "Unable to establish a physical repository-root identity.");
+                }
+
+                ByHandleFileInformation information;
+                if (!GetInformation(handle, out information))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to inspect a physical repository-root identity.");
+                }
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    throw new InvalidOperationException("A repository or USER root is a reparse point; physical root alias safety cannot be established.");
+                }
+                if ((information.FileAttributes & FileAttributeDirectory) == 0)
+                {
+                    throw new InvalidOperationException("A repository or USER root is not a directory; physical root identity cannot be established.");
+                }
+                return information.VolumeSerialNumber.ToString("x8") + ":" +
+                    information.FileIndexHigh.ToString("x8") + information.FileIndexLow.ToString("x8");
+            }
+        }
+    }
+}
+'@
+}
+
+function Get-CanonicalRepositoryRoot {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $full = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($full)
+    if ([string]::IsNullOrWhiteSpace($root)) { throw 'Repository root canonical path is unavailable.' }
+    if ($full.Length -gt $root.Length) { return $full.TrimEnd([char[]]@('\','/')) }
+    return $root
+}
+
+function Assert-RepoAndUserRootsDistinct {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$UserHome)
+
+    $repositoryCanonical = Get-CanonicalRepositoryRoot $Repository
+    $userCanonical = Get-CanonicalRepositoryRoot $UserHome
+    if ($repositoryCanonical.Equals($userCanonical,[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Repository and USER roots must be physically distinct; canonical root alias detected.'
+    }
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'Repository and USER physical root identity cannot be verified on this platform; migration fails closed.'
+    }
+    $repositoryIdentity = [CodexAiInstructions.RepositoryRootIdentity]::TryGetDirectoryIdentity($repositoryCanonical)
+    if ($null -eq $repositoryIdentity) { throw 'Repository physical root is missing; migration fails closed.' }
+    $userIdentity = [CodexAiInstructions.RepositoryRootIdentity]::TryGetDirectoryIdentity($userCanonical)
+    if ($null -eq $userIdentity) { return $true }
+    if ($repositoryIdentity -ceq $userIdentity) {
+        throw 'Repository and USER roots resolve to the same physical directory; aliased roots are not eligible for Skill migration.'
+    }
+    return $true
+}
+
 function Get-RepoSkillSafePath {
     param([string]$Root, [string]$Relative)
     if ($Relative -cnotmatch '^\.agents/(?:skills/[a-z0-9][a-z0-9-]*/.+|catalog-skills\.manifest\.json)$' -or
@@ -117,6 +230,7 @@ function Get-RepoSharedSkillsMigrationPlan {
         [Parameter(Mandatory=$true)][string]$UserHome,
         [string]$GitExecutable='git'
     )
+    Assert-RepoAndUserRootsDistinct -Repository $Repository -UserHome $UserHome | Out-Null
     $results = New-Object 'System.Collections.Generic.List[object]'
     $user = $null
     $userError = 'USER installation unavailable; repair USER Skills before migration.'
@@ -169,6 +283,7 @@ function Get-RepoSharedSkillsMigrationPlan {
 
 function Assert-RepoSharedSkillsMigrationEvidence {
     param([string]$Repository, [object]$Skill, [string[]]$RemovedPaths=@(), [string]$GitExecutable='git')
+    Assert-RepoAndUserRootsDistinct -Repository $Repository -UserHome ([string]$Skill.userHome) | Out-Null
     $current = Get-RepoSkillMigrationGitState $Repository $GitExecutable
     if ($current.head -cne $Skill.gitState.head -or $current.indexSha256 -cne $Skill.gitState.indexSha256) { throw 'Skill migration Git state changed concurrently.' }
     $userPath = Get-RepoSkillSafePath $Skill.userHome '.agents/catalog-skills.manifest.json'
@@ -189,4 +304,4 @@ function Assert-RepoSharedSkillsMigrationEvidence {
     }
 }
 
-Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness
+Export-ModuleMember -Function Get-RepoSharedSkillsMigrationPlan, Assert-RepoSharedSkillsMigrationEvidence, Get-RepoSkillMigrationGitState, Get-UserSharedSkillsReadiness, Assert-RepoAndUserRootsDistinct

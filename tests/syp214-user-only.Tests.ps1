@@ -459,6 +459,148 @@ else{
     return $childScript.Replace('__SYP214_NATIVE_HANDLE_EVIDENCE__',$nativeEvidenceSource)
 }
 
+function New-Syp214RenameCrashChildScript {
+    return @'
+param([string]$BootstrapScriptPath,[string]$TargetRoot,[string]$UserHome,[string]$RecoveryRoot,[string]$RelativePath,[string]$WriterKind,[string]$MarkerPath,[string]$CompletionPath)
+$ErrorActionPreference='Stop'
+$bootstrapText=[IO.File]::ReadAllText($BootstrapScriptPath)
+$prefixEnd=$bootstrapText.IndexOf('$syncStartPath = ',[StringComparison]::Ordinal)
+if($prefixEnd -lt 0){throw 'Could not find the bootstrap definition prefix boundary.'}
+$bootstrapRoot=Split-Path -Parent $BootstrapScriptPath
+$bootstrapRootLiteral="'"+$bootstrapRoot.Replace("'","''")+"'"
+$prefixText=$bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
+. ([scriptblock]::Create($prefixText)) -TargetRoot $TargetRoot -UserHome $UserHome -GitExecutable 'git'
+$backupRoot=Join-Path $RecoveryRoot 'target-backup'
+$journalPath=Join-Path $backupRoot 'skill-migration.json'
+$snapshot=New-TargetMutationSnapshot -TargetRoot $TargetRoot -RelativePaths @($RelativePath) -BackupRoot $backupRoot
+$excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $TargetRoot
+$gitState=Get-RepoSkillMigrationGitState -Repository $TargetRoot -GitExecutable 'git'
+Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot -Path $journalPath -GitState $gitState -Phase 'mutating'
+$script:SkillMigrationJournalContext=[pscustomobject]@{Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState}
+$realRename=(Get-Command Invoke-AtomicFilePublicationRename -CommandType Function).ScriptBlock
+$processId=$PID
+$dieAfterTombstone={
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle,[string]$DestinationPath)
+    & $realRename -Handle $Handle -DestinationPath $DestinationPath
+    if([IO.Path]::GetFileName($DestinationPath) -match '-[0-9a-f]{32}-tomb$'){
+        [IO.File]::WriteAllText($MarkerPath,$DestinationPath,[Text.UTF8Encoding]::new($false))
+        Stop-Process -Id $processId -Force
+    }
+}.GetNewClosure()
+Set-Item -Path 'Function:\Invoke-AtomicFilePublicationRename' -Value $dieAfterTombstone
+if($WriterKind -ceq 'target'){
+    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $RelativePath -Bytes ([Text.Encoding]::UTF8.GetBytes('# staged replacement'+"`n"))
+}
+else{
+    Set-ManagedGitInfoExclude -Repository $TargetRoot -ManagedPaths @($RelativePath) -Snapshot $excludeSnapshot
+}
+[IO.File]::WriteAllText($CompletionPath,'publication unexpectedly returned',[Text.UTF8Encoding]::new($false))
+'@
+}
+
+function New-Syp214RestoreCrashChildScript {
+    return @'
+param([string]$BootstrapScriptPath,[string]$TargetRoot,[string]$UserHome,[string]$JournalPath,[string]$CrashAt,[string]$MarkerPath,[string]$CompletionPath)
+$ErrorActionPreference='Stop'
+$bootstrapText=[IO.File]::ReadAllText($BootstrapScriptPath)
+$prefixEnd=$bootstrapText.IndexOf('$syncStartPath = ',[StringComparison]::Ordinal)
+if($prefixEnd -lt 0){throw 'Could not find the bootstrap definition prefix boundary.'}
+$bootstrapRoot=Split-Path -Parent $BootstrapScriptPath
+$bootstrapRootLiteral="'"+$bootstrapRoot.Replace("'","''")+"'"
+$prefixText=$bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
+. ([scriptblock]::Create($prefixText)) -TargetRoot $TargetRoot -UserHome $UserHome -GitExecutable 'git'
+$processId=$PID
+if($CrashAt -ceq 'restore-first-rename'){
+    $realRename=(Get-Command Invoke-AtomicFilePublicationRename -CommandType Function).ScriptBlock
+    $dieAfterOldRename={
+        param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle,[string]$DestinationPath)
+        & $realRename -Handle $Handle -DestinationPath $DestinationPath
+        if([IO.Path]::GetFileName($DestinationPath) -match '-[0-9a-f]{32}-tomb$'){
+            [IO.File]::WriteAllText($MarkerPath,$DestinationPath,[Text.UTF8Encoding]::new($false))
+            Stop-Process -Id $processId -Force
+        }
+    }.GetNewClosure()
+    Set-Item -Path 'Function:\Invoke-AtomicFilePublicationRename' -Value $dieAfterOldRename
+}
+elseif($CrashAt -ceq 'restore-stage-cleanup'){
+    $realRemove=(Get-Command Remove-VerifiedPublicationFile -CommandType Function).ScriptBlock
+    $dieAfterStageRemoval={
+        param([string]$Root,[string]$Path,[string]$RelativePath,[string]$Kind,[string]$Identity,[string]$Sha256,[long]$Length)
+        & $realRemove -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind `
+            -Identity $Identity -Sha256 $Sha256 -Length $Length
+        if([IO.Path]::GetFileName($Path) -match '-[0-9a-f]{32}-stage$'){
+            [IO.File]::WriteAllText($MarkerPath,$Path,[Text.UTF8Encoding]::new($false))
+            Stop-Process -Id $processId -Force
+        }
+    }.GetNewClosure()
+    Set-Item -Path 'Function:\Remove-VerifiedPublicationFile' -Value $dieAfterStageRemoval
+}
+else{throw 'Unknown SYP214 recovery crash seam.'}
+Restore-SkillMigrationJournal -Repository $TargetRoot -Path $JournalPath | Out-Null
+[IO.File]::WriteAllText($CompletionPath,'recovery unexpectedly completed',[Text.UTF8Encoding]::new($false))
+'@
+}
+
+function Invoke-Syp214RestoreCrashChild {
+    param([string]$RecoveryRoot,[string]$TargetRoot,[string]$UserHome,[string]$JournalPath,[string]$CrashAt)
+    $childScriptPath=Join-Path $RecoveryRoot 'restore-crash-child.ps1'
+    $markerPath=Join-Path $RecoveryRoot ($CrashAt+'.marker')
+    $completionPath=Join-Path $RecoveryRoot ($CrashAt+'.completion')
+    $stdoutPath=Join-Path $RecoveryRoot ($CrashAt+'.stdout.log')
+    $stderrPath=Join-Path $RecoveryRoot ($CrashAt+'.stderr.log')
+    [IO.File]::WriteAllText($childScriptPath,(New-Syp214RestoreCrashChildScript),[Text.UTF8Encoding]::new($false))
+    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$childScriptPath,
+        $script:BootstrapScript,$TargetRoot,$UserHome,$JournalPath,$CrashAt,$markerPath,$completionPath)
+    $argumentLine=[string]::Join(' ',@($arguments | ForEach-Object { '"'+([string]$_).Replace('"','\"')+'"' }))
+    $process=Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $argumentLine `
+        -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    if(-not $process.WaitForExit(30000)){
+        Stop-Process -Id $process.Id -Force
+        throw "SYP214 $CrashAt recovery child exceeded its bounded 30-second wait."
+    }
+    $process.Refresh()
+    return [pscustomobject][ordered]@{ExitCode=$process.ExitCode;MarkerPath=$markerPath
+        MarkerExists=(Test-Path -LiteralPath $markerPath -PathType Leaf)
+        CompletionExists=(Test-Path -LiteralPath $completionPath -PathType Leaf)
+        MarkerValue=$(if(Test-Path -LiteralPath $markerPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 -LiteralPath $markerPath}else{$null})
+        StdoutPath=$stdoutPath;StderrPath=$stderrPath}
+}
+
+function Invoke-Syp214RenameCrashChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RecoveryRoot,
+        [Parameter(Mandatory=$true)][string]$TargetRoot,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][string]$WriterKind
+    )
+    $childScriptPath=Join-Path $RecoveryRoot 'rename-crash-child.ps1'
+    $markerPath=Join-Path $RecoveryRoot 'tombstone-renamed.marker'
+    $completionPath=Join-Path $RecoveryRoot 'publication-completed.marker'
+    $stdoutPath=Join-Path $RecoveryRoot 'child.stdout.log'
+    $stderrPath=Join-Path $RecoveryRoot 'child.stderr.log'
+    [IO.File]::WriteAllText($childScriptPath,(New-Syp214RenameCrashChildScript),[Text.UTF8Encoding]::new($false))
+    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$childScriptPath,
+        $script:BootstrapScript,$TargetRoot,$UserHome,$RecoveryRoot,$RelativePath,$WriterKind,$markerPath,$completionPath)
+    $argumentLine=[string]::Join(' ',@($arguments | ForEach-Object { '"'+([string]$_).Replace('"','\"')+'"' }))
+    $process=Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $argumentLine `
+        -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    if(-not $process.WaitForExit(30000)){
+        Stop-Process -Id $process.Id -Force
+        throw 'SYP214 rename crash child exceeded its bounded 30-second wait.'
+    }
+    $process.Refresh()
+    return [pscustomobject][ordered]@{
+        ExitCode=$process.ExitCode
+        MarkerPath=$markerPath
+        MarkerExists=(Test-Path -LiteralPath $markerPath -PathType Leaf)
+        CompletionExists=(Test-Path -LiteralPath $completionPath -PathType Leaf)
+        TombstonePath=$(if(Test-Path -LiteralPath $markerPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 -LiteralPath $markerPath}else{$null})
+        StdoutPath=$stdoutPath
+        StderrPath=$stderrPath
+    }
+}
+
 function Invoke-Syp214Bootstrap {
     param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration, [switch]$CaptureFailure)
     New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
@@ -475,6 +617,79 @@ function Invoke-Syp214Bootstrap {
     }
     if ($exitCode -ne 0) { throw ($output -join "`n") }
     return $output
+}
+
+function Invoke-Syp214ManifestIntentExitChild {
+    param(
+        [Parameter(Mandatory=$true)][string]$RecoveryRoot,
+        [Parameter(Mandatory=$true)][string]$SourceArchivePath,
+        [Parameter(Mandatory=$true)][string]$TargetRoot,
+        [Parameter(Mandatory=$true)][string]$ConfigurationPath,
+        [Parameter(Mandatory=$true)][string]$ProvenancePath,
+        [Parameter(Mandatory=$true)][string]$UserHome
+    )
+    $childScriptPath=Join-Path $RecoveryRoot 'manifest-intent-exit-child.ps1'
+    $markerPath=Join-Path $RecoveryRoot 'manifest-intent.marker.json'
+    $stdoutPath=Join-Path $RecoveryRoot 'manifest-intent.stdout.log'
+    $stderrPath=Join-Path $RecoveryRoot 'manifest-intent.stderr.log'
+    $bootstrapText=[IO.File]::ReadAllText($script:BootstrapScript)
+    $prefixEnd=$bootstrapText.IndexOf('$syncStartPath = ',[StringComparison]::Ordinal)
+    if($prefixEnd -lt 0){throw 'Could not find the bootstrap definition prefix boundary.'}
+    $bootstrapRoot=Split-Path -Parent $script:BootstrapScript
+    $bootstrapRootLiteral="'"+$bootstrapRoot.Replace("'","''")+"'"
+    $prefixText=$bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
+    $markerLiteral="'"+$markerPath.Replace("'","''")+"'"
+    $hookTemplate=@'
+$realRename=(Get-Command Invoke-AtomicFilePublicationRename -CommandType Function).ScriptBlock
+$markerPath=__SYP214_MARKER_PATH__
+$exitAtManifestIntent={
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle,[string]$DestinationPath)
+    $context=$script:SkillMigrationJournalContext
+    $manifestState=$null
+    if($null -ne $context){
+        $manifestState=@($context.Snapshot.FileStates | Where-Object { [string]$_.RelativePath -ceq $manifestRelativePath } | Select-Object -First 1)[0]
+    }
+    if($null -ne $manifestState -and $null -ne $manifestState.Publication -and
+        [string]$manifestState.Publication.direction -ceq 'apply'){
+        $expectedDestination=[IO.Path]::GetFullPath((Join-Path (Split-Path -Parent ([string]$manifestState.TargetPath)) `
+            ([string]$manifestState.Publication.tombstoneLeaf)))
+        if([StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($DestinationPath),$expectedDestination)){
+            [ordered]@{journalPath=[string]$context.Path;relativePath=[string]$manifestState.RelativePath
+                direction=[string]$manifestState.Publication.direction
+                expectedOldIdentity=[string]$manifestState.Publication.expectedOldIdentity
+                stageIdentity=[string]$manifestState.Publication.stageIdentity} |
+                ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $markerPath -Encoding UTF8
+            exit 0
+        }
+    }
+    & $realRename -Handle $Handle -DestinationPath $DestinationPath
+}
+Set-Item -Path 'Function:\Invoke-AtomicFilePublicationRename' -Value $exitAtManifestIntent
+'@
+    $hookText=$hookTemplate.Replace('__SYP214_MARKER_PATH__',$markerLiteral)
+    $childText=$prefixText+"`n"+$hookText+"`n"+$bootstrapText.Substring($prefixEnd)
+    [IO.File]::WriteAllText($childScriptPath,$childText,[Text.UTF8Encoding]::new($false))
+    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$childScriptPath,
+        '-SourceArchivePath',$SourceArchivePath,'-TargetRoot',$TargetRoot,'-ConfigurationPath',$ConfigurationPath,
+        '-ProvenancePath',$ProvenancePath,'-GitExecutable','git','-UserHome',$UserHome)
+    $argumentLine=[string]::Join(' ',@($arguments | ForEach-Object { '"'+([string]$_).Replace('"','\"')+'"' }))
+    $process=Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $argumentLine `
+        -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    if(-not $process.WaitForExit(120000)){
+        Stop-Process -Id $process.Id -Force
+        $stdoutDiagnostic=if(Test-Path -LiteralPath $stdoutPath -PathType Leaf){[IO.File]::ReadAllText($stdoutPath)}else{''}
+        $stderrDiagnostic=if(Test-Path -LiteralPath $stderrPath -PathType Leaf){[IO.File]::ReadAllText($stderrPath)}else{''}
+        if($stdoutDiagnostic.Length -gt 1200){$stdoutDiagnostic=$stdoutDiagnostic.Substring(0,1200)}
+        if($stderrDiagnostic.Length -gt 1200){$stderrDiagnostic=$stderrDiagnostic.Substring(0,1200)}
+        throw ("SYP214 manifest-intent child exceeded its bounded 120-second wait. stdout: {0}; stderr: {1}" -f $stdoutDiagnostic,$stderrDiagnostic)
+    }
+    $process.Refresh()
+    $marker=$null
+    if(Test-Path -LiteralPath $markerPath -PathType Leaf){
+        $marker=Get-Content -Raw -Encoding UTF8 -LiteralPath $markerPath | ConvertFrom-Json
+    }
+    return [pscustomobject][ordered]@{ExitCode=$process.ExitCode;MarkerPath=$markerPath;MarkerExists=($null -ne $marker)
+        Marker=$marker;StdoutPath=$stdoutPath;StderrPath=$stderrPath}
 }
 
 function Get-Syp214FileInventory {
@@ -1119,7 +1334,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             $script:SkillMigrationJournalContext=[pscustomobject]@{
                 Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
             }
-            $realWriter=(Get-Command Write-TargetMutationStreamBytes -CommandType Function).ScriptBlock
+            $realWriter=(Get-Command ($writerPath -replace '^Function:\\','') -CommandType Function).ScriptBlock
             $interruptionSentinel='SYP214 writer interruption '+[guid]::NewGuid().ToString('N')
             $interruptAfterPrefix={
                 param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
@@ -1525,6 +1740,566 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             $ErrorActionPreference=$previousErrorActionPreference
             Set-StrictMode -Off
             if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-process-crash-'}
+        }
+    }
+
+    # Scenario: The writer process dies after the original final file is renamed to its journaled tombstone.
+    # Purpose: Reconcile the schema-v2 missing window by restoring the exact original file and retrying safely.
+    It 'InterT80_recovers_<WriterKind>_after_process_death_in_the_old_to_tombstone_window' -TestCases @(@{WriterKind='target'},@{WriterKind='exclude'}) {
+        param($WriterKind)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-rename-window-'+[guid]::NewGuid().ToString('N'))
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        if(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $originalExclude=[IO.File]::ReadAllBytes($excludePath)
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $childProcess=$null
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            # When
+            $child=Invoke-Syp214RenameCrashChild -RecoveryRoot $recoveryRoot -TargetRoot $targetRoot `
+                -UserHome $userHome -RelativePath $relativePath -WriterKind $WriterKind
+            # Then / When
+            $child.MarkerExists | Should Be $true
+            $child.CompletionExists | Should Be $false
+            $journalPath=Join-Path (Join-Path $recoveryRoot 'target-backup') 'skill-migration.json'
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $journal.schemaVersion | Should Be 2
+            $journal.phase | Should Be 'mutating'
+            $publication=if($WriterKind -ceq 'target'){
+                @($journal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0].publication
+            }else{$journal.exclude.publication}
+            $publication | Should Not BeNullOrEmpty
+            $writerPath=if($WriterKind -ceq 'target'){$targetPath}else{$excludePath}
+            $parentPath=Split-Path -Parent $writerPath
+            $stagePath=Join-Path $parentPath ([string]$publication.stageLeaf)
+            $tombstonePath=Join-Path $parentPath ([string]$publication.tombstoneLeaf)
+            [IO.Path]::GetFullPath($child.TombstonePath) | Should Be ([IO.Path]::GetFullPath($tombstonePath))
+            Test-Path -LiteralPath $writerPath | Should Be $false
+            Test-Path -LiteralPath $stagePath -PathType Leaf | Should Be $true
+            Test-Path -LiteralPath $tombstonePath -PathType Leaf | Should Be $true
+            $oldBytes=if($WriterKind -ceq 'target'){$originalTarget}else{$originalExclude}
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($tombstonePath)) -Right $oldBytes) | Should Be $true
+            $stageBytes=[IO.File]::ReadAllBytes($stagePath)
+            (Get-ByteArraySha256 -Bytes $stageBytes) | Should Be ([string]$publication.newSha256)
+            $recoveryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryFailure=$_.Exception.Message }
+            $recoveryFailure | Should BeNullOrEmpty
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($writerPath)) -Right $oldBytes) | Should Be $true
+            Test-Path -LiteralPath $stagePath | Should Be $false
+            Test-Path -LiteralPath $tombstonePath | Should Be $false
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        }
+        finally {
+            if($childProcess -and -not $childProcess.HasExited){Stop-Process -Id $childProcess.Id -Force -ErrorAction SilentlyContinue}
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-rename-window-'
+        }
+    }
+
+    # Scenario: Independent recovery dies after its first rename, then again after removing its journaled stage.
+    # Purpose: Re-enter the durable restore intent from both the tombstone gap and the completed-old-file cleanup state.
+    It 'InterT96_reenters_<WriterKind>_restore_after_two_recovery_process_deaths' -TestCases @(@{WriterKind='target'},@{WriterKind='exclude'}) {
+        param($WriterKind)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-restore-reentry-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        if(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            [IO.File]::WriteAllText($excludePath,"# original project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $originalExclude=[IO.File]::ReadAllBytes($excludePath)
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            if($WriterKind -ceq 'target'){
+                Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath `
+                    -Bytes ([Text.Encoding]::UTF8.GetBytes('# applied restore-reentry bytes'+"`n"))
+            }else{
+                Set-ManagedGitInfoExclude -Repository $targetRoot -ManagedPaths @($relativePath) -Snapshot $excludeSnapshot
+            }
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=$null
+            $appliedTargetBytes=[IO.File]::ReadAllBytes($targetPath)
+            $appliedExcludeBytes=[IO.File]::ReadAllBytes($excludePath)
+            # When
+            $firstDeath=Invoke-Syp214RestoreCrashChild -RecoveryRoot $recoveryRoot -TargetRoot $targetRoot `
+                -UserHome $userHome -JournalPath $journalPath -CrashAt 'restore-first-rename'
+            # Then / When
+            $firstDeath.MarkerExists | Should Be $true
+            $firstDeath.CompletionExists | Should Be $false
+            $journalAfterFirstDeath=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $firstPublication=if($WriterKind -ceq 'target'){
+                @($journalAfterFirstDeath.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0].publication
+            }else{$journalAfterFirstDeath.exclude.publication}
+            [string]$firstPublication.direction | Should Be 'restore'
+            $finalPath=if($WriterKind -ceq 'target'){$targetPath}else{$excludePath}
+            $parentPath=Split-Path -Parent $finalPath
+            $restoreStagePath=Join-Path $parentPath ([string]$firstPublication.stageLeaf)
+            $restoreTombstonePath=Join-Path $parentPath ([string]$firstPublication.tombstoneLeaf)
+            Test-Path -LiteralPath $finalPath | Should Be $false
+            Test-Path -LiteralPath $restoreStagePath -PathType Leaf | Should Be $true
+            Test-Path -LiteralPath $restoreTombstonePath -PathType Leaf | Should Be $true
+            (Get-ByteArraySha256 ([IO.File]::ReadAllBytes($restoreStagePath))) | Should Be ([string]$firstPublication.newSha256)
+            $secondDeath=Invoke-Syp214RestoreCrashChild -RecoveryRoot $recoveryRoot -TargetRoot $targetRoot `
+                -UserHome $userHome -JournalPath $journalPath -CrashAt 'restore-stage-cleanup'
+            $secondDeath.MarkerExists | Should Be $true
+            $secondDeath.CompletionExists | Should Be $false
+            Test-Path -LiteralPath $restoreStagePath | Should Be $false
+            Test-Path -LiteralPath $restoreTombstonePath | Should Be $false
+            $expectedIntervalBytes=if($WriterKind -ceq 'target'){$appliedTargetBytes}else{$appliedExcludeBytes}
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($finalPath)) -Right $expectedIntervalBytes) | Should Be $true
+            $staleJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $stalePublication=if($WriterKind -ceq 'target'){
+                @($staleJournal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0].publication
+            }else{$staleJournal.exclude.publication}
+            [string]$stalePublication.direction | Should Be 'restore'
+            Test-Path -LiteralPath ([string]$secondDeath.MarkerValue) | Should Be $false
+            # When / Then
+            $retryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $retryFailure=$_.Exception.Message }
+            $retryFailure | Should BeNullOrEmpty
+            $expectedOriginalBytes=if($WriterKind -ceq 'target'){$originalTarget}else{$originalExclude}
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($finalPath)) -Right $expectedOriginalBytes) | Should Be $true
+            $finalJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $finalJournal.phase | Should Be 'recovered'
+            $finalState=if($WriterKind -ceq 'target'){@($finalJournal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0]}else{$finalJournal.exclude}
+            $finalState.publication | Should BeNullOrEmpty
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        }
+        finally {
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-restore-reentry-'}
+        }
+    }
+
+    # Scenario: A durable schema-v2 deletion intent records the managed target as missing before restoration starts.
+    # Purpose: Publish verified original bytes through an absent-old no-replace stage and accept a legal missing restore intent.
+    It 'InterT97_restores_original_bytes_from_a_schema_v2_missing_applied_state' {
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-missing-restore-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            # When
+            Remove-TargetMutationFile -Snapshot $snapshot -RelativePath $relativePath
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $missingIntent=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $missingState=@($missingIntent.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0]
+            $missingState.originalType | Should Be 'file'
+            $missingState.appliedType | Should Be 'missing'
+            $missingState.mutationApplied | Should Be $true
+            Test-Path -LiteralPath $targetPath | Should Be $false
+            $script:SkillMigrationJournalContext=$null
+            # Then
+            $recoveryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryFailure=$_.Exception.Message }
+            $recoveryFailure | Should BeNullOrEmpty
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalTarget) | Should Be $true
+            $restoredJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $restoredJournal.schemaVersion | Should Be 2
+            $restoredJournal.phase | Should Be 'recovered'
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        }
+        finally {
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-missing-restore-'}
+        }
+    }
+
+    # Scenario: A schema-v1 target or exclude file/missing state lacks recorded historical identity and DACL metadata.
+    # Purpose: Retry staged whole-file recovery after a prefix fault without fabricating v2 history or claiming a missing final.
+    It 'InterT98_recovers_schema_v1_<WriterKind>_<AppliedType>_without_inventing_historic_metadata_after_a_prefix_fault' -TestCases @(
+        @{WriterKind='target';AppliedType='file'},@{WriterKind='target';AppliedType='missing'},@{WriterKind='exclude';AppliedType='file'}) {
+        param($WriterKind,$AppliedType)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-v1-restore-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $appliedBytes=[Text.Encoding]::UTF8.GetBytes('# legacy schema-v1 applied bytes'+"`n")
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        if(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            [IO.File]::WriteAllText($excludePath,"# schema-v1 existing exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $originalExclude=[IO.File]::ReadAllBytes($excludePath)
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $writerPath=if($WriterKind -ceq 'target'){'Function:\Write-TargetMutationStreamBytes'}else{'Function:\Write-GitInfoExcludeStreamBytes'}
+        $realWriter=$null
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            if($WriterKind -ceq 'target' -and $AppliedType -ceq 'file'){
+                Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $appliedBytes
+            }elseif($WriterKind -ceq 'target'){
+                Remove-TargetMutationFile -Snapshot $snapshot -RelativePath $relativePath
+            }else{
+                Set-ManagedGitInfoExclude -Repository $targetRoot -ManagedPaths @($relativePath) -Snapshot $excludeSnapshot
+            }
+            $targetStateMutation=$WriterKind -ceq 'target'
+            $legacyState=[ordered]@{relativePath=$relativePath;originalType='file'
+                backupName=(Split-Path -Leaf ([string]$snapshot.FileStates[0].BackupPath))
+                backupSha256=(Get-RawContentHash ([string]$snapshot.FileStates[0].BackupPath))
+                mutationApplied=$targetStateMutation;appliedType=$(if($targetStateMutation){$AppliedType}else{$null})
+                appliedBase64=$(if($targetStateMutation -and $AppliedType -ceq 'file'){[Convert]::ToBase64String($appliedBytes)}else{$null})}
+            $legacyExcludeAppliedBytes=if($WriterKind -ceq 'exclude'){[IO.File]::ReadAllBytes($excludePath)}else{$null}
+            $legacyExclude=[ordered]@{Path=$excludeSnapshot.Path;Repository=$excludeSnapshot.Repository
+                MutationApplied=($WriterKind -ceq 'exclude');Existed=[bool]$excludeSnapshot.Existed
+                Bytes=$excludeSnapshot.Bytes;AppliedBytes=$legacyExcludeAppliedBytes}
+            $legacyJournal=[ordered]@{schemaVersion=1;targetRoot=$targetRoot;phase='mutating';head=$gitState.head
+                indexSha256=$gitState.indexSha256;states=@($legacyState);exclude=$legacyExclude}
+            [IO.File]::WriteAllText($journalPath,($legacyJournal | ConvertTo-Json -Depth 12)+"`n",[Text.UTF8Encoding]::new($false))
+            $script:SkillMigrationJournalContext=$null
+            if($AppliedType -ceq 'file'){
+                $liveHandle=if($WriterKind -ceq 'target'){
+                    [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($targetRoot,$targetPath,$relativePath)
+                }else{[CodexAiInstructions.NativeFileMutation]::OpenStandaloneForMetadata($excludePath)}
+                try {
+                    $liveDacl=Get-FileDaclJournalRecord -Handle $liveHandle
+                    $liveReadOnly=[CodexAiInstructions.NativeFileMutation]::GetReadOnly($liveHandle)
+                }finally{$liveHandle.Dispose()}
+            }
+            $faultSentinel='SYP214 legacy v1 prefix fault '+[guid]::NewGuid().ToString('N')
+            $prefixFault={
+                param([IO.FileStream]$Stream,[byte[]]$Bytes)
+                $Stream.Position=0
+                $Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $faultSentinel
+            }.GetNewClosure()
+            $realWriter=(Get-Command ($writerPath -replace '^Function:\\','') -CommandType Function).ScriptBlock
+            Set-Item -Path $writerPath -Value $prefixFault
+            # When
+            $prefixFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $prefixFailure=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+            # Then / When
+            $prefixFailure | Should Match ([regex]::Escape($faultSentinel))
+            $afterFault=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $afterFault.schemaVersion | Should Be 1
+            $publishedPath=if($WriterKind -ceq 'target'){$targetPath}else{$excludePath}
+            $expectedAppliedBytes=if($WriterKind -ceq 'target'){$appliedBytes}else{$legacyExcludeAppliedBytes}
+            if($WriterKind -ceq 'target' -and $AppliedType -ceq 'missing'){
+                Test-Path -LiteralPath $publishedPath | Should Be $false
+            }else{
+                (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($publishedPath)) -Right $expectedAppliedBytes) | Should Be $true
+            }
+            if($WriterKind -ceq 'target'){
+                $afterFaultState=@($afterFault.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0]
+                $afterFaultState.appliedType | Should Be $AppliedType
+                $afterFaultState.PSObject.Properties['publication'] | Should BeNullOrEmpty
+                $afterFaultState.PSObject.Properties['originalDacl'] | Should BeNullOrEmpty
+                $afterFaultState.PSObject.Properties['originalIdentity'] | Should BeNullOrEmpty
+            }else{
+                $afterFault.exclude.MutationApplied | Should Be $true
+                $afterFault.exclude.PSObject.Properties['publication'] | Should BeNullOrEmpty
+                $afterFault.exclude.PSObject.Properties['dacl'] | Should BeNullOrEmpty
+                $afterFault.exclude.PSObject.Properties['originalIdentity'] | Should BeNullOrEmpty
+            }
+            $stageParent=Split-Path -Parent $publishedPath
+            $unrecordedStages=@(Get-ChildItem -LiteralPath $stageParent -Force -File -Filter '.syp214-*-stage')
+            $unrecordedStages.Count | Should BeGreaterThan 0
+            [byte[]]$prefixBytes=[IO.File]::ReadAllBytes($unrecordedStages[0].FullName)
+            $prefixBytes.Length | Should Be 3
+            $script:SkillMigrationJournalContext=$null
+            $retryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $retryFailure=$_.Exception.Message }
+            $retryFailure | Should BeNullOrEmpty
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalTarget) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $originalExclude) | Should Be $true
+            Test-Path -LiteralPath $unrecordedStages[0].FullName -PathType Leaf | Should Be $true
+            if($AppliedType -ceq 'file'){
+                $liveAfterHandle=if($WriterKind -ceq 'target'){
+                    [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($targetRoot,$targetPath,$relativePath)
+                }else{[CodexAiInstructions.NativeFileMutation]::OpenStandaloneForMetadata($excludePath)}
+                try {
+                    $afterDacl=Get-FileDaclJournalRecord -Handle $liveAfterHandle
+                    [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                        (ConvertFrom-FileDaclJournalRecord $liveDacl),(ConvertFrom-FileDaclJournalRecord $afterDacl)) | Should Be $true
+                    [CodexAiInstructions.NativeFileMutation]::GetReadOnly($liveAfterHandle) | Should Be ([bool]$liveReadOnly)
+                }finally{$liveAfterHandle.Dispose()}
+            }
+            $finalJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $finalJournal.schemaVersion | Should Be 1
+            $finalJournal.phase | Should Be 'recovered'
+            $finalState=@($finalJournal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0]
+            $finalState.PSObject.Properties['originalDacl'] | Should BeNullOrEmpty
+            $finalState.PSObject.Properties['originalIdentity'] | Should BeNullOrEmpty
+            $finalState.PSObject.Properties['publication'] | Should BeNullOrEmpty
+            $finalJournal.exclude.PSObject.Properties['dacl'] | Should BeNullOrEmpty
+            $finalJournal.exclude.PSObject.Properties['originalIdentity'] | Should BeNullOrEmpty
+            $finalJournal.exclude.PSObject.Properties['publication'] | Should BeNullOrEmpty
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        }
+        finally {
+            if($realWriter){Set-Item -Path $writerPath -Value $realWriter}
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-v1-restore-'}
+        }
+    }
+
+    # Scenario: A completed stage is paired with a later unrelated final or is consumed and later deleted.
+    # Purpose: Fail closed on both ambiguous states while preserving the unrelated final and journaled tombstone.
+    It 'InterT90_rejects_<CompetingState>_without_clobbering_unrelated_or_owned_bytes' -TestCases @(
+        @{CompetingState='unrelated-final'},@{CompetingState='consumed-stage-then-deleted-final'}) {
+        param($CompetingState)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-rename-conflict-'+[guid]::NewGuid().ToString('N'))
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        if(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $originalBytes=[IO.File]::ReadAllBytes($targetPath)
+        $childProcess=$null
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            # When
+            $child=Invoke-Syp214RenameCrashChild -RecoveryRoot $recoveryRoot -TargetRoot $targetRoot `
+                -UserHome $userHome -RelativePath $relativePath -WriterKind 'target'
+            $child.MarkerExists | Should Be $true
+            $child.CompletionExists | Should Be $false
+            $journalPath=Join-Path (Join-Path $recoveryRoot 'target-backup') 'skill-migration.json'
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $publication=@($journal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })[0].publication
+            $stagePath=Join-Path (Split-Path -Parent $targetPath) ([string]$publication.stageLeaf)
+            $tombstonePath=Join-Path (Split-Path -Parent $targetPath) ([string]$publication.tombstoneLeaf)
+            $expectedStageBytes=[IO.File]::ReadAllBytes($stagePath)
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($tombstonePath)) -Right $originalBytes) | Should Be $true
+            if($CompetingState -ceq 'unrelated-final'){
+                $unrelatedBytes=[Text.Encoding]::UTF8.GetBytes('unrelated final collision'+"`n")
+                [IO.File]::WriteAllBytes($targetPath,$unrelatedBytes)
+            }
+            else{
+                Move-Item -LiteralPath $stagePath -Destination $targetPath
+                Remove-Item -LiteralPath $targetPath -Force
+            }
+            # When / Then
+            $recoveryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryFailure=$_.Exception.Message }
+            $recoveryFailure | Should Not BeNullOrEmpty
+            $afterJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $afterJournal.phase | Should Be 'mutating'
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($tombstonePath)) -Right $originalBytes) | Should Be $true
+            if($CompetingState -ceq 'unrelated-final'){
+                (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $unrelatedBytes) | Should Be $true
+                (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($stagePath)) -Right $expectedStageBytes) | Should Be $true
+            }
+            else{
+                Test-Path -LiteralPath $targetPath | Should Be $false
+                Test-Path -LiteralPath $stagePath | Should Be $false
+            }
+        }
+        finally {
+            if($childProcess -and -not $childProcess.HasExited){Stop-Process -Id $childProcess.Id -Force -ErrorAction SilentlyContinue}
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-rename-conflict-'
+        }
+    }
+
+    # Scenario: A flushed prefix faults while publishing a target or exclude with either inherited or protected DACLs.
+    # Purpose: Apply the original DACL before staged payload bytes and preserve the original final DACL and read-only flag.
+    It 'InterT95_preserves_<Protection>_DACL_and_readonly_after_<WriterKind>_staging_prefix_fault' -TestCases @(
+        @{Protection='inherited';Protected=$false;WriterKind='target'},
+        @{Protection='protected';Protected=$true;WriterKind='target'},
+        @{Protection='inherited';Protected=$false;WriterKind='exclude'},
+        @{Protection='protected';Protected=$true;WriterKind='exclude'}) {
+        param($Protection,$Protected,$WriterKind)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-dacl-prefix-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $recoveryRoot,$userHome | Out-Null
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        if(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $writerPath=if($WriterKind -ceq 'target'){'Function:\Write-TargetMutationStreamBytes'}else{'Function:\Write-GitInfoExcludeStreamBytes'}
+        $filePath=if($WriterKind -ceq 'target'){$targetPath}else{$excludePath}
+        $fileAcl=Get-Acl -LiteralPath $filePath
+        $fileAcl.SetAccessRuleProtection([bool]$Protected,$true)
+        Set-Acl -LiteralPath $filePath -AclObject $fileAcl
+        [IO.File]::SetAttributes($filePath,[IO.File]::GetAttributes($filePath) -bor [IO.FileAttributes]::ReadOnly)
+        $originalBytes=[IO.File]::ReadAllBytes($filePath)
+        $originalAttributes=[IO.File]::GetAttributes($filePath)
+        $realWriter=$null
+        $recoveryRootCreated=$false
+        try {
+            # When
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            $expectedDacl=if($WriterKind -ceq 'target'){
+                @($snapshot.FileStates | Where-Object { [string]$_.RelativePath -ceq $relativePath })[0].OriginalDacl
+            }else{$excludeSnapshot.DaclRecord}
+            $expectedNativeDacl=ConvertFrom-FileDaclJournalRecord $expectedDacl
+            $writerWitness=[pscustomobject]@{called=$false;daclMatched=$false;protected=$null}
+            $faultSentinel='SYP214 DACL staging prefix fault '+[guid]::NewGuid().ToString('N')
+            $faultAfterDaclCheck={
+                param([IO.FileStream]$Stream,[byte[]]$Bytes)
+                $writerWitness.called=$true
+                $stageDacl=[CodexAiInstructions.NativeFileMutation]::CaptureDacl($Stream.SafeFileHandle)
+                $writerWitness.daclMatched=[CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                    $expectedNativeDacl,$stageDacl)
+                $writerWitness.protected=[bool]$stageDacl.isProtected
+                $Stream.Position=0
+                $Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $faultSentinel
+            }.GetNewClosure()
+            $realWriter=(Get-Command ($writerPath -replace '^Function:\\','') -CommandType Function).ScriptBlock
+            Set-Item -Path $writerPath -Value $faultAfterDaclCheck
+            $writeFailure=''
+            try {
+                if($WriterKind -ceq 'target'){
+                    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath `
+                        -Bytes ([Text.Encoding]::UTF8.GetBytes('# intended replacement'+"`n"))
+                }else{
+                    Set-ManagedGitInfoExclude -Repository $targetRoot -ManagedPaths @($relativePath) -Snapshot $excludeSnapshot
+                }
+            }
+            catch { $writeFailure=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+            # Then
+            $writeFailure | Should Match ([regex]::Escape($faultSentinel))
+            $writerWitness.called | Should Be $true
+            $writerWitness.daclMatched | Should Be $true
+            $writerWitness.protected | Should Be ([bool]$Protected)
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($filePath)) -Right $originalBytes) | Should Be $true
+            ([IO.File]::GetAttributes($filePath) -band [IO.FileAttributes]::ReadOnly) -ne 0 | Should Be $true
+            $finalHandle=if($WriterKind -ceq 'target'){
+                [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($targetRoot,$filePath,$relativePath)
+            }else{[CodexAiInstructions.NativeFileMutation]::OpenStandaloneForMetadata($filePath)}
+            try {
+                $finalDacl=Get-FileDaclJournalRecord -Handle $finalHandle
+                [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                    (ConvertFrom-FileDaclJournalRecord $expectedDacl),(ConvertFrom-FileDaclJournalRecord $finalDacl)) | Should Be $true
+                [CodexAiInstructions.NativeFileMutation]::GetReadOnly($finalHandle) | Should Be $true
+            }
+            finally { $finalHandle.Dispose() }
+            [byte[]]$finalBytes=[IO.File]::ReadAllBytes($filePath)
+            (Get-ByteArraySha256 -Bytes $finalBytes) | Should Be (Get-ByteArraySha256 -Bytes $originalBytes)
+            [bool]($originalAttributes -band [IO.FileAttributes]::ReadOnly) | Should Be $true
+        }
+        finally {
+            if($realWriter){Set-Item -Path $writerPath -Value $realWriter}
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-dacl-prefix-'
         }
     }
 }
@@ -1988,12 +2763,28 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         }
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         $manifestBefore=[IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
+        $manifestBeforeBytes=[IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath))
         $beforeSnapshot=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
         $unrelatedRepositoryBefore=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
         $unrelatedUserBefore=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
-        $output=Invoke-Syp214Bootstrap
-        $line=@($output | ForEach-Object {[string]$_} | Where-Object {$_ -match '^Skill migration transaction retained\.'})[0]
-        $journalPath=$line.Substring($line.IndexOf('journal: ') + 9).Trim()
+        $pendingIntentChild=$null
+        $pendingIntentEvidenceVerified=$null
+        $output=@()
+        if($State -eq 'pending-intent'){
+            New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+            $pendingIntentChild=Invoke-Syp214ManifestIntentExitChild -RecoveryRoot $caseRoot `
+                -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $script:TestConfigurationPath `
+                -ProvenancePath $script:TestProvenancePath -UserHome $userHome
+            $pendingIntentChild.ExitCode | Should Be 0
+            $pendingIntentChild.MarkerExists | Should Be $true
+            $journalPath=[string]$pendingIntentChild.Marker.journalPath
+            $output=@(Get-Content -Encoding UTF8 -LiteralPath $pendingIntentChild.StdoutPath)
+        }
+        else{
+            $output=Invoke-Syp214Bootstrap
+            $line=@($output | ForEach-Object {[string]$_} | Where-Object {$_ -match '^Skill migration transaction retained\.'})[0]
+            $journalPath=$line.Substring($line.IndexOf('journal: ') + 9).Trim()
+        }
         Test-Path -LiteralPath $journalPath | Should Be $true
         $journal=Get-Content -Raw -LiteralPath $journalPath | ConvertFrom-Json
         $repoFile=Join-Path $targetRoot $entries[0].targetPath
@@ -2001,10 +2792,37 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             'later-edit' { Set-TestText $repoFile 'later project edit' }
             'corrupt-backup' { Set-TestText (Join-Path (Split-Path $journalPath) $journal.states[0].backupName) 'corrupt backup' }
             'pending-intent' {
-                # Model a crash after flushing intent, before the final manifest write.
-                [IO.File]::WriteAllText((Join-Path $targetRoot $script:ManifestPath),$manifestBefore)
-                $journal.phase='mutating'
-                $journal | ConvertTo-Json -Depth 14 | Set-Content -LiteralPath $journalPath
+                $pendingManifestRelativePath=$script:ManifestPath.Replace('\','/')
+                $pendingManifestFullPath=Join-Path $targetRoot $pendingManifestRelativePath
+                $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+                . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
+                $manifestState=@($journal.states | Where-Object { [string]$_.relativePath -ceq $pendingManifestRelativePath })[0]
+                $manifestState | Should Not BeNullOrEmpty
+                $manifestState.mutationApplied | Should Be $true
+                $manifestState.appliedType | Should Be 'file'
+                $manifestState.publication.direction | Should Be 'apply'
+                $manifestState.publication.expectedOldExists | Should Be $true
+                [string]$manifestState.publication.expectedOldIdentity | Should Be ([string]$manifestState.originalIdentity)
+                [string]$pendingIntentChild.Marker.relativePath | Should Be $pendingManifestRelativePath
+                [string]$pendingIntentChild.Marker.direction | Should Be 'apply'
+                [string]$pendingIntentChild.Marker.expectedOldIdentity | Should Be ([string]$manifestState.originalIdentity)
+                [string]$pendingIntentChild.Marker.stageIdentity | Should Be ([string]$manifestState.publication.stageIdentity)
+                $manifestEvidence=Get-PublicationFileEvidence -Root $targetRoot -Path $pendingManifestFullPath `
+                    -RelativePath $pendingManifestRelativePath -Kind Target
+                (Test-TargetMutationBytesEqual -Left ([byte[]]$manifestEvidence.bytes) -Right $manifestBeforeBytes) | Should Be $true
+                [string]$manifestEvidence.identity | Should Be ([string]$manifestState.publication.expectedOldIdentity)
+                $manifestStagePath=Join-Path (Split-Path -Parent $pendingManifestFullPath) ([string]$manifestState.publication.stageLeaf)
+                $manifestStageRelative=([IO.Path]::GetRelativePath($targetRoot,$manifestStagePath)).Replace('\','/')
+                $manifestStageEvidence=Get-PublicationFileEvidence -Root $targetRoot -Path $manifestStagePath `
+                    -RelativePath $manifestStageRelative -Kind Target
+                [string]$manifestStageEvidence.identity | Should Be ([string]$manifestState.publication.stageIdentity)
+                [long]$manifestStageEvidence.length | Should Be ([long]$manifestState.publication.newLength)
+                [string]$manifestStageEvidence.sha256 | Should Be ([string]$manifestState.publication.newSha256)
+                [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                    (ConvertFrom-FileDaclJournalRecord $manifestState.publicationDacl),
+                    (ConvertFrom-FileDaclJournalRecord $manifestStageEvidence.dacl)) | Should Be $true
+                [bool]$manifestStageEvidence.readOnly | Should Be ([bool]$manifestState.publicationReadOnly)
+                $pendingIntentEvidenceVerified=$true
             }
         }
         $preRecoverySnapshot=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
@@ -2118,7 +2936,9 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $repositoryTreeSemanticallyStable=Test-Syp214InventoryEqual -Left $expectedRepositorySnapshot.fullTree -Right $afterSnapshot.repository.fullTree
         $repositoryPointInventorySemanticallyStable=Test-Syp214PointInventoryEqual -Left $expectedRepositorySnapshot -Right $afterSnapshot.repository
         $userPointInventoryPreserved=Test-Syp214PointInventoryEqual -Left $beforeSnapshot.user -Right $afterSnapshot.user
-        $repositoryGitCoreStateSemanticallyStable=Test-Syp214GitCoreStateEqual -Left $preRecoverySnapshot.repository -Right $afterSnapshot.repository
+        $expectedGitCoreSnapshot=if($State -eq 'pending-intent'){$beforeSnapshot.repository}else{$preRecoverySnapshot.repository}
+        $expectedGitCoreBasis=if($State -eq 'pending-intent'){'apply-before snapshot; recovery restores the interrupted transaction to its original Git state'}else{'pre-recovery snapshot'}
+        $repositoryGitCoreStateSemanticallyStable=Test-Syp214GitCoreStateEqual -Left $expectedGitCoreSnapshot -Right $afterSnapshot.repository
         $repositoryStashEvidenceStable=Test-Syp214InventoryEqual -Left $preRecoverySnapshot.repository.stashes -Right $afterSnapshot.repository.stashes
         $repositoryExcludeSemanticallyStable=Test-Syp214InventoryEqual -Left $expectedExcludeSnapshot.gitInfoExclude -Right $afterSnapshot.repository.gitInfoExclude
         $unrelatedRepositoryAfter=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
@@ -2138,6 +2958,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             unrelatedFilesPreserved=[bool]$unrelatedFilesPreserved
             laterEditDriftInventoryVerified=[bool]$laterEditDriftInventoryVerified
             corruptBackupWitnessMatchesInventory=[bool]$corruptBackupWitnessMatchesInventory
+            pendingManifestIntentEvidenceVerified=([bool]($State -ne 'pending-intent' -or $pendingIntentEvidenceVerified))
         }
         $failedRecoveryChecks=@($recoveryCheckResults.GetEnumerator() | Where-Object { -not [bool]$_.Value } | ForEach-Object { [string]$_.Key })
         $verified=($failedRecoveryChecks.Count -eq 0)
@@ -2160,6 +2981,12 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
                 laterEditDriftInventoryPreserved=$laterEditDriftInventoryPreserved}
             userPointInventoryPreserved=$userPointInventoryPreserved
             repositoryGitCoreStateSemanticallyStable=$repositoryGitCoreStateSemanticallyStable
+            expectedGitCoreState=[ordered]@{basis=$expectedGitCoreBasis
+                head=$expectedGitCoreSnapshot.head;indexSha256=$expectedGitCoreSnapshot.indexSha256
+                status=@($expectedGitCoreSnapshot.status)
+                afterRecovery=[ordered]@{head=$afterSnapshot.repository.head;indexSha256=$afterSnapshot.repository.indexSha256
+                    status=@($afterSnapshot.repository.status)}
+                stable=$repositoryGitCoreStateSemanticallyStable}
             repositoryStashEvidenceStable=$repositoryStashEvidenceStable
             repositoryStashesBeforeRecovery=$preRecoverySnapshot.repository.stashes
             repositoryStashesAfterRecovery=$afterSnapshot.repository.stashes
@@ -2167,11 +2994,12 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             expectedGitInfoExclude=[ordered]@{basis=$expectedExcludeBasis
                 expectedInventory=$expectedExcludeSnapshot.gitInfoExclude;afterRecoveryInventory=$afterSnapshot.repository.gitInfoExclude
                 stable=$repositoryExcludeSemanticallyStable}
+            pendingManifestIntent=[ordered]@{child=$pendingIntentChild;interruptionEvidenceVerified=$pendingIntentEvidenceVerified}
             recoveryCheckResults=$recoveryCheckResults;failedChecks=$failedRecoveryChecks
             unrelatedFiles=[ordered]@{repositoryBefore=$unrelatedRepositoryBefore;repositoryAfter=$unrelatedRepositoryAfter
                 userBefore=$unrelatedUserBefore;userAfter=$unrelatedUserAfter;preserved=$unrelatedFilesPreserved}
             verified=$verified;repositoryStateVerified=$repositoryStateVerified;userBytesPreserved=$userBytesPreserved
-            processKillExecuted=$false;interruptionModel=$(if($State -eq 'pending-intent'){'manually persisted pending-intent journal state'}else{'no process termination'})
+            processKillExecuted=$false;interruptionModel=$(if($State -eq 'pending-intent'){'controlled child exit after durable manifest publication intent before the first rename'}else{'no process termination'})
         })
         if($failedRecoveryChecks.Count -gt 0){ throw "Recovery fixture checks failed: $($failedRecoveryChecks -join ', ')" }
         $verified | Should Be $true

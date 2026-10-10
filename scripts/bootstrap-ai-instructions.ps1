@@ -138,12 +138,46 @@ namespace CodexAiInstructions
         }
     }
 
+    public sealed class FileDaclSnapshot
+    {
+        public bool IsNull { get; private set; }
+        public byte[] AclBytes { get; private set; }
+        public bool IsProtected { get; private set; }
+
+        public FileDaclSnapshot(bool isNull, byte[] aclBytes, bool isProtected)
+        {
+            IsNull = isNull;
+            AclBytes = aclBytes;
+            IsProtected = isProtected;
+        }
+    }
+
+    public sealed class AtomicDirectoryGuard : IDisposable
+    {
+        private List<SafeFileHandle> directoryHandles;
+
+        internal AtomicDirectoryGuard(List<SafeFileHandle> handles)
+        {
+            directoryHandles = handles;
+        }
+
+        public void Dispose()
+        {
+            if (directoryHandles == null) return;
+            for (int index = directoryHandles.Count - 1; index >= 0; index--) directoryHandles[index].Dispose();
+            directoryHandles = null;
+        }
+    }
+
     public static class NativeFileMutation
     {
         private const uint GenericRead = 0x80000000;
         private const uint GenericWrite = 0x40000000;
         private const uint Delete = 0x00010000;
+        private const uint ReadControl = 0x00020000;
+        private const uint WriteDac = 0x00040000;
         private const uint FileWriteAttributes = 0x00000100;
+        private const uint FileReadAttributes = 0x00000080;
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint FileShareDelete = 0x00000004;
@@ -157,7 +191,13 @@ namespace CodexAiInstructions
         private const uint FileFlagOpenReparsePoint = 0x00200000;
         private const int FileBasicInfoClass = 0;
         private const int FileDispositionInfoClass = 4;
+        private const int FileRenameInfoClass = 3;
         private const int ErrorAlreadyExists = 183;
+        private const uint SecurityInformationDacl = 0x00000004;
+        private const uint SecurityInformationProtectedDacl = 0x80000000;
+        private const uint SecurityInformationUnprotectedDacl = 0x20000000;
+        private const int SeFileObject = 1;
+        private const ushort SeDaclProtected = 0x1000;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
         private static extern SafeFileHandle CreateFile(
@@ -189,6 +229,14 @@ namespace CodexAiInstructions
             ref FileBasicInfo fileInformation,
             uint bufferSize);
 
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileRenameInfoByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            uint bufferSize);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandleEx(
@@ -210,14 +258,37 @@ namespace CodexAiInstructions
             uint pathLength,
             uint flags);
 
+        [DllImport("advapi32.dll", SetLastError = false, EntryPoint = "GetSecurityInfo")]
+        private static extern uint GetSecurityInfo(
+            SafeFileHandle handle, int objectType, uint securityInfo,
+            out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = false, EntryPoint = "SetSecurityInfo")]
+        private static extern uint SetSecurityInfo(
+            SafeFileHandle handle, int objectType, uint securityInfo,
+            IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+        [DllImport("advapi32.dll", SetLastError = true, EntryPoint = "GetSecurityDescriptorControl")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorControl(IntPtr securityDescriptor, out ushort control, out uint revision);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "LocalFree")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
         public static SafeFileHandle OpenForAtomicDelete(string targetRoot, string path, string relativePath)
         {
             return OpenValidatedTarget(
                 targetRoot,
                 path,
                 relativePath,
-                GenericRead | Delete | FileWriteAttributes,
+                GenericRead | ReadControl | Delete | FileWriteAttributes,
                 FileShareRead);
+        }
+
+        public static SafeFileHandle OpenForMetadata(string targetRoot, string path, string relativePath)
+        {
+            return OpenValidatedTarget(
+                targetRoot, path, relativePath, GenericRead | ReadControl | FileWriteAttributes, FileShareRead, false);
         }
 
         public static SafeFileHandle OpenForAtomicWrite(
@@ -313,6 +384,55 @@ namespace CodexAiInstructions
             string path,
             string relativePath)
         {
+            return OpenForAtomicCreate(targetRoot, path, relativePath, false);
+        }
+
+        public static AtomicDirectoryGuard OpenForAtomicDirectoryGuard(string targetRoot, string relativeDirectoryPath)
+        {
+            string safeRelativePath = string.IsNullOrWhiteSpace(relativeDirectoryPath)
+                ? string.Empty
+                : NormalizeRelativePath(relativeDirectoryPath);
+            string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
+            List<SafeFileHandle> handles = new List<SafeFileHandle>();
+            try
+            {
+                SafeFileHandle rootHandle = OpenValidatedDirectory(
+                    lexicalRoot, null, GenericRead, FileShareRead | FileShareWrite,
+                    "Unable to guard the publication target root.");
+                handles.Add(rootHandle);
+                string currentPath = lexicalRoot;
+                string currentFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
+                if (safeRelativePath.Length > 0)
+                {
+                    foreach (string segment in safeRelativePath.Split('\\'))
+                    {
+                        currentPath = Path.Combine(currentPath, segment);
+                        currentFinalPath = currentFinalPath + "\\" + segment;
+                        SafeFileHandle directoryHandle = OpenValidatedDirectory(
+                            currentPath, currentFinalPath, GenericRead, FileShareRead | FileShareWrite,
+                            "Unable to guard a publication parent directory.");
+                        handles.Add(directoryHandle);
+                    }
+                }
+                AtomicDirectoryGuard result = new AtomicDirectoryGuard(handles);
+                handles = null;
+                return result;
+            }
+            finally
+            {
+                if (handles != null)
+                {
+                    for (int index = handles.Count - 1; index >= 0; index--) handles[index].Dispose();
+                }
+            }
+        }
+
+        public static AtomicCreateContext OpenForAtomicCreate(
+            string targetRoot,
+            string path,
+            string relativePath,
+            bool includeDaclWrite)
+        {
             string safeRelativePath = NormalizeRelativePath(relativePath);
             string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
             string lexicalPath = Path.GetFullPath(path);
@@ -379,7 +499,7 @@ namespace CodexAiInstructions
 
                 fileHandle = CreateFile(
                     lexicalPath,
-                    GenericRead | GenericWrite | Delete | FileWriteAttributes,
+                    GenericRead | GenericWrite | Delete | FileWriteAttributes | (includeDaclWrite ? WriteDac : 0),
                     FileShareRead,
                     IntPtr.Zero,
                     CreateNew,
@@ -516,7 +636,8 @@ namespace CodexAiInstructions
             string path,
             string relativePath,
             uint desiredAccess,
-            uint shareMode)
+            uint shareMode,
+            bool requireSingleLink = true)
         {
             string safeRelativePath = NormalizeRelativePath(relativePath);
             SafeFileHandle rootHandle = CreateFile(
@@ -551,7 +672,7 @@ namespace CodexAiInstructions
                 try
                 {
                     EnsureValidHandle(handle, "Unable to acquire an atomic managed-file mutation handle.");
-                    ValidateFileHandle(handle, rootFinalPath + "\\" + safeRelativePath, "managed-file mutation");
+                    ValidateFileHandle(handle, rootFinalPath + "\\" + safeRelativePath, "managed-file mutation", requireSingleLink);
                     return handle;
                 }
                 catch
@@ -612,7 +733,7 @@ namespace CodexAiInstructions
             }
         }
 
-        private static void ValidateFileHandle(SafeFileHandle handle, string expectedFinalPath, string operation)
+        private static void ValidateFileHandle(SafeFileHandle handle, string expectedFinalPath, string operation, bool requireSingleLink = true)
         {
             ByHandleFileInformation information = GetInformation(
                 handle,
@@ -625,7 +746,7 @@ namespace CodexAiInstructions
             {
                 throw new IOException("The " + operation + " handle did not open a regular file.");
             }
-            if (information.NumberOfLinks != 1)
+            if (requireSingleLink && information.NumberOfLinks != 1)
             {
                 throw new IOException(
                     "The " + operation + " handle has multiple file-system links; hard link aliases do not provide exclusive ownership.");
@@ -674,6 +795,178 @@ namespace CodexAiInstructions
                 }
                 throw;
             }
+        }
+
+        public static string GetFileIdentity(SafeFileHandle handle)
+        {
+            ByHandleFileInformation information = GetInformation(handle, "Unable to identify a guarded file handle.");
+            return information.VolumeSerialNumber.ToString("x8") + ":" +
+                information.FileIndexHigh.ToString("x8") + information.FileIndexLow.ToString("x8");
+        }
+
+        public static string GetDirectoryIdentity(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, FileReadAttributes, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+            try
+            {
+                EnsureValidHandle(handle, "Unable to open the guarded publication parent directory.");
+                ByHandleFileInformation information = GetInformation(handle, "Unable to identify the guarded publication parent directory.");
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeDirectory) == 0)
+                {
+                    throw new IOException("The guarded publication parent must be a non-reparse directory.");
+                }
+                return GetFileIdentity(handle);
+            }
+            finally { if (handle != null) handle.Dispose(); }
+        }
+
+        public static SafeFileHandle OpenStandaloneForAtomicDelete(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, GenericRead | ReadControl | Delete | FileWriteAttributes, FileShareRead,
+                IntPtr.Zero, OpenExisting, FileAttributeNormal | FileFlagOpenReparsePoint, IntPtr.Zero);
+            try
+            {
+                EnsureValidHandle(handle, "Unable to acquire the exclusive shared Git exclude mutation handle.");
+                ByHandleFileInformation information = GetInformation(handle, "Unable to inspect the shared Git exclude handle.");
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeDirectory) != 0 || information.NumberOfLinks != 1)
+                {
+                    throw new IOException("The shared Git exclude is not a single-link regular file.");
+                }
+                return handle;
+            }
+            catch
+            {
+                if (handle != null) handle.Dispose();
+                throw;
+            }
+        }
+
+        public static SafeFileHandle OpenStandaloneForMetadata(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, GenericRead | ReadControl | FileReadAttributes, FileShareRead | FileShareWrite,
+                IntPtr.Zero, OpenExisting, FileAttributeNormal | FileFlagOpenReparsePoint, IntPtr.Zero);
+            try
+            {
+                EnsureValidHandle(handle, "Unable to inspect the shared Git exclude metadata.");
+                ByHandleFileInformation information = GetInformation(handle, "Unable to inspect the shared Git exclude metadata.");
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
+                    (information.FileAttributes & FileAttributeDirectory) != 0)
+                {
+                    throw new IOException("The shared Git exclude must be a regular file.");
+                }
+                return handle;
+            }
+            catch
+            {
+                if (handle != null) handle.Dispose();
+                throw;
+            }
+        }
+
+        public static FileDaclSnapshot CaptureDacl(SafeFileHandle handle)
+        {
+            IntPtr owner, group, dacl, sacl, descriptor;
+            uint error = GetSecurityInfo(handle, SeFileObject, SecurityInformationDacl,
+                out owner, out group, out dacl, out sacl, out descriptor);
+            if (error != 0) throw new Win32Exception((int)error, "Unable to read the file DACL for safe publication.");
+            try
+            {
+                ushort control;
+                uint revision;
+                if (!GetSecurityDescriptorControl(descriptor, out control, out revision))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to inspect file DACL protection for safe publication.");
+                }
+                byte[] bytes = null;
+                if (dacl != IntPtr.Zero)
+                {
+                    int size = (ushort)Marshal.ReadInt16(dacl, 2);
+                    if (size < 8) throw new IOException("The file DACL has an invalid ACL size.");
+                    bytes = new byte[size];
+                    Marshal.Copy(dacl, bytes, 0, size);
+                }
+                return new FileDaclSnapshot(dacl == IntPtr.Zero, bytes, (control & SeDaclProtected) != 0);
+            }
+            finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+        }
+
+        public static void SetDacl(SafeFileHandle handle, FileDaclSnapshot snapshot)
+        {
+            if (snapshot == null) throw new ArgumentNullException("snapshot");
+            IntPtr acl = IntPtr.Zero;
+            try
+            {
+                if (!snapshot.IsNull)
+                {
+                    if (snapshot.AclBytes == null || snapshot.AclBytes.Length < 8)
+                    {
+                        throw new IOException("The saved file DACL is incomplete.");
+                    }
+                    acl = Marshal.AllocHGlobal(snapshot.AclBytes.Length);
+                    Marshal.Copy(snapshot.AclBytes, 0, acl, snapshot.AclBytes.Length);
+                }
+                uint flags = SecurityInformationDacl |
+                    (snapshot.IsProtected ? SecurityInformationProtectedDacl : SecurityInformationUnprotectedDacl);
+                uint error = SetSecurityInfo(handle, SeFileObject, flags, IntPtr.Zero, IntPtr.Zero, acl, IntPtr.Zero);
+                if (error != 0) throw new Win32Exception((int)error, "Unable to apply the saved file DACL to the staged file.");
+            }
+            finally { if (acl != IntPtr.Zero) Marshal.FreeHGlobal(acl); }
+        }
+
+        public static bool DaclEquals(FileDaclSnapshot left, FileDaclSnapshot right)
+        {
+            if (left == null || right == null) return left == right;
+            if (left.IsNull != right.IsNull || left.IsProtected != right.IsProtected) return false;
+            if (left.IsNull) return true;
+            if (left.AclBytes == null || right.AclBytes == null || left.AclBytes.Length != right.AclBytes.Length) return false;
+            for (int index = 0; index < left.AclBytes.Length; index++)
+            {
+                if (left.AclBytes[index] != right.AclBytes[index]) return false;
+            }
+            return true;
+        }
+
+        public static bool GetReadOnly(SafeFileHandle handle)
+        {
+            return (GetAttributes(handle) & FileAttributeReadOnly) != 0;
+        }
+
+        public static void SetReadOnly(SafeFileHandle handle, bool readOnly)
+        {
+            uint attributes = GetAttributes(handle);
+            if (readOnly) attributes |= FileAttributeReadOnly;
+            else attributes &= ~FileAttributeReadOnly;
+            SetAttributes(handle, attributes);
+        }
+
+        public static void RenameNoReplace(SafeFileHandle handle, string destinationPath)
+        {
+            string destination = Path.GetFullPath(destinationPath);
+            byte[] fileName = Encoding.Unicode.GetBytes(destination);
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            int lengthOffset = rootOffset + IntPtr.Size;
+            int nameOffset = lengthOffset + 4;
+            int size = nameOffset + fileName.Length + sizeof(char);
+            IntPtr information = Marshal.AllocHGlobal(size);
+            try
+            {
+                for (int index = 0; index < size; index++) Marshal.WriteByte(information, index, 0);
+                Marshal.WriteByte(information, 0, 0); // ReplaceIfExists = FALSE (classic FileRenameInfo)
+                Marshal.WriteIntPtr(information, rootOffset, IntPtr.Zero);
+                Marshal.WriteInt32(information, lengthOffset, fileName.Length);
+                Marshal.Copy(fileName, 0, IntPtr.Add(information, nameOffset), fileName.Length);
+                if (!SetFileRenameInfoByHandle(handle, FileRenameInfoClass, information, (uint)size))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "A no-replace handle-bound publication rename failed; the current destination was preserved.");
+                }
+            }
+            finally { Marshal.FreeHGlobal(information); }
         }
 
         public static void RestoreReadOnly(SafeFileHandle handle)
@@ -1132,6 +1425,13 @@ function Get-StringSha256 {
     finally { $sha256.Dispose() }
 }
 
+function Get-ByteArraySha256 {
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return [System.BitConverter]::ToString($sha256.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
 function Get-GitPathComparer {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
@@ -1261,14 +1561,41 @@ function New-GitInfoExcludeSnapshot {
 
     $path = Get-GitInfoExcludePath -Repository $Repository
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
-    return [pscustomobject][ordered]@{
+    $snapshot = [pscustomobject][ordered]@{
         Path = $path
         Repository = $Repository
         MutationApplied = $false
         Existed = $false
         Bytes = $null
         AppliedBytes = $null
+        DaclRecord = $null
+        OriginalReadOnly = $false
+        OriginalIdentity = $null
+        AppliedFileIdentity = $null
+        Publication = $null
+        PublicationDaclRecord = $null
+        PublicationReadOnly = $false
+        LegacyRecovery = $false
     }
+    $metadataHandle = $null
+    $metadataStream = $null
+    try {
+        $snapshot.Existed = Test-Path -LiteralPath $path -PathType Leaf
+        if ($snapshot.Existed) {
+            $metadataHandle = [CodexAiInstructions.NativeFileMutation]::OpenStandaloneForMetadata($path)
+            $metadataStream = [System.IO.FileStream]::new($metadataHandle,[System.IO.FileAccess]::Read)
+            $metadataHandle = $null
+            $snapshot.Bytes = [byte[]](Read-GitInfoExcludeStreamBytes -Stream $metadataStream)
+            $snapshot.DaclRecord = Get-FileDaclJournalRecord -Handle $metadataStream.SafeFileHandle
+            $snapshot.OriginalReadOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($metadataStream.SafeFileHandle)
+            $snapshot.OriginalIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($metadataStream.SafeFileHandle)
+        }
+    }
+    finally {
+        if ($null -ne $metadataStream) { $metadataStream.Dispose() }
+        if ($null -ne $metadataHandle) { $metadataHandle.Dispose() }
+    }
+    return $snapshot
 }
 
 function Test-GitInfoExcludeBytesEqual {
@@ -1334,28 +1661,21 @@ function Open-GitInfoExcludeMutationHandle {
     )
 
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $Path
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $Path
     $stream = $null
-    $created = $false
+    $nativeHandle = $null
     try {
-        if ($RequireExisting) {
-            $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            if ($RequireExisting) { throw [System.IO.FileNotFoundException]::new("Shared Git exclude disappeared: $Path") }
+            return [pscustomobject]@{ Stream=$null; Created=$true }
         }
-        else {
-            try {
-                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
-                $created = $true
-            }
-            catch [System.IO.IOException] {
-                $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::Read)
-            }
-        }
-        return [pscustomobject]@{ Stream=$stream; Created=$created }
+        $nativeHandle = [CodexAiInstructions.NativeFileMutation]::OpenStandaloneForAtomicDelete($Path)
+        $stream = [System.IO.FileStream]::new($nativeHandle,[System.IO.FileAccess]::Read)
+        $nativeHandle = $null
+        return [pscustomobject]@{ Stream=$stream; Created=$false }
     }
     catch {
         if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $nativeHandle) { $nativeHandle.Dispose() }
         throw "Unable to acquire the exclusive shared Git exclude mutation handle; another process may be changing '$Path'. $($_.Exception.Message)"
     }
 }
@@ -1363,7 +1683,32 @@ function Open-GitInfoExcludeMutationHandle {
 function Restore-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
+    if ($null -ne $Snapshot.Publication) {
+        Resolve-AtomicFilePublication -Kind Exclude -Root ([string]$Snapshot.Repository) -Path ([string]$Snapshot.Path) `
+            -RelativePath ([IO.Path]::GetFileName([string]$Snapshot.Path)) -PublicationState $Snapshot
+    }
     if (-not [bool]$Snapshot.MutationApplied) { return }
+    if ($null -eq $Snapshot.Publication -and -not [bool]$Snapshot.LegacyRecovery) {
+        if (-not [bool]$Snapshot.Existed -and -not (Test-Path -LiteralPath ([string]$Snapshot.Path))) {
+            $Snapshot.MutationApplied = $false
+            return
+        }
+        if ([bool]$Snapshot.Existed -and (Test-Path -LiteralPath ([string]$Snapshot.Path) -PathType Leaf)) {
+            $originalHandle = $null
+            try {
+                $originalHandle = Open-GitInfoExcludeMutationHandle -Repository ([string]$Snapshot.Repository) -Path ([string]$Snapshot.Path) -RequireExisting
+                [byte[]]$originalCurrent = Read-GitInfoExcludeStreamBytes -Stream $originalHandle.Stream
+                $isOriginal = (Test-GitInfoExcludeBytesEqual -Left $originalCurrent -Right ([byte[]]$Snapshot.Bytes)) -and
+                    ([CodexAiInstructions.NativeFileMutation]::GetFileIdentity($originalHandle.Stream.SafeFileHandle) -ceq [string]$Snapshot.OriginalIdentity) -and
+                    ([bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($originalHandle.Stream.SafeFileHandle) -eq [bool]$Snapshot.OriginalReadOnly) -and
+                    [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                        (ConvertFrom-FileDaclJournalRecord (Get-FileDaclJournalRecord -Handle $originalHandle.Stream.SafeFileHandle)),
+                        (ConvertFrom-FileDaclJournalRecord $Snapshot.DaclRecord))
+                if ($isOriginal) { $Snapshot.MutationApplied = $false; return }
+            }
+            finally { if ($null -ne $originalHandle -and $null -ne $originalHandle.Stream) { $originalHandle.Stream.Dispose() } }
+        }
+    }
     $path = [string]$Snapshot.Path
     $repository = [string]$Snapshot.Repository
     Assert-GitInfoExcludeMutationPath -Repository $repository -Path $path
@@ -1374,6 +1719,10 @@ function Restore-GitInfoExcludeSnapshot {
         }
         throw "Shared Git exclude changed concurrently during rollback; the missing current state was preserved: $path"
     }
+    if (-not [bool]$Snapshot.LegacyRecovery -and $null -eq $Snapshot.Publication -and
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.AppliedFileIdentity)) {
+        throw "Shared Git exclude has no journal-owned published identity; the current file was preserved: $path"
+    }
 
     $handle = Open-GitInfoExcludeMutationHandle -Repository $repository -Path $path -RequireExisting
     try {
@@ -1382,9 +1731,47 @@ function Restore-GitInfoExcludeSnapshot {
         if (-not (Test-GitInfoExcludeBytesEqual -Left $currentBytes -Right ([byte[]]$Snapshot.AppliedBytes))) {
             throw "Shared Git exclude changed concurrently during rollback; current bytes were preserved: $path"
         }
-        $restoreBytes = if ([bool]$Snapshot.Existed) { [byte[]]$Snapshot.Bytes } else { [byte[]]@() }
-        Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $restoreBytes
-        $Snapshot.MutationApplied = $false
+        if ([bool]$Snapshot.Existed) {
+            [byte[]]$restoreBytes = [byte[]]$Snapshot.Bytes
+            $restoreDacl = $Snapshot.DaclRecord
+            $restoreReadOnly = [bool]$Snapshot.OriginalReadOnly
+            if ([bool]$Snapshot.LegacyRecovery) {
+                # V1 recorded bytes but no historical file metadata. Capture the current
+                # file metadata only after the exact applied-byte CAS has succeeded.
+                $restoreDacl = Get-FileDaclJournalRecord -Handle $handle.Stream.SafeFileHandle
+                $restoreReadOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($handle.Stream.SafeFileHandle)
+                $Snapshot.AppliedFileIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($handle.Stream.SafeFileHandle)
+                $Snapshot.PublicationDaclRecord = $restoreDacl
+                $Snapshot.PublicationReadOnly = $restoreReadOnly
+            }
+            Invoke-AtomicFilePublication -Kind Exclude -Root $repository -Path $path `
+                -RelativePath ([IO.Path]::GetFileName($path)) -ExpectedOldExists $true -ExpectedOldBytes $currentBytes `
+                -ExpectedOldIdentity ([string]$Snapshot.AppliedFileIdentity) -ExpectedOldSha256 (Get-ByteArraySha256 $currentBytes) `
+                -ExpectedOldStream $handle.Stream `
+                -DaclRecord $restoreDacl -ReadOnly $restoreReadOnly -NewBytes $restoreBytes `
+                -Direction restore -PublicationState $Snapshot -Snapshot $null | Out-Null
+            $Snapshot.Publication = $null
+            $Snapshot.AppliedFileIdentity = $null
+            $Snapshot.AppliedBytes = $null
+            $Snapshot.PublicationDaclRecord = $null
+            $Snapshot.PublicationReadOnly = $false
+            $Snapshot.MutationApplied = $false
+        }
+        else {
+            $currentIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($handle.Stream.SafeFileHandle)
+            if ([string]$Snapshot.AppliedFileIdentity -and $currentIdentity -cne [string]$Snapshot.AppliedFileIdentity) {
+                throw "Shared Git exclude changed concurrently during rollback; the recreated current state was preserved: $path"
+            }
+            [CodexAiInstructions.NativeFileMutation]::MarkDeleteOnClose($handle.Stream.SafeFileHandle)
+            $handle.Stream.Dispose()
+            $handle.Stream = $null
+            $Snapshot.MutationApplied = $false
+            $Snapshot.Publication = $null
+            $Snapshot.AppliedFileIdentity = $null
+            $Snapshot.AppliedBytes = $null
+            $Snapshot.PublicationDaclRecord = $null
+            $Snapshot.PublicationReadOnly = $false
+        }
     }
     finally {
         if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
@@ -1416,11 +1803,13 @@ function Set-ManagedGitInfoExclude {
     $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
     $handle = Open-GitInfoExcludeMutationHandle -Repository $Repository -Path $path
     try {
-        [byte[]]$beforeBytes = Read-GitInfoExcludeStreamBytes -Stream $handle.Stream
-        $Snapshot.Existed = -not [bool]$handle.Created
-        $Snapshot.Bytes = if ([bool]$handle.Created) { $null } else { $beforeBytes }
+        [byte[]]$beforeBytes = if ([bool]$handle.Created) { [byte[]]@() } else { Read-GitInfoExcludeStreamBytes -Stream $handle.Stream }
+        if ([bool]$handle.Created -and [bool]$Snapshot.Existed) { throw "Shared Git exclude disappeared before update; the current state was preserved: $path" }
+        if (-not [bool]$handle.Created -and -not [bool]$Snapshot.Existed) { throw "Shared Git exclude appeared before update; the current state was preserved: $path" }
+        if (-not [bool]$handle.Created -and -not (Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right ([byte[]]$Snapshot.Bytes))) {
+            throw "Shared Git exclude changed concurrently before update; the current state was preserved: $path"
+        }
         $Snapshot.AppliedBytes = $beforeBytes
-        $Snapshot.MutationApplied = [bool]$handle.Created
 
         $content = (ConvertFrom-GitInfoExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
         $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
@@ -1445,7 +1834,14 @@ function Set-ManagedGitInfoExclude {
                     $context=$script:SkillMigrationJournalContext
                     Save-SkillMigrationJournal $context.Snapshot $Snapshot $context.Path $context.GitState 'mutating'
                 }
-                Write-GitInfoExcludeStreamBytes -Stream $handle.Stream -Bytes $updatedBytes
+                Invoke-AtomicFilePublication -Kind Exclude -Root $Repository -Path $path `
+                    -RelativePath ([IO.Path]::GetFileName($path)) -ExpectedOldExists ([bool]$Snapshot.Existed) `
+                    -ExpectedOldBytes $(if ($Snapshot.Existed) { [byte[]]$Snapshot.Bytes } else { $null }) `
+                    -ExpectedOldIdentity $(if ([bool]$Snapshot.Existed) { [string]$Snapshot.OriginalIdentity } else { $null }) `
+                    -ExpectedOldSha256 $(if ($Snapshot.Existed) { Get-ByteArraySha256 ([byte[]]$Snapshot.Bytes) } else { $null }) `
+                    -ExpectedOldStream $(if ($Snapshot.Existed) { $handle.Stream } else { $null }) `
+                    -DaclRecord $Snapshot.DaclRecord -ReadOnly ([bool]$Snapshot.OriginalReadOnly) -NewBytes $updatedBytes `
+                    -Direction apply -PublicationState $Snapshot -Snapshot $null | Out-Null
             }
             catch {
                 try { $Snapshot.AppliedBytes = [byte[]](Read-GitInfoExcludeStreamBytes -Stream $handle.Stream) }
@@ -1650,10 +2046,31 @@ function New-TargetMutationSnapshot {
 
         $originalType = 'missing'
         $backupPath = $null
+        $daclRecord = $null
+        $readOnly = $false
+        $originalIdentity = $null
         if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
             $originalType = 'file'
             $backupPath = Join-Path $BackupRoot ('{0:D6}.bin' -f $backupIndex)
             Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force
+            $metadataHandle = $null
+            $metadataStream = $null
+            try {
+                $metadataHandle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($resolvedTargetRoot,$targetPath,$relativePath)
+                $metadataStream = [System.IO.FileStream]::new($metadataHandle,[System.IO.FileAccess]::Read)
+                $metadataHandle = $null
+                [byte[]]$observedBytes = Read-TargetMutationStreamBytes -Stream $metadataStream
+                if (-not (Test-TargetMutationBytesEqual -Left $observedBytes -Right ([System.IO.File]::ReadAllBytes($backupPath)))) {
+                    throw "Managed target changed while its rollback snapshot was captured: $relativePath"
+                }
+                $daclRecord = Get-FileDaclJournalRecord -Handle $metadataStream.SafeFileHandle
+                $readOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($metadataStream.SafeFileHandle)
+                $originalIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($metadataStream.SafeFileHandle)
+            }
+            finally {
+                if ($null -ne $metadataStream) { $metadataStream.Dispose() }
+                if ($null -ne $metadataHandle) { $metadataHandle.Dispose() }
+            }
             $backupIndex++
         }
         elseif (Test-Path -LiteralPath $targetPath) {
@@ -1665,9 +2082,17 @@ function New-TargetMutationSnapshot {
             TargetPath = $targetPath
             OriginalType = $originalType
             BackupPath = $backupPath
+            OriginalDacl = $daclRecord
+            OriginalReadOnly = $readOnly
+            OriginalIdentity = $originalIdentity
+            AppliedFileIdentity = $null
             MutationApplied = $false
             AppliedType = $null
             AppliedBytes = $null
+            Publication = $null
+            PublicationDaclRecord = $null
+            PublicationReadOnly = $false
+            LegacyRecovery = $false
         })
     }
 
@@ -1799,14 +2224,15 @@ function Open-TargetMutationAtomicCreateStream {
         [Parameter(Mandatory = $true)][string] $TargetPath,
         [Parameter(Mandatory = $true)][string] $RelativePath,
         [Parameter(Mandatory = $true)][string] $Operation,
-        [Parameter(Mandatory = $true)][ref] $CreateContext
+        [Parameter(Mandatory = $true)][ref] $CreateContext,
+        [switch] $IncludeDaclWrite
     )
 
     $nativeContext = $null
     $nativeHandle = $null
     try {
         $nativeContext = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicCreate(
-            $TargetRoot,$TargetPath,$RelativePath)
+            $TargetRoot,$TargetPath,$RelativePath,[bool]$IncludeDaclWrite.IsPresent)
         $nativeHandle = $nativeContext.TakeFileHandle()
         $stream = [System.IO.FileStream]::new($nativeHandle,[System.IO.FileAccess]::ReadWrite)
         $nativeHandle = $null
@@ -1837,12 +2263,522 @@ function Close-TargetMutationStream {
     finally { $Stream.Dispose() }
 }
 
+function Assert-ExactJournalProperties {
+    param([Parameter(Mandatory=$true)][object]$Value,[Parameter(Mandatory=$true)][string[]]$Names,[Parameter(Mandatory=$true)][string]$Context)
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $expected = @($Names | Sort-Object -CaseSensitive)
+    if ($actual.Count -ne $expected.Count) { throw "Invalid $Context schema properties." }
+    for ($index=0; $index -lt $expected.Count; $index++) {
+        if ($actual[$index] -cne $expected[$index]) { throw "Invalid $Context schema properties." }
+    }
+}
+
+function ConvertTo-FileDaclJournalRecord {
+    param([AllowNull()][CodexAiInstructions.FileDaclSnapshot]$Dacl)
+    if ($null -eq $Dacl) { return $null }
+    return [pscustomobject][ordered]@{
+        isNull = [bool]$Dacl.IsNull
+        isProtected = [bool]$Dacl.IsProtected
+        aclBase64 = if ($Dacl.IsNull) { $null } else { [Convert]::ToBase64String([byte[]]$Dacl.AclBytes) }
+    }
+}
+
+function ConvertFrom-FileDaclJournalRecord {
+    param([AllowNull()][object]$Record)
+    if ($null -eq $Record) { return $null }
+    Assert-ExactJournalProperties -Value $Record -Names @('isNull','isProtected','aclBase64') -Context 'schema-v2 file DACL record'
+    if ($Record.isNull -isnot [bool] -or $Record.isProtected -isnot [bool]) { throw 'Invalid schema-v2 file DACL record.' }
+    [byte[]]$aclBytes = $null
+    if ([bool]$Record.isNull) {
+        if ($null -ne $Record.aclBase64) { throw 'Invalid null-DACL schema-v2 record.' }
+    }
+    else {
+        if ([string]$Record.aclBase64 -cnotmatch '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$') { throw 'Invalid schema-v2 DACL encoding.' }
+        try { $aclBytes = [Convert]::FromBase64String([string]$Record.aclBase64) }
+        catch { throw 'Invalid schema-v2 DACL encoding.' }
+        if ($aclBytes.Length -lt 8 -or ([BitConverter]::ToUInt16($aclBytes,2) -ne $aclBytes.Length)) { throw 'Invalid schema-v2 DACL byte inventory.' }
+    }
+    return [CodexAiInstructions.FileDaclSnapshot]::new([bool]$Record.isNull,$aclBytes,[bool]$Record.isProtected)
+}
+
+function Get-FileDaclJournalRecord {
+    param([Parameter(Mandatory=$true)][Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle)
+    return ConvertTo-FileDaclJournalRecord ([CodexAiInstructions.NativeFileMutation]::CaptureDacl($Handle))
+}
+
+function Get-PublicationFileHandle {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [switch]$AllowMissing
+    )
+    try {
+        if ($Kind -eq 'Target') {
+            return [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDelete($Root,$Path,$RelativePath)
+        }
+        return [CodexAiInstructions.NativeFileMutation]::OpenStandaloneForAtomicDelete($Path)
+    }
+    catch {
+        $nativeCode = $null
+        if ($_.Exception -is [ComponentModel.Win32Exception]) { $nativeCode = $_.Exception.NativeErrorCode }
+        elseif ($null -ne $_.Exception.InnerException -and $_.Exception.InnerException -is [ComponentModel.Win32Exception]) {
+            $nativeCode = $_.Exception.InnerException.NativeErrorCode
+        }
+        if ($AllowMissing -and $nativeCode -in @(2,3)) { return $null }
+        if ($Kind -eq 'Exclude') {
+            throw "Unable to acquire the exclusive shared Git exclude mutation handle; another process may be changing '$Path'. $($_.Exception.Message)"
+        }
+        throw
+    }
+}
+
+function Get-PublicationFileEvidence {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [switch]$AllowMissing
+    )
+    $handle = Get-PublicationFileHandle -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind -AllowMissing:$AllowMissing
+    if ($null -eq $handle) { return $null }
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($handle,[System.IO.FileAccess]::Read)
+        $handle = $null
+        [byte[]]$bytes = Read-TargetMutationStreamBytes -Stream $stream
+        return [pscustomobject][ordered]@{
+            bytes = $bytes
+            length = [long]$bytes.Length
+            sha256 = Get-ByteArraySha256 -Bytes $bytes
+            identity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stream.SafeFileHandle)
+            dacl = Get-FileDaclJournalRecord -Handle $stream.SafeFileHandle
+            readOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($stream.SafeFileHandle)
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $handle) { $handle.Dispose() }
+    }
+}
+
+function Remove-VerifiedPublicationFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [Parameter(Mandatory=$true)][string]$Identity,
+        [Parameter(Mandatory=$true)][string]$Sha256,
+        [Parameter(Mandatory=$true)][long]$Length
+    )
+    $handle = Get-PublicationFileHandle -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($handle,[System.IO.FileAccess]::Read)
+        $handle = $null
+        [byte[]]$bytes = Read-TargetMutationStreamBytes -Stream $stream
+        if ([CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stream.SafeFileHandle) -cne $Identity -or
+            $bytes.Length -ne $Length -or (Get-ByteArraySha256 -Bytes $bytes) -cne $Sha256) {
+            throw "A publication-owned file changed and was preserved: $Path"
+        }
+        [CodexAiInstructions.NativeFileMutation]::MarkDeleteOnClose($stream.SafeFileHandle)
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $handle) { $handle.Dispose() }
+    }
+}
+
+function Add-TargetMutationCreatedDirectories {
+    param([Parameter(Mandatory=$true)][object]$Snapshot,[AllowNull()][object]$CreateContext)
+    if ($null -eq $CreateContext) { return }
+    foreach ($createdDirectory in @($CreateContext.CreatedDirectories)) {
+        $alreadyRecorded = @($Snapshot.CreatedDirectories | Where-Object {
+            ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,[System.StringComparison]::OrdinalIgnoreCase)
+        }).Count -gt 0
+        if (-not $alreadyRecorded) {
+            $Snapshot.CreatedDirectories.Add([pscustomobject][ordered]@{
+                FullPath = [string]$createdDirectory.FullPath
+                RelativePath = [string]$createdDirectory.RelativePath
+                VolumeSerialNumber = [uint32]$createdDirectory.VolumeSerialNumber
+                FileIndexHigh = [uint32]$createdDirectory.FileIndexHigh
+                FileIndexLow = [uint32]$createdDirectory.FileIndexLow
+            })
+        }
+    }
+}
+
+function New-AtomicFilePublicationRecord {
+    param(
+        [string]$OperationId,[string]$Direction,[string]$StageLeaf,[string]$TombstoneLeaf,
+        [string]$ParentIdentity,[string]$StageIdentity,[AllowNull()][object]$ExpectedOldIdentity,
+        [AllowNull()][object]$ExpectedOldSha256,[long]$ExpectedOldLength,[bool]$ExpectedOldExists,
+        [string]$NewSha256,[long]$NewLength
+    )
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        operationId = $OperationId
+        direction = $Direction
+        stageLeaf = $StageLeaf
+        tombstoneLeaf = $TombstoneLeaf
+        parentIdentity = $ParentIdentity
+        stageIdentity = $StageIdentity
+        expectedOldExists = $ExpectedOldExists
+        expectedOldIdentity = $ExpectedOldIdentity
+        expectedOldSha256 = $ExpectedOldSha256
+        expectedOldLength = $ExpectedOldLength
+        newSha256 = $NewSha256
+        newLength = $NewLength
+    }
+}
+
+function Invoke-AtomicFilePublicationRename {
+    param(
+        [Parameter(Mandatory=$true)][Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle,
+        [Parameter(Mandatory=$true)][string]$DestinationPath
+    )
+    [CodexAiInstructions.NativeFileMutation]::RenameNoReplace($Handle,$DestinationPath)
+}
+
+function Invoke-AtomicFilePublication {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][bool]$ExpectedOldExists,
+        [AllowNull()][byte[]]$ExpectedOldBytes,
+        [AllowNull()][object]$ExpectedOldIdentity,
+        [AllowNull()][object]$ExpectedOldSha256,
+        [AllowNull()][System.IO.FileStream]$ExpectedOldStream,
+        [AllowNull()][object]$DaclRecord,
+        [bool]$ReadOnly = $false,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$NewBytes,
+        [Parameter(Mandatory=$true)][ValidateSet('apply','restore')][string]$Direction,
+        [Parameter(Mandatory=$true)][object]$PublicationState,
+        [AllowNull()][object]$Snapshot
+    )
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Atomic file publication requires Windows handle-bound rename support.' }
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $parentRelative = if ($Kind -eq 'Target') { (Split-Path -Parent $RelativePath).Replace('\','/').Trim('/') } else { '' }
+    $operationId = [guid]::NewGuid().ToString('N')
+    $stageLeaf = ".syp214-$operationId-stage"
+    $tombstoneLeaf = ".syp214-$operationId-tomb"
+    $stagePath = Join-Path $parent $stageLeaf
+    $stageRelative = if ([string]::IsNullOrWhiteSpace($parentRelative)) { $stageLeaf } else { "$parentRelative/$stageLeaf" }
+    $tombstonePath = Join-Path $parent $tombstoneLeaf
+    $createContext = $null
+    $stageStream = $null
+    $oldStream = $null
+    $ownsOldStream = $false
+    $createRoot = if ($Kind -eq 'Target') { $Root } else { $parent }
+    $createRelative = if ($Kind -eq 'Target') { $stageRelative } else { $stageLeaf }
+    $createGuardPath = if ($Kind -eq 'Target') { $stageRelative.Replace('/','\') } else { $stageLeaf }
+    try {
+        $stageStream = Open-TargetMutationAtomicCreateStream -TargetRoot $createRoot -TargetPath $stagePath `
+            -RelativePath $createRelative -Operation 'Managed publication staging' -CreateContext ([ref]$createContext) -IncludeDaclWrite
+        if ($Kind -eq 'Target' -and $null -ne $Snapshot) { Add-TargetMutationCreatedDirectories -Snapshot $Snapshot -CreateContext $createContext }
+
+        $oldEvidence = $null
+        if ($ExpectedOldExists) {
+            if ($null -ne $ExpectedOldStream) { $oldStream = $ExpectedOldStream }
+            else {
+                $oldHandle = Get-PublicationFileHandle -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind
+                $oldStream = [System.IO.FileStream]::new($oldHandle,[System.IO.FileAccess]::Read)
+                $ownsOldStream = $true
+            }
+            [byte[]]$currentOldBytes = Read-TargetMutationStreamBytes -Stream $oldStream
+            $actualOldIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($oldStream.SafeFileHandle)
+            $actualOldDacl = Get-FileDaclJournalRecord -Handle $oldStream.SafeFileHandle
+            $actualOldReadOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($oldStream.SafeFileHandle)
+            $actualOldHash = Get-ByteArraySha256 -Bytes $currentOldBytes
+            if (-not (Test-TargetMutationBytesEqual -Left $currentOldBytes -Right $ExpectedOldBytes) -or
+                ($ExpectedOldIdentity -and $actualOldIdentity -cne $ExpectedOldIdentity) -or
+                ($ExpectedOldSha256 -and $actualOldHash -cne $ExpectedOldSha256) -or
+                $actualOldReadOnly -ne $ReadOnly -or
+                -not [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                    (ConvertFrom-FileDaclJournalRecord $actualOldDacl), (ConvertFrom-FileDaclJournalRecord $DaclRecord))) {
+                throw "Managed publication detected concurrent bytes, identity, DACL, or read-only changes; the current file was preserved: $Path"
+            }
+            $oldEvidence = [pscustomobject]@{identity=$actualOldIdentity;sha256=$actualOldHash;length=[long]$currentOldBytes.Length}
+        }
+        else {
+            $unexpected = Get-PublicationFileHandle -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind -AllowMissing
+            if ($null -ne $unexpected) {
+                $unexpected.Dispose()
+                throw "Managed publication destination appeared concurrently and was preserved: $Path"
+            }
+        }
+
+        if ($null -ne $DaclRecord) {
+            $dacl = ConvertFrom-FileDaclJournalRecord $DaclRecord
+            [CodexAiInstructions.NativeFileMutation]::SetDacl($stageStream.SafeFileHandle,$dacl)
+            $readbackDacl = [CodexAiInstructions.NativeFileMutation]::CaptureDacl($stageStream.SafeFileHandle)
+            if (-not [CodexAiInstructions.NativeFileMutation]::DaclEquals($dacl,$readbackDacl)) {
+                throw "Managed publication stage DACL did not match the original before writing; the original destination was preserved: $Path"
+            }
+        }
+        if ($Kind -eq 'Target') { Write-TargetMutationStreamBytes -Stream $stageStream -Bytes $NewBytes }
+        else { Write-GitInfoExcludeStreamBytes -Stream $stageStream -Bytes $NewBytes }
+        [byte[]]$stagedBytes = Read-TargetMutationStreamBytes -Stream $stageStream
+        if (-not (Test-TargetMutationBytesEqual -Left $stagedBytes -Right $NewBytes)) {
+            throw "Managed publication stage did not retain complete bytes; the original destination was preserved: $Path"
+        }
+        if ($null -ne $DaclRecord) {
+            [CodexAiInstructions.NativeFileMutation]::SetReadOnly($stageStream.SafeFileHandle,$ReadOnly)
+        }
+        $publicationDaclRecord = Get-FileDaclJournalRecord -Handle $stageStream.SafeFileHandle
+        $publicationReadOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($stageStream.SafeFileHandle)
+        $stageIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stageStream.SafeFileHandle)
+        $parentIdentity = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($parent)
+        $newHash = Get-ByteArraySha256 -Bytes $NewBytes
+        $publication = New-AtomicFilePublicationRecord -OperationId $operationId -Direction $Direction `
+            -StageLeaf $stageLeaf -TombstoneLeaf $tombstoneLeaf -ParentIdentity $parentIdentity `
+            -StageIdentity $stageIdentity -ExpectedOldIdentity $(if ($oldEvidence) { $oldEvidence.identity } else { $null }) `
+            -ExpectedOldSha256 $(if ($oldEvidence) { $oldEvidence.sha256 } else { $null }) `
+            -ExpectedOldLength $(if ($oldEvidence) { $oldEvidence.length } else { 0 }) -ExpectedOldExists $ExpectedOldExists `
+            -NewSha256 $newHash -NewLength $NewBytes.Length
+        $PublicationState.Publication = $publication
+        if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $publicationDaclRecord }
+        if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $publicationReadOnly }
+        if ($Direction -eq 'apply') {
+            $PublicationState.MutationApplied = $true
+            if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = 'file' }
+            $PublicationState.AppliedBytes = [byte[]]$NewBytes.Clone()
+            if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = $stageIdentity }
+        }
+        if ($null -ne $script:SkillMigrationJournalContext) {
+            $context = $script:SkillMigrationJournalContext
+            Save-SkillMigrationJournal $context.Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating'
+        }
+
+        if ($ExpectedOldExists) {
+            Invoke-AtomicFilePublicationRename -Handle $oldStream.SafeFileHandle -DestinationPath $tombstonePath
+        }
+        Invoke-AtomicFilePublicationRename -Handle $stageStream.SafeFileHandle -DestinationPath $Path
+        [byte[]]$publishedBytes = Read-TargetMutationStreamBytes -Stream $stageStream
+        if ([CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stageStream.SafeFileHandle) -cne $stageIdentity -or
+            -not (Test-TargetMutationBytesEqual -Left $publishedBytes -Right $NewBytes)) {
+            throw "Published managed file failed final identity or byte verification: $Path"
+        }
+        if ($ExpectedOldExists) { [CodexAiInstructions.NativeFileMutation]::MarkDeleteOnClose($oldStream.SafeFileHandle) }
+        if ($Direction -eq 'restore') { $PublicationState.MutationApplied = $false }
+        return $publication
+    }
+    finally {
+        if ($ownsOldStream -and $null -ne $oldStream) { $oldStream.Dispose() }
+        if ($null -ne $stageStream) { $stageStream.Dispose() }
+        if ($null -ne $createContext) { $createContext.Dispose() }
+    }
+}
+
+function Assert-AtomicFilePublicationRecord {
+    param([Parameter(Mandatory=$true)][object]$Publication,[Parameter(Mandatory=$true)][string]$RelativePath)
+    Assert-ExactJournalProperties -Value $Publication -Names @('schemaVersion','operationId','direction','stageLeaf','tombstoneLeaf',
+        'parentIdentity','stageIdentity','expectedOldExists','expectedOldIdentity','expectedOldSha256','expectedOldLength','newSha256','newLength') `
+        -Context 'schema-v2 publication ownership record'
+    if ($Publication.schemaVersion -ne 1 -or
+        [string]$Publication.operationId -cnotmatch '^[0-9a-f]{32}$' -or
+        [string]$Publication.direction -cnotin @('apply','restore') -or
+        [string]$Publication.stageLeaf -cne ".syp214-$($Publication.operationId)-stage" -or
+        [string]$Publication.tombstoneLeaf -cne ".syp214-$($Publication.operationId)-tomb" -or
+        [string]$Publication.parentIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+        [string]$Publication.stageIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+        $Publication.expectedOldExists -isnot [bool] -or
+        ($Publication.newLength -isnot [int] -and $Publication.newLength -isnot [long]) -or
+        [string]$Publication.newSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [long]$Publication.newLength -lt 0) { throw "Invalid schema-v2 publication ownership record for '$RelativePath'." }
+    if ([bool]$Publication.expectedOldExists) {
+        if (($Publication.expectedOldLength -isnot [int] -and $Publication.expectedOldLength -isnot [long]) -or
+            [string]$Publication.expectedOldIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+            [string]$Publication.expectedOldSha256 -cnotmatch '^[0-9a-f]{64}$' -or [long]$Publication.expectedOldLength -lt 0) {
+            throw "Invalid schema-v2 expected-old publication record for '$RelativePath'."
+        }
+        if ([string]$Publication.expectedOldIdentity -ceq [string]$Publication.stageIdentity) {
+            throw "Invalid schema-v2 publication with aliased old and staged file identities for '$RelativePath'."
+        }
+    }
+    elseif ($null -ne $Publication.expectedOldIdentity -or $null -ne $Publication.expectedOldSha256 -or
+        ($Publication.expectedOldLength -isnot [int] -and $Publication.expectedOldLength -isnot [long]) -or [long]$Publication.expectedOldLength -ne 0) {
+        throw "Invalid schema-v2 missing-old publication record for '$RelativePath'."
+    }
+}
+
+function Test-PublicationEvidenceMatches {
+    param(
+        [AllowNull()][object]$Evidence,[string]$Identity,[string]$Sha256,[long]$Length,
+        [AllowNull()][object]$DaclRecord,[bool]$ReadOnly
+    )
+    if ($null -eq $Evidence) { return $false }
+    if ([string]$Evidence.identity -cne $Identity -or [string]$Evidence.sha256 -cne $Sha256 -or [long]$Evidence.length -ne $Length -or
+        [bool]$Evidence.readOnly -ne $ReadOnly) { return $false }
+    if ($null -ne $DaclRecord) {
+        return [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+            (ConvertFrom-FileDaclJournalRecord $DaclRecord),
+            (ConvertFrom-FileDaclJournalRecord $Evidence.dacl))
+    }
+    return $true
+}
+
+function Resolve-AtomicFilePublication {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][object]$PublicationState
+    )
+    $publication = $PublicationState.Publication
+    if ($null -eq $publication) { return }
+    Assert-AtomicFilePublicationRecord -Publication $publication -RelativePath $RelativePath
+    $parent = Split-Path -Parent $Path
+    $stagePath = Join-Path $parent ([string]$publication.stageLeaf)
+    $tombstonePath = Join-Path $parent ([string]$publication.tombstoneLeaf)
+    $parentRelative = if ($Kind -eq 'Target') { (Split-Path -Parent $RelativePath).Replace('\','/').Trim('/') } else { '' }
+    $stageRelative = if ([string]::IsNullOrWhiteSpace($parentRelative)) { [string]$publication.stageLeaf } else { "$parentRelative/$($publication.stageLeaf)" }
+    $tombstoneRelative = if ([string]::IsNullOrWhiteSpace($parentRelative)) { [string]$publication.tombstoneLeaf } else { "$parentRelative/$($publication.tombstoneLeaf)" }
+    $guardRoot = if ($Kind -eq 'Exclude') { $parent } else { $Root }
+    $guard = $null
+    try {
+        $guard = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDirectoryGuard($guardRoot,$parentRelative.Replace('/','\'))
+        $actualParentIdentity = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($parent)
+        if ($actualParentIdentity -cne [string]$publication.parentIdentity) {
+            throw "Publication parent identity changed; all current files were preserved: $Path"
+        }
+        $stage = Get-PublicationFileEvidence -Root $Root -Path $stagePath -RelativePath $stageRelative -Kind $Kind -AllowMissing
+        $final = Get-PublicationFileEvidence -Root $Root -Path $Path -RelativePath $RelativePath -Kind $Kind -AllowMissing
+        $tombstone = Get-PublicationFileEvidence -Root $Root -Path $tombstonePath -RelativePath $tombstoneRelative -Kind $Kind -AllowMissing
+        $daclRecord = if ($PublicationState.PSObject.Properties['PublicationDaclRecord'] -and $null -ne $PublicationState.PublicationDaclRecord) {
+            $PublicationState.PublicationDaclRecord
+        } elseif ($PublicationState.PSObject.Properties['DaclRecord']) { $PublicationState.DaclRecord } else { $PublicationState.OriginalDacl }
+        $readOnly = if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { [bool]$PublicationState.PublicationReadOnly }
+            elseif ($PublicationState.PSObject.Properties['OriginalReadOnly']) { [bool]$PublicationState.OriginalReadOnly }
+            else { [bool]$PublicationState.ReadOnly }
+        $stageMatches = Test-PublicationEvidenceMatches $stage ([string]$publication.stageIdentity) `
+            ([string]$publication.newSha256) ([long]$publication.newLength) $daclRecord $readOnly
+        $oldMatchesFinal = $false
+        $oldMatchesTombstone = $false
+        if ([bool]$publication.expectedOldExists) {
+            $oldMatchesFinal = Test-PublicationEvidenceMatches $final ([string]$publication.expectedOldIdentity) `
+                ([string]$publication.expectedOldSha256) ([long]$publication.expectedOldLength) $daclRecord $readOnly
+            $oldMatchesTombstone = Test-PublicationEvidenceMatches $tombstone ([string]$publication.expectedOldIdentity) `
+                ([string]$publication.expectedOldSha256) ([long]$publication.expectedOldLength) $daclRecord $readOnly
+        }
+        $newMatchesFinal = Test-PublicationEvidenceMatches $final ([string]$publication.stageIdentity) `
+            ([string]$publication.newSha256) ([long]$publication.newLength) $daclRecord $readOnly
+
+        if ($newMatchesFinal -and $null -eq $stage -and
+            (([bool]$publication.expectedOldExists -and ($null -eq $tombstone -or $oldMatchesTombstone)) -or
+             (-not [bool]$publication.expectedOldExists -and $null -eq $tombstone))) {
+            if ($null -ne $tombstone) {
+                Remove-VerifiedPublicationFile -Root $Root -Path $tombstonePath -RelativePath $tombstoneRelative `
+                    -Kind $Kind -Identity ([string]$publication.expectedOldIdentity) `
+                    -Sha256 ([string]$publication.expectedOldSha256) -Length ([long]$publication.expectedOldLength)
+            }
+            if ([string]$publication.direction -ceq 'restore') {
+                $PublicationState.MutationApplied = $false
+                if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = $null }
+                if ($PublicationState.PSObject.Properties['AppliedBytes']) { $PublicationState.AppliedBytes = $null }
+                if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = $null }
+                if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $null }
+                if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $false }
+                $PublicationState.Publication = $null
+            }
+            else {
+                $PublicationState.MutationApplied = $true
+                if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = 'file' }
+                if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = [string]$publication.stageIdentity }
+            }
+            return
+        }
+
+        $oldIsCurrent = if ([bool]$publication.expectedOldExists) { $oldMatchesFinal } else { $null -eq $final }
+
+        # A restore retry can die after safely returning the old file from its tombstone,
+        # then removing the owned stage, before the recovered journal is flushed. Reconcile
+        # only the positive, complete old-file identity; a missing final is never sufficient.
+        if ([bool]$publication.expectedOldExists -and $oldMatchesFinal -and $null -eq $stage -and $null -eq $tombstone) {
+            if ([string]$publication.direction -ceq 'apply') {
+                $PublicationState.MutationApplied = $false
+                if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = $null }
+                if ($PublicationState.PSObject.Properties['AppliedBytes']) { $PublicationState.AppliedBytes = $null }
+                if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = $null }
+                if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $null }
+                if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $false }
+            }
+            else {
+                if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $null }
+                if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $false }
+            }
+            $PublicationState.Publication = $null
+            return
+        }
+
+        if ($oldIsCurrent -and $stageMatches -and $null -eq $tombstone) {
+            Remove-VerifiedPublicationFile -Root $Root -Path $stagePath -RelativePath $stageRelative `
+                -Kind $Kind -Identity ([string]$publication.stageIdentity) `
+                -Sha256 ([string]$publication.newSha256) -Length ([long]$publication.newLength)
+            if ([string]$publication.direction -ceq 'apply') {
+                $PublicationState.MutationApplied = $false
+                if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = $null }
+                if ($PublicationState.PSObject.Properties['AppliedBytes']) { $PublicationState.AppliedBytes = $null }
+                if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = $null }
+            }
+            if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $null }
+            if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $false }
+            $PublicationState.Publication = $null
+            return
+        }
+
+        if ($null -eq $final -and [bool]$publication.expectedOldExists -and $oldMatchesTombstone -and $stageMatches) {
+            $tombstoneHandle = Get-PublicationFileHandle -Root $Root -Path $tombstonePath -RelativePath $tombstoneRelative -Kind $Kind
+            $tombstoneStream = $null
+            try {
+                $tombstoneStream = [System.IO.FileStream]::new($tombstoneHandle,[System.IO.FileAccess]::Read)
+                $tombstoneHandle = $null
+                [byte[]]$tombstoneBytes = Read-TargetMutationStreamBytes -Stream $tombstoneStream
+                if ([CodexAiInstructions.NativeFileMutation]::GetFileIdentity($tombstoneStream.SafeFileHandle) -cne [string]$publication.expectedOldIdentity -or
+                    (Get-ByteArraySha256 $tombstoneBytes) -cne [string]$publication.expectedOldSha256 -or
+                    $tombstoneBytes.Length -ne [long]$publication.expectedOldLength) {
+                    throw "Publication tombstone changed before missing-window recovery; it was preserved: $tombstonePath"
+                }
+                Invoke-AtomicFilePublicationRename -Handle $tombstoneStream.SafeFileHandle -DestinationPath $Path
+            }
+            finally {
+                if ($null -ne $tombstoneStream) { $tombstoneStream.Dispose() }
+                if ($null -ne $tombstoneHandle) { $tombstoneHandle.Dispose() }
+            }
+            Remove-VerifiedPublicationFile -Root $Root -Path $stagePath -RelativePath $stageRelative `
+                -Kind $Kind -Identity ([string]$publication.stageIdentity) `
+                -Sha256 ([string]$publication.newSha256) -Length ([long]$publication.newLength)
+            if ([string]$publication.direction -ceq 'apply') {
+                $PublicationState.MutationApplied = $false
+                if ($PublicationState.PSObject.Properties['AppliedFileIdentity']) { $PublicationState.AppliedFileIdentity = $null }
+                if ($PublicationState.PSObject.Properties['AppliedBytes']) { $PublicationState.AppliedBytes = $null }
+                if ($PublicationState.PSObject.Properties['AppliedType']) { $PublicationState.AppliedType = $null }
+            }
+            if ($PublicationState.PSObject.Properties['PublicationDaclRecord']) { $PublicationState.PublicationDaclRecord = $null }
+            if ($PublicationState.PSObject.Properties['PublicationReadOnly']) { $PublicationState.PublicationReadOnly = $false }
+            $PublicationState.Publication = $null
+            return
+        }
+
+        throw "Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery: $Path"
+    }
+    finally { if ($null -ne $guard) { $guard.Dispose() } }
+}
+
 function Remove-TargetMutationFileAtomically {
     param(
         [Parameter(Mandatory = $true)][object] $Snapshot,
         [Parameter(Mandatory = $true)][string] $RelativePath,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
-        [Parameter(Mandatory = $true)][string] $Operation
+        [Parameter(Mandatory = $true)][string] $Operation,
+        [AllowNull()][string] $ExpectedIdentity
     )
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -1857,7 +2793,9 @@ function Remove-TargetMutationFileAtomically {
             -TargetPath ([string]$state.TargetPath) `
             -RelativePath $RelativePath -Operation $Operation
         [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
-        if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $ExpectedBytes)) {
+        $currentIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stream.SafeFileHandle)
+        if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $ExpectedBytes) -or
+            ($ExpectedIdentity -and $currentIdentity -cne $ExpectedIdentity)) {
             throw "$Operation detected concurrent content; the current file was preserved: $RelativePath"
         }
         Set-TargetMutationDeleteDisposition -Handle $stream.SafeFileHandle
@@ -1886,73 +2824,18 @@ function Set-TargetMutationFileBytes {
         Save-SkillMigrationJournal $Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating' $RelativePath 'file' $Bytes
     }
     Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
-    $stream = $null
-    $restoreReadOnly = $false
-    $createContext = $null
-    try {
-        if ([string]$state.OriginalType -ceq 'file') {
-            [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
-            try {
-                $stream = Open-TargetMutationAtomicWriteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
-                    -TargetPath ([string]$state.TargetPath) -RelativePath $RelativePath `
-                    -Operation 'Managed target mutation' -RestoreReadOnly ([ref]$restoreReadOnly)
-            }
-            catch {
-                throw "Managed target changed concurrently before mutation: $RelativePath. $($_.Exception.Message)"
-            }
-            [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
-            if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right $originalBytes)) {
-                throw "Managed target changed concurrently before mutation: $RelativePath"
-            }
-        }
-        else {
-            try {
-                $stream = Open-TargetMutationAtomicCreateStream -TargetRoot ([string]$Snapshot.TargetRoot) `
-                    -TargetPath ([string]$state.TargetPath) -RelativePath $RelativePath `
-                    -Operation 'Managed target creation' -CreateContext ([ref]$createContext)
-            }
-            catch {
-                throw "Managed target changed concurrently before creation: $RelativePath. $($_.Exception.Message)"
-            }
-            foreach ($createdDirectory in @($createContext.CreatedDirectories)) {
-                $alreadyRecorded = @($Snapshot.CreatedDirectories | Where-Object {
-                    ([string]$_.FullPath).Equals([string]$createdDirectory.FullPath,[System.StringComparison]::OrdinalIgnoreCase)
-                }).Count -gt 0
-                if (-not $alreadyRecorded) {
-                    $Snapshot.CreatedDirectories.Add([pscustomobject][ordered]@{
-                        FullPath = [string]$createdDirectory.FullPath
-                        RelativePath = [string]$createdDirectory.RelativePath
-                        VolumeSerialNumber = [uint32]$createdDirectory.VolumeSerialNumber
-                        FileIndexHigh = [uint32]$createdDirectory.FileIndexHigh
-                        FileIndexLow = [uint32]$createdDirectory.FileIndexLow
-                    })
-                }
-            }
-        }
-
-        $state.AppliedType = 'file'
-        $state.AppliedBytes = [byte[]]$Bytes.Clone()
-        $state.MutationApplied = $true
-        try {
-            Write-TargetMutationStreamBytes -Stream $stream -Bytes $Bytes
-            [byte[]]$writtenBytes = Read-TargetMutationStreamBytes -Stream $stream
-            if (-not (Test-TargetMutationBytesEqual -Left $writtenBytes -Right $Bytes)) {
-                $state.AppliedBytes = $writtenBytes
-                throw "Managed target write did not retain the exact applied bytes: $RelativePath"
-            }
-        }
-        catch {
-            try { $state.AppliedBytes = [byte[]](Read-TargetMutationStreamBytes -Stream $stream) }
-            catch { }
-            throw
-        }
-    }
-    finally {
-        if ($null -ne $stream) {
-            Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
-        }
-        if ($null -ne $createContext) { $createContext.Dispose() }
-    }
+    $expectedOldExists = [string]$state.OriginalType -ceq 'file'
+    $expectedOldBytes = if ($expectedOldExists) { [System.IO.File]::ReadAllBytes([string]$state.BackupPath) } else { $null }
+    $expectedOldHash = if ($expectedOldExists) { Get-RawContentHash ([string]$state.BackupPath) } else { $null }
+    Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+        -Path ([string]$state.TargetPath) -RelativePath $RelativePath -ExpectedOldExists $expectedOldExists `
+        -ExpectedOldBytes $expectedOldBytes -ExpectedOldIdentity $(if ($expectedOldExists) { [string]$state.OriginalIdentity } else { $null }) `
+        -ExpectedOldSha256 $expectedOldHash -DaclRecord $state.OriginalDacl -ReadOnly ([bool]$state.OriginalReadOnly) `
+        -NewBytes $Bytes -Direction apply -PublicationState $state -Snapshot $Snapshot | Out-Null
+    $state.AppliedType = 'file'
+    $state.AppliedBytes = [byte[]]$Bytes.Clone()
+    $state.AppliedFileIdentity = [string]$state.Publication.stageIdentity
+    $state.MutationApplied = $true
 }
 
 function Remove-TargetMutationFile {
@@ -1988,39 +2871,104 @@ function Restore-TargetMutationSnapshot {
         $restoreReadOnly = $false
         $createContext = $null
         try {
+            if ($null -ne $state.Publication) {
+                Resolve-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                    -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -PublicationState $state
+                if (-not [bool]$state.MutationApplied) { continue }
+            }
+            if (-not [bool]$state.LegacyRecovery -and $null -eq $state.Publication) {
+                $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
+                    -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -Kind Target -AllowMissing
+                $isOriginal = if ([string]$state.OriginalType -ceq 'missing') { $null -eq $currentEvidence } else {
+                    Test-PublicationEvidenceMatches $currentEvidence ([string]$state.OriginalIdentity) `
+                        (Get-RawContentHash ([string]$state.BackupPath)) ([long](Get-Item -LiteralPath ([string]$state.BackupPath)).Length) `
+                        $state.OriginalDacl ([bool]$state.OriginalReadOnly)
+                }
+                if ($isOriginal) {
+                    $state.MutationApplied = $false
+                    $state.Publication = $null
+                    continue
+                }
+            }
             Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Target rollback '$($state.RelativePath)'"
             switch ([string]$state.AppliedType) {
                 'file' {
-                    if (-not (Test-Path -LiteralPath ([string]$state.TargetPath) -PathType Leaf)) {
-                        $driftedPaths.Add([string]$state.RelativePath)
+                    if (-not [bool]$state.LegacyRecovery) {
+                        if ([string]$state.OriginalType -ceq 'file') {
+                            $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
+                                -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -Kind Target -AllowMissing
+                            [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+                            [byte[]]$appliedBytes = [byte[]]$state.AppliedBytes
+                            if (-not (Test-PublicationEvidenceMatches $currentEvidence ([string]$state.AppliedFileIdentity) `
+                                (Get-ByteArraySha256 $appliedBytes) ([long]$appliedBytes.Length) $state.OriginalDacl ([bool]$state.OriginalReadOnly))) {
+                                $driftedPaths.Add([string]$state.RelativePath)
+                                continue
+                            }
+                            Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                                -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                                -ExpectedOldExists $true -ExpectedOldBytes $appliedBytes -ExpectedOldIdentity ([string]$state.AppliedFileIdentity) `
+                                -ExpectedOldSha256 (Get-ByteArraySha256 $appliedBytes) -DaclRecord $state.OriginalDacl `
+                                -ReadOnly ([bool]$state.OriginalReadOnly) -NewBytes $originalBytes -Direction restore `
+                                -PublicationState $state -Snapshot $Snapshot | Out-Null
+                            $state.Publication = $null
+                            $state.PublicationDaclRecord = $null
+                            $state.PublicationReadOnly = $false
+                            $state.AppliedFileIdentity = $null
+                            $state.AppliedBytes = $null
+                            $state.AppliedType = $null
+                            continue
+                        }
+                        $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
+                            -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -Kind Target -AllowMissing
+                        [byte[]]$appliedBytes = [byte[]]$state.AppliedBytes
+                        if (-not (Test-PublicationEvidenceMatches $currentEvidence ([string]$state.AppliedFileIdentity) `
+                            (Get-ByteArraySha256 $appliedBytes) ([long]$appliedBytes.Length) $state.OriginalDacl ([bool]$state.OriginalReadOnly))) {
+                            $driftedPaths.Add([string]$state.RelativePath)
+                            continue
+                        }
+                        Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath ([string]$state.RelativePath) `
+                            -ExpectedBytes $appliedBytes -ExpectedIdentity ([string]$state.AppliedFileIdentity) -Operation 'Target rollback removal'
+                        $state.MutationApplied = $false
+                        $state.Publication = $null
+                        $state.PublicationDaclRecord = $null
+                        $state.PublicationReadOnly = $false
+                        $state.AppliedFileIdentity = $null
+                        $state.AppliedBytes = $null
+                        $state.AppliedType = $null
                         continue
                     }
-                    try {
-                        $stream = Open-TargetMutationAtomicWriteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
-                            -TargetPath ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
-                            -Operation 'Target rollback mutation' -RestoreReadOnly ([ref]$restoreReadOnly)
-                    }
-                    catch {
-                        $driftedPaths.Add([string]$state.RelativePath)
-                        continue
-                    }
-                    [byte[]]$currentBytes = Read-TargetMutationStreamBytes -Stream $stream
-                    if (-not (Test-TargetMutationBytesEqual -Left $currentBytes -Right ([byte[]]$state.AppliedBytes))) {
+                    $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
+                        -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -Kind Target -AllowMissing
+                    if ($null -eq $currentEvidence -or
+                        -not (Test-TargetMutationBytesEqual -Left ([byte[]]$currentEvidence.bytes) -Right ([byte[]]$state.AppliedBytes))) {
                         $driftedPaths.Add([string]$state.RelativePath)
                         continue
                     }
                     if ([string]$state.OriginalType -ceq 'file') {
                         [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
-                        Write-TargetMutationStreamBytes -Stream $stream -Bytes $originalBytes
+                        # Schema-v1 did not retain the original identity or DACL. Use live
+                        # metadata only after the old whole-file byte CAS succeeds, and keep
+                        # that fact separate from historic metadata in the journal.
+                        $state.PublicationDaclRecord = $currentEvidence.dacl
+                        $state.PublicationReadOnly = [bool]$currentEvidence.readOnly
+                        Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                            -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                            -ExpectedOldExists $true -ExpectedOldBytes ([byte[]]$currentEvidence.bytes) `
+                            -ExpectedOldIdentity ([string]$currentEvidence.identity) -ExpectedOldSha256 ([string]$currentEvidence.sha256) `
+                            -DaclRecord $currentEvidence.dacl -ReadOnly ([bool]$currentEvidence.readOnly) `
+                            -NewBytes $originalBytes -Direction restore -PublicationState $state -Snapshot $Snapshot | Out-Null
                         $state.MutationApplied = $false
+                        $state.Publication = $null
+                        $state.PublicationDaclRecord = $null
+                        $state.PublicationReadOnly = $false
+                        $state.AppliedBytes = $null
+                        $state.AppliedType = $null
                         continue
                     }
-                    Close-TargetMutationStream -Stream $stream -RestoreReadOnly $restoreReadOnly
-                    $stream = $null
-                    $restoreReadOnly = $false
                     try {
                         Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath ([string]$state.RelativePath) `
-                            -ExpectedBytes ([byte[]]$state.AppliedBytes) -Operation 'Target rollback removal'
+                            -ExpectedBytes ([byte[]]$state.AppliedBytes) -ExpectedIdentity ([string]$currentEvidence.identity) `
+                            -Operation 'Target rollback removal'
                     }
                     catch {
                         $driftedPaths.Add([string]$state.RelativePath)
@@ -2030,22 +2978,56 @@ function Restore-TargetMutationSnapshot {
                     $state.MutationApplied = $false
                 }
                 'missing' {
+                    if (-not [bool]$state.LegacyRecovery) {
+                        if ([string]$state.OriginalType -ceq 'file') {
+                            $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
+                                -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                                -Kind Target -AllowMissing
+                            if ($null -ne $currentEvidence) {
+                                $driftedPaths.Add([string]$state.RelativePath)
+                                continue
+                            }
+                            [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+                            Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                                -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                                -ExpectedOldExists $false -ExpectedOldBytes $null -ExpectedOldIdentity $null -ExpectedOldSha256 $null `
+                                -DaclRecord $state.OriginalDacl -ReadOnly ([bool]$state.OriginalReadOnly) -NewBytes $originalBytes `
+                                -Direction restore -PublicationState $state -Snapshot $Snapshot | Out-Null
+                            $state.Publication = $null
+                            $state.PublicationDaclRecord = $null
+                            $state.PublicationReadOnly = $false
+                            $state.AppliedFileIdentity = $null
+                            $state.AppliedBytes = $null
+                            $state.AppliedType = $null
+                        }
+                        else { $state.MutationApplied = $false; $state.Publication = $null; $state.PublicationDaclRecord = $null
+                            $state.PublicationReadOnly = $false; $state.AppliedFileIdentity = $null; $state.AppliedBytes = $null; $state.AppliedType = $null }
+                        continue
+                    }
                     if (Test-Path -LiteralPath ([string]$state.TargetPath)) {
                         $driftedPaths.Add([string]$state.RelativePath)
                         continue
                     }
                     if ([string]$state.OriginalType -ceq 'file') {
+                        if ([string]$state.AppliedType -cne 'missing' -or $null -ne $state.AppliedBytes) {
+                            throw "Schema-v1 recovery cannot prove that the missing target belongs to a journaled deletion; the backup was preserved for manual recovery: $($state.RelativePath)"
+                        }
                         [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
-                        try {
-                            $stream = Open-TargetMutationAtomicCreateStream -TargetRoot ([string]$Snapshot.TargetRoot) `
-                                -TargetPath ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
-                                -Operation 'Target rollback creation' -CreateContext ([ref]$createContext)
-                        }
-                        catch {
-                            $driftedPaths.Add([string]$state.RelativePath)
-                            continue
-                        }
-                        Write-TargetMutationStreamBytes -Stream $stream -Bytes $originalBytes
+                        # V1 has no historic DACL or file identity. The journaled missing
+                        # state plus the verified backup authorizes a no-replace stage into
+                        # the guarded parent; capture the new file's actual ACL for retries.
+                        Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                            -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) `
+                            -ExpectedOldExists $false -ExpectedOldBytes $null -ExpectedOldIdentity $null -ExpectedOldSha256 $null `
+                            -DaclRecord $null -ReadOnly $false -NewBytes $originalBytes -Direction restore `
+                            -PublicationState $state -Snapshot $Snapshot | Out-Null
+                        $state.MutationApplied = $false
+                        $state.Publication = $null
+                        $state.PublicationDaclRecord = $null
+                        $state.PublicationReadOnly = $false
+                        $state.AppliedBytes = $null
+                        $state.AppliedType = $null
+                        continue
                     }
                     $state.MutationApplied = $false
                 }
@@ -2414,6 +3396,43 @@ function Update-PersonalAgentStash {
 function Save-SkillMigrationJournal {
     param([object]$Snapshot, [object]$ExcludeSnapshot, [string]$Path, [object]$GitState, [string]$Phase,
         [string]$PendingPath, [string]$PendingType='missing', [byte[]]$PendingBytes)
+    $schemaVersion = 2
+    if ($Snapshot.PSObject.Properties['JournalSchemaVersion']) { $schemaVersion = [int]$Snapshot.JournalSchemaVersion }
+    if ($schemaVersion -eq 1) {
+        $states = @(
+            foreach ($state in $Snapshot.FileStates) {
+                $pending = [string]$state.RelativePath -ceq $PendingPath
+                $legacyState = [ordered]@{
+                    relativePath=$state.RelativePath; originalType=$state.OriginalType
+                    backupName=$(if ($state.BackupPath) { Split-Path -Leaf $state.BackupPath } else { $null })
+                    backupSha256=$(if ($state.BackupPath) { Get-RawContentHash $state.BackupPath } else { $null })
+                    mutationApplied=([bool]$state.MutationApplied -or $pending)
+                    appliedType=$(if ($pending) { $PendingType } else { $state.AppliedType })
+                    appliedBase64=$(if ($pending -and $null -ne $PendingBytes) { [Convert]::ToBase64String($PendingBytes) }
+                        elseif ($null -ne $state.AppliedBytes) { [Convert]::ToBase64String([byte[]]$state.AppliedBytes) } else { $null })
+                }
+                if ($null -ne $state.Publication) {
+                    $legacyState.publication = $state.Publication
+                    $legacyState.publicationDacl = $state.PublicationDaclRecord
+                    $legacyState.publicationReadOnly = [bool]$state.PublicationReadOnly
+                }
+                $legacyState
+            }
+        )
+        $exclude = [ordered]@{
+            Path=$ExcludeSnapshot.Path; Repository=$ExcludeSnapshot.Repository
+            MutationApplied=[bool]$ExcludeSnapshot.MutationApplied; Existed=[bool]$ExcludeSnapshot.Existed
+            Bytes=$ExcludeSnapshot.Bytes; AppliedBytes=$ExcludeSnapshot.AppliedBytes
+        }
+        if ($null -ne $ExcludeSnapshot.Publication) {
+            $exclude.publication = $ExcludeSnapshot.Publication
+            $exclude.publicationDacl = $ExcludeSnapshot.PublicationDaclRecord
+            $exclude.publicationReadOnly = [bool]$ExcludeSnapshot.PublicationReadOnly
+        }
+        $document = [ordered]@{schemaVersion=1; targetRoot=$Snapshot.TargetRoot; phase=$Phase; head=$GitState.head
+            indexSha256=$GitState.indexSha256; states=$states; exclude=$exclude}
+    }
+    else {
     $states = @(
         foreach ($state in $Snapshot.FileStates) {
             $pending = [string]$state.RelativePath -ceq $PendingPath
@@ -2423,11 +3442,29 @@ function Save-SkillMigrationJournal {
                 mutationApplied=([bool]$state.MutationApplied -or $pending)
                 appliedType=$(if ($pending) { $PendingType } else { $state.AppliedType })
                 appliedBase64=$(if ($pending -and $null -ne $PendingBytes) { [Convert]::ToBase64String($PendingBytes) }
-                    elseif ($null -ne $state.AppliedBytes) { [Convert]::ToBase64String([byte[]]$state.AppliedBytes) } else { $null })}
+                    elseif ($null -ne $state.AppliedBytes) { [Convert]::ToBase64String([byte[]]$state.AppliedBytes) } else { $null })
+                originalDacl=$state.OriginalDacl; originalReadOnly=[bool]$state.OriginalReadOnly; originalIdentity=$state.OriginalIdentity
+                appliedFileIdentity=$state.AppliedFileIdentity; publication=$state.Publication
+                publicationDacl=$state.PublicationDaclRecord; publicationReadOnly=[bool]$state.PublicationReadOnly}
         }
     )
-    $document = [ordered]@{schemaVersion=1; targetRoot=$Snapshot.TargetRoot; phase=$Phase; head=$GitState.head; indexSha256=$GitState.indexSha256
-        states=$states; exclude=$ExcludeSnapshot}
+    $exclude = [ordered]@{
+        path=$ExcludeSnapshot.Path; repository=$ExcludeSnapshot.Repository
+        mutationApplied=[bool]$ExcludeSnapshot.MutationApplied; existed=[bool]$ExcludeSnapshot.Existed
+        bytesBase64=$(if ([bool]$ExcludeSnapshot.Existed -and $null -ne $ExcludeSnapshot.Bytes) { [Convert]::ToBase64String([byte[]]$ExcludeSnapshot.Bytes) } else { $null })
+        appliedBase64=$(if ($null -ne $ExcludeSnapshot.AppliedBytes) { [Convert]::ToBase64String([byte[]]$ExcludeSnapshot.AppliedBytes) } else { $null })
+        dacl=$ExcludeSnapshot.DaclRecord; originalReadOnly=[bool]$ExcludeSnapshot.OriginalReadOnly
+        originalIdentity=$ExcludeSnapshot.OriginalIdentity; appliedFileIdentity=$ExcludeSnapshot.AppliedFileIdentity
+        publication=$ExcludeSnapshot.Publication; publicationDacl=$ExcludeSnapshot.PublicationDaclRecord
+        publicationReadOnly=[bool]$ExcludeSnapshot.PublicationReadOnly
+    }
+    $createdDirectories = @($Snapshot.CreatedDirectories | ForEach-Object {
+        [ordered]@{fullPath=$_.FullPath;relativePath=$_.RelativePath;volumeSerialNumber=$_.VolumeSerialNumber
+            fileIndexHigh=$_.FileIndexHigh;fileIndexLow=$_.FileIndexLow}
+    })
+    $document = [ordered]@{schemaVersion=2; targetRoot=$Snapshot.TargetRoot; phase=$Phase; head=$GitState.head; indexSha256=$GitState.indexSha256
+        states=$states; exclude=$exclude; createdDirectories=$createdDirectories}
+    }
     $bytes = [Text.Encoding]::UTF8.GetBytes(($document | ConvertTo-Json -Depth 14) + "`n")
     $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -2444,12 +3481,28 @@ function Restore-SkillMigrationJournal {
         (Split-Path -Leaf $backupRoot) -cne 'target-backup' -or (Split-Path -Leaf $journalPath) -cne 'skill-migration.json') { throw 'Unsafe Skill migration recovery location.' }
     Assert-ManagedPathDoesNotCrossReparsePoint -Root $tempPrefix.TrimEnd([char[]]@('\','/')) -Path $journalPath -Context 'Skill migration recovery'
     $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
-    if ($journal.schemaVersion -ne 1 -or [string]$journal.targetRoot -cne $Repository -or $journal.phase -notin @('mutating','applied','rolled-back','recovered')) { throw 'Skill migration journal identity is invalid.' }
+    $schemaVersion = [int]$journal.schemaVersion
+    if ($schemaVersion -eq 2) {
+        Assert-ExactJournalProperties -Value $journal -Names @('schemaVersion','targetRoot','phase','head','indexSha256','states','exclude','createdDirectories') -Context 'schema-v2 migration journal'
+        if ($null -eq $journal.states -or $null -eq $journal.exclude -or $null -eq $journal.createdDirectories) { throw 'Schema-v2 migration journal is incomplete.' }
+    }
+    if ($schemaVersion -notin @(1,2) -or [string]$journal.targetRoot -cne $Repository -or
+        $journal.phase -notin @('mutating','applied','rolled-back','recovered') -or
+        [string]$journal.head -cnotmatch '^[0-9a-f]{40,64}$' -or [string]$journal.indexSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Skill migration journal identity or schema is invalid.'
+    }
     $gitState = Get-RepoSkillMigrationGitState -Repository $Repository -GitExecutable $GitExecutable
     if ($gitState.head -cne $journal.head -or $gitState.indexSha256 -cne $journal.indexSha256) { throw 'Skill migration recovery preserved concurrent Git changes.' }
     $states = @()
     $seen = @{}
+    $seenBackups = @{}
     foreach ($state in $journal.states) {
+        if ($schemaVersion -eq 2) {
+            Assert-ExactJournalProperties -Value $state -Names @('relativePath','originalType','backupName','backupSha256','mutationApplied',
+                'appliedType','appliedBase64','originalDacl','originalReadOnly','originalIdentity','appliedFileIdentity','publication',
+                'publicationDacl','publicationReadOnly') `
+                -Context 'schema-v2 migration state'
+        }
         if ($state.mutationApplied -isnot [bool]) { throw 'Invalid Skill migration recovery mutation flag.' }
         $relative = [string]$state.relativePath
         if ((-not (Test-IsAllowedManagedPath $relative) -and $relative -cne '.codex/ai-instructions.manifest.json') -or
@@ -2460,32 +3513,281 @@ function Restore-SkillMigrationJournal {
         $backup = $null
         if ($state.originalType -eq 'file') {
             if ([string]$state.backupName -cnotmatch '^\d{6}\.bin$' -or [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid Skill migration backup inventory.' }
+            if ($seenBackups.ContainsKey([string]$state.backupName)) { throw 'Duplicate Skill migration backup inventory.' }
+            $seenBackups[[string]$state.backupName]=$true
             $backup = Join-Path $backupRoot $state.backupName
             Assert-ManagedPathDoesNotCrossReparsePoint -Root $backupRoot -Path $backup -Context 'Skill migration recovery backup'
             if ((Get-RawContentHash $backup) -cne [string]$state.backupSha256) { throw 'Skill migration recovery backup hash mismatch.' }
         }
+        elseif ($schemaVersion -eq 2 -and ($null -ne $state.backupName -or $null -ne $state.backupSha256)) {
+            throw 'Schema-v2 missing original file contains an unexpected backup inventory.'
+        }
         $applied = [bool]$state.mutationApplied
         if ($applied -and $state.appliedType -notin @('file','missing')) { throw 'Invalid applied Skill migration recovery state.' }
-        # Intent is durable before mutation; a crash may leave the original state untouched.
-        if ($applied -and (($state.originalType -eq 'file' -and (Test-Path -LiteralPath $target -PathType Leaf) -and
+        $appliedBytes = $null
+        if ($null -ne $state.appliedBase64) {
+            try { $appliedBytes = [Convert]::FromBase64String([string]$state.appliedBase64) }
+            catch { throw 'Invalid Skill migration applied-byte encoding.' }
+        }
+        $originalDacl = $null; $originalReadOnly = $false; $originalIdentity = $null
+        $appliedIdentity = $null; $publication = $null; $publicationDacl = $null; $publicationReadOnly = $false
+        $legacyRecovery = $schemaVersion -eq 1
+        $statePublicationProperty = $state.PSObject.Properties['publication']
+        $statePublication = if ($null -eq $statePublicationProperty) { $null } else { $statePublicationProperty.Value }
+        if ($schemaVersion -eq 1 -and $null -ne $statePublication) {
+            Assert-AtomicFilePublicationRecord -Publication $statePublication -RelativePath $relative
+            $publication = $statePublication
+            $publicationNewMatchesBackup = [string]$publication.direction -ceq 'restore' -and
+                $state.originalType -ceq 'file' -and
+                [string]$publication.newSha256 -ceq [string]$state.backupSha256 -and
+                [long]$publication.newLength -eq [long](Get-Item -LiteralPath $backup).Length
+            if ($state.appliedType -ceq 'file') {
+                $publicationOldMatchesApplied = $null -ne $appliedBytes -and [bool]$publication.expectedOldExists -and
+                    [string]$publication.expectedOldSha256 -ceq (Get-ByteArraySha256 $appliedBytes) -and
+                    [long]$publication.expectedOldLength -eq [long]$appliedBytes.Length
+            }
+            else {
+                $publicationOldMatchesApplied = $state.appliedType -ceq 'missing' -and $null -eq $appliedBytes -and
+                    -not [bool]$publication.expectedOldExists -and $null -eq $publication.expectedOldIdentity -and
+                    $null -eq $publication.expectedOldSha256 -and [long]$publication.expectedOldLength -eq 0
+            }
+            if (-not $publicationNewMatchesBackup -or -not $publicationOldMatchesApplied -or
+                $state.publicationReadOnly -isnot [bool] -or $null -eq $state.publicationDacl) {
+                throw 'Invalid schema-v1 staged recovery publication state.'
+            }
+            $publicationDacl = $state.publicationDacl
+            $null = ConvertFrom-FileDaclJournalRecord $publicationDacl
+            $publicationReadOnly = [bool]$state.publicationReadOnly
+        }
+        if ($schemaVersion -eq 2) {
+            if ($null -ne $state.appliedType -and $state.appliedType -notin @('file','missing')) { throw 'Invalid schema-v2 applied state type.' }
+            if ($state.originalReadOnly -isnot [bool]) { throw 'Invalid schema-v2 original read-only attribute.' }
+            $originalReadOnly = [bool]$state.originalReadOnly
+            if ($state.originalType -eq 'file') {
+                if ([string]$state.originalIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or $null -eq $state.originalDacl) { throw 'Invalid schema-v2 original file identity or DACL.' }
+                $originalIdentity = [string]$state.originalIdentity
+                $originalDacl = $state.originalDacl
+                $null = ConvertFrom-FileDaclJournalRecord $originalDacl
+            }
+            elseif ($null -ne $state.originalIdentity -or $null -ne $state.originalDacl -or $originalReadOnly) { throw 'Invalid schema-v2 missing original file metadata.' }
+            if ($applied -and $state.appliedType -ceq 'file' -and $null -eq $appliedBytes) { throw 'Schema-v2 applied file bytes are missing.' }
+            if ($applied -and $state.appliedType -ceq 'missing' -and $null -ne $appliedBytes) { throw 'Schema-v2 missing applied state has file bytes.' }
+            if ($null -ne $state.appliedFileIdentity) {
+                if ([string]$state.appliedFileIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$') { throw 'Invalid schema-v2 applied file identity.' }
+                $appliedIdentity = [string]$state.appliedFileIdentity
+            }
+            if ($null -eq $statePublication -and $null -ne $appliedIdentity) {
+                throw 'Schema-v2 applied file identity has no publication ownership record.'
+            }
+            if ($null -ne $statePublication) {
+                Assert-AtomicFilePublicationRecord -Publication $statePublication -RelativePath $relative
+                $publication = $statePublication
+                if ($null -eq $state.publicationDacl -or $state.publicationReadOnly -isnot [bool]) {
+                    throw 'Schema-v2 publication is missing its measured staged-file metadata.'
+                }
+                $publicationDacl = $state.publicationDacl
+                $null = ConvertFrom-FileDaclJournalRecord $publicationDacl
+                $publicationReadOnly = [bool]$state.publicationReadOnly
+                if ($state.originalType -ceq 'file' -and
+                    (-not [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                        (ConvertFrom-FileDaclJournalRecord $originalDacl), (ConvertFrom-FileDaclJournalRecord $publicationDacl)) -or
+                     $publicationReadOnly -ne $originalReadOnly)) {
+                    throw 'Schema-v2 publication metadata does not match the preserved original file metadata.'
+                }
+                if ($publication.direction -ceq 'apply') {
+                    if ($null -eq $appliedBytes -or (Get-ByteArraySha256 $appliedBytes) -cne [string]$publication.newSha256 -or
+                        [long]$appliedBytes.Length -ne [long]$publication.newLength -or $appliedIdentity -cne [string]$publication.stageIdentity) {
+                        throw 'Schema-v2 apply publication does not match its recorded file state.'
+                    }
+                    if ([bool]$publication.expectedOldExists -ne ($state.originalType -ceq 'file') -or
+                        ([bool]$publication.expectedOldExists -and ([string]$publication.expectedOldSha256 -cne [string]$state.backupSha256 -or
+                            [string]$publication.expectedOldIdentity -cne [string]$originalIdentity -or
+                            [long]$publication.expectedOldLength -ne [long](Get-Item -LiteralPath $backup).Length))) {
+                        throw 'Schema-v2 apply publication does not match its original file inventory.'
+                    }
+                }
+                else {
+                    $restoreNewMatchesBackup = $state.originalType -ceq 'file' -and
+                        [string]$publication.newSha256 -ceq [string]$state.backupSha256 -and
+                        [long]$publication.newLength -eq [long](Get-Item -LiteralPath $backup).Length
+                    if ($state.appliedType -ceq 'file') {
+                        $restoreOldMatchesApplied = [bool]$publication.expectedOldExists -and $null -ne $appliedBytes -and
+                            $null -ne $appliedIdentity -and
+                            [string]$publication.expectedOldSha256 -ceq (Get-ByteArraySha256 $appliedBytes) -and
+                            [long]$publication.expectedOldLength -eq [long]$appliedBytes.Length -and
+                            [string]$publication.expectedOldIdentity -ceq [string]$appliedIdentity
+                    }
+                    else {
+                        $restoreOldMatchesApplied = $state.appliedType -ceq 'missing' -and
+                            -not [bool]$publication.expectedOldExists -and
+                            $null -eq $publication.expectedOldIdentity -and $null -eq $publication.expectedOldSha256 -and
+                            [long]$publication.expectedOldLength -eq 0 -and
+                            $null -eq $appliedBytes -and $null -eq $appliedIdentity
+                    }
+                    if (-not $restoreNewMatchesBackup -or -not $restoreOldMatchesApplied) {
+                        throw 'Schema-v2 restore publication does not match its original backup and applied state.'
+                    }
+                }
+            }
+            elseif ($null -ne $state.publicationDacl -or $state.publicationReadOnly -isnot [bool] -or [bool]$state.publicationReadOnly) {
+                throw 'Schema-v2 state contains staged-file metadata without publication ownership.'
+            }
+        }
+        elseif ($null -eq $publication -and $applied -and (($state.originalType -eq 'file' -and (Test-Path -LiteralPath $target -PathType Leaf) -and
             (Get-RawContentHash $target) -ceq [string]$state.backupSha256) -or
-            ($state.originalType -eq 'missing' -and -not (Test-Path -LiteralPath $target)))) { $applied=$false }
-        $states += [pscustomobject]@{RelativePath=$relative; TargetPath=$target; OriginalType=$state.originalType; BackupPath=$backup
-            MutationApplied=$applied; AppliedType=$state.appliedType
-            AppliedBytes=$(if ($null -ne $state.appliedBase64) { [Convert]::FromBase64String($state.appliedBase64) } else { $null })}
+            ($state.originalType -eq 'missing' -and -not (Test-Path -LiteralPath $target)))) {
+            # Schema-v1 intent had no publication record; only an exact original state is a no-op.
+            $applied = $false
+        }
+        $states += [pscustomobject][ordered]@{RelativePath=$relative; TargetPath=$target; OriginalType=$state.originalType; BackupPath=$backup
+            OriginalDacl=$originalDacl; OriginalReadOnly=$originalReadOnly; OriginalIdentity=$originalIdentity
+            AppliedFileIdentity=$appliedIdentity; Publication=$publication; PublicationDaclRecord=$publicationDacl
+            PublicationReadOnly=$publicationReadOnly; LegacyRecovery=$legacyRecovery
+            MutationApplied=$applied; AppliedType=$state.appliedType; AppliedBytes=$appliedBytes}
     }
-    $snapshot = [pscustomobject]@{TargetRoot=$Repository; FileStates=$states; CreatedDirectories=@()}
-    $exclude = $journal.exclude
-    if ([string]$exclude.Repository -cne $Repository -or [string]$exclude.Path -cne (Get-GitInfoExcludePath $Repository)) { throw 'Invalid Skill migration exclude recovery target.' }
-    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $exclude.Path
-    if ([bool]$exclude.MutationApplied -and (Test-Path -LiteralPath $exclude.Path -PathType Leaf) -and
-        (Test-GitInfoExcludeBytesEqual -Left ([IO.File]::ReadAllBytes($exclude.Path)) -Right ([byte[]]$exclude.Bytes))) {
-        $exclude.MutationApplied=$false
+    $createdDirectories = New-Object 'System.Collections.Generic.List[object]'
+    if ($schemaVersion -eq 2) {
+        $seenCreatedDirectories=@{}
+        foreach ($directory in @($journal.createdDirectories)) {
+            Assert-ExactJournalProperties -Value $directory -Names @('fullPath','relativePath','volumeSerialNumber','fileIndexHigh','fileIndexLow') `
+                -Context 'schema-v2 created-directory identity'
+            $relativeDirectory = [string]$directory.relativePath
+            $directorySegments=$relativeDirectory.Replace('\','/').Split('/')
+            if ([string]::IsNullOrWhiteSpace($relativeDirectory) -or $relativeDirectory.Contains(':') -or $relativeDirectory.StartsWith('/') -or
+                @($directorySegments | Where-Object { $_ -in @('','.','..') }).Count -gt 0 -or
+                [uint32]$directory.volumeSerialNumber -eq 0 -or ([uint32]$directory.fileIndexHigh -eq 0 -and [uint32]$directory.fileIndexLow -eq 0)) {
+                throw 'Invalid schema-v2 created-directory identity.'
+            }
+            $fullDirectory = [IO.Path]::GetFullPath((Join-Path $Repository $relativeDirectory.Replace('/','\')))
+            $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+            if (-not $fullDirectory.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase) -or
+                $fullDirectory -cne [IO.Path]::GetFullPath([string]$directory.fullPath) -or
+                $seenCreatedDirectories.ContainsKey($relativeDirectory)) { throw 'Invalid schema-v2 created-directory path.' }
+            $seenCreatedDirectories[$relativeDirectory]=$true
+            [void]$createdDirectories.Add([pscustomobject][ordered]@{FullPath=$fullDirectory;RelativePath=$relativeDirectory
+                VolumeSerialNumber=[uint32]$directory.volumeSerialNumber;FileIndexHigh=[uint32]$directory.fileIndexHigh;FileIndexLow=[uint32]$directory.fileIndexLow})
+        }
     }
-    Restore-TargetMutationSnapshot -Snapshot $snapshot
-    Restore-GitInfoExcludeSnapshot -Snapshot $exclude
-    Save-SkillMigrationJournal $snapshot $exclude $journalPath $gitState 'recovered'
-    Write-Output "Skill migration recovery verified: $journalPath"
+    $snapshot = [pscustomobject][ordered]@{TargetRoot=$Repository; FileStates=$states; CreatedDirectories=$createdDirectories
+        JournalSchemaVersion=$schemaVersion}
+    $journalExclude = $journal.exclude
+    if ([string]$journalExclude.Repository -cne $Repository -or [string]$journalExclude.Path -cne (Get-GitInfoExcludePath $Repository)) { throw 'Invalid Skill migration exclude recovery target.' }
+    Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $journalExclude.Path
+    $excludePublicationProperty = $journalExclude.PSObject.Properties['publication']
+    $journalExcludePublication = if ($null -eq $excludePublicationProperty) { $null } else { $excludePublicationProperty.Value }
+    if ($schemaVersion -eq 1) {
+        $excludePublication = $journalExcludePublication
+        $excludePublicationDacl = $null; $excludePublicationReadOnly = $false
+        if ($null -ne $excludePublication) {
+            Assert-AtomicFilePublicationRecord -Publication $excludePublication -RelativePath ([IO.Path]::GetFileName([string]$journalExclude.Path))
+            if ([string]$excludePublication.direction -cne 'restore' -or -not [bool]$journalExclude.Existed -or
+                $null -eq $journalExclude.AppliedBytes -or
+                [string]$excludePublication.newSha256 -cne (Get-ByteArraySha256 ([byte[]]$journalExclude.Bytes)) -or
+                [long]$excludePublication.newLength -ne [long]([byte[]]$journalExclude.Bytes).Length -or
+                -not [bool]$excludePublication.expectedOldExists -or
+                [string]$excludePublication.expectedOldSha256 -cne (Get-ByteArraySha256 ([byte[]]$journalExclude.AppliedBytes)) -or
+                [long]$excludePublication.expectedOldLength -ne [long]([byte[]]$journalExclude.AppliedBytes).Length -or
+                $journalExclude.publicationReadOnly -isnot [bool] -or $null -eq $journalExclude.publicationDacl) {
+                throw 'Invalid schema-v1 exclude staged recovery publication state.'
+            }
+            $excludePublicationDacl = $journalExclude.publicationDacl
+            $null = ConvertFrom-FileDaclJournalRecord $excludePublicationDacl
+            $excludePublicationReadOnly = [bool]$journalExclude.publicationReadOnly
+        }
+        $exclude = [pscustomobject][ordered]@{Path=$journalExclude.Path;Repository=$journalExclude.Repository
+            MutationApplied=[bool]$journalExclude.MutationApplied;Existed=[bool]$journalExclude.Existed
+            Bytes=$(if ($null -ne $journalExclude.bytes) { [byte[]]$journalExclude.bytes } else { $null })
+            AppliedBytes=$(if ($null -ne $journalExclude.appliedBytes) { [byte[]]$journalExclude.appliedBytes } else { $null })
+            DaclRecord=$null;OriginalReadOnly=$false;OriginalIdentity=$null;AppliedFileIdentity=$null;Publication=$excludePublication
+            PublicationDaclRecord=$excludePublicationDacl;PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$true}
+    }
+    else {
+        Assert-ExactJournalProperties -Value $journalExclude -Names @('path','repository','mutationApplied','existed','bytesBase64','appliedBase64',
+            'dacl','originalReadOnly','originalIdentity','appliedFileIdentity','publication','publicationDacl','publicationReadOnly') -Context 'schema-v2 exclude state'
+        if ($journalExclude.mutationApplied -isnot [bool] -or $journalExclude.existed -isnot [bool] -or $journalExclude.originalReadOnly -isnot [bool]) {
+            throw 'Invalid schema-v2 exclude mutation metadata.'
+        }
+        $excludeBytes=$null; $excludeAppliedBytes=$null
+        if ($null -ne $journalExclude.bytesBase64) { try { $excludeBytes=[Convert]::FromBase64String([string]$journalExclude.bytesBase64) } catch { throw 'Invalid schema-v2 exclude backup encoding.' } }
+        if ($null -ne $journalExclude.appliedBase64) { try { $excludeAppliedBytes=[Convert]::FromBase64String([string]$journalExclude.appliedBase64) } catch { throw 'Invalid schema-v2 exclude applied encoding.' } }
+        $excludeDacl=$journalExclude.dacl
+        if ([bool]$journalExclude.existed) {
+            if ($null -eq $excludeBytes -or [string]$journalExclude.originalIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or $null -eq $excludeDacl) { throw 'Invalid schema-v2 exclude original inventory.' }
+            $null=ConvertFrom-FileDaclJournalRecord $excludeDacl
+        }
+        elseif ($null -ne $excludeBytes -or $null -ne $journalExclude.originalIdentity -or $null -ne $excludeDacl -or [bool]$journalExclude.originalReadOnly) { throw 'Invalid schema-v2 missing exclude original inventory.' }
+        if ($null -ne $journalExclude.appliedFileIdentity -and
+            [string]$journalExclude.appliedFileIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$') {
+            throw 'Invalid schema-v2 exclude applied file identity.'
+        }
+        $excludePublication=$journalExcludePublication
+        $excludePublicationDacl=$journalExclude.publicationDacl
+        $excludePublicationReadOnly=$false
+        if ($null -ne $excludePublication) {
+            if ($null -eq $excludePublicationDacl -or $journalExclude.publicationReadOnly -isnot [bool]) {
+                throw 'Schema-v2 exclude publication is missing its measured staged-file metadata.'
+            }
+            $null=ConvertFrom-FileDaclJournalRecord $excludePublicationDacl
+            $excludePublicationReadOnly=[bool]$journalExclude.publicationReadOnly
+            if ([bool]$journalExclude.existed -and
+                (-not [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                    (ConvertFrom-FileDaclJournalRecord $excludeDacl), (ConvertFrom-FileDaclJournalRecord $excludePublicationDacl)) -or
+                 $excludePublicationReadOnly -ne [bool]$journalExclude.originalReadOnly)) {
+                throw 'Schema-v2 exclude publication metadata does not match its preserved original metadata.'
+            }
+        }
+        elseif ($null -ne $excludePublicationDacl -or $journalExclude.publicationReadOnly -isnot [bool] -or [bool]$journalExclude.publicationReadOnly) {
+            throw 'Schema-v2 exclude contains staged-file metadata without publication ownership.'
+        }
+        if ($null -eq $excludePublication -and $null -ne $journalExclude.appliedFileIdentity) {
+            throw 'Schema-v2 exclude applied file identity has no publication ownership record.'
+        }
+        if ($null -ne $excludePublication) {
+            Assert-AtomicFilePublicationRecord -Publication $excludePublication -RelativePath ([IO.Path]::GetFileName([string]$journalExclude.Path))
+            if ($excludePublication.direction -ceq 'apply' -and ($null -eq $excludeAppliedBytes -or
+                (Get-ByteArraySha256 $excludeAppliedBytes) -cne [string]$excludePublication.newSha256 -or
+                [long]$excludeAppliedBytes.Length -ne [long]$excludePublication.newLength -or
+                [string]$journalExclude.appliedFileIdentity -cne [string]$excludePublication.stageIdentity -or
+                [bool]$excludePublication.expectedOldExists -ne [bool]$journalExclude.existed -or
+                ([bool]$excludePublication.expectedOldExists -and ([string]$excludePublication.expectedOldIdentity -cne [string]$journalExclude.originalIdentity -or
+                    [string]$excludePublication.expectedOldSha256 -cne (Get-ByteArraySha256 $excludeBytes) -or
+                    [long]$excludePublication.expectedOldLength -ne [long]$excludeBytes.Length)))) { throw 'Schema-v2 exclude publication does not match its applied state.' }
+            if ($excludePublication.direction -ceq 'restore' -and ([bool]$journalExclude.existed -eq $false -or
+                (Get-ByteArraySha256 $excludeBytes) -cne [string]$excludePublication.newSha256 -or
+                [long]$excludePublication.newLength -ne [long]$excludeBytes.Length -or
+                $null -eq $excludeAppliedBytes -or [string]$excludePublication.expectedOldIdentity -cne [string]$journalExclude.appliedFileIdentity -or
+                [string]$excludePublication.expectedOldSha256 -cne (Get-ByteArraySha256 $excludeAppliedBytes) -or
+                [long]$excludePublication.expectedOldLength -ne [long]$excludeAppliedBytes.Length)) { throw 'Schema-v2 exclude restore publication does not match its backup.' }
+        }
+        $exclude=[pscustomobject][ordered]@{Path=$journalExclude.Path;Repository=$journalExclude.Repository
+            MutationApplied=[bool]$journalExclude.mutationApplied;Existed=[bool]$journalExclude.existed;Bytes=$excludeBytes
+            AppliedBytes=$excludeAppliedBytes;DaclRecord=$excludeDacl;OriginalReadOnly=[bool]$journalExclude.originalReadOnly
+            OriginalIdentity=$journalExclude.originalIdentity;AppliedFileIdentity=$journalExclude.appliedFileIdentity
+            Publication=$excludePublication;PublicationDaclRecord=$excludePublicationDacl
+            PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$false}
+    }
+    if ($schemaVersion -eq 1 -and $null -eq $exclude.Publication -and [bool]$exclude.MutationApplied) {
+        $legacyExcludeIsOriginal = $false
+        if ([bool]$exclude.Existed -and (Test-Path -LiteralPath $exclude.Path -PathType Leaf)) {
+            $legacyExcludeIsOriginal = Test-GitInfoExcludeBytesEqual -Left ([IO.File]::ReadAllBytes([string]$exclude.Path)) `
+                -Right ([byte[]]$exclude.Bytes)
+        }
+        elseif (-not [bool]$exclude.Existed -and -not (Test-Path -LiteralPath $exclude.Path)) {
+            $legacyExcludeIsOriginal = $true
+        }
+        if ($legacyExcludeIsOriginal) { $exclude.MutationApplied = $false }
+    }
+    $previousJournalContext = $script:SkillMigrationJournalContext
+    $script:SkillMigrationJournalContext = [pscustomobject]@{
+        Snapshot=$snapshot; ExcludeSnapshot=$exclude; Path=$journalPath; GitState=$gitState
+    }
+    try {
+        Restore-TargetMutationSnapshot -Snapshot $snapshot
+        Restore-GitInfoExcludeSnapshot -Snapshot $exclude
+        Save-SkillMigrationJournal $snapshot $exclude $journalPath $gitState 'recovered'
+        Write-Output "Skill migration recovery verified: $journalPath"
+    }
+    finally { $script:SkillMigrationJournalContext = $previousJournalContext }
 }
 
 $script:SkillMigrationJournalContext = $null
@@ -2510,6 +3812,7 @@ if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
 }
 
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
+Assert-RepoAndUserRootsDistinct -Repository $targetRootPath -UserHome $UserHome | Out-Null
 $syncStartRelativePath = ''
 if ($syncStartPath.Equals($targetRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     $syncStartRelativePath = ''
@@ -3175,7 +4478,7 @@ try {
         catch { $rollbackErrors.Add($_.Exception.Message) }
         try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
         catch { $rollbackErrors.Add($_.Exception.Message) }
-        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
+        if ($migrationGitState -and $rollbackErrors.Count -eq 0) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
         if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
             throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
@@ -3238,7 +4541,9 @@ try {
         catch { $rollbackErrors.Add($_.Exception.Message) }
         try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
         catch { $rollbackErrors.Add($_.Exception.Message) }
-        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
+        if ($migrationGitState -and $rollbackErrors.Count -eq 0) {
+            Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back'
+        }
         if ($rollbackErrors.Count -gt 0) {
             $preserveWorkingPath = $true
             throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
