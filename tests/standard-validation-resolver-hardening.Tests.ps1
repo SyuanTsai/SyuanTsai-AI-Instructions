@@ -469,10 +469,11 @@ Version: this line also belongs to the description body
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
         Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
 
-        # An invalid .exe can enter Windows application-error handling and wait for
-        # a hidden UI. An unregistered extension reaches the same process-launch
-        # failure deterministically without invoking that host-specific handler.
-        $invalidNativePath = Join-Path $TestDrive $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'invalid-native.invalid' } else { 'invalid-native' })
+        # Unknown extensions can open Windows' application picker. Use an invalid
+        # executable and suppress error UI only on this test's thread, restoring
+        # the previous flags after the real launch attempt.
+        $isWindowsFixture = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        $invalidNativePath = Join-Path $TestDrive $(if ($isWindowsFixture) { 'invalid-native.exe' } else { 'invalid-native' })
         [IO.File]::WriteAllBytes($invalidNativePath, [byte[]]@(0, 1, 2, 3))
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
             $chmodCommand = Assert-Command -Name 'chmod'
@@ -482,8 +483,31 @@ Version: this line also belongs to the description body
         }
         $global:LASTEXITCODE = 0
         $launchError = $null
-        try { Invoke-CheckedCommand -Command $invalidNativePath -Arguments @('--probe') | Out-Null }
-        catch { $launchError = $_.Exception.Message }
+        [uint32]$previousNativeErrorMode = 0
+        [uint32]$discardedNativeErrorMode = 0
+        $restoreNativeErrorMode = $false
+        try {
+            if ($isWindowsFixture) {
+                if ($null -eq ('StandardResolverFixtureErrorMode' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class StandardResolverFixtureErrorMode {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetThreadErrorMode(uint mode, out uint oldMode);
+}
+'@
+                }
+                if (-not [StandardResolverFixtureErrorMode]::SetThreadErrorMode(0x8003, [ref]$previousNativeErrorMode)) { throw 'Could not suppress test-thread native error UI.' }
+                $restoreNativeErrorMode = $true
+                if (-not [StandardResolverFixtureErrorMode]::SetThreadErrorMode(($previousNativeErrorMode -bor 0x8003), [ref]$discardedNativeErrorMode)) { throw 'Could not preserve existing native error flags.' }
+            }
+            try { Invoke-CheckedCommand -Command $invalidNativePath -Arguments @('--probe') | Out-Null }
+            catch { $launchError = $_.Exception.Message }
+        }
+        finally {
+            if ($restoreNativeErrorMode -and -not [StandardResolverFixtureErrorMode]::SetThreadErrorMode($previousNativeErrorMode, [ref]$discardedNativeErrorMode)) { throw 'Could not restore test-thread native error mode.' }
+        }
         Assert-True (-not [string]::IsNullOrWhiteSpace($launchError)) 'A native launch failure must not inherit a stale successful exit code.'
 
         $pythonCommand = Assert-Command -Name 'python'
@@ -1560,5 +1584,182 @@ Describe 'Third-party raw Skill tool boundary' {
             $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true) | ForEach-Object { $_.GetCommandName() })
             @($commands | Where-Object { $_ -in @('Invoke-WebRequest','Invoke-RestMethod','Start-Process','Invoke-Expression','git','python','npm','go') }).Count | Should Be 0
         }
+    }
+}
+
+Describe 'SYP280 Core candidate inventory diagnostics SourceValidation' {
+    BeforeAll {
+        $script:Syp280CoreRunner=Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $script:Syp280CoreRunner -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'syp280-core-unused-adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'syp280-core-unused-results') -SourceRepository 'https://example.test/source.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+    }
+
+    Context 'SourceValidation candidate inventory lifecycle modes' {
+    # Scenario: The real SourceValidation runner inventories a tracked candidate initially and at both stability rechecks.
+    # Purpose: Verify one dedicated heartbeat phase per actual candidate inventory and preserve the final content digest.
+    It 'UnitT34_runs_real_source_validation_inventory_capture_and_two_rechecks_with_phase_heartbeats' {
+        $candidateRoot=Join-Path $TestDrive 'syp280-core-candidate'
+        $fixtureRepository='https://fixture-org.example/fixture/demo.git'
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidateRoot 'skills/demo'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidateRoot 'tests'))
+        [IO.File]::WriteAllText((Join-Path $candidateRoot 'skills/demo/SKILL.md'),'fixture skill',(New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $candidateRoot 'tests/pass.ps1'),'# fixture check',(New-Object Text.UTF8Encoding($false)))
+        & git -C $candidateRoot init --quiet
+        if($LASTEXITCODE -ne 0){throw 'Could not initialize the temporary candidate Git fixture.'}
+        & git -C $candidateRoot config user.name 'P2 inventory fixture'
+        & git -C $candidateRoot config user.email 'p2-inventory@example.invalid'
+        & git -C $candidateRoot remote add origin $fixtureRepository
+        & git -C $candidateRoot add -- skills/demo/SKILL.md tests/pass.ps1
+        & git -C $candidateRoot commit --quiet -m 'candidate inventory fixture'
+        if($LASTEXITCODE -ne 0){throw 'Could not commit the temporary candidate Git fixture.'}
+        $sourceRevision=(& git -C $candidateRoot rev-parse HEAD).Trim()
+        if($LASTEXITCODE -ne 0 -or $sourceRevision -cnotmatch '^[a-f0-9]{40}$'){throw 'Temporary candidate fixture has no immutable revision.'}
+
+        $checkExecutable=Join-Path $PSHOME 'pwsh.exe'
+        if(-not (Test-Path -LiteralPath $checkExecutable -PathType Leaf)){throw "The trusted PowerShell executable is missing: $checkExecutable"}
+        $checkHash=Get-StandardValidationFileSha256 -Path $checkExecutable -Context 'P2 fixture check executable'
+        $frozen=@([pscustomobject][ordered]@{path=$checkExecutable;sha256=$checkHash})
+        $sourceSpec=[pscustomobject][ordered]@{
+            packageAdapter=[pscustomobject]@{}
+            skillValidator=[pscustomobject]@{}
+            skillTools=[pscustomobject]@{}
+            staticAnalyzer=[pscustomobject]@{}
+            frozenFiles=$frozen
+            toolReceipts=@()
+        }
+        $adapter=[pscustomobject][ordered]@{
+            schemaVersion=2
+            adapter='standard-core-adapter-v2'
+            skillsRoot='skills'
+            activeSkills=@('demo')
+            checks=@([pscustomobject][ordered]@{id='smoke';kind='general';executable=$checkExecutable;executableSha256=$checkHash;arguments=@('-File','tests/pass.ps1')})
+            sourceValidation=$sourceSpec
+        }
+        $adapterPath=Join-Path $TestDrive 'syp280-core-adapter.json'
+        [IO.File]::WriteAllText($adapterPath,($adapter|ConvertTo-Json -Depth 20 -Compress),(New-Object Text.UTF8Encoding($false)))
+        $expectedRows=@(
+            [pscustomobject]@{path='skills/demo/SKILL.md';sha256=(Get-StandardValidationFileSha256 -Path (Join-Path $candidateRoot 'skills/demo/SKILL.md') -Context 'P2 expected');length=[int64]13},
+            [pscustomobject]@{path='tests/pass.ps1';sha256=(Get-StandardValidationFileSha256 -Path (Join-Path $candidateRoot 'tests/pass.ps1') -Context 'P2 expected');length=[int64]15}
+        )
+        $expectedContentSha=Get-StandardValidationInventorySha256 -Inventory $expectedRows
+
+        $previousError=[Console]::Error
+        $previousTiming=$script:StandardValidationTimingEnabled
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        $global:Syp280CoreCandidateRoot=[IO.Path]::GetFullPath($candidateRoot).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+        $global:Syp280CoreAuthorityRoot=[IO.Path]::GetFullPath($script:StandardValidationRepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+        $global:Syp280CoreAuthorityRevision=(& git -C $global:Syp280CoreAuthorityRoot rev-parse HEAD).Trim()
+        $global:Syp280CoreAuthorityOrigin=[string]$script:StandardValidationAuthorityRepository
+        $global:Syp280CoreTrustedExecutable=$checkExecutable
+        $global:Syp280CoreOriginalGit=(Get-Command Invoke-StandardCoreGit -CommandType Function).ScriptBlock
+        $global:Syp280CoreOriginalProcess=(Get-Command Invoke-StandardValidationProcess -CommandType Function).ScriptBlock
+        $global:Syp280CoreOriginalFileHash=(Get-Command Get-StandardValidationFileSha256 -CommandType Function).ScriptBlock
+        $global:Syp280CoreOriginalPhase=(Get-Command New-StandardValidationPhase -CommandType Function).ScriptBlock
+        $global:Syp280CoreHashMode='success'
+        $global:Syp280CoreCandidateHashCalls=0
+        $global:Syp280CoreSourceToolCalls=0
+        $global:Syp280CoreCheckCalls=0
+        $global:Syp280CoreSourceGuardCalls=0
+        try {
+            [Console]::SetError($capture)
+            Mock New-StandardValidationPhase {
+                param([string]$Stage='validation',[string]$Phase,[switch]$Aggregate,[switch]$Silent)
+                if($Phase -ceq 'candidate-inventory') {
+                    $clock=[pscustomobject]@{seconds=[double]0}
+                    $clock|Add-Member -MemberType ScriptProperty -Name Elapsed -Value {$this.seconds+=31.0;[TimeSpan]::FromSeconds($this.seconds)} -Force
+                    $timing=[pscustomobject]@{stage=$Stage;phase=$Phase;watch=$clock;calls=[long]0;files=[long]0;bytes=[long]0;nextHeartbeat=[double]30;heartbeats=0;aggregate=[bool]$Aggregate;ticks=[long]0;silent=[bool]$Silent}
+                    Write-StandardValidationPhaseDiagnostic -Timing $timing -State 'started'
+                    return $timing
+                }
+                & $global:Syp280CoreOriginalPhase -Stage $Stage -Phase $Phase -Aggregate:$Aggregate -Silent:$Silent
+            }
+            Mock Invoke-StandardCoreGit {
+                param([string]$RepositoryRoot,[string]$WorkingDirectory,[string[]]$Arguments,[int]$TimeoutSeconds=30,[int[]]$AllowedExitCodes=@(0))
+                $normalized=[IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+                if($normalized -ceq $global:Syp280CoreAuthorityRoot) {
+                    if($Arguments[0] -ceq 'rev-parse') {return [pscustomobject]@{stdout=$global:Syp280CoreAuthorityRevision+"`n";stderr='';exitCode=0;status='passed';cleanedUp=$true}}
+                    if($Arguments[0] -ceq 'config') {return [pscustomobject]@{stdout=$global:Syp280CoreAuthorityOrigin+"`n";stderr='';exitCode=0;status='passed';cleanedUp=$true}}
+                    if($Arguments[0] -ceq 'diff') {return [pscustomobject]@{stdout='';stderr='';exitCode=0;status='passed';cleanedUp=$true}}
+                    throw "Unexpected authority Git call: $($Arguments -join ' ')"
+                }
+                & $global:Syp280CoreOriginalGit -RepositoryRoot $RepositoryRoot -WorkingDirectory $WorkingDirectory -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowedExitCodes $AllowedExitCodes
+            }
+            Mock Invoke-StandardValidationProcess {
+                param([string]$Command,[string[]]$Arguments,[string]$WorkingDirectory,[hashtable]$Environment,[int]$TimeoutSeconds,[string]$CancellationPath,[switch]$CoreLifecycleOnly,[switch]$EmitSupervisorProgress,[int]$SupervisorProgressIntervalSeconds=30)
+                if([IO.Path]::GetFullPath($Command) -ceq [IO.Path]::GetFullPath($global:Syp280CoreTrustedExecutable)) {
+                    [void]($global:Syp280CoreCheckCalls++)
+                    return [pscustomobject][ordered]@{startedAt='2026-10-11T00:00:00.0000000Z';endedAt='2026-10-11T00:00:00.0100000Z';processId=280;exitCode=0;status='passed';stdout='';stderr='';cleanedUp=$true}
+                }
+                & $global:Syp280CoreOriginalProcess -Command $Command -Arguments $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath -CoreLifecycleOnly:$CoreLifecycleOnly -EmitSupervisorProgress:$EmitSupervisorProgress -SupervisorProgressIntervalSeconds $SupervisorProgressIntervalSeconds
+            }
+            Mock Get-StandardValidationFileSha256 {
+                param([string]$Path,[string]$Context)
+                $fullPath=[IO.Path]::GetFullPath($Path)
+                if($fullPath.StartsWith(($global:Syp280CoreCandidateRoot+[IO.Path]::DirectorySeparatorChar),[StringComparison]::OrdinalIgnoreCase)) {
+                    [void]($global:Syp280CoreCandidateHashCalls++)
+                    if($global:Syp280CoreHashMode -ceq 'failed' -and $global:Syp280CoreCandidateHashCalls -eq 2){throw 'FAILED|controlled candidate inventory hash failure'}
+                    if($global:Syp280CoreHashMode -ceq 'cancelled' -and $global:Syp280CoreCandidateHashCalls -eq 2){throw 'CANCELLED|controlled candidate inventory cancellation'}
+                }
+                & $global:Syp280CoreOriginalFileHash -Path $Path -Context $Context
+            }
+            Mock Invoke-StandardCoreSourceTools {
+                param($Spec,$SkillSet,[string]$RunId,[string]$SourceRevision,[string]$AuthorityRevision,[string]$SnapshotRoot,[string]$ContentSha256,[string]$RunRoot,[string]$AdapterPath,[string]$AdapterSha256,[string]$ArtifactsRoot,[string]$TrustedToolRoot,[int]$TimeoutSeconds,[string]$CancellationPath)
+                [void]($global:Syp280CoreSourceToolCalls++)
+                $casePath=Join-Path $RunRoot 'repository-pester-case-inventory-v1.json'
+                [IO.File]::WriteAllText($casePath,'{}',(New-Object Text.UTF8Encoding($false)))
+                return [pscustomobject][ordered]@{status='passed';runId=$RunId;sourceRevision=$SourceRevision;authorityRevision=$AuthorityRevision;contentSha256=$ContentSha256;activeSkills=@($SkillSet.ids);frozenFiles=@($Spec.frozenFiles);toolReceipts=@($Spec.toolReceipts);events=@()}
+            }
+            Mock Assert-StandardCoreSourceCheckReport {
+                param($Report,[string]$ExpectedSourceRevision,[string]$ExpectedBaseRevision,[string]$ExpectedAuthorityRevision,[string]$ExpectedEventName,[string]$ArtifactsRoot,[string]$OutputPath,[int]$ProcessExitCode)
+                [void]($global:Syp280CoreSourceGuardCalls++)
+            }
+
+            $successRoot=Join-Path $TestDrive 'syp280-core-success-results'
+            $success=Invoke-StandardCoreValidationRun -CandidateRoot $candidateRoot -AdapterPath $adapterPath -ArtifactsRoot $successRoot -SourceRepository $fixtureRepository -SourceRevision $sourceRevision -BaseRevision $sourceRevision -AuthorityRevision $global:Syp280CoreAuthorityRevision -EventName local -TrustedToolRoot (Split-Path -Parent $checkExecutable) -SourceValidation $true -ValidationRunId ('a' * 32)
+            if($success.state -cne 'PASS' -or $success.exitCode -ne 0){throw "Real SourceValidation core run did not pass: $($success.state)|$($success.failure.message)"}
+            if($success.candidate.contentSha256 -cne $expectedContentSha -or @($success.candidate.inventory).Count -ne 2){throw 'Core candidate content or canonical inventory changed.'}
+            if($global:Syp280CoreSourceToolCalls -ne 1 -or $global:Syp280CoreCheckCalls -ne 1 -or $global:Syp280CoreSourceGuardCalls -ne 1){throw 'The full SourceValidation runner did not reach source dispatch, the general check, and the source report gate exactly once.'}
+            $records=@($capture.ToString().Trim().Split([char]10)|Where-Object{$_.IndexOf('{') -ge 0}|ForEach-Object{$_.Substring($_.IndexOf('{'))|ConvertFrom-Json})
+            $successRows=@($records|Where-Object{$_.phase -ceq 'candidate-inventory'})
+            $segments=@();$segment=@()
+            foreach($row in $successRows){if($row.state -ceq 'started' -and $segment.Count -gt 0){$segments+=,@($segment);$segment=@()};$segment+=,$row;if($row.state -in @('completed','failed','cancelled')){$segments+=,@($segment);$segment=@()}}
+            if($segments.Count -ne 3){throw "SourceValidation must run initial candidate inventory plus both rechecks; lifecycle segments=$($segments.Count)."}
+            foreach($phaseRows in $segments){
+                $terminal=$phaseRows[-1]
+                if($phaseRows[0].state -cne 'started' -or $terminal.state -cne 'completed' -or @($phaseRows|Where-Object{$_.state -ceq 'heartbeat'}).Count -lt 1){throw 'Each real candidate inventory needs its own started, heartbeat, and completed timing records.'}
+                if($terminal.calls -ne 1 -or $terminal.files -ne 2 -or $terminal.bytes -ne 28 -or $terminal.elapsedSeconds -le 0){throw 'Candidate inventory phase counters do not match the real two-file fixture.'}
+            }
+
+            foreach($mode in @('failed','cancelled')){
+                $global:Syp280CoreHashMode=$mode
+                $global:Syp280CoreCandidateHashCalls=0
+                $capture.GetStringBuilder().Clear()|Out-Null
+                $runSuffix=if($mode -ceq 'failed'){'b'}else{'c'}
+                $artifactPath=Join-Path $TestDrive ("syp280-core-$mode-results")
+                $interrupted=Invoke-StandardCoreValidationRun -CandidateRoot $candidateRoot -AdapterPath $adapterPath -ArtifactsRoot $artifactPath -SourceRepository $fixtureRepository -SourceRevision $sourceRevision -BaseRevision $sourceRevision -AuthorityRevision $global:Syp280CoreAuthorityRevision -EventName local -TrustedToolRoot (Split-Path -Parent $checkExecutable) -SourceValidation $true -ValidationRunId ($runSuffix * 32)
+                $expectedState=if($mode -ceq 'failed'){'FAILED'}else{'CANCELLED'}
+                $expectedExitCode=if($mode -ceq 'failed'){20}else{40}
+                $expectedFailureMessage=if($mode -ceq 'failed'){'controlled candidate inventory hash failure'}else{'controlled candidate inventory cancellation'}
+                if($interrupted.state -cne $expectedState -or $interrupted.exitCode -ne $expectedExitCode -or
+                    $interrupted.failure.message -cne $expectedFailureMessage -or $global:Syp280CoreCandidateHashCalls -ne 2){
+                    throw "Mid-hash $mode did not preserve the original state, exit mapping, message, and two real candidate hash attempts; state=$($interrupted.state) exit=$($interrupted.exitCode) message=$($interrupted.failure.message) calls=$global:Syp280CoreCandidateHashCalls."
+                }
+                $records=@($capture.ToString().Trim().Split([char]10)|Where-Object{$_.IndexOf('{') -ge 0}|ForEach-Object{$_.Substring($_.IndexOf('{'))|ConvertFrom-Json})
+                $phaseRows=@($records|Where-Object{$_.phase -ceq 'candidate-inventory'})
+                $terminalRow=if($phaseRows.Count -gt 0){$phaseRows[-1]}else{$null}
+                if($phaseRows.Count -eq 0 -or $phaseRows[0].state -cne 'started' -or $null -eq $terminalRow -or $terminalRow.state -cne $mode -or
+                    @($phaseRows|Where-Object{$_.state -ceq 'heartbeat'}).Count -lt 1 -or
+                    $terminalRow.calls -ne 1 -or $terminalRow.files -ne 2 -or $terminalRow.bytes -ne 28 -or $terminalRow.elapsedSeconds -le 0){
+                    throw "Mid-hash $mode must preserve heartbeat, lifecycle terminal state, and two attempted files/28 bytes; terminal=$($terminalRow|ConvertTo-Json -Compress)."
+                }
+            }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled=$previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+            Remove-Variable -Name Syp280CoreCandidateRoot,Syp280CoreAuthorityRoot,Syp280CoreAuthorityRevision,Syp280CoreAuthorityOrigin,Syp280CoreTrustedExecutable,Syp280CoreOriginalGit,Syp280CoreOriginalProcess,Syp280CoreOriginalFileHash,Syp280CoreOriginalPhase,Syp280CoreHashMode,Syp280CoreCandidateHashCalls,Syp280CoreSourceToolCalls,Syp280CoreCheckCalls,Syp280CoreSourceGuardCalls -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
     }
 }
