@@ -357,7 +357,8 @@ function Get-Syp214TreeInventory {
             }
         }
     }
-    return @($records | Sort-Object relativePath)
+    # OrderedDictionary records need an explicit key expression; named-property sorting may not read dictionary keys.
+    return @($records | Sort-Object { [string]$_['relativePath'] })
 }
 
 function Test-Syp214InventoryEqual {
@@ -397,8 +398,9 @@ function New-Syp214RepositorySnapshotWithFileOverride {
     if($originalTreeRecords.Count -ne 1 -or $originalPointRecords.Count -ne 1){
         throw "Expected exactly one original inventory record for drift path: $relativePath"
     }
-    $fullTree=@(@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($TreeFileRecord) | Sort-Object relativePath)
-    $files=@(@($Snapshot.files | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($PointFileRecord) | Sort-Object relativePath)
+    # Keep full records for exact comparison while sorting by the dictionary's explicit relativePath key.
+    $fullTree=@(@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($TreeFileRecord) | Sort-Object { [string]$_['relativePath'] })
+    $files=@(@($Snapshot.files | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($PointFileRecord) | Sort-Object { [string]$_['relativePath'] })
     return [pscustomobject][ordered]@{
         fullTree=$fullTree
         files=$files
@@ -1086,6 +1088,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             $repositoryStateVerified=($manifestAfter -ceq $manifestBefore -and -not (Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) -and $filesRestored)
         }
         $expectedRepositorySnapshot=if($State -in @('later-edit','corrupt-backup')){$preRecoverySnapshot.repository}else{$beforeSnapshot.repository}
+        $expectedExcludeBasis=if($State -eq 'later-edit'){'pre-recovery snapshot; drift stops target restore before exclude recovery'}elseif($State -eq 'corrupt-backup'){'pre-recovery snapshot; recovery preflight rejected the corrupt backup'}else{'apply-before snapshot; journal recovery restores the original exclude'}
         $expectedExcludeSnapshot=if($State -in @('later-edit','corrupt-backup')){$preRecoverySnapshot.repository}else{$beforeSnapshot.repository}
         $laterEditTreeRecordBeforeRecovery=$null
         $laterEditPointRecordBeforeRecovery=$null
@@ -1127,13 +1130,22 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $unrelatedUserAfter=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
         $unrelatedFilesPreserved=(Test-Syp214InventoryEqual -Left $unrelatedRepositoryBefore -Right $unrelatedRepositoryAfter) -and
             (Test-Syp214InventoryEqual -Left $unrelatedUserBefore -Right $unrelatedUserAfter)
-        $verified=($userBytesPreserved -and $repositoryStateVerified -and $journalInventoryVerifiedBeforeRecovery -and
-            $journalInventoryVerifiedAfterRecovery -and $repositoryTreeSemanticallyStable -and
-            $repositoryPointInventorySemanticallyStable -and $userPointInventoryPreserved -and
-            $repositoryGitCoreStateSemanticallyStable -and $repositoryStashEvidenceStable -and
-            $repositoryExcludeSemanticallyStable -and $unrelatedFilesPreserved -and $laterEditDriftInventoryVerified -and
-            $corruptBackupWitnessMatchesInventory)
-        $verified | Should Be $true
+        $recoveryCheckResults=[ordered]@{
+            userBytesPreserved=[bool]$userBytesPreserved;repositoryStateVerified=[bool]$repositoryStateVerified
+            journalInventoryVerifiedBeforeRecovery=[bool]$journalInventoryVerifiedBeforeRecovery
+            journalInventoryVerifiedAfterRecovery=[bool]$journalInventoryVerifiedAfterRecovery
+            repositoryTreeSemanticallyStable=[bool]$repositoryTreeSemanticallyStable
+            repositoryPointInventorySemanticallyStable=[bool]$repositoryPointInventorySemanticallyStable
+            userPointInventoryPreserved=[bool]$userPointInventoryPreserved
+            repositoryGitCoreStateSemanticallyStable=[bool]$repositoryGitCoreStateSemanticallyStable
+            repositoryStashEvidenceStable=[bool]$repositoryStashEvidenceStable
+            repositoryExcludeSemanticallyStable=[bool]$repositoryExcludeSemanticallyStable
+            unrelatedFilesPreserved=[bool]$unrelatedFilesPreserved
+            laterEditDriftInventoryVerified=[bool]$laterEditDriftInventoryVerified
+            corruptBackupWitnessMatchesInventory=[bool]$corruptBackupWitnessMatchesInventory
+        }
+        $failedRecoveryChecks=@($recoveryCheckResults.GetEnumerator() | Where-Object { -not [bool]$_.Value } | ForEach-Object { [string]$_.Key })
+        $verified=($failedRecoveryChecks.Count -eq 0)
         Save-Syp214FixtureEvidence ('recovery-'+$State) ([ordered]@{
             schemaVersion=2;scope='disposable integration fixture';runIdentity=(Get-Syp214RunIdentity);scenario=$State
             before=$beforeSnapshot;preRecovery=$preRecoverySnapshot;after=$afterSnapshot
@@ -1157,10 +1169,16 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             repositoryStashesBeforeRecovery=$preRecoverySnapshot.repository.stashes
             repositoryStashesAfterRecovery=$afterSnapshot.repository.stashes
             repositoryExcludeSemanticallyStable=$repositoryExcludeSemanticallyStable
+            expectedGitInfoExclude=[ordered]@{basis=$expectedExcludeBasis
+                expectedInventory=$expectedExcludeSnapshot.gitInfoExclude;afterRecoveryInventory=$afterSnapshot.repository.gitInfoExclude
+                stable=$repositoryExcludeSemanticallyStable}
+            recoveryCheckResults=$recoveryCheckResults;failedChecks=$failedRecoveryChecks
             unrelatedFiles=[ordered]@{repositoryBefore=$unrelatedRepositoryBefore;repositoryAfter=$unrelatedRepositoryAfter
                 userBefore=$unrelatedUserBefore;userAfter=$unrelatedUserAfter;preserved=$unrelatedFilesPreserved}
             verified=$verified;repositoryStateVerified=$repositoryStateVerified;userBytesPreserved=$userBytesPreserved
             processKillExecuted=$false;interruptionModel=$(if($State -eq 'pending-intent'){'manually persisted pending-intent journal state'}else{'no process termination'})
         })
+        if($failedRecoveryChecks.Count -gt 0){ throw "Recovery fixture checks failed: $($failedRecoveryChecks -join ', ')" }
+        $verified | Should Be $true
     }
 }
