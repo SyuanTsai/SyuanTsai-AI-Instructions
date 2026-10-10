@@ -383,7 +383,7 @@ function Test-Syp214CrashRecoveryRepositoryTree {
 function New-Syp214WriterCrashChildScript {
     $nativeEvidenceSource=Get-Syp214CrashWriterHandleInspectionSource
     $childScript=@'
-param([string]$BootstrapScriptPath,[string]$TargetRoot,[string]$RecoveryRoot,[string]$RelativePath,[string]$WriterKind,[string]$MarkerPath,[string]$CompletionPath)
+param([string]$BootstrapScriptPath,[string]$TargetRoot,[string]$UserHome,[string]$RecoveryRoot,[string]$RelativePath,[string]$WriterKind,[string]$MarkerPath,[string]$CompletionPath)
 $ErrorActionPreference='Stop'
 $nativeEvidenceSource=@"
 __SYP214_NATIVE_HANDLE_EVIDENCE__
@@ -423,7 +423,7 @@ if($prefixEnd -lt 0){throw 'Could not find the bootstrap definition prefix bound
 $bootstrapRoot=Split-Path -Parent $BootstrapScriptPath
 $bootstrapRootLiteral="'"+$bootstrapRoot.Replace("'","''")+"'"
 $prefixText=$bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
-. ([scriptblock]::Create($prefixText)) -TargetRoot $TargetRoot -GitExecutable 'git'
+. ([scriptblock]::Create($prefixText)) -TargetRoot $TargetRoot -UserHome $UserHome -GitExecutable 'git'
 $backupRoot=Join-Path $RecoveryRoot 'target-backup'
 $journalPath=Join-Path $backupRoot 'skill-migration.json'
 $snapshot=New-TargetMutationSnapshot -TargetRoot $TargetRoot -RelativePaths @($RelativePath) -BackupRoot $backupRoot
@@ -760,7 +760,7 @@ function Save-Syp214FixtureEvidence {
 Describe 'SYP214 whole-Skill migration evidence' {
     BeforeEach {
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-catalog-contract.psm1') -Force
-        Import-Module (Join-Path $PSScriptRoot '../scripts/repo-shared-skills-migration.psm1') -Force
+        Import-Module (Join-Path $PSScriptRoot '../scripts/repo-shared-skills-migration.psm1')
         $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $targetRoot = Join-Path $caseRoot 'consumer'
         $userHome = Join-Path $caseRoot 'user'
@@ -849,6 +849,7 @@ Describe 'SYP214 whole-Skill migration evidence' {
         Test-Path (Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md') | Should Be $true
     }
 
+    Context 'Repository and USER root aliases are isolated' {
     # Scenario: Repository and USER roots identify the same physical directory through different path spellings.
     # Purpose: Reject migration eligibility before USER or Git evidence is observed, regardless of lexical or filesystem aliases.
     It 'InterT40_rejects_<Alias>_Repository_and_USER_roots_before_observation' -TestCases @(
@@ -913,6 +914,8 @@ Describe 'SYP214 whole-Skill migration evidence' {
         finally { if($substAlias){Remove-Syp214SubstAlias -Alias $substAlias} }
     }
 
+    }
+
     # Scenario: USER is a parent directory of a valid single-file Skill consumer.
     # Purpose: Keep distinct nested roots eligible while rejecting only identities that resolve to the same directory.
     It 'InterT45_allows_a_distinct_USER_parent_and_Repository_child' {
@@ -949,7 +952,9 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
     BeforeEach {
         $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $targetRoot = Join-Path $caseRoot 'consumer'
+        $userHome = Join-Path $caseRoot 'user'
         New-TestRepository -Path $targetRoot
+        New-Item -ItemType Directory -Force -Path $userHome | Out-Null
         $targetRoot = (Resolve-Path -LiteralPath $targetRoot).Path
         $relativePath = '.codex/AI-Rules/Obsolete.en.md'
         $targetPath = Join-Path $targetRoot $relativePath
@@ -968,7 +973,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $bootstrapPrefix = New-Syp214BootstrapMutationPrefix
-            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
             $snapshot = New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
             $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRoot
             $gitState = Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
@@ -1027,7 +1032,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $bootstrapPrefix = New-Syp214BootstrapMutationPrefix
-            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
             $snapshot = New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
             $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRoot
             $gitState = Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
@@ -1103,7 +1108,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $recoveryRootCreated=$false
         try {
             $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
-            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
             New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
             $recoveryRootCreated=$true
             $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
@@ -1193,7 +1198,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $recoveryRootCreated=$false
         try {
             $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
-            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
             $excludePath=Get-GitInfoExcludePath -Repository $targetRoot
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
             [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
@@ -1309,7 +1314,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $recoveryRootCreated=$false
         try {
             $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
-            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
             New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
             $recoveryRootCreated=$true
             $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
@@ -1416,7 +1421,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
         }
         $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
-        . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+        . $bootstrapPrefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git'
         $originalTarget=[IO.File]::ReadAllBytes($targetPath)
         $originalExclude=[IO.File]::ReadAllBytes($excludePath)
         $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
@@ -1424,12 +1429,12 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $childScriptText=New-Syp214WriterCrashChildScript
         [IO.File]::WriteAllText($childScriptPath,$childScriptText,[Text.UTF8Encoding]::new($false))
         $childArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$childScriptPath,
-            $script:BootstrapScript,$targetRoot,$recoveryRoot,$relativePath,$WriterKind,$markerPath,$completionPath)
+            $script:BootstrapScript,$targetRoot,$userHome,$recoveryRoot,$relativePath,$WriterKind,$markerPath,$completionPath)
         $argumentLine=[string]::Join(' ',@($childArguments | ForEach-Object { '"'+([string]$_).Replace('"','\"')+'"' }))
         try {
             # When
             $childProcess=Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $argumentLine `
-                -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+                -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
             if(-not $childProcess.WaitForExit(30000)){
                 Stop-Process -Id $childProcess.Id -Force
                 throw 'SYP214 writer crash child exceeded its bounded 30-second wait.'
