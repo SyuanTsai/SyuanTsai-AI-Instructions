@@ -2778,7 +2778,11 @@ function Remove-TargetMutationFileAtomically {
         [Parameter(Mandatory = $true)][string] $RelativePath,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
         [Parameter(Mandatory = $true)][string] $Operation,
-        [AllowNull()][string] $ExpectedIdentity
+        [AllowNull()][string] $ExpectedIdentity,
+        [AllowNull()][object] $ExpectedDaclRecord,
+        [AllowNull()][object] $ExpectedReadOnly,
+        [AllowNull()][string] $ExpectedParentIdentity,
+        [switch] $AllowReadOnlyOnlyDrift
     )
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -2788,7 +2792,18 @@ function Remove-TargetMutationFileAtomically {
     Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path `
         ([string]$state.TargetPath) -Context "$Operation '$RelativePath'"
     $stream = $null
+    $parentGuard = $null
     try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$ExpectedParentIdentity)) {
+            $parentRelativePath = (Split-Path -Parent $RelativePath).Replace('/','\').Trim('\')
+            $parentPath = Split-Path -Parent ([string]$state.TargetPath)
+            $parentGuard = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDirectoryGuard(
+                [string]$Snapshot.TargetRoot, $parentRelativePath)
+            $actualParentIdentity = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($parentPath)
+            if ($actualParentIdentity -cne [string]$ExpectedParentIdentity) {
+                throw "$Operation detected a changed publication parent; the current file was preserved: $RelativePath"
+            }
+        }
         $stream = Open-TargetMutationAtomicDeleteStream -TargetRoot ([string]$Snapshot.TargetRoot) `
             -TargetPath ([string]$state.TargetPath) `
             -RelativePath $RelativePath -Operation $Operation
@@ -2798,12 +2813,28 @@ function Remove-TargetMutationFileAtomically {
             ($ExpectedIdentity -and $currentIdentity -cne $ExpectedIdentity)) {
             throw "$Operation detected concurrent content; the current file was preserved: $RelativePath"
         }
+        if ($null -ne $ExpectedDaclRecord) {
+            $currentDaclRecord = Get-FileDaclJournalRecord -Handle $stream.SafeFileHandle
+            if (-not [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                (ConvertFrom-FileDaclJournalRecord $ExpectedDaclRecord),
+                (ConvertFrom-FileDaclJournalRecord $currentDaclRecord))) {
+                throw "$Operation detected concurrent security metadata; the current file was preserved: $RelativePath"
+            }
+        }
+        if ($null -ne $ExpectedReadOnly) {
+            $currentReadOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($stream.SafeFileHandle)
+            $readOnlyOnlyChange = ($AllowReadOnlyOnlyDrift -and -not [bool]$ExpectedReadOnly -and $currentReadOnly)
+            if ($currentReadOnly -ne [bool]$ExpectedReadOnly -and -not $readOnlyOnlyChange) {
+                throw "$Operation detected concurrent file attributes; the current file was preserved: $RelativePath"
+            }
+        }
         Set-TargetMutationDeleteDisposition -Handle $stream.SafeFileHandle
         $stream.Dispose()
         $stream = $null
     }
     finally {
         if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $parentGuard) { $parentGuard.Dispose() }
     }
 }
 
@@ -2860,6 +2891,66 @@ function Remove-TargetMutationFile {
     $state.MutationApplied = $true
 }
 
+function Get-TargetCreatedReadOnlyRollbackEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [Parameter(Mandatory = $true)][object] $State
+    )
+
+    if ([string]$State.OriginalType -cne 'missing' -or -not [bool]$State.MutationApplied -or
+        [string]$State.AppliedType -cne 'file' -or $null -eq $State.Publication -or
+        $null -eq $State.PublicationDaclRecord -or [bool]$State.OriginalReadOnly -or
+        [bool]$State.PublicationReadOnly -or $null -ne $State.OriginalIdentity -or
+        $null -ne $State.OriginalDacl) { return $null }
+
+    $publication = $State.Publication
+    Assert-AtomicFilePublicationRecord -Publication $publication -RelativePath ([string]$State.RelativePath)
+    if ([string]$publication.direction -cne 'apply' -or [bool]$publication.expectedOldExists -or
+        $null -ne $publication.expectedOldIdentity -or $null -ne $publication.expectedOldSha256 -or
+        [string]$State.AppliedFileIdentity -cne [string]$publication.stageIdentity) { return $null }
+
+    [byte[]]$appliedBytes = [byte[]]$State.AppliedBytes
+    if ($null -eq $appliedBytes -or [string]$publication.newSha256 -cne (Get-ByteArraySha256 -Bytes $appliedBytes) -or
+        [long]$publication.newLength -ne [long]$appliedBytes.Length) { return $null }
+    [void](ConvertFrom-FileDaclJournalRecord $State.PublicationDaclRecord)
+
+    Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) `
+        -Path ([string]$State.TargetPath) -Context "Target rollback '$($State.RelativePath)'"
+    $path = [string]$State.TargetPath
+    $relativePath = [string]$State.RelativePath
+    $parent = Split-Path -Parent $path
+    $parentRelative = (Split-Path -Parent $relativePath).Replace('\','/').Trim('/')
+    $stagePath = Join-Path $parent ([string]$publication.stageLeaf)
+    $tombstonePath = Join-Path $parent ([string]$publication.tombstoneLeaf)
+    $stageRelative = if ([string]::IsNullOrWhiteSpace($parentRelative)) { [string]$publication.stageLeaf } else { "$parentRelative/$($publication.stageLeaf)" }
+    $tombstoneRelative = if ([string]::IsNullOrWhiteSpace($parentRelative)) { [string]$publication.tombstoneLeaf } else { "$parentRelative/$($publication.tombstoneLeaf)" }
+    $guard = $null
+    try {
+        $guard = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDirectoryGuard(
+            [string]$Snapshot.TargetRoot,$parentRelative.Replace('/','\'))
+        if ([CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($parent) -cne [string]$publication.parentIdentity) {
+            return $null
+        }
+        $stage = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) -Path $stagePath `
+            -RelativePath $stageRelative -Kind Target -AllowMissing
+        $final = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) -Path $path `
+            -RelativePath $relativePath -Kind Target -AllowMissing
+        $tombstone = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) -Path $tombstonePath `
+            -RelativePath $tombstoneRelative -Kind Target -AllowMissing
+        if ($null -ne $stage -or $null -ne $tombstone -or $null -eq $final -or -not [bool]$final.readOnly -or
+            [string]$final.identity -cne [string]$publication.stageIdentity -or
+            [string]$final.sha256 -cne [string]$publication.newSha256 -or
+            [long]$final.length -ne [long]$publication.newLength -or
+            -not [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+                (ConvertFrom-FileDaclJournalRecord $State.PublicationDaclRecord),
+                (ConvertFrom-FileDaclJournalRecord $final.dacl))) {
+            return $null
+        }
+        return $final
+    }
+    finally { if ($null -ne $guard) { $guard.Dispose() } }
+}
+
 function Restore-TargetMutationSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
@@ -2871,9 +2962,13 @@ function Restore-TargetMutationSnapshot {
         $restoreReadOnly = $false
         $createContext = $null
         try {
+            $readOnlyCreatedFileEvidence = $null
             if ($null -ne $state.Publication) {
-                Resolve-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
-                    -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -PublicationState $state
+                $readOnlyCreatedFileEvidence = Get-TargetCreatedReadOnlyRollbackEvidence -Snapshot $Snapshot -State $state
+                if ($null -eq $readOnlyCreatedFileEvidence) {
+                    Resolve-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
+                        -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -PublicationState $state
+                }
                 if (-not [bool]$state.MutationApplied) { continue }
             }
             if (-not [bool]$state.LegacyRecovery -and $null -eq $state.Publication) {
@@ -2921,13 +3016,32 @@ function Restore-TargetMutationSnapshot {
                         $currentEvidence = Get-PublicationFileEvidence -Root ([string]$Snapshot.TargetRoot) `
                             -Path ([string]$state.TargetPath) -RelativePath ([string]$state.RelativePath) -Kind Target -AllowMissing
                         [byte[]]$appliedBytes = [byte[]]$state.AppliedBytes
-                        if (-not (Test-PublicationEvidenceMatches $currentEvidence ([string]$state.AppliedFileIdentity) `
-                            (Get-ByteArraySha256 $appliedBytes) ([long]$appliedBytes.Length) $state.OriginalDacl ([bool]$state.OriginalReadOnly))) {
+                        $readOnlyCreatedFileEvidence = if ([string]$state.OriginalType -ceq 'missing') {
+                            Get-TargetCreatedReadOnlyRollbackEvidence -Snapshot $Snapshot -State $state
+                        } else { $null }
+                        $currentMatchesOriginalMetadata = Test-PublicationEvidenceMatches $currentEvidence `
+                            ([string]$state.AppliedFileIdentity) (Get-ByteArraySha256 $appliedBytes) `
+                            ([long]$appliedBytes.Length) $state.OriginalDacl ([bool]$state.OriginalReadOnly)
+                        if (-not $currentMatchesOriginalMetadata -and $null -eq $readOnlyCreatedFileEvidence) {
                             $driftedPaths.Add([string]$state.RelativePath)
                             continue
                         }
+                        $expectedDeleteDacl = if ([string]$state.OriginalType -ceq 'missing') { $state.PublicationDaclRecord } else { $null }
+                        $expectedDeleteReadOnly = if ([string]$state.OriginalType -ceq 'missing') { [bool]$state.PublicationReadOnly } else { $null }
+                        $expectedDeleteParentIdentity = $null
+                        if ([string]$state.OriginalType -ceq 'missing' -and [bool]$state.MutationApplied -and
+                            [string]$state.AppliedType -ceq 'file' -and $null -ne $state.Publication -and
+                            [string]$state.Publication.direction -ceq 'apply' -and
+                            -not [bool]$state.Publication.expectedOldExists -and
+                            $null -ne $state.PublicationDaclRecord -and
+                            [string]$state.AppliedFileIdentity -ceq [string]$state.Publication.stageIdentity) {
+                            $expectedDeleteParentIdentity = [string]$state.Publication.parentIdentity
+                        }
                         Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath ([string]$state.RelativePath) `
-                            -ExpectedBytes $appliedBytes -ExpectedIdentity ([string]$state.AppliedFileIdentity) -Operation 'Target rollback removal'
+                            -ExpectedBytes $appliedBytes -ExpectedIdentity ([string]$state.AppliedFileIdentity) `
+                            -ExpectedDaclRecord $expectedDeleteDacl -ExpectedReadOnly $expectedDeleteReadOnly `
+                            -ExpectedParentIdentity $expectedDeleteParentIdentity `
+                            -AllowReadOnlyOnlyDrift:($null -ne $readOnlyCreatedFileEvidence) -Operation 'Target rollback removal'
                         $state.MutationApplied = $false
                         $state.Publication = $null
                         $state.PublicationDaclRecord = $null

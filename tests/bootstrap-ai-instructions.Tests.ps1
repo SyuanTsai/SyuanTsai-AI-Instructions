@@ -47,6 +47,14 @@ function Set-TestText {
     [System.IO.File]::WriteAllText($Path, "$Value`n", $utf8WithoutBom)
 }
 
+function ConvertTo-TestDiagnosticText {
+    param([Parameter(Mandatory = $true)][object[]] $Output)
+
+    $text = @($Output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    $text = [regex]::Replace($text, '(?m)\r?\n[ \t]*\|[ \t]*', ' ')
+    return [regex]::Replace($text, '\s+', ' ').Trim()
+}
+
 function Compress-TestSource {
     param(
         [Parameter(Mandatory = $true)]
@@ -2151,7 +2159,7 @@ description: Verify raw bytes.
 
         # Then
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match '\.github\\AI-Rules\\Testing\.en\.md'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)Managed publication staging could not acquire the handle-bound create stream; no external path was changed:\s*\.github/AI-Rules/\.syp214-[0-9a-f]{32}-stage.*A guarded managed directory path is not a directory'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
         Test-Path -LiteralPath (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md') | Should Be $false
@@ -2201,7 +2209,7 @@ exit /b %errorlevel%
         # Then
         $exitCode | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stash list'
-        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*shared Git exclude changed concurrently'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)Rollback also failed:.*Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery:.*info[\\/]exclude.*Recovery files were preserved at:'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
@@ -2360,11 +2368,67 @@ exit /b %errorlevel%
         $attributeExecutable = Join-Path $env:SystemRoot 'System32\attrib.exe'
         $agentPath = Join-Path $targetRoot 'AGENTS.md'
         $powerShellExe = (Get-Command powershell.exe).Source
-        $gitWrapper = "@echo off`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 goto forward`n`"$attributeExecutable`" +R `"$agentPath`"`nexit /b 86`n:forward`n`"$realGit`" %*"
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
+        $indexPath = Join-Path $targetRoot '.git\index'
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $captureBeforePath = Join-Path $wrapperRoot 'target-before-readonly.json'
+        $captureAfterPath = Join-Path $wrapperRoot 'target-after-readonly.json'
+        $captureScriptPath = Join-Path $wrapperRoot 'capture-target-evidence.ps1'
+        $bootstrapText = [System.IO.File]::ReadAllText($script:BootstrapScript)
+        $prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+        if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary for target evidence.' }
+        $bootstrapRoot = Split-Path -Parent $script:BootstrapScript
+        $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'", "''") + "'"
+        $capturePrefix = $bootstrapText.Substring(0, $prefixEnd).Replace('$PSScriptRoot', $bootstrapRootLiteral)
+        $captureBody = @'
+$evidencePath = [string]$env:SYP214_FILE_EVIDENCE_PATH
+if ([string]::IsNullOrWhiteSpace($evidencePath)) { throw 'SYP214 file evidence path was not set.' }
+$path = Join-Path $TargetRoot 'AGENTS.md'
+$handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($TargetRoot, $path, 'AGENTS.md')
+$stream = $null
+try {
+    $stream = [System.IO.FileStream]::new($handle, [System.IO.FileAccess]::Read)
+    $handle = $null
+    [byte[]]$bytes = Read-TargetMutationStreamBytes -Stream $stream
+    $record = [ordered]@{
+        bytesBase64 = [Convert]::ToBase64String($bytes)
+        length = [long]$bytes.Length
+        sha256 = Get-ByteArraySha256 -Bytes $bytes
+        nativeIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stream.SafeFileHandle)
+        dacl = Get-FileDaclJournalRecord -Handle $stream.SafeFileHandle
+        readOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($stream.SafeFileHandle)
+    }
+    [System.IO.File]::WriteAllText($evidencePath, (ConvertTo-Json -InputObject $record -Depth 8), [System.Text.UTF8Encoding]::new($false))
+}
+finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+    if ($null -ne $handle) { $handle.Dispose() }
+}
+'@
+        [System.IO.File]::WriteAllText($captureScriptPath, $capturePrefix + "`n" + $captureBody, [System.Text.UTF8Encoding]::new($false))
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"stash store" >nul
+if errorlevel 1 goto forward
+set "SYP214_FILE_EVIDENCE_PATH=$captureBeforePath"
+"$powerShellExe" -NoProfile -ExecutionPolicy Bypass -File "$captureScriptPath" -TargetRoot "$targetRoot"
+if errorlevel 1 exit /b 87
+"$attributeExecutable" +R "$agentPath"
+if errorlevel 1 exit /b 88
+set "SYP214_FILE_EVIDENCE_PATH=$captureAfterPath"
+"$powerShellExe" -NoProfile -ExecutionPolicy Bypass -File "$captureScriptPath" -TargetRoot "$targetRoot"
+if errorlevel 1 exit /b 89
+exit /b 86
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
         $statusBefore = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+        $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        [byte[]]$excludeBytesBefore = [System.IO.File]::ReadAllBytes($excludePath)
 
         # When
         $arguments = @(
@@ -2381,12 +2445,58 @@ exit /b %errorlevel%
         # Then
         $exitCode | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stash store'
-        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')) | Should Be $headBefore
-        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be $statusBefore
+        $beforeEvidence = Get-Content -Raw -LiteralPath $captureBeforePath | ConvertFrom-Json
+        $afterEvidence = Get-Content -Raw -LiteralPath $captureAfterPath | ConvertFrom-Json
+        [byte[]]$beforeBytes = [Convert]::FromBase64String([string]$beforeEvidence.bytesBase64)
+        [byte[]]$afterBytes = [Convert]::FromBase64String([string]$afterEvidence.bytesBase64)
+        [long]$beforeEvidence.length | Should Be $beforeBytes.Length
+        [long]$afterEvidence.length | Should Be $afterBytes.Length
+        [long]$afterEvidence.length | Should Be ([long]$beforeEvidence.length)
+        [string]$beforeEvidence.sha256 | Should Match '^[0-9a-f]{64}$'
+        [string]$afterEvidence.sha256 | Should Be ([string]$beforeEvidence.sha256)
+        [string]$beforeEvidence.bytesBase64 | Should Be ([string]$afterEvidence.bytesBase64)
+        [string]$beforeEvidence.nativeIdentity | Should Be ([string]$afterEvidence.nativeIdentity)
+        $beforeDaclJson = ConvertTo-Json -InputObject $beforeEvidence.dacl -Compress -Depth 8
+        $afterDaclJson = ConvertTo-Json -InputObject $afterEvidence.dacl -Compress -Depth 8
+        $beforeDaclJson | Should Be $afterDaclJson
+        [bool]$beforeEvidence.readOnly | Should Be $false
+        [bool]$afterEvidence.readOnly | Should Be $true
+        $headAfter = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse', 'HEAD')
+        $statusAfter = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
+        $indexAfter = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        [byte[]]$excludeBytesAfter = [System.IO.File]::ReadAllBytes($excludePath)
+        $personalAgentStashCount = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
+            Where-Object { $_ -match 'PersonalAgent$' }).Count
+        $headAfter | Should Be $headBefore
+        $statusAfter | Should Be $statusBefore
+        $indexAfter | Should Be $indexBefore
+        [Convert]::ToBase64String($excludeBytesAfter) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
-        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
-        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
-            Where-Object { $_ -match 'PersonalAgent$' }).Count | Should Be 0
+        Test-Path -LiteralPath $manifestPath | Should Be $false
+        $personalAgentStashCount | Should Be 0
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $beforeBytesHash = [BitConverter]::ToString($sha.ComputeHash($beforeBytes)).Replace('-', '').ToLowerInvariant()
+            $afterBytesHash = [BitConverter]::ToString($sha.ComputeHash($afterBytes)).Replace('-', '').ToLowerInvariant()
+            $beforeDaclHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($beforeDaclJson))).Replace('-', '').ToLowerInvariant()
+            $afterDaclHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($afterDaclJson))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+        [string]$beforeEvidence.sha256 | Should Be $beforeBytesHash
+        [string]$afterEvidence.sha256 | Should Be $afterBytesHash
+        $witness = [ordered]@{
+            scenario = 'InterT92_external_readonly_rollback'
+            file = [ordered]@{
+                before = [ordered]@{ nativeIdentity = [string]$beforeEvidence.nativeIdentity; sha256 = [string]$beforeEvidence.sha256; length = [long]$beforeEvidence.length; daclSha256 = $beforeDaclHash; readOnly = [bool]$beforeEvidence.readOnly }
+                after = [ordered]@{ nativeIdentity = [string]$afterEvidence.nativeIdentity; sha256 = [string]$afterEvidence.sha256; length = [long]$afterEvidence.length; daclSha256 = $afterDaclHash; readOnly = [bool]$afterEvidence.readOnly }
+                sameBytes = ([string]$beforeEvidence.sha256 -ceq [string]$afterEvidence.sha256)
+                sameIdentity = ([string]$beforeEvidence.nativeIdentity -ceq [string]$afterEvidence.nativeIdentity)
+                sameDacl = ($beforeDaclJson -ceq $afterDaclJson)
+            }
+            repository = [ordered]@{ headPreserved = ($headAfter -ceq $headBefore); statusPreserved = ($statusAfter -ceq $statusBefore); indexPreserved = ($indexAfter -ceq $indexBefore); excludePreserved = ([Convert]::ToBase64String($excludeBytesAfter) -ceq [Convert]::ToBase64String($excludeBytesBefore)); targetRemoved = (-not (Test-Path -LiteralPath $agentPath)); manifestRemoved = (-not (Test-Path -LiteralPath $manifestPath)); personalAgentStashCount = $personalAgentStashCount }
+            verified = $true
+        }
+        [Console]::WriteLine('SYP214 readonly rollback witness ' + (ConvertTo-Json -InputObject $witness -Depth 8 -Compress))
     }
 
     # Scenario: Git reports stash store success but an external process replaces the managed manifest afterward.
@@ -2418,7 +2528,7 @@ exit /b %errorlevel%
 
         $exitCode | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match '(?s)raw bytes.*ai-instructions\.manifest\.json'
-        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*concurrent target changes'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)Rollback also failed:.*Target rollback errors:.*\.codex[/\\]ai-instructions\.manifest\.json: Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery:.*Recovery files were preserved at:'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath $manifestPath -PathType Leaf | Should Be $true
@@ -2460,7 +2570,7 @@ exit /b %errorlevel%
 
         $exitCode | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match '(?s)raw bytes.*AGENTS\.md'
-        ($output -join [Environment]::NewLine) | Should Match '(?is)rollback also failed.*concurrent target changes'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)Rollback also failed:.*Target rollback errors:.*AGENTS\.md: Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery:.*Recovery files were preserved at:'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
         Test-Path -LiteralPath $agentPath -PathType Leaf | Should Be $true
         (Get-Content -Raw -LiteralPath $agentPath).Trim() | Should Be 'concurrent-user-agent-edit'
@@ -2579,5 +2689,358 @@ exit /b %errorlevel%
         Test-Path -LiteralPath (Join-Path $unbornRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $unbornRoot $script:ManifestPath) | Should Be $false
         (@(Invoke-TestGit -Repository $unbornRoot -Arguments @('status', '--porcelain')) -join "`n") | Should Be ''
+    }
+}
+
+Describe 'SYP214 read-only rollback drift preservation' {
+    BeforeEach {
+        $scenarioRoot = Join-Path $TestDrive ('readonly-rollback-' + [guid]::NewGuid().ToString('N'))
+        $probeRoot = Join-Path $scenarioRoot 'consumer'
+        $managedParent = Join-Path $probeRoot 'managed'
+        New-Item -ItemType Directory -Force -Path $managedParent | Out-Null
+        $backupRoot = Join-Path $scenarioRoot 'backup'
+        $wrapperPath = Join-Path $scenarioRoot 'rollback-drift-probe.ps1'
+        $resultPath = Join-Path $scenarioRoot 'result.json'
+    }
+
+    # Scenario: A read-only transaction-created file has concurrent ownership evidence beyond its original publication.
+    # Purpose: Refuse to delete drifted bytes or metadata, preserve unknown publication debris, and restore unaffected snapshot paths.
+    It 'InterT118_preserves_external_target_evidence_for_<Case>_during_read_only_rollback' -TestCases @(
+        @{ Case = 'later-bytes' },
+        @{ Case = 'replacement-identity' },
+        @{ Case = 'dacl-drift' },
+        @{ Case = 'stage-and-tombstone' },
+        @{ Case = 'parent-replacement' }
+    ) {
+        param([Parameter(Mandatory = $true)][string] $Case)
+
+        # Given
+        $targetPath = Join-Path $managedParent 'new.md'
+        $wrapperText = @'
+param(
+    [Parameter(Mandatory = $true)][string] $BootstrapScript,
+    [Parameter(Mandatory = $true)][string] $ProbeRoot,
+    [Parameter(Mandatory = $true)][string] $BackupRoot,
+    [Parameter(Mandatory = $true)][string] $Case,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$bootstrapText = [System.IO.File]::ReadAllText($BootstrapScript)
+$prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary.' }
+$bootstrapRoot = Split-Path -Parent $BootstrapScript
+$bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'", "''") + "'"
+$bootstrapPrefix = [scriptblock]::Create($bootstrapText.Substring(0, $prefixEnd).Replace('$PSScriptRoot', $bootstrapRootLiteral))
+. $bootstrapPrefix -TargetRoot $ProbeRoot -UserHome $ProbeRoot -GitExecutable 'git' | Out-Null
+
+function Get-ProbeFileEvidence {
+    param([string] $Root, [string] $Path, [string] $RelativePath)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($Root, $Path, $RelativePath)
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($handle, [System.IO.FileAccess]::Read)
+        $handle = $null
+        [byte[]]$bytes = Read-TargetMutationStreamBytes -Stream $stream
+        return [pscustomobject][ordered]@{
+            bytesBase64 = [Convert]::ToBase64String($bytes)
+            sha256 = Get-ByteArraySha256 -Bytes $bytes
+            length = [long]$bytes.Length
+            identity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($stream.SafeFileHandle)
+            dacl = Get-FileDaclJournalRecord -Handle $stream.SafeFileHandle
+            readOnly = [bool][CodexAiInstructions.NativeFileMutation]::GetReadOnly($stream.SafeFileHandle)
+            attributes = [uint32][System.IO.File]::GetAttributes($Path)
+        }
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $handle) { $handle.Dispose() }
+    }
+}
+
+function Set-ProbeFileReadOnly {
+    param([string] $Root, [string] $Path, [string] $RelativePath, [bool] $ReadOnly)
+    $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($Root, $Path, $RelativePath)
+    try { [CodexAiInstructions.NativeFileMutation]::SetReadOnly($handle, $ReadOnly) }
+    finally { $handle.Dispose() }
+}
+
+$targetParent = Join-Path $ProbeRoot 'managed'
+$targetPath = Join-Path $targetParent 'new.md'
+$unaffectedParent = Join-Path $ProbeRoot 'unaffected'
+$unaffectedPath = Join-Path $unaffectedParent 'unaffected.md'
+$relativePath = 'managed/new.md'
+$unaffectedRelativePath = 'unaffected/unaffected.md'
+if ($Case -eq 'parent-replacement') {
+    $renameProbe = Join-Path $ProbeRoot 'rename-capability'
+    $renameProbeMoved = Join-Path $ProbeRoot 'rename-capability-moved'
+    New-Item -ItemType Directory -Path $renameProbe | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $renameProbe 'proof.txt'), 'directory move capability')
+    Move-Item -LiteralPath $renameProbe -Destination $renameProbeMoved -ErrorAction Stop
+    Move-Item -LiteralPath $renameProbeMoved -Destination $renameProbe -ErrorAction Stop
+}
+$newBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction managed bytes')
+$unaffectedOriginalBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# original unaffected bytes' + "`n")
+New-Item -ItemType Directory -Force -Path $unaffectedParent | Out-Null
+[System.IO.File]::WriteAllBytes($unaffectedPath, $unaffectedOriginalBytes)
+$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot `
+    -RelativePaths @($relativePath, $unaffectedRelativePath) -BackupRoot $BackupRoot
+Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $newBytes
+Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $unaffectedRelativePath `
+    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed unaffected bytes'))
+$state = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $relativePath
+$unaffectedState = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $unaffectedRelativePath
+$unaffectedOriginalDaclJson = ConvertTo-Json -InputObject $unaffectedState.OriginalDacl -Compress -Depth 8
+$debris = [ordered]@{}
+switch ($Case) {
+    'later-bytes' {
+        Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $false
+        [System.IO.File]::WriteAllBytes($targetPath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# external later bytes'))
+    }
+    'replacement-identity' {
+        Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $false
+        $replacementPath = Join-Path $targetParent 'replacement.md'
+        [System.IO.File]::WriteAllBytes($replacementPath, $newBytes)
+        $replacementHandle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata(
+            $ProbeRoot, $replacementPath, 'managed/replacement.md')
+        try {
+            $replacementIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($replacementHandle)
+        }
+        finally { $replacementHandle.Dispose() }
+        if ([string]$replacementIdentity -ceq [string]$state.AppliedFileIdentity) {
+            throw 'A concurrently existing replacement did not have a distinct native file identity.'
+        }
+        Remove-Item -LiteralPath $targetPath -Force
+        Move-Item -LiteralPath $replacementPath -Destination $targetPath -ErrorAction Stop
+    }
+    'dacl-drift' {
+        $targetAcl = Get-Acl -LiteralPath $targetPath
+        $targetAcl.SetAccessRuleProtection(-not [bool]$targetAcl.AreAccessRulesProtected, $true)
+        Set-Acl -LiteralPath $targetPath -AclObject $targetAcl
+    }
+    'stage-and-tombstone' {
+        $stagePath = Join-Path $targetParent ([string]$state.Publication.stageLeaf)
+        $tombstonePath = Join-Path $targetParent ([string]$state.Publication.tombstoneLeaf)
+        [System.IO.File]::WriteAllBytes($stagePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown stage owner'))
+        [System.IO.File]::WriteAllBytes($tombstonePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown tombstone owner'))
+        $debris.stagePath = $stagePath
+        $debris.tombstonePath = $tombstonePath
+    }
+    'parent-replacement' { }
+    default { throw "Unsupported probe case: $Case" }
+}
+Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+$before = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
+$appliedIdentity = [string]$state.AppliedFileIdentity
+$appliedSha256 = Get-ByteArraySha256 -Bytes $newBytes
+$publicationDaclJson = ConvertTo-Json -InputObject $state.PublicationDaclRecord -Compress -Depth 8
+$publicationDacl = [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+    (ConvertFrom-FileDaclJournalRecord $state.PublicationDaclRecord),
+    (ConvertFrom-FileDaclJournalRecord (Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath).dacl))
+$parentIdentityBefore = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($targetParent)
+$debrisBefore = [ordered]@{}
+foreach ($debrisName in @('stage','tombstone')) {
+    if ($debris.Contains($debrisName + 'Path')) {
+        $debrisRelative = 'managed/' + [System.IO.Path]::GetFileName([string]$debris[$debrisName + 'Path'])
+        $debrisBefore[$debrisName] = Get-ProbeFileEvidence -Root $ProbeRoot `
+            -Path ([string]$debris[$debrisName + 'Path']) -RelativePath $debrisRelative
+    }
+}
+
+$restoreError = $null
+$swapFired = $false
+$swapSucceeded = $false
+$swapBlocked = $false
+$swapError = $null
+$breakpoint = $null
+if ($Case -eq 'parent-replacement') {
+    $savedParent = Join-Path $ProbeRoot 'managed-saved'
+    $global:Syp214ReadOnlyParent = $targetParent
+    $global:Syp214ReadOnlySavedParent = $savedParent
+    $global:Syp214ReadOnlyRoot = $ProbeRoot
+    $global:Syp214ReadOnlySwapFired = $false
+    $global:Syp214ReadOnlySwapSucceeded = $false
+    $global:Syp214ReadOnlySwapError = $null
+    $breakpoint = Set-PSBreakpoint -Command Remove-TargetMutationFileAtomically -Action {
+        if (-not $global:Syp214ReadOnlySwapFired) {
+            $global:Syp214ReadOnlySwapFired = $true
+            $oldPath = Join-Path $global:Syp214ReadOnlyParent 'new.md'
+            try {
+                $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata(
+                    $global:Syp214ReadOnlyRoot, $oldPath, 'managed/new.md')
+                try { [CodexAiInstructions.NativeFileMutation]::SetReadOnly($handle, $false) }
+                finally { $handle.Dispose() }
+                Move-Item -LiteralPath $global:Syp214ReadOnlyParent -Destination $global:Syp214ReadOnlySavedParent -ErrorAction Stop
+                New-Item -ItemType Directory -Path $global:Syp214ReadOnlyParent -ErrorAction Stop | Out-Null
+                Move-Item -LiteralPath (Join-Path $global:Syp214ReadOnlySavedParent 'new.md') `
+                    -Destination (Join-Path $global:Syp214ReadOnlyParent 'new.md') -ErrorAction Stop
+                $newPath = Join-Path $global:Syp214ReadOnlyParent 'new.md'
+                $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata(
+                    $global:Syp214ReadOnlyRoot, $newPath, 'managed/new.md')
+                try { [CodexAiInstructions.NativeFileMutation]::SetReadOnly($handle, $true) }
+                finally { $handle.Dispose() }
+                $global:Syp214ReadOnlySwapSucceeded = $true
+            }
+            catch { $global:Syp214ReadOnlySwapError = $_.Exception.GetType().FullName }
+        }
+    }
+}
+try { Restore-TargetMutationSnapshot -Snapshot $snapshot }
+catch { $restoreError = $_.Exception.Message }
+finally {
+    if ($Case -eq 'parent-replacement') {
+        $swapFired = [bool]$global:Syp214ReadOnlySwapFired
+        $swapSucceeded = [bool]$global:Syp214ReadOnlySwapSucceeded
+        $swapBlocked = ($null -ne $global:Syp214ReadOnlySwapError)
+        if (-not $swapSucceeded -and (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+        }
+    }
+    if ($null -ne $breakpoint) { Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue }
+    Remove-Variable -Name Syp214ReadOnlyParent,Syp214ReadOnlySavedParent,Syp214ReadOnlyRoot,`
+        Syp214ReadOnlySwapFired,Syp214ReadOnlySwapSucceeded,Syp214ReadOnlySwapError -Scope Global -ErrorAction SilentlyContinue
+}
+$after = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
+$unaffectedAfter = Get-ProbeFileEvidence -Root $ProbeRoot -Path $unaffectedPath -RelativePath $unaffectedRelativePath
+$afterDacl = if ($null -ne $after) { ConvertTo-Json -InputObject $after.dacl -Compress -Depth 8 } else { $null }
+$beforeDacl = ConvertTo-Json -InputObject $before.dacl -Compress -Depth 8
+$debrisAfter = [ordered]@{}
+foreach ($debrisName in @('stage','tombstone')) {
+    if ($debris.Contains($debrisName + 'Path')) {
+        $debrisRelative = 'managed/' + [System.IO.Path]::GetFileName([string]$debris[$debrisName + 'Path'])
+        $debrisAfter[$debrisName] = Get-ProbeFileEvidence -Root $ProbeRoot `
+            -Path ([string]$debris[$debrisName + 'Path']) -RelativePath $debrisRelative
+    }
+}
+$parentIdentityAfter = if (Test-Path -LiteralPath $targetParent -PathType Container) {
+    [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($targetParent)
+} else { $null }
+$result = [ordered]@{
+    case = $Case
+    restoreFailed = ($null -ne $restoreError)
+    targetPreserved = ($null -ne $after -and $before.bytesBase64 -ceq $after.bytesBase64 -and
+        $before.sha256 -ceq $after.sha256 -and $before.length -eq $after.length -and
+        $before.identity -ceq $after.identity -and $beforeDacl -ceq $afterDacl -and
+        [bool]$before.readOnly -eq [bool]$after.readOnly -and [uint32]$before.attributes -eq [uint32]$after.attributes)
+    targetBefore = $before
+    targetAfter = $after
+    appliedIdentity = $appliedIdentity
+    appliedSha256 = $appliedSha256
+    publicationDacl = $publicationDacl
+    publicationDaclJson = $publicationDaclJson
+    unaffectedRestored = ($null -ne $unaffectedAfter -and
+        $unaffectedAfter.bytesBase64 -ceq [Convert]::ToBase64String($unaffectedOriginalBytes) -and
+        (ConvertTo-Json -InputObject $unaffectedAfter.dacl -Compress -Depth 8) -ceq $unaffectedOriginalDaclJson -and
+        -not [bool]$unaffectedAfter.readOnly)
+    unaffectedAfter = $unaffectedAfter
+    unaffectedOriginalBytesBase64 = [Convert]::ToBase64String($unaffectedOriginalBytes)
+    unaffectedOriginalDaclJson = $unaffectedOriginalDaclJson
+    debrisBefore = $debrisBefore
+    debrisAfter = $debrisAfter
+    parentIdentityBefore = $parentIdentityBefore
+    parentIdentityAfter = $parentIdentityAfter
+    parentSwapAttempted = ($Case -eq 'parent-replacement' -and $swapFired)
+    parentSwapSucceeded = ($Case -eq 'parent-replacement' -and $swapSucceeded)
+    parentSwapBlocked = ($Case -eq 'parent-replacement' -and $swapBlocked)
+    targetRemoved = ($null -eq $after)
+}
+[System.IO.File]::WriteAllText($ResultPath, (ConvertTo-Json -InputObject $result -Depth 14), [System.Text.UTF8Encoding]::new($false))
+'@
+        Set-TestText -Path $wrapperPath -Value $wrapperText
+        # When
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $wrapperPath `
+            -BootstrapScript (Resolve-Path -LiteralPath $script:BootstrapScript).Path -ProbeRoot $probeRoot `
+            -BackupRoot $backupRoot -Case $Case -ResultPath $resultPath 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Then
+        if ($exitCode -ne 0) {
+            $childOutput = @($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+            if ($childOutput.Length -gt 12000) {
+                $omittedCharacterCount = $childOutput.Length - 12000
+                $childOutput = "[... $omittedCharacterCount leading characters omitted ...]`n" +
+                    $childOutput.Substring($omittedCharacterCount)
+            }
+            throw "Read-only rollback probe child exited $exitCode for '$Case'. Combined child output:`n$childOutput"
+        }
+        $exitCode | Should Be 0
+        $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+        $result.case | Should Be $Case
+        $result.unaffectedRestored | Should Be $true
+        if ($Case -eq 'parent-replacement') {
+            $result.parentSwapAttempted | Should Be $true
+            if ($result.parentSwapSucceeded) {
+                $result.restoreFailed | Should Be $true
+                $result.targetBefore.bytesBase64 | Should Be $result.targetAfter.bytesBase64
+                $result.targetBefore.sha256 | Should Be $result.targetAfter.sha256
+                $result.targetBefore.length | Should Be $result.targetAfter.length
+                $result.targetBefore.identity | Should Be $result.targetAfter.identity
+                (ConvertTo-Json -InputObject $result.targetBefore.dacl -Compress -Depth 8) |
+                    Should Be (ConvertTo-Json -InputObject $result.targetAfter.dacl -Compress -Depth 8)
+                $result.targetBefore.readOnly | Should Be $result.targetAfter.readOnly
+                $result.targetBefore.attributes | Should Be $result.targetAfter.attributes
+                $result.targetRemoved | Should Be $false
+                $result.parentIdentityAfter | Should Not Be $result.parentIdentityBefore
+            }
+            else {
+                $result.parentSwapBlocked | Should Be $true
+                $result.parentIdentityAfter | Should Be $result.parentIdentityBefore
+                if ($result.targetRemoved) {
+                    $result.restoreFailed | Should Be $false
+                }
+                else {
+                    $result.restoreFailed | Should Be $true
+                    $result.targetBefore.bytesBase64 | Should Be $result.targetAfter.bytesBase64
+                    $result.targetBefore.sha256 | Should Be $result.targetAfter.sha256
+                    $result.targetBefore.length | Should Be $result.targetAfter.length
+                    $result.targetBefore.identity | Should Be $result.targetAfter.identity
+                    (ConvertTo-Json -InputObject $result.targetBefore.dacl -Compress -Depth 8) |
+                        Should Be (ConvertTo-Json -InputObject $result.targetAfter.dacl -Compress -Depth 8)
+                    $result.targetBefore.readOnly | Should Be $result.targetAfter.readOnly
+                    $result.targetBefore.attributes | Should Be $result.targetAfter.attributes
+                }
+            }
+        }
+        else {
+            $result.restoreFailed | Should Be $true
+            $result.targetBefore.bytesBase64 | Should Be $result.targetAfter.bytesBase64
+            $result.targetBefore.sha256 | Should Be $result.targetAfter.sha256
+            $result.targetBefore.length | Should Be $result.targetAfter.length
+            $result.targetBefore.identity | Should Be $result.targetAfter.identity
+            (ConvertTo-Json -InputObject $result.targetBefore.dacl -Compress -Depth 8) |
+                Should Be (ConvertTo-Json -InputObject $result.targetAfter.dacl -Compress -Depth 8)
+            $result.targetBefore.readOnly | Should Be $result.targetAfter.readOnly
+            $result.targetBefore.attributes | Should Be $result.targetAfter.attributes
+            $result.targetRemoved | Should Be $false
+        }
+        $result.unaffectedAfter.bytesBase64 | Should Be $result.unaffectedOriginalBytesBase64
+        (ConvertTo-Json -InputObject $result.unaffectedAfter.dacl -Compress -Depth 8) |
+            Should Be $result.unaffectedOriginalDaclJson
+        if ($Case -eq 'later-bytes') { $result.targetBefore.sha256 | Should Not Be $result.appliedSha256 }
+        if ($Case -eq 'replacement-identity') {
+            $result.targetBefore.sha256 | Should Be $result.appliedSha256
+            $result.targetBefore.identity | Should Not Be $result.appliedIdentity
+        }
+        if ($Case -eq 'dacl-drift') {
+            $result.targetBefore.sha256 | Should Be $result.appliedSha256
+            $result.targetBefore.identity | Should Be $result.appliedIdentity
+            $result.publicationDacl | Should Be $false
+        }
+        if ($Case -eq 'stage-and-tombstone') {
+            $result.targetBefore.sha256 | Should Be $result.appliedSha256
+            $result.targetBefore.identity | Should Be $result.appliedIdentity
+            $result.publicationDacl | Should Be $true
+            foreach ($debrisName in @('stage','tombstone')) {
+                $beforeDebrisItem = $result.debrisBefore.PSObject.Properties[$debrisName].Value
+                $afterDebrisItem = $result.debrisAfter.PSObject.Properties[$debrisName].Value
+                $afterDebrisItem.bytesBase64 | Should Be $beforeDebrisItem.bytesBase64
+                $afterDebrisItem.sha256 | Should Be $beforeDebrisItem.sha256
+                $afterDebrisItem.length | Should Be $beforeDebrisItem.length
+                $afterDebrisItem.identity | Should Be $beforeDebrisItem.identity
+                (ConvertTo-Json -InputObject $afterDebrisItem.dacl -Compress -Depth 8) |
+                    Should Be (ConvertTo-Json -InputObject $beforeDebrisItem.dacl -Compress -Depth 8)
+                $afterDebrisItem.readOnly | Should Be $beforeDebrisItem.readOnly
+                $afterDebrisItem.attributes | Should Be $beforeDebrisItem.attributes
+            }
+        }
     }
 }
