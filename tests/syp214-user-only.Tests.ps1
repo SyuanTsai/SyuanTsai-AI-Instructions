@@ -284,7 +284,7 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
 }
 
 function Invoke-Syp214Bootstrap {
-    param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration)
+    param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration, [switch]$CaptureFailure)
     New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
     $arguments = @('-NoProfile','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,
         '-TargetRoot',$targetRoot,'-ConfigurationPath',$script:TestConfigurationPath,
@@ -293,7 +293,11 @@ function Invoke-Syp214Bootstrap {
     if ($WhatIf) { $arguments += '-WhatIf' }
     if ($FailureAfterSkillRemovalCount) { $arguments += @('-FailureAfterSkillRemovalCount', $FailureAfterSkillRemovalCount) }
     $output = & $script:TestPowerShellExecutable @arguments 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ($output -join "`n") }
+    $exitCode = $LASTEXITCODE
+    if ($CaptureFailure) {
+        return [pscustomobject][ordered]@{ exitCode=$exitCode; output=@($output | ForEach-Object { [string]$_ }) }
+    }
+    if ($exitCode -ne 0) { throw ($output -join "`n") }
     return $output
 }
 
@@ -306,17 +310,150 @@ function Get-Syp214FileInventory {
         if(Test-Path -LiteralPath $full){
             $item=Get-Item -Force -LiteralPath $full
             if($item.PSIsContainer){
-                [ordered]@{relativePath=$normalized;type='directory';length=$null;sha256=$null}
+                [ordered]@{relativePath=$normalized;type='directory';regularFile=$false;length=$null;sha256=$null}
+            }
+            elseif(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+                [ordered]@{relativePath=$normalized;type='reparse-point';regularFile=$false;length=$null;sha256=$null}
             }
             else{
-                [ordered]@{relativePath=$normalized;type='file';length=[long]$item.Length
+                [ordered]@{relativePath=$normalized;type='file';regularFile=$true;length=[long]$item.Length
                     sha256=(Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()}
             }
         }
         else{
-            [ordered]@{relativePath=$normalized;type='missing';length=$null;sha256=$null}
+            [ordered]@{relativePath=$normalized;type='missing';regularFile=$false;length=$null;sha256=$null}
         }
     }
+}
+
+function Get-Syp214TreeInventory {
+    param([string]$Root)
+    $resolvedRoot=[IO.Path]::GetFullPath($Root)
+    $rootPrefix=$resolvedRoot.TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+    $pending=[System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($resolvedRoot)
+    $records=[System.Collections.Generic.List[object]]::new()
+    while($pending.Count -gt 0){
+        $directory=$pending.Pop()
+        foreach($item in @(Get-ChildItem -Force -LiteralPath $directory | Sort-Object Name)){
+            $relativePath=$item.FullName.Substring($rootPrefix.Length).Replace('\','/')
+            if($relativePath -match '(^|/)\.git(?:/|$)'){ continue }
+            $isReparsePoint=(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            if($item.PSIsContainer){
+                if($isReparsePoint){
+                    $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
+                }
+                else{
+                    $records.Add([ordered]@{relativePath=$relativePath;type='directory';regularFile=$false;length=$null;sha256=$null})
+                    $pending.Push($item.FullName)
+                }
+            }
+            elseif($isReparsePoint){
+                $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
+            }
+            else{
+                $records.Add([ordered]@{relativePath=$relativePath;type='file';regularFile=$true;length=[long]$item.Length
+                    sha256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()})
+            }
+        }
+    }
+    return @($records | Sort-Object relativePath)
+}
+
+function Test-Syp214InventoryEqual {
+    param([AllowEmptyCollection()][object[]]$Left,[AllowEmptyCollection()][object[]]$Right)
+    $leftJson=ConvertTo-Json -InputObject @($Left) -Depth 12 -Compress
+    $rightJson=ConvertTo-Json -InputObject @($Right) -Depth 12 -Compress
+    return $leftJson -ceq $rightJson
+}
+
+function Test-Syp214FileInventoryRecordEqual {
+    param([object]$Left,[object]$Right)
+    if($null -eq $Left -or $null -eq $Right){ return $false }
+    $lengthEqual=if($null -eq $Left.length -or $null -eq $Right.length){
+        $null -eq $Left.length -and $null -eq $Right.length
+    }
+    else{ [long]$Left.length -eq [long]$Right.length }
+    return ([string]$Left.relativePath -ceq [string]$Right.relativePath -and
+        [string]$Left.type -ceq [string]$Right.type -and
+        [bool]$Left.regularFile -eq [bool]$Right.regularFile -and
+        $lengthEqual -and [string]$Left.sha256 -ceq [string]$Right.sha256)
+}
+
+function Test-Syp214PointInventoryEqual {
+    param([object]$Left,[object]$Right)
+    return ((Test-Syp214InventoryEqual -Left $Left.files -Right $Right.files) -and
+        (Test-Syp214InventoryEqual -Left $Left.missingFileWitness -Right $Right.missingFileWitness))
+}
+
+function New-Syp214RepositorySnapshotWithFileOverride {
+    param([object]$Snapshot,[object]$TreeFileRecord,[object]$PointFileRecord)
+    $relativePath=[string]$TreeFileRecord.relativePath
+    if([string]$PointFileRecord.relativePath -cne $relativePath){
+        throw "Tree and point inventory drift records disagree on path: $relativePath"
+    }
+    $originalTreeRecords=@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -ceq $relativePath })
+    $originalPointRecords=@($Snapshot.files | Where-Object { [string]$_.relativePath -ceq $relativePath })
+    if($originalTreeRecords.Count -ne 1 -or $originalPointRecords.Count -ne 1){
+        throw "Expected exactly one original inventory record for drift path: $relativePath"
+    }
+    $fullTree=@(@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($TreeFileRecord) | Sort-Object relativePath)
+    $files=@(@($Snapshot.files | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($PointFileRecord) | Sort-Object relativePath)
+    return [pscustomobject][ordered]@{
+        fullTree=$fullTree
+        files=$files
+        missingFileWitness=@($files | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object {
+            [ordered]@{relativePath=$_.relativePath;type=$_.type}
+        })
+    }
+}
+
+function Test-Syp214GitCoreStateEqual {
+    param([object]$Left,[object]$Right)
+    return ([string]$Left.head -ceq [string]$Right.head -and
+        [string]$Left.indexSha256 -ceq [string]$Right.indexSha256 -and
+        (Test-Syp214InventoryEqual -Left @($Left.status) -Right @($Right.status)))
+}
+
+function Test-Syp214GitStateEqual {
+    param([object]$Left,[object]$Right)
+    return ((Test-Syp214GitCoreStateEqual -Left $Left -Right $Right) -and
+        (Test-Syp214InventoryEqual -Left @($Left.stashes) -Right @($Right.stashes)))
+}
+
+function Test-Syp214RegularFileInventory {
+    param([object[]]$Inventory)
+    return (@($Inventory).Count -eq 1 -and [string]$Inventory[0].type -ceq 'file' -and
+        [bool]$Inventory[0].regularFile -and $null -ne $Inventory[0].length -and
+        [long]$Inventory[0].length -ge 0 -and [string]$Inventory[0].sha256 -cmatch '^[0-9a-f]{64}$')
+}
+
+function Get-Syp214SafeOutputText {
+    param([string]$Text,[string[]]$PrivateRoots)
+    $safeText=$Text
+    foreach($privateRoot in @($PrivateRoots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object Length -Descending -Unique)){
+        $resolved=[IO.Path]::GetFullPath([string]$privateRoot).TrimEnd([char[]]@('\','/'))
+        if($resolved.Length -gt 2){
+            $safeText=[regex]::Replace($safeText,[regex]::Escape($resolved),'<fixture-path>',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+    return $safeText
+}
+
+function New-Syp214UnrelatedEvidenceFiles {
+    param([string]$Repository,[string]$UserHome)
+    $repositoryPaths=@('.codex/AI-Rules/Personal.md','.github/AI-Rules/Project.md')
+    $userPaths=@('AGENTS.md','local-evidence.bin')
+    foreach($path in @($repositoryPaths | ForEach-Object { Join-Path $Repository $_ }) + @($userPaths | ForEach-Object { Join-Path $UserHome $_ })){
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    }
+    Set-TestText -Path (Join-Path $Repository $repositoryPaths[0]) -Value '# Personal Codex Instructions'
+    Set-TestText -Path (Join-Path $Repository $repositoryPaths[1]) -Value '# Project Copilot Instructions'
+    Set-TestText -Path (Join-Path $UserHome $userPaths[0]) -Value '# USER home Instructions'
+    $userBinaryPath=Join-Path $UserHome $userPaths[1]
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userBinaryPath) | Out-Null
+    [IO.File]::WriteAllBytes($userBinaryPath,[byte[]]@(0x01,0x02,0x03,0xfe))
+    return [pscustomobject][ordered]@{repository=[string[]]$repositoryPaths;user=[string[]]$userPaths}
 }
 
 function Get-Syp214FixtureSnapshot {
@@ -324,15 +461,34 @@ function Get-Syp214FixtureSnapshot {
     $repositoryPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @($script:ManifestPath,'AGENTS.md'))
     $userPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @('.agents/catalog-skills.manifest.json'))
     $indexPath=Join-Path $Repository '.git/index'
+    $repositoryFiles=@(Get-Syp214FileInventory -Root $Repository -RelativePaths $repositoryPaths)
+    $userFiles=@(Get-Syp214FileInventory -Root $UserHome -RelativePaths $userPaths)
+    $gitExcludeRelativePath=(Invoke-TestGit $Repository @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+    if([IO.Path]::IsPathRooted($gitExcludeRelativePath)){
+        $gitExcludeFullPath=[IO.Path]::GetFullPath($gitExcludeRelativePath)
+        $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+        if(-not $gitExcludeFullPath.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'Fixture Git info/exclude path is outside its disposable repository.'
+        }
+        $gitExcludeRelativePath=$gitExcludeFullPath.Substring($repositoryPrefix.Length).Replace('\','/')
+    }
+    else{ $gitExcludeRelativePath=$gitExcludeRelativePath.Replace('\','/') }
     [ordered]@{
         repository=[ordered]@{
-            files=@(Get-Syp214FileInventory -Root $Repository -RelativePaths $repositoryPaths)
+            files=$repositoryFiles
+            missingFileWitness=@($repositoryFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
+            fullTree=@(Get-Syp214TreeInventory -Root $Repository)
+            gitInfoExclude=@(Get-Syp214FileInventory -Root $Repository -RelativePaths @($gitExcludeRelativePath))
             head=((Invoke-TestGit $Repository @('rev-parse','HEAD') | Select-Object -First 1).Trim())
             indexSha256=$(if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()}else{$null})
             status=@(Invoke-TestGit $Repository @('status','--porcelain'))
             stashes=@(Invoke-TestGit $Repository @('stash','list','--format=%H%x00%gs'))
         }
-        user=[ordered]@{files=@(Get-Syp214FileInventory -Root $UserHome -RelativePaths $userPaths)}
+        user=[ordered]@{
+            files=$userFiles
+            missingFileWitness=@($userFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
+            fullTree=@(Get-Syp214TreeInventory -Root $UserHome)
+        }
     }
 }
 
@@ -352,7 +508,7 @@ function Get-Syp214JournalInventory {
         else{
             $state=@($backupStates | Where-Object { [string]$_.backupName -ceq [string]$item.relativePath })[0]
             $expectedSha256=[string]$state.backupSha256
-            $matchesJournalSha256=([string]$item.type -ceq 'file' -and
+            $matchesJournalSha256=([string]$item.type -ceq 'file' -and [bool]$item.regularFile -and
                 [string]$item.sha256 -cmatch '^[0-9a-f]{64}$' -and
                 [string]$item.sha256 -ceq $expectedSha256)
             $item['kind']='backup'
@@ -367,6 +523,7 @@ function Test-Syp214JournalInventory {
     param([object[]]$Inventory,[object]$Journal,[string]$ExpectedCorruptBackupName)
     $journalRecords=@($Inventory | Where-Object { [string]$_.kind -ceq 'journal' })
     if($journalRecords.Count -ne 1 -or [string]$journalRecords[0].type -cne 'file' -or
+        -not [bool]$journalRecords[0].regularFile -or
         $null -eq $journalRecords[0].length -or [long]$journalRecords[0].length -lt 0 -or
         [string]$journalRecords[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
 
@@ -377,6 +534,7 @@ function Test-Syp214JournalInventory {
     foreach($state in $backupStates){
         $record=@($backupRecords | Where-Object { [string]$_.relativePath -ceq [string]$state.backupName })
         if($record.Count -ne 1 -or [string]$record[0].type -cne 'file' -or
+            -not [bool]$record[0].regularFile -or
             $null -eq $record[0].length -or [long]$record[0].length -lt 0 -or
             [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$' -or
             [string]$record[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
@@ -593,6 +751,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
     It 'InterT40_verified_USER_allows_exact_migration_after_a_mutation_free_dry_run' {
         # Given
         $entries = New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
+        $unrelatedEvidencePaths=New-Syp214UnrelatedEvidenceFiles -Repository $targetRoot -UserHome $userHome
         foreach ($entry in $entries) {
             $full = Join-Path $sourceRoot $entry.targetPath
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $full) | Out-Null
@@ -603,16 +762,46 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $index = (Get-FileHash (Join-Path $targetRoot '.git/index')).Hash
         $manifestBefore = [IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
         $beforeSnapshot = Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $unrelatedRepositoryBefore=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserBefore=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
         $bootstrapAndBranchRuns=0
         $dryRunCount=0
         # When / Then
-        Invoke-Syp214Bootstrap -WhatIf | Out-Null
+        $dryRunOutput=@(Invoke-Syp214Bootstrap -WhatIf | ForEach-Object { [string]$_ })
         $dryRunCount++
+        $dryRunSnapshot=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $dryRunQualification=@($dryRunOutput | Where-Object { $_ -match '^Skill migration syp214-fixture: ' })
+        $dryRunQualification.Count | Should Be 1
+        $dryRunQualification[0] | Should Match '^Skill migration syp214-fixture: retire verified ignored/untracked copy$'
+        $dryRunQualificationReason=$dryRunQualification[0].Substring($dryRunQualification[0].IndexOf(':') + 1).Trim()
+        $dryRunWhatIfOutput=@($dryRunOutput | Where-Object { $_ -match '^WhatIf: consumer Instructions-only synchronization;' })
+        $dryRunWhatIfOutput.Count | Should Be 1
+        $dryRunConsumerTreeStable=Test-Syp214InventoryEqual -Left $beforeSnapshot.repository.fullTree -Right $dryRunSnapshot.repository.fullTree
+        $dryRunUserTreeStable=Test-Syp214InventoryEqual -Left $beforeSnapshot.user.fullTree -Right $dryRunSnapshot.user.fullTree
+        $dryRunPointInventoryStable=(Test-Syp214PointInventoryEqual -Left $beforeSnapshot.repository -Right $dryRunSnapshot.repository) -and
+            (Test-Syp214PointInventoryEqual -Left $beforeSnapshot.user -Right $dryRunSnapshot.user)
+        $dryRunGitStateStable=Test-Syp214GitStateEqual -Left $beforeSnapshot.repository -Right $dryRunSnapshot.repository
+        $dryRunExcludeStable=Test-Syp214InventoryEqual -Left $beforeSnapshot.repository.gitInfoExclude -Right $dryRunSnapshot.repository.gitInfoExclude
+        $dryRunExcludeRegularFile=Test-Syp214RegularFileInventory -Inventory $dryRunSnapshot.repository.gitInfoExclude
+        $dryRunMutationFree=($dryRunConsumerTreeStable -and $dryRunUserTreeStable -and $dryRunPointInventoryStable -and
+            $dryRunGitStateStable -and $dryRunExcludeStable -and $dryRunExcludeRegularFile)
+        $dryRunMutationFree | Should Be $true
         $manifestAfterDryRun = [IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
         $manifestAfterDryRun | Should Be $manifestBefore
         Test-Path (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        $dryRunOutputText=$dryRunOutput -join [Environment]::NewLine
+        $dryRunOutputBytes=[Text.Encoding]::UTF8.GetBytes($dryRunOutputText)
+        $dryRunOutputSha256=([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($dryRunOutputBytes)).Replace('-','').ToLowerInvariant())
+        $dryRunOutputSafe=Get-Syp214SafeOutputText -Text $dryRunOutputText -PrivateRoots @(
+            $caseRoot,$targetRoot,$userHome,$sourceRoot,[IO.Path]::GetTempPath(),$PSHOME,$script:TestPowerShellExecutable,
+            (Split-Path -Parent (Split-Path -Parent $script:BootstrapScript)))
+        $dryRunExcludeBeforeToApply=@($beforeSnapshot.repository.gitInfoExclude)
         $output = Invoke-Syp214Bootstrap
         $bootstrapAndBranchRuns++
+        $afterApplySnapshot=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $stashEvidenceAfterApply=@($afterApplySnapshot.repository.stashes)
+        $personalAgentStashEvidenceRecorded=@($stashEvidenceAfterApply | Where-Object { [string]$_ -match 'CodexPersonalAgent:.*:PersonalAgent$' }).Count -gt 0
+        $personalAgentStashEvidenceRecorded | Should Be $true
         foreach ($entry in $entries) { Test-Path (Join-Path $targetRoot $entry.targetPath) | Should Be $false }
         ($output -join ' ') | Should Match 'Skill migration.*Backup'
         $manifest = Get-Content -Raw (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
@@ -634,22 +823,43 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         (Get-FileHash (Join-Path $targetRoot '.git/index')).Hash | Should Be $index
         foreach ($entry in $entries) { (Get-FileHash (Join-Path $userHome $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
         $afterSnapshot = Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
-        $userBytesStable = (ConvertTo-Json -InputObject @($beforeSnapshot.user.files) -Depth 6 -Compress) -ceq (ConvertTo-Json -InputObject @($afterSnapshot.user.files) -Depth 6 -Compress)
+        $userBytesStable = Test-Syp214InventoryEqual -Left $beforeSnapshot.user.fullTree -Right $afterSnapshot.user.fullTree
         $manifestDryRunStable = $manifestAfterDryRun -ceq $manifestBefore
         $indexPreserved = ([string]$afterSnapshot.repository.indexSha256 -ceq ([string]$beforeSnapshot.repository.indexSha256))
         $headPreserved = ([string]$afterSnapshot.repository.head -ceq ([string]$beforeSnapshot.repository.head))
+        $gitCoreStatePreserved=Test-Syp214GitCoreStateEqual -Left $beforeSnapshot.repository -Right $afterSnapshot.repository
+        $stashEvidenceStableAfterNoOpRuns=Test-Syp214InventoryEqual -Left $stashEvidenceAfterApply -Right $afterSnapshot.repository.stashes
+        $unrelatedRepositoryAfter=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserAfter=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
+        $unrelatedFilesPreserved=(Test-Syp214InventoryEqual -Left $unrelatedRepositoryBefore -Right $unrelatedRepositoryAfter) -and
+            (Test-Syp214InventoryEqual -Left $unrelatedUserBefore -Right $unrelatedUserAfter)
+        $applyExcludeRegularFile=Test-Syp214RegularFileInventory -Inventory $afterSnapshot.repository.gitInfoExclude
+        $applyExcludeChanged= -not (Test-Syp214InventoryEqual -Left $dryRunExcludeBeforeToApply -Right $afterSnapshot.repository.gitInfoExclude)
         $journalFilesAfterNoOpRuns=@(Get-Syp214JournalInventory -JournalPath $journalPath -Journal $journal)
         $journalInventoryVerifiedAfterNoOpRuns=Test-Syp214JournalInventory -Inventory $journalFilesAfterNoOpRuns -Journal $journal
         $journalInventoryStable=(ConvertTo-Json -InputObject $journalFilesBeforeNoOpRuns -Depth 6 -Compress) -ceq
             (ConvertTo-Json -InputObject $journalFilesAfterNoOpRuns -Depth 6 -Compress)
         $userBytesStable | Should Be $true
         $manifestDryRunStable | Should Be $true
+        $gitCoreStatePreserved | Should Be $true
+        $stashEvidenceStableAfterNoOpRuns | Should Be $true
+        $unrelatedFilesPreserved | Should Be $true
+        $applyExcludeRegularFile | Should Be $true
         $journalInventoryVerifiedAfterNoOpRuns | Should Be $true
         $journalInventoryStable | Should Be $true
         $runIdentity=Get-Syp214RunIdentity
         Save-Syp214FixtureEvidence 'migration' ([ordered]@{
             schemaVersion=2; scope='disposable integration fixture'; skillId='syp214-fixture'; runIdentity=$runIdentity
             before=$beforeSnapshot; after=$afterSnapshot; userBytesStable=$userBytesStable
+            unrelatedFiles=[ordered]@{repositoryBefore=$unrelatedRepositoryBefore;repositoryAfter=$unrelatedRepositoryAfter
+                userBefore=$unrelatedUserBefore;userAfter=$unrelatedUserAfter;preserved=$unrelatedFilesPreserved}
+            dryRun=[ordered]@{before=$beforeSnapshot;after=$dryRunSnapshot;output=$dryRunOutputSafe
+                outputByteLength=$dryRunOutputBytes.Length;outputSha256=$dryRunOutputSha256
+                qualificationOutput=$dryRunQualification[0];qualificationReason=$dryRunQualificationReason;whatIfOutput=$dryRunWhatIfOutput[0]
+                consumerTreeStable=$dryRunConsumerTreeStable;userTreeStable=$dryRunUserTreeStable
+                pointInventoryStable=$dryRunPointInventoryStable;gitStateStable=$dryRunGitStateStable
+                gitInfoExcludeStable=$dryRunExcludeStable;gitInfoExcludeRegularFile=$dryRunExcludeRegularFile
+                zeroMutationVerified=$dryRunMutationFree}
             repoBefore=@($entries); repoAfter=@($entries | ForEach-Object { [ordered]@{targetPath=$_.targetPath; exists=(Test-Path (Join-Path $targetRoot $_.targetPath))} })
             userAfter=@($entries | ForEach-Object { [ordered]@{targetPath=$_.targetPath; sha256=(Get-FileHash (Join-Path $userHome $_.targetPath)).Hash.ToLowerInvariant()} })
             manifestBeforeSha256=([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($manifestBefore)) | ForEach-Object ToString x2) -join ''
@@ -662,7 +872,12 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             journalPhase=$journal.phase; dryRunPreservedManifest=$manifestDryRunStable
             dryRunManifestSha256=([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($manifestAfterDryRun))).Replace('-','').ToLowerInvariant())
             dryRunCount=$dryRunCount; bootstrapAndBranchRuns=$bootstrapAndBranchRuns
-            indexPreserved=$indexPreserved; headPreserved=$headPreserved
+            indexPreserved=$indexPreserved; headPreserved=$headPreserved;gitCoreStatePreserved=$gitCoreStatePreserved
+            stashEvidence=[ordered]@{beforeApply=$beforeSnapshot.repository.stashes;afterApply=$stashEvidenceAfterApply
+                afterNoOpRuns=$afterSnapshot.repository.stashes;personalAgentRecorded=$personalAgentStashEvidenceRecorded
+                stableAfterNoOpRuns=$stashEvidenceStableAfterNoOpRuns}
+            applyGitInfoExclude=$afterSnapshot.repository.gitInfoExclude;applyGitInfoExcludeRegularFile=$applyExcludeRegularFile
+            applyGitInfoExcludeChanged=$applyExcludeChanged
         })
     }
 
@@ -671,6 +886,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
     It 'InterT50_failure_during_migration_restores_exact_files_and_manifest' {
         # Given
         $entries = New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
+        $unrelatedEvidencePaths=New-Syp214UnrelatedEvidenceFiles -Repository $targetRoot -UserHome $userHome
         foreach ($entry in $entries) {
             $full = Join-Path $sourceRoot $entry.targetPath
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $full) | Out-Null
@@ -679,11 +895,47 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         $before = [IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
         $beforeSnapshot = Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $unrelatedRepositoryBefore=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserBefore=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
         # When
         $failureMessage=''
-        try { Invoke-Syp214Bootstrap -FailureAfterSkillRemovalCount 1 | Out-Null }
-        catch { $failureMessage=$_.Exception.Message }
+        $failureRun=Invoke-Syp214Bootstrap -FailureAfterSkillRemovalCount 1 -CaptureFailure
+        $failureExitCode=[int]$failureRun.exitCode
+        $failureOutputLines=@($failureRun.output | ForEach-Object { [string]$_ })
+        $failureOutputText=$failureOutputLines -join [Environment]::NewLine
+        $failureMessageLines=@($failureOutputLines | Where-Object { $_ -match 'Injected Skill migration failure' })
+        $failureMessageLines.Count | Should BeGreaterThan 0
+        $failureMessage=$failureMessageLines[-1]
         $failureMessage | Should Match 'Injected Skill migration failure'
+        $failureExitCode | Should Not Be 0
+        $failureOutputForParsing=[regex]::Replace($failureOutputText,'\x1B\[[0-?]*[ -/]*[@-~]','')
+        $retainedPathMatch=[regex]::Match($failureOutputForParsing,'(?im)AI instruction sync temporary recovery files were preserved at:\s*(?<path>[^\r\n]+)')
+        $retainedPathMatch.Success | Should Be $true
+        $retainedWorkingPath=[IO.Path]::GetFullPath($retainedPathMatch.Groups['path'].Value.Trim())
+        $temporaryRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+        $retainedWorkingPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase) | Should Be $true
+        $failureJournalPath=Join-Path $retainedWorkingPath 'target-backup/skill-migration.json'
+        Test-Path -LiteralPath $failureJournalPath -PathType Leaf | Should Be $true
+        $failureJournal=Get-Content -Raw -Encoding UTF8 -LiteralPath $failureJournalPath | ConvertFrom-Json
+        $failureJournal.phase | Should Be 'rolled-back'
+        $failureJournalInventory=@(Get-Syp214JournalInventory -JournalPath $failureJournalPath -Journal $failureJournal)
+        $failureJournalInventoryVerified=Test-Syp214JournalInventory -Inventory $failureJournalInventory -Journal $failureJournal
+        $failureJournalInventoryVerified | Should Be $true
+        $failureJournalEvidence=[ordered]@{
+            schemaVersion=$failureJournal.schemaVersion;phase=$failureJournal.phase;head=$failureJournal.head
+            indexSha256=$failureJournal.indexSha256
+            states=@($failureJournal.states | ForEach-Object {
+                [ordered]@{relativePath=$_.relativePath;originalType=$_.originalType;backupName=$_.backupName
+                    backupSha256=$_.backupSha256;mutationApplied=$_.mutationApplied;appliedType=$_.appliedType}
+            })
+        }
+        $failureOutputBytes=[Text.Encoding]::UTF8.GetBytes($failureOutputText)
+        $failureOutputSha256=([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($failureOutputBytes)).Replace('-','').ToLowerInvariant())
+        $privateRoots=@(
+            $caseRoot,$targetRoot,$userHome,$sourceRoot,[IO.Path]::GetTempPath(),$retainedWorkingPath,$PSHOME,$script:TestPowerShellExecutable,
+            (Split-Path -Parent (Split-Path -Parent $script:BootstrapScript)))
+        $failureOutputSafe=Get-Syp214SafeOutputText -Text $failureOutputText -PrivateRoots $privateRoots
+        $failureMessageSafe=Get-Syp214SafeOutputText -Text $failureMessage -PrivateRoots $privateRoots
         # Then
         $manifestAfter=[IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
         $manifestAfter | Should Be $before
@@ -693,13 +945,35 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $filesRestored=(@($restoredFiles | Where-Object { $_.type -ne 'file' }).Count -eq 0 -and
             @($entries | Where-Object { $expected=$_; @($restoredFiles | Where-Object { $_.relativePath -ceq $expected.targetPath -and $_.sha256 -ceq $expected.sha256 }).Count -ne 1 }).Count -eq 0)
         $manifestRestored=($manifestAfter -ceq $before)
-        $userBytesPreserved=(ConvertTo-Json -InputObject @($beforeSnapshot.user.files) -Depth 6 -Compress) -ceq (ConvertTo-Json -InputObject @($afterSnapshot.user.files) -Depth 6 -Compress)
-        $verified=($failureMessage -match 'Injected Skill migration failure' -and $filesRestored -and $manifestRestored -and $userBytesPreserved)
+        $userBytesPreserved=Test-Syp214InventoryEqual -Left $beforeSnapshot.user.fullTree -Right $afterSnapshot.user.fullTree
+        $repositoryTreeRestored=Test-Syp214InventoryEqual -Left $beforeSnapshot.repository.fullTree -Right $afterSnapshot.repository.fullTree
+        $repositoryPointInventoryRestored=Test-Syp214PointInventoryEqual -Left $beforeSnapshot.repository -Right $afterSnapshot.repository
+        $userPointInventoryPreserved=Test-Syp214PointInventoryEqual -Left $beforeSnapshot.user -Right $afterSnapshot.user
+        $repositoryGitStatePreserved=Test-Syp214GitStateEqual -Left $beforeSnapshot.repository -Right $afterSnapshot.repository
+        $repositoryExcludeRestored=Test-Syp214InventoryEqual -Left $beforeSnapshot.repository.gitInfoExclude -Right $afterSnapshot.repository.gitInfoExclude
+        $unrelatedRepositoryAfter=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserAfter=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
+        $unrelatedFilesPreserved=(Test-Syp214InventoryEqual -Left $unrelatedRepositoryBefore -Right $unrelatedRepositoryAfter) -and
+            (Test-Syp214InventoryEqual -Left $unrelatedUserBefore -Right $unrelatedUserAfter)
+        $verified=($failureExitCode -ne 0 -and $failureMessage -match 'Injected Skill migration failure' -and
+            $failureJournalInventoryVerified -and [string]$failureJournal.phase -ceq 'rolled-back' -and
+            $filesRestored -and $manifestRestored -and $userBytesPreserved -and $repositoryTreeRestored -and
+            $repositoryPointInventoryRestored -and $userPointInventoryPreserved -and
+            $repositoryGitStatePreserved -and $repositoryExcludeRestored -and $unrelatedFilesPreserved)
         $verified | Should Be $true
         Save-Syp214FixtureEvidence 'failure-rollback' ([ordered]@{
             schemaVersion=2;scope='disposable integration fixture';runIdentity=(Get-Syp214RunIdentity)
-            failureAfterRemovedFiles=1;failureMessage=$failureMessage;before=$beforeSnapshot;after=$afterSnapshot
-            originalManifestRestored=$manifestRestored;restoredFiles=$restoredFiles;userBytesPreserved=$userBytesPreserved;verified=$verified
+            failureAfterRemovedFiles=1;failureProcessExitCode=$failureExitCode;failureMessage=$failureMessageSafe
+            capturedOutput=[ordered]@{redactedText=$failureOutputSafe;byteLength=$failureOutputBytes.Length;sha256=$failureOutputSha256}
+            failureJournal=$failureJournalEvidence;journalFiles=$failureJournalInventory
+            journalInventoryVerified=$failureJournalInventoryVerified;before=$beforeSnapshot;after=$afterSnapshot
+            originalManifestRestored=$manifestRestored;restoredFiles=$restoredFiles;userBytesPreserved=$userBytesPreserved
+            repositoryTreeRestored=$repositoryTreeRestored;repositoryPointInventoryRestored=$repositoryPointInventoryRestored
+            userPointInventoryPreserved=$userPointInventoryPreserved;repositoryGitStatePreserved=$repositoryGitStatePreserved
+            repositoryExcludeRestored=$repositoryExcludeRestored
+            unrelatedFiles=[ordered]@{repositoryBefore=$unrelatedRepositoryBefore;repositoryAfter=$unrelatedRepositoryAfter
+                userBefore=$unrelatedUserBefore;userAfter=$unrelatedUserAfter;preserved=$unrelatedFilesPreserved}
+            verified=$verified
         })
     }
 
@@ -709,6 +983,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         param($State)
         # Given
         $entries=New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
+        $unrelatedEvidencePaths=New-Syp214UnrelatedEvidenceFiles -Repository $targetRoot -UserHome $userHome
         foreach($entry in $entries){
             $full=Join-Path $sourceRoot $entry.targetPath
             New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
@@ -717,6 +992,8 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
         $manifestBefore=[IO.File]::ReadAllText((Join-Path $targetRoot $script:ManifestPath))
         $beforeSnapshot=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $unrelatedRepositoryBefore=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserBefore=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
         $output=Invoke-Syp214Bootstrap
         $line=@($output | ForEach-Object {[string]$_} | Where-Object {$_ -match '^Skill migration transaction retained\.'})[0]
         $journalPath=$line.Substring($line.IndexOf('journal: ') + 9).Trim()
@@ -738,7 +1015,27 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $corruptBackupName=if($State -eq 'corrupt-backup'){[string]$journal.states[0].backupName}else{''}
         $journalInventoryVerifiedBeforeRecovery=Test-Syp214JournalInventory -Inventory $journalFilesBeforeRecovery -Journal $journal -ExpectedCorruptBackupName $corruptBackupName
         $journalInventoryVerifiedBeforeRecovery | Should Be $true
-        $corruptBackupWitness=if($corruptBackupName){@($journalFilesBeforeRecovery | Where-Object { [string]$_.relativePath -ceq $corruptBackupName } | Select-Object relativePath,expectedSha256,sha256,matchesJournalSha256)[0]}else{$null}
+        $corruptBackupRecords=@($journalFilesBeforeRecovery | Where-Object { [string]$_.relativePath -ceq $corruptBackupName })
+        $corruptBackupWitnessMatchesInventory=$true
+        if($corruptBackupName){
+            $corruptBackupRecords.Count | Should Be 1
+            $corruptBackupRecord=$corruptBackupRecords[0]
+            $corruptBackupWitness=[ordered]@{
+                relativePath=[string]$corruptBackupRecord['relativePath']
+                expectedSha256=[string]$corruptBackupRecord['expectedSha256']
+                sha256=[string]$corruptBackupRecord['sha256']
+                matchesJournalSha256=[bool]$corruptBackupRecord['matchesJournalSha256']
+            }
+            $corruptBackupWitnessMatchesInventory=([string]$corruptBackupWitness.relativePath -ceq [string]$corruptBackupRecord['relativePath'] -and
+                [string]$corruptBackupWitness.expectedSha256 -ceq [string]$corruptBackupRecord['expectedSha256'] -and
+                [string]$corruptBackupWitness.sha256 -ceq [string]$corruptBackupRecord['sha256'] -and
+                [bool]$corruptBackupWitness.matchesJournalSha256 -eq [bool]$corruptBackupRecord['matchesJournalSha256'])
+            $corruptBackupWitnessMatchesInventory | Should Be $true
+            $corruptBackupWitness.relativePath | Should Be $corruptBackupName
+            $corruptBackupWitness.expectedSha256 | Should Not Be $corruptBackupWitness.sha256
+            $corruptBackupWitness.matchesJournalSha256 | Should Be $false
+        }
+        else{$corruptBackupWitness=$null}
         $recoveryError=''
         $recoveryOutput=@()
         # When / Then
@@ -769,7 +1066,7 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         $journalInventoryVerifiedAfterRecovery=Test-Syp214JournalInventory -Inventory $journalFilesAfterRecovery -Journal $journal -ExpectedCorruptBackupName $corruptBackupName
         $journalInventoryVerifiedAfterRecovery | Should Be $true
         $journalAfterRecovery=if(Test-Path -LiteralPath $journalPath -PathType Leaf){Get-Content -Raw -LiteralPath $journalPath | ConvertFrom-Json}else{$null}
-        $userBytesPreserved=(ConvertTo-Json -InputObject @($beforeSnapshot.user.files) -Depth 6 -Compress) -ceq (ConvertTo-Json -InputObject @($afterSnapshot.user.files) -Depth 6 -Compress)
+        $userBytesPreserved=Test-Syp214InventoryEqual -Left $beforeSnapshot.user.fullTree -Right $afterSnapshot.user.fullTree
         $repositoryStateVerified=$false
         if($State -eq 'later-edit'){
             $repositoryStateVerified=((Get-Content -Raw $repoFile).Trim() -ceq 'later project edit' -and $recoveryError -match 'preserved')
@@ -788,7 +1085,54 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             }).Count -eq 0
             $repositoryStateVerified=($manifestAfter -ceq $manifestBefore -and -not (Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) -and $filesRestored)
         }
-        $verified=($userBytesPreserved -and $repositoryStateVerified -and $journalInventoryVerifiedBeforeRecovery -and $journalInventoryVerifiedAfterRecovery)
+        $expectedRepositorySnapshot=if($State -in @('later-edit','corrupt-backup')){$preRecoverySnapshot.repository}else{$beforeSnapshot.repository}
+        $expectedExcludeSnapshot=if($State -in @('later-edit','corrupt-backup')){$preRecoverySnapshot.repository}else{$beforeSnapshot.repository}
+        $laterEditTreeRecordBeforeRecovery=$null
+        $laterEditPointRecordBeforeRecovery=$null
+        $laterEditTreeRecordAfterRecovery=$null
+        $laterEditPointRecordAfterRecovery=$null
+        $laterEditDriftInventoryPreserved=$null
+        if($State -eq 'later-edit'){
+            $driftRelativePath=[string]$entries[0].targetPath
+            $laterEditTreeRecordBeforeRecovery=@($preRecoverySnapshot.repository.fullTree | Where-Object { [string]$_.relativePath -ceq $driftRelativePath })
+            $laterEditPointRecordBeforeRecovery=@($preRecoverySnapshot.repository.files | Where-Object { [string]$_.relativePath -ceq $driftRelativePath })
+            $laterEditTreeRecordBeforeRecovery.Count | Should Be 1
+            $laterEditPointRecordBeforeRecovery.Count | Should Be 1
+            $laterEditTreeRecordBeforeRecovery[0].type | Should Be 'file'
+            $laterEditTreeRecordBeforeRecovery[0].regularFile | Should Be $true
+            $laterEditTreeRecordBeforeRecovery[0].length | Should BeGreaterThan 0
+            $laterEditTreeRecordBeforeRecovery[0].sha256 | Should Match '^[0-9a-f]{64}$'
+            (Test-Syp214FileInventoryRecordEqual -Left $laterEditTreeRecordBeforeRecovery[0] -Right $laterEditPointRecordBeforeRecovery[0]) | Should Be $true
+            (Get-Content -Raw -LiteralPath $repoFile).Trim() | Should Be 'later project edit'
+            $expectedRepositorySnapshot=New-Syp214RepositorySnapshotWithFileOverride `
+                -Snapshot $beforeSnapshot.repository -TreeFileRecord $laterEditTreeRecordBeforeRecovery[0] `
+                -PointFileRecord $laterEditPointRecordBeforeRecovery[0]
+            $laterEditTreeRecordAfterRecovery=@($afterSnapshot.repository.fullTree | Where-Object { [string]$_.relativePath -ceq $driftRelativePath })
+            $laterEditPointRecordAfterRecovery=@($afterSnapshot.repository.files | Where-Object { [string]$_.relativePath -ceq $driftRelativePath })
+            $laterEditTreeRecordAfterRecovery.Count | Should Be 1
+            $laterEditPointRecordAfterRecovery.Count | Should Be 1
+            $laterEditTreeRecordPreserved=Test-Syp214FileInventoryRecordEqual -Left $laterEditTreeRecordBeforeRecovery[0] -Right $laterEditTreeRecordAfterRecovery[0]
+            $laterEditPointRecordPreserved=Test-Syp214FileInventoryRecordEqual -Left $laterEditPointRecordBeforeRecovery[0] -Right $laterEditPointRecordAfterRecovery[0]
+            $laterEditDriftInventoryPreserved=($laterEditTreeRecordPreserved -and $laterEditPointRecordPreserved)
+            $laterEditDriftInventoryPreserved | Should Be $true
+        }
+        $laterEditDriftInventoryVerified=($State -ne 'later-edit' -or [bool]$laterEditDriftInventoryPreserved)
+        $repositoryTreeSemanticallyStable=Test-Syp214InventoryEqual -Left $expectedRepositorySnapshot.fullTree -Right $afterSnapshot.repository.fullTree
+        $repositoryPointInventorySemanticallyStable=Test-Syp214PointInventoryEqual -Left $expectedRepositorySnapshot -Right $afterSnapshot.repository
+        $userPointInventoryPreserved=Test-Syp214PointInventoryEqual -Left $beforeSnapshot.user -Right $afterSnapshot.user
+        $repositoryGitCoreStateSemanticallyStable=Test-Syp214GitCoreStateEqual -Left $preRecoverySnapshot.repository -Right $afterSnapshot.repository
+        $repositoryStashEvidenceStable=Test-Syp214InventoryEqual -Left $preRecoverySnapshot.repository.stashes -Right $afterSnapshot.repository.stashes
+        $repositoryExcludeSemanticallyStable=Test-Syp214InventoryEqual -Left $expectedExcludeSnapshot.gitInfoExclude -Right $afterSnapshot.repository.gitInfoExclude
+        $unrelatedRepositoryAfter=@(Get-Syp214FileInventory -Root $targetRoot -RelativePaths $unrelatedEvidencePaths.repository)
+        $unrelatedUserAfter=@(Get-Syp214FileInventory -Root $userHome -RelativePaths $unrelatedEvidencePaths.user)
+        $unrelatedFilesPreserved=(Test-Syp214InventoryEqual -Left $unrelatedRepositoryBefore -Right $unrelatedRepositoryAfter) -and
+            (Test-Syp214InventoryEqual -Left $unrelatedUserBefore -Right $unrelatedUserAfter)
+        $verified=($userBytesPreserved -and $repositoryStateVerified -and $journalInventoryVerifiedBeforeRecovery -and
+            $journalInventoryVerifiedAfterRecovery -and $repositoryTreeSemanticallyStable -and
+            $repositoryPointInventorySemanticallyStable -and $userPointInventoryPreserved -and
+            $repositoryGitCoreStateSemanticallyStable -and $repositoryStashEvidenceStable -and
+            $repositoryExcludeSemanticallyStable -and $unrelatedFilesPreserved -and $laterEditDriftInventoryVerified -and
+            $corruptBackupWitnessMatchesInventory)
         $verified | Should Be $true
         Save-Syp214FixtureEvidence ('recovery-'+$State) ([ordered]@{
             schemaVersion=2;scope='disposable integration fixture';runIdentity=(Get-Syp214RunIdentity);scenario=$State
@@ -797,7 +1141,24 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
             journalFilesBeforeRecovery=$journalFilesBeforeRecovery;journalFilesAfterRecovery=$journalFilesAfterRecovery
             journalInventoryVerifiedBeforeRecovery=$journalInventoryVerifiedBeforeRecovery
             journalInventoryVerifiedAfterRecovery=$journalInventoryVerifiedAfterRecovery;corruptBackupWitness=$corruptBackupWitness
+            corruptBackupWitnessMatchesInventory=$corruptBackupWitnessMatchesInventory
             recoveryOutput=@($recoveryOutput | ForEach-Object { [string]$_ });recoveryError=$recoveryError
+            repositoryTreeSemanticallyStable=$repositoryTreeSemanticallyStable
+            repositoryPointInventorySemanticallyStable=$repositoryPointInventorySemanticallyStable
+            expectedRepositoryAfterRecovery=[ordered]@{basis=$(if($State -eq 'later-edit'){'apply-before snapshot plus pre-recovery measured drift file'}elseif($State -eq 'corrupt-backup'){'pre-recovery snapshot'}else{'apply-before snapshot'})
+                fullTree=$expectedRepositorySnapshot.fullTree;files=$expectedRepositorySnapshot.files
+                missingFileWitness=$expectedRepositorySnapshot.missingFileWitness
+                laterEditDriftRecordBeforeRecovery=[ordered]@{fullTree=$laterEditTreeRecordBeforeRecovery;pointInventory=$laterEditPointRecordBeforeRecovery}
+                laterEditDriftRecordAfterRecovery=[ordered]@{fullTree=$laterEditTreeRecordAfterRecovery;pointInventory=$laterEditPointRecordAfterRecovery}
+                laterEditDriftInventoryPreserved=$laterEditDriftInventoryPreserved}
+            userPointInventoryPreserved=$userPointInventoryPreserved
+            repositoryGitCoreStateSemanticallyStable=$repositoryGitCoreStateSemanticallyStable
+            repositoryStashEvidenceStable=$repositoryStashEvidenceStable
+            repositoryStashesBeforeRecovery=$preRecoverySnapshot.repository.stashes
+            repositoryStashesAfterRecovery=$afterSnapshot.repository.stashes
+            repositoryExcludeSemanticallyStable=$repositoryExcludeSemanticallyStable
+            unrelatedFiles=[ordered]@{repositoryBefore=$unrelatedRepositoryBefore;repositoryAfter=$unrelatedRepositoryAfter
+                userBefore=$unrelatedUserBefore;userAfter=$unrelatedUserAfter;preserved=$unrelatedFilesPreserved}
             verified=$verified;repositoryStateVerified=$repositoryStateVerified;userBytesPreserved=$userBytesPreserved
             processKillExecuted=$false;interruptionModel=$(if($State -eq 'pending-intent'){'manually persisted pending-intent journal state'}else{'no process termination'})
         })
