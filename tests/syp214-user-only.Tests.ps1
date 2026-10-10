@@ -134,6 +134,155 @@ Describe 'SYP214 whole-Skill migration evidence' {
     }
 }
 
+function New-Syp214BootstrapMutationPrefix {
+    $bootstrapPath = (Resolve-Path -LiteralPath $script:BootstrapScript).Path
+    $bootstrapText = [IO.File]::ReadAllText($bootstrapPath)
+    $prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+    if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary.' }
+    $bootstrapRoot = Split-Path -Parent $bootstrapPath
+    $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'", "''") + "'"
+    $prefixText = $bootstrapText.Substring(0, $prefixEnd).Replace('$PSScriptRoot', $bootstrapRootLiteral)
+    return ,([scriptblock]::Create($prefixText))
+}
+
+Describe 'SYP214 generic managed Instructions deletion recovery' {
+    BeforeEach {
+        $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $targetRoot = Join-Path $caseRoot 'consumer'
+        New-TestRepository -Path $targetRoot
+        $targetRoot = (Resolve-Path -LiteralPath $targetRoot).Path
+        $relativePath = '.codex/AI-Rules/Obsolete.en.md'
+        $targetPath = Join-Path $targetRoot $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
+        Set-TestText -Path $targetPath -Value '# stale managed Instructions'
+        $originalBytes = [IO.File]::ReadAllBytes($targetPath)
+        $originalHash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $backupRoot = Join-Path $caseRoot 'target-backup'
+        $journalPath = Join-Path $backupRoot 'skill-migration.json'
+    }
+
+    # Scenario: Generic managed-file deletion is interrupted after atomic removal but before in-memory mutation state is updated.
+    # Purpose: Recover the exact stale Instructions bytes from the durable backup journal.
+    It 'InterT10_restores_stale_Instructions_after_atomic_delete_interruption' {
+        # Given
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $bootstrapPrefix = New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            $snapshot = New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState = Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext = [pscustomobject]@{
+                Snapshot = $snapshot; ExcludeSnapshot = $excludeSnapshot; Path = $journalPath; GitState = $gitState
+            }
+
+            $atomicDeletePath = 'Function:\Remove-TargetMutationFileAtomically'
+            $realAtomicDelete = (Get-Command Remove-TargetMutationFileAtomically -CommandType Function).ScriptBlock
+            $interruptionSentinel = 'SYP214 interruption ' + [guid]::NewGuid().ToString('N')
+            $interruptAfterDelete = {
+                param(
+                    [Parameter(Mandatory = $true)][object] $Snapshot,
+                    [Parameter(Mandatory = $true)][string] $RelativePath,
+                    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
+                    [Parameter(Mandatory = $true)][string] $Operation
+                )
+                & $realAtomicDelete @PSBoundParameters
+                throw $interruptionSentinel
+            }.GetNewClosure()
+            # When
+            $interruptionObserved = $false
+            try {
+                Set-Item -Path $atomicDeletePath -Value $interruptAfterDelete
+                try {
+                    Remove-TargetMutationFile -Snapshot $snapshot -RelativePath $relativePath
+                }
+                catch {
+                    if ($_.Exception.Message -cne $interruptionSentinel) { throw }
+                    $interruptionObserved = $true
+                }
+            }
+            finally { Set-Item -Path $atomicDeletePath -Value $realAtomicDelete }
+
+            # Then
+            $interruptionObserved | Should Be $true
+            Test-Path -LiteralPath $targetPath -PathType Leaf | Should Be $false
+            Restore-SkillMigrationJournal -Repository $snapshot.TargetRoot -Path $journalPath | Out-Null
+            Test-Path -LiteralPath $targetPath -PathType Leaf | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalBytes) | Should Be $true
+            (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $originalHash
+        }
+        finally {
+            $script:SkillMigrationJournalContext = $null
+            $ErrorActionPreference = $previousErrorActionPreference
+            Set-StrictMode -Off
+        }
+    }
+
+    # Scenario: A user edit recreates the stale Instructions path after interrupted deletion but before recovery.
+    # Purpose: Stop recovery when current bytes differ and preserve the later edit unchanged.
+    It 'InterT20_preserves_later_Instructions_edit_after_atomic_delete_interruption' {
+        # Given
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $bootstrapPrefix = New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            $snapshot = New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState = Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext = [pscustomobject]@{
+                Snapshot = $snapshot; ExcludeSnapshot = $excludeSnapshot; Path = $journalPath; GitState = $gitState
+            }
+
+            $atomicDeletePath = 'Function:\Remove-TargetMutationFileAtomically'
+            $realAtomicDelete = (Get-Command Remove-TargetMutationFileAtomically -CommandType Function).ScriptBlock
+            $interruptionSentinel = 'SYP214 interruption ' + [guid]::NewGuid().ToString('N')
+            $interruptAfterDelete = {
+                param(
+                    [Parameter(Mandatory = $true)][object] $Snapshot,
+                    [Parameter(Mandatory = $true)][string] $RelativePath,
+                    [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
+                    [Parameter(Mandatory = $true)][string] $Operation
+                )
+                & $realAtomicDelete @PSBoundParameters
+                throw $interruptionSentinel
+            }.GetNewClosure()
+            # When
+            $interruptionObserved = $false
+            try {
+                Set-Item -Path $atomicDeletePath -Value $interruptAfterDelete
+                try {
+                    Remove-TargetMutationFile -Snapshot $snapshot -RelativePath $relativePath
+                }
+                catch {
+                    if ($_.Exception.Message -cne $interruptionSentinel) { throw }
+                    $interruptionObserved = $true
+                }
+            }
+            finally { Set-Item -Path $atomicDeletePath -Value $realAtomicDelete }
+
+            # Then
+            $interruptionObserved | Should Be $true
+            Test-Path -LiteralPath $targetPath -PathType Leaf | Should Be $false
+            Set-TestText -Path $targetPath -Value '# later user Instructions edit'
+            $laterEditBytes = [IO.File]::ReadAllBytes($targetPath)
+            $laterEditHash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            { Restore-SkillMigrationJournal -Repository $snapshot.TargetRoot -Path $journalPath } | Should Throw 'preserved'
+            Test-Path -LiteralPath $targetPath -PathType Leaf | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $laterEditBytes) | Should Be $true
+            (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $laterEditHash
+        }
+        finally {
+            $script:SkillMigrationJournalContext = $null
+            $ErrorActionPreference = $previousErrorActionPreference
+            Set-StrictMode -Off
+        }
+    }
+}
+
 function Invoke-Syp214Bootstrap {
     param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration)
     New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
