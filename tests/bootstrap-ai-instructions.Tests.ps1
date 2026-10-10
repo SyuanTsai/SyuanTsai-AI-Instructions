@@ -51,6 +51,7 @@ function ConvertTo-TestDiagnosticText {
     param([Parameter(Mandatory = $true)][object[]] $Output)
 
     $text = @($Output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    $text = [regex]::Replace($text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
     $text = [regex]::Replace($text, '(?m)\r?\n[ \t]*\|[ \t]*', ' ')
     return [regex]::Replace($text, '\s+', ' ').Trim()
 }
