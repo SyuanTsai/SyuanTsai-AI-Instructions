@@ -1966,6 +1966,10 @@ function Remove-TargetMutationFile {
         throw "Target mutation cannot remove an unexpected snapshot state: $RelativePath"
     }
     [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
+    if ($null -ne $script:SkillMigrationJournalContext) {
+        $context = $script:SkillMigrationJournalContext
+        Save-SkillMigrationJournal $Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating' $RelativePath
+    }
     Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath $RelativePath -ExpectedBytes $originalBytes `
         -Operation 'Managed target removal'
     $state.AppliedType = 'missing'
@@ -3085,7 +3089,6 @@ try {
             $id = $managedTargetPath.Split('/')[2]
             if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {
                 Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -RemovedPaths @($removedPaths) -GitExecutable $GitExecutable
-                Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating' $managedTargetPath
                 Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
                 $removedPaths.Add($managedTargetPath)
                 Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'

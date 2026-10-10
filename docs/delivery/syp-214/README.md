@@ -4,21 +4,112 @@
 
 ## Review and reproducibility
 
-從來源 PR 取得精確 candidate commit；不要用本機已安裝的舊 runtime 證明 candidate。此目錄的驗證報告記錄實際 Red/Green、回歸、exit/skip 與 installed smoke 的版本。未執行項目明列 `not-run`。
+在另一台 Windows 主機以 disposable clone 檢查完整 candidate commit，確認工作樹與 index 乾淨後才執行 fixture lane。先依 `.github/workflows/pr8-powershell-validation.yml` 使用相同的 PowerShell 7.6.6 portable archive SHA-256 pin 驗證套件，並從中性位置（例如 `<portable-pwsh-root>\pwsh.exe`）啟動 PowerShell Core 7.6.6；不要用 Windows 內建 PowerShell 5.1 或本機已安裝的舊 runtime 證明 candidate。fresh clone 不含 ignored `.tools/Pester`，需使用既有 CI 相同的 Pester 4.10.1。以下命令是操作範本，需填入 PR 的完整 commit SHA；不代表本文件已執行測試。記錄 candidate commit、tree、測試檔 blob 及兩種測試輸出的實際數量。
 
 ```powershell
-git remote get-url origin
-git fetch origin main
-git status --short
-git rev-parse HEAD origin/main
-Import-Module Pester -RequiredVersion 4.10.1 -Force
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -ne [version]'7.6.6') {
+    throw 'Use the SHA-256-verified portable PowerShell Core 7.6.6 runtime.'
+}
+$expectedCommit = '<full-candidate-commit-sha>'
+$repo = (Resolve-Path .).Path
+$head = (git -C $repo rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $head -ne $expectedCommit) { throw 'Not at the requested candidate commit.' }
+$dirty = @(git -C $repo status --porcelain=v1 --untracked-files=all)
+if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) { throw 'Candidate checkout is not clean.' }
+$tree = (git -C $repo rev-parse 'HEAD^{tree}').Trim()
+$testBlob = (git -C $repo rev-parse 'HEAD:tests/syp214-user-only.Tests.ps1').Trim()
+Import-Module Pester -RequiredVersion 4.10.1 -Force -ErrorAction Stop
+if ((Get-Module Pester).Version -ne [version]'4.10.1') { throw 'Pester 4.10.1 is required.' }
+
+$previousEvidenceRoot = $env:SYP214_FIXTURE_EVIDENCE_ROOT
+$privateEvidenceRoot = Join-Path ([IO.Path]::GetTempPath()) ('syp214-evidence-' + [guid]::NewGuid().ToString('N'))
+$fixtureRoot = Join-Path $privateEvidenceRoot 'fixtures'
+$nunitPath = Join-Path $privateEvidenceRoot 'fixtures.xml'
+$transcriptPath = Join-Path $privateEvidenceRoot 'fixture-console.log'
+$transcriptStarted = $false
+New-Item -ItemType Directory -Force -Path $fixtureRoot | Out-Null
+try {
+    $env:SYP214_FIXTURE_EVIDENCE_ROOT = $fixtureRoot
+    Start-Transcript -Path $transcriptPath -Force | Out-Null
+    $transcriptStarted = $true
+    $pester = Invoke-Pester -Script (Join-Path $repo 'tests/syp214-user-only.Tests.ps1') `
+        -Tag 'Syp214FixtureEvidence' -PassThru -OutputFile $nunitPath -OutputFormat NUnitXml
+    [xml]$nunit = [IO.File]::ReadAllText($nunitPath)
+    $nunitSummary = $nunit.'test-results'
+    Stop-Transcript | Out-Null
+    $transcriptStarted = $false
+    $actualFiles = @(Get-ChildItem -LiteralPath $fixtureRoot -File -Filter '*.json' |
+        ForEach-Object { $_.Name } | Sort-Object)
+    $artifactPaths = @($nunitPath, $transcriptPath)
+    $artifactPaths += @(Get-ChildItem -LiteralPath $fixtureRoot -File -Filter '*.json' | ForEach-Object { $_.FullName })
+    $hashes = @($artifactPaths | ForEach-Object {
+        [ordered]@{ name = (Split-Path -Leaf $_); sha256 = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() }
+    })
+    $runRecord = [ordered]@{
+        candidateCommit = $head; tree = $tree; testBlob = $testBlob; pesterVersion = (Get-Module Pester).Version.ToString()
+        pesterCounts = [ordered]@{ total = $pester.TotalCount; passed = $pester.PassedCount; failed = $pester.FailedCount; skipped = $pester.SkippedCount; pending = $pester.PendingCount; inconclusive = $pester.InconclusiveCount }
+        nunitCounts = [ordered]@{ total = $nunitSummary.total; errors = $nunitSummary.errors; failures = $nunitSummary.failures; inconclusive = $nunitSummary.inconclusive; ignored = $nunitSummary.ignored }
+        fixtureFiles = $actualFiles; evidenceSha256 = $hashes
+    }
+    [IO.File]::WriteAllText((Join-Path $privateEvidenceRoot 'run-metadata.json'),
+        ($runRecord | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+
+    $problems = @()
+    if ($pester.TotalCount -ne 6 -or $pester.PassedCount -ne 6 -or
+        $pester.FailedCount -ne 0 -or $pester.SkippedCount -ne 0 -or
+        $pester.PendingCount -ne 0 -or $pester.InconclusiveCount -ne 0) {
+        $problems += 'Pester must report exactly six passed cases and no failures, skips, pending, or inconclusive cases.'
+    }
+    if ([int]$nunitSummary.total -ne 6 -or [int]$nunitSummary.errors -ne 0 -or
+        [int]$nunitSummary.failures -ne 0 -or [int]$nunitSummary.inconclusive -ne 0 -or
+        [int]$nunitSummary.ignored -ne 0) {
+        $problems += 'NUnit XML must report six cases and no errors, failures, inconclusive, or ignored cases.'
+    }
+    $expectedFiles = @('migration.json','failure-rollback.json','recovery-exact.json',
+        'recovery-later-edit.json','recovery-corrupt-backup.json','recovery-pending-intent.json')
+    if (Compare-Object ($expectedFiles | Sort-Object) $actualFiles) { $problems += 'Fixture evidence file set is not the expected six cases.' }
+    foreach ($name in $actualFiles) {
+        try {
+            $item = Get-Content -LiteralPath (Join-Path $fixtureRoot $name) -Raw | ConvertFrom-Json
+            if ($item.schemaVersion -ne 2 -or $item.scope -ne 'disposable integration fixture') {
+                $problems += "Invalid fixture evidence metadata: $name"
+            }
+        }
+        catch { $problems += "Fixture evidence is missing or invalid JSON: $name" }
+    }
+    $afterHead = (git -C $repo rev-parse HEAD).Trim()
+    $afterTree = (git -C $repo rev-parse 'HEAD^{tree}').Trim()
+    $afterTestBlob = (git -C $repo rev-parse 'HEAD:tests/syp214-user-only.Tests.ps1').Trim()
+    $afterDirty = @(git -C $repo status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0 -or $afterHead -ne $head -or $afterTree -ne $tree -or
+        $afterTestBlob -ne $testBlob -or $afterDirty.Count -ne 0) { $problems += 'Candidate changed during fixture run.' }
+    if ($problems.Count -ne 0) { throw ($problems -join ' ') }
+}
+finally {
+    if ($transcriptStarted) { Stop-Transcript | Out-Null }
+    if ($null -eq $previousEvidenceRoot) { Remove-Item Env:SYP214_FIXTURE_EVIDENCE_ROOT -ErrorAction SilentlyContinue }
+    else { $env:SYP214_FIXTURE_EVIDENCE_ROOT = $previousEvidenceRoot }
+}
+```
+
+Fixture lane 只由外層 `Describe` 的 `Syp214FixtureEvidence` tag 選出，預期展開為六個實際案例；零案例、只匹配 tag 的空跑或任何 skipped/pending/inconclusive 都是失敗。六份 schema-v2 JSON 依情境記錄實測的 USER／consumer 檔案 inventory、manifest hash、Git HEAD/index/status/stash，以及 migration/recovery 適用的 journal、backup 檔案類型、長度、SHA-256 與實際完整性判定；刻意損壞的 backup 會保留量測到的不匹配 witness。手動 fixture lane 的 `run-metadata.json`、NUnit XML、transcript 與六份實際 JSON reports 一起綁定 candidate commit/tree/test blob、Pester/NUnit counts 和輸出 artifact hashes。CI 另以 `pester-summary.json` 與 `process-result.json` 記錄觀察到的案例名稱/counts、source 與 checkout identity、runtime/script hashes、child exit status 及 stdout/stderr hashes。跨主機 Review 必須檢查同一 run/attempt 的實際 reports、sidecars 與 logs、核對 hash/identity/count/exit，並確認完整正常 gate run；預期檔名或單一 JSON 不足以驗收。Disposable CI fixture/smoke JSON 與 logs 可用其精確 artifact path 提供 portable review，例如 Windows Core artifact 中的 `syp214-fixture-evidence/reports/*.json`、`pester-summary.json`、`process-result.json` 和 `child.stdout.log`／`child.stderr.log`。真實 USER／consumer 的私人 bytes、真實路徑及 raw reports 必須私有保存；對外只提供去識別化摘要與 digest，不分享私人路徑或原始內容。
+
+完成 targeted lane 並恢復原本的 `SYP214_FIXTURE_EVIDENCE_ROOT` 後，在獨立正常 gate run 中另行執行完整 suite 與既有驗證命令，分開記錄結果；fixture lane 不替代 full suite 或 gate。
+
+```powershell
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -ne [version]'7.6.6') {
+    throw 'Use the SHA-256-verified portable PowerShell Core 7.6.6 runtime.'
+}
+Import-Module Pester -RequiredVersion 4.10.1 -Force -ErrorAction Stop
+if ((Get-Module Pester).Version -ne [version]'4.10.1') { throw 'Pester 4.10.1 is required.' }
 Invoke-Pester -Script ./tests -PassThru
 ./scripts/update-skills-catalog-lock.ps1 -Check
 git diff --check
-./scripts/test-syp101-production-smoke.ps1 -EvidencePath ./smoke-result.json
+$smokeEvidencePath = Join-Path ([IO.Path]::GetTempPath()) ('syp214-smoke-' + [guid]::NewGuid().ToString('N') + '.json')
+./scripts/test-syp101-production-smoke.ps1 -EvidencePath $smokeEvidencePath
 ```
 
-CI 的 bounded Windows Core Pester 與既有 authority gate 仍使用中央入口。不要改數量或略過失敗讓 gate 通過。Smoke 在系統 temp 建立 Codex Home、USER 與 disposable consumer，先經 verified installed USER updater 套用真實 immutable archives，再執行兩次 installed bootstrap，檢查 USER bytes、consumer Instructions、零共用 Skill entries、同名 project Skill、HEAD/index/status 與 recovery evidence。它不等於真實 client UI 驗收。
+CI 的 bounded Windows Core Pester 與既有 authority gate 仍使用中央入口；不要改數量或略過失敗讓 gate 通過。Smoke 在系統 temp 建立 Codex Home、disposable USER 與 consumer，先經 verified installed USER updater 套用真實 immutable archives，再執行兩次 installed bootstrap；schema-v2 smoke JSON 記錄量測到的 managed consumer、USER/manifest 與 project Skill inventories、Git state、candidate/source identity、runtime/catalog/script hashes，以及 bytes、manifest、HEAD/index/status/recovery evidence 的實際比較。`syp101-production-smoke-evidence-<run_id>-<attempt>` artifact 同時保存 `smoke-evidence.json`、`process-result.json` 與 stdout/stderr logs；以同一 run/attempt 的 evidence hash、sidecar exit/identity/log hashes 交叉核對，再連同 Windows Core 的六份 fixture reports、Pester summary、shard sidecars 與完整正常 gates Review。這些都是 disposable smoke/fixture 的 portable evidence，不等於真實 client UI 或正式 USER 部署驗收。正式 runtime／真實 USER 部署與 UI discovery 由 SYP-259 承接；候選通知維持 `notify-only`。CI 不執行 process kill；`realUserDeployment` 與 `codexCopilotUiDiscovery` 未有實際結果前維持 `not-run-SYP-259`。真實 USER／consumer 的私人 bytes、路徑與 raw reports 只在私有位置保存，對外僅分享去識別化 digest。此目錄的驗證紀錄依實際結果填寫 Red/Green、回歸、exit/skip 與 installed smoke；未執行項目明列 `not-run`，不得只依 evidence JSON 宣稱 Green。
 
 ## Operator sequence for SYP-259
 

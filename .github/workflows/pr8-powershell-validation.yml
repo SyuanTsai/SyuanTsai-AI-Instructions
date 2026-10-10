@@ -181,6 +181,147 @@ jobs:
           & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
           if (-not $?) { throw 'The bounded non-authority Pester suite failed.' }
 
+      - name: Run isolated SYP-214 fixture evidence child
+        shell: pwsh
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $pwshPath = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw 'Verified portable PowerShell is unavailable for the fixture child.' }
+          $pwshVersion = (& $pwshPath -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$pwshVersion).Trim() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw 'Fixture child PowerShell identity does not match the verified runtime.' }
+          $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable for the fixture child.' }
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'syp214-fixture-evidence'
+          $evidenceRoot = Join-Path $artifactRoot 'reports'
+          New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+          $stdoutPath = Join-Path $artifactRoot 'child.stdout.log'
+          $stderrPath = Join-Path $artifactRoot 'child.stderr.log'
+          $summaryPath = Join-Path $artifactRoot 'pester-summary.json'
+          $processResultPath = Join-Path $artifactRoot 'process-result.json'
+          $childScriptPath = Join-Path $artifactRoot 'invoke-fixtures.ps1'
+          $checkoutHead = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutHead -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out fixture commit.' }
+          $checkoutTree = (& git rev-parse --verify 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutTree -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out fixture tree.' }
+          $sourceHead = if ($env:PULL_REQUEST_HEAD_SHA -match '^[0-9a-f]{40}$') { $env:PULL_REQUEST_HEAD_SHA } else { $env:GITHUB_SHA }
+          $testPath = [IO.Path]::GetFullPath('./tests/syp214-user-only.Tests.ps1')
+          $bootstrapPath = [IO.Path]::GetFullPath('./scripts/bootstrap-ai-instructions.ps1')
+          $testHash = (Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bootstrapHash = (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:SYP214_FIXTURE_EVIDENCE_ROOT = $evidenceRoot
+          $env:SYP214_SOURCE_HEAD_SHA = $sourceHead
+          $env:SYP214_CHECKOUT_HEAD_SHA = $checkoutHead
+          $env:SYP214_CHECKOUT_TREE_SHA = $checkoutTree
+          $env:SYP214_TEST_SCRIPT_SHA256 = $testHash
+          $env:SYP214_BOOTSTRAP_SCRIPT_SHA256 = $bootstrapHash
+          $env:SYP214_PESTER_VERSION = '4.10.1'
+          $childScript = @'
+          $ErrorActionPreference = 'Stop'
+          $expectedCases = @(
+            'migration.json', 'failure-rollback.json', 'recovery-exact.json',
+            'recovery-later-edit.json', 'recovery-corrupt-backup.json', 'recovery-pending-intent.json'
+          )
+          $summary = [ordered]@{
+            schemaVersion = 1; status = 'starting'; runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [string]$env:GITHUB_RUN_ATTEMPT; sourceHeadCommit = [string]$env:SYP214_SOURCE_HEAD_SHA
+            checkoutHeadCommit = [string]$env:SYP214_CHECKOUT_HEAD_SHA; checkoutTree = [string]$env:SYP214_CHECKOUT_TREE_SHA
+            testScriptSha256 = [string]$env:SYP214_TEST_SCRIPT_SHA256; bootstrapScriptSha256 = [string]$env:SYP214_BOOTSTRAP_SCRIPT_SHA256
+            pwshVersion = $PSVersionTable.PSVersion.ToString(); pwshExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+            pesterVersion = $null; total = $null; passed = $null; failed = $null; skipped = $null
+            pending = $null; inconclusive = $null; observedCaseNames = @(); expectedEvidenceFiles = $expectedCases
+            observedCases = @(); observedEvidenceFiles = @(); missingEvidenceFiles = @(); startedAtUtc = [DateTime]::UtcNow.ToString('o')
+            completedAtUtc = $null; error = $null
+          }
+          try {
+            $pester = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+            if ($pester.Count -ne 1) { throw "Expected one Pester 4.10.1 module in child; found $($pester.Count)." }
+            Import-Module $pester[0].Path -Force
+            $summary.pesterVersion = (Get-Module Pester | Select-Object -First 1).Version.ToString()
+            $run = Invoke-Pester -Script $env:SYP214_TEST_SCRIPT_PATH -Tag 'Syp214FixtureEvidence' -PassThru -Show Summary
+            if ($null -eq $run) { throw 'Pester returned no result object for the isolated fixture run.' }
+            $summary.total = [int]$run.TotalCount
+            $summary.passed = [int]$run.PassedCount
+            $summary.failed = [int]$run.FailedCount
+            $summary.skipped = [int]$run.SkippedCount
+            $summary.pending = [int]$run.PendingCount
+            $summary.inconclusive = [int]$run.InconclusiveCount
+            $summary.observedCases = @($run.TestResult | ForEach-Object {
+              [ordered]@{ name = [string]$_.Name; result = [string]$_.Result; duration = [string]$_.Time; failureMessage = [string]$_.FailureMessage }
+            })
+            $summary.observedCaseNames = @($summary.observedCases | ForEach-Object { [string]$_.name })
+            $reports = @(Get-ChildItem -LiteralPath $env:SYP214_FIXTURE_EVIDENCE_ROOT -File -Filter '*.json' | Sort-Object Name)
+            $summary.observedEvidenceFiles = @($reports | ForEach-Object {
+              [ordered]@{ name = $_.Name; length = [long]$_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            })
+            $actualNames = @($reports | ForEach-Object { $_.Name } | Sort-Object -CaseSensitive)
+            $expectedNames = @($expectedCases | Sort-Object -CaseSensitive)
+            $summary.missingEvidenceFiles = @($expectedCases | Where-Object { $actualNames -cnotcontains $_ })
+            $caseInventoryValid = ($summary.total -eq 6 -and $summary.observedCaseNames.Count -eq 6 -and
+              @($summary.observedCaseNames | Select-Object -Unique).Count -eq 6 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT40_' }).Count -eq 1 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT50_' }).Count -eq 1 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT60_durable_recovery_' }).Count -eq 4)
+            $reportInventoryValid = (($actualNames -join "`n") -ceq ($expectedNames -join "`n"))
+            $allPassed = ($summary.passed -eq 6 -and $summary.failed -eq 0 -and $summary.skipped -eq 0 -and
+              $summary.pending -eq 0 -and $summary.inconclusive -eq 0)
+            if (-not $caseInventoryValid) { throw 'Observed Pester case names or counts differ from the six tagged SYP-214 fixtures.' }
+            if (-not $reportInventoryValid) { throw 'Observed fixture JSON files do not equal the six expected evidence reports.' }
+            if (-not $allPassed) { throw 'The isolated SYP-214 Pester fixture run did not pass all six cases.' }
+            $summary.status = 'passed'
+          }
+          catch {
+            $summary.status = 'failed'
+            $summary.error = $_.Exception.Message
+          }
+          finally {
+            $summary.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            [IO.File]::WriteAllText($env:SYP214_PESTER_SUMMARY_PATH, ($summary | ConvertTo-Json -Depth 10) + "`n", [Text.UTF8Encoding]::new($false))
+          }
+          if ($summary.status -cne 'passed') { throw [string]$summary.error }
+          '@
+          [IO.File]::WriteAllText($childScriptPath, $childScript, [Text.UTF8Encoding]::new($false))
+          $childScriptHash = (Get-FileHash -LiteralPath $childScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:SYP214_TEST_SCRIPT_PATH = $testPath
+          $env:SYP214_PESTER_SUMMARY_PATH = $summaryPath
+          $startedAt = [DateTime]::UtcNow.ToString('o')
+          $childExitCode = $null
+          $completionState = 'launch-failed'
+          $launchError = $null
+          try {
+            & $pwshPath -NoLogo -NoProfile -File $childScriptPath 1> $stdoutPath 2> $stderrPath
+            $childExitCode = $LASTEXITCODE
+            $completionState = 'exited'
+          }
+          catch {
+            $launchError = $_.Exception.Message
+          }
+          $completedAt = [DateTime]::UtcNow.ToString('o')
+          $summaryExists = Test-Path -LiteralPath $summaryPath -PathType Leaf
+          $processResult = [ordered]@{
+            schemaVersion = 1; runId = [string]$env:GITHUB_RUN_ID; runAttempt = [string]$env:GITHUB_RUN_ATTEMPT
+            workflow = [string]$env:GITHUB_WORKFLOW; event = [string]$env:GITHUB_EVENT_NAME; ref = [string]$env:GITHUB_REF
+            sourceHeadCommit = $sourceHead; checkoutHeadCommit = $checkoutHead; checkoutTree = $checkoutTree
+            command = @($pwshPath, '-NoLogo', '-NoProfile', '-File', $childScriptPath)
+            childScriptSha256 = $childScriptHash; testScriptSha256 = $testHash; bootstrapScriptSha256 = $bootstrapHash
+            pwshVersion = ([string]$pwshVersion).Trim(); pwshExecutable = $pwshPath
+            verifiedPwshArchiveSha256 = [string]$env:SYP_REQUIRED_PWSH_SHA256; pesterVersion = '4.10.1'
+            testScriptPath = $testPath; pesterTag = 'Syp214FixtureEvidence'
+            startedAtUtc = $startedAt; completedAtUtc = $completedAt; completionState = $completionState
+            childExitCode = $childExitCode; childExitStatus = $(if ($null -eq $childExitCode) { 'unknown' } elseif ($childExitCode -eq 0) { 'passed' } else { 'failed' })
+            launchError = $launchError; summaryExists = $summaryExists
+            summarySha256 = $(if ($summaryExists) { (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stdoutPath = $stdoutPath; stdoutLength = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [long](Get-Item -LiteralPath $stdoutPath).Length } else { $null })
+            stdoutSha256 = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stderrPath = $stderrPath; stderrLength = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [long](Get-Item -LiteralPath $stderrPath).Length } else { $null })
+            stderrSha256 = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            pesterSummaryPath = $summaryPath; evidenceRoot = $evidenceRoot
+          }
+          [IO.File]::WriteAllText($processResultPath, ($processResult | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+          if ($completionState -cne 'exited' -or $null -eq $childExitCode -or $childExitCode -ne 0 -or -not $summaryExists) { throw 'Isolated SYP-214 fixture evidence child failed or omitted its result summary.' }
+
       - name: Run offline routine semantic fixtures once
         shell: pwsh
         run: |
@@ -189,3 +330,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Offline fixtures require Python 3.10 or newer.' }
           python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 61, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
           if ($LASTEXITCODE -ne 0) { throw 'Offline routine semantic fixtures failed or skipped.' }
+
+      - name: Upload Windows Core test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-core-powershell-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/windows-core-pester-summary.json
+            ${{ runner.temp }}/pester-shard-*.json
+            ${{ runner.temp }}/pester-shard-*.process.json
+            ${{ runner.temp }}/pester-shard-*.stdout.log
+            ${{ runner.temp }}/pester-shard-*.stderr.log
+            ${{ runner.temp }}/syp214-fixture-evidence/pester-summary.json
+            ${{ runner.temp }}/syp214-fixture-evidence/process-result.json
+            ${{ runner.temp }}/syp214-fixture-evidence/child.stdout.log
+            ${{ runner.temp }}/syp214-fixture-evidence/child.stderr.log
+            ${{ runner.temp }}/syp214-fixture-evidence/reports/*.json
+          if-no-files-found: warn
+          retention-days: 1
