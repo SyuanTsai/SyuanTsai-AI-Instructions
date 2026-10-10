@@ -336,6 +336,239 @@ Describe 'SYP280 runner inventory performance and compatibility' -Tag 'SYP280' {
     }
 }
 
+Describe 'SYP280 P2 inventory diagnostics real loops' {
+    BeforeAll {
+        $script:Syp280P2Runner=Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
+        . $script:Syp280P2Runner -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'p2-unused-adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'p2-results') -SourceRepository 'https://example.test/source.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+        function New-Syp280P2TwoFileFixture {
+            $root=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            [IO.File]::WriteAllText((Join-Path $root 'command.bin'),'0000',[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $root 'dependency.bin'),'0000',[Text.UTF8Encoding]::new($false))
+            return $root
+        }
+    }
+
+    Context 'Ordinary inventory real hash success' {
+    # Scenario: The ordinary inventory hashes multiple real files while its clock advances deterministically.
+    # Purpose: Require bounded progress from the real hashing loop without changing canonical inventory bytes.
+    It 'UnitT30_reports_progress_during_real_file_inventory_hashing' {
+        $root=New-Syp280P2TwoFileFixture
+        $previousError=[Console]::Error
+        $previousTiming=$script:StandardValidationTimingEnabled
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        try {
+            [Console]::SetError($capture)
+            Mock New-StandardValidationPhase {
+                param([string]$Stage,[string]$Phase,[switch]$Aggregate,[switch]$Silent)
+                $clock=[pscustomobject]@{seconds=[double]0}
+                $clock | Add-Member -MemberType ScriptProperty -Name Elapsed -Value { $this.seconds += 31.0; [TimeSpan]::FromSeconds($this.seconds) } -Force
+                $phaseTiming=[pscustomobject]@{stage=$Stage;phase=$Phase;watch=$clock;calls=[long]0;files=[long]0;bytes=[long]0;nextHeartbeat=[double]30;heartbeats=0;aggregate=[bool]$Aggregate;ticks=[long]0;silent=[bool]$Silent}
+                Write-StandardValidationPhaseDiagnostic -Timing $phaseTiming -State 'started'
+                $phaseTiming
+            }
+            $actual=Get-StandardValidationInventory -Root $root -Context 'fixture'
+            $expectedRows=@(
+                [pscustomobject]@{path='command.bin';sha256=(Get-StandardValidationFileSha256 -Path (Join-Path $root 'command.bin') -Context 'expected');length=4L},
+                [pscustomobject]@{path='dependency.bin';sha256=(Get-StandardValidationFileSha256 -Path (Join-Path $root 'dependency.bin') -Context 'expected');length=4L}
+            )
+            $expectedCanonical=($expectedRows | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
+            $expectedSha=Get-StandardValidationTextSha256 -Value $expectedCanonical
+            if((Get-StandardValidationInventorySha256 -Inventory $actual) -cne $expectedSha){throw 'Real file inventory canonical SHA-256 changed.'}
+            $records=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $rows=@($records | Where-Object { $_.phase -ceq 'file-inventory' })
+            if($rows.Count -lt 3 -or $rows[0].state -cne 'started' -or $rows[-1].state -cne 'completed') { throw "Real inventory needs a heartbeat before its successful terminal record; states=$($rows.state -join ',')." }
+            if(@($rows | Where-Object { $_.state -ceq 'heartbeat' }).Count -lt 1) { throw 'Real inventory hashing did not emit a heartbeat.' }
+            if($rows[-1].calls -ne 1 -or $rows[-1].files -ne 2 -or $rows[-1].bytes -ne 8 -or $rows[-1].elapsedSeconds -le 0) { throw 'Successful inventory phase counts or elapsed time differ.' }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled=$previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+        }
+    }
+    }
+
+    Context 'Ordinary inventory interrupted hash' {
+    # Scenario: A real inventory hashes one file, then the next read fails or is cancelled.
+    # Purpose: Preserve attempted-file counts and report the original terminal state after mid-loop interruption.
+    It 'UnitT31_preserves_attempted_file_counts_before_hash_failure_or_cancellation' {
+        $root=New-Syp280P2TwoFileFixture
+        $previousError=[Console]::Error
+        $previousTiming=$script:StandardValidationTimingEnabled
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        $global:Syp280InventoryRoot=[IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+        $global:Syp280OriginalFileSha256=(Get-Command Get-StandardValidationFileSha256 -CommandType Function).ScriptBlock
+        $global:Syp280HashCallCount=0
+        $global:Syp280HashFailure='FAILED|controlled inventory hash failure'
+        try {
+            [Console]::SetError($capture)
+            Mock New-StandardValidationPhase {
+                param([string]$Stage,[string]$Phase,[switch]$Aggregate,[switch]$Silent)
+                $clock=[pscustomobject]@{seconds=[double]0}
+                $clock | Add-Member -MemberType ScriptProperty -Name Elapsed -Value { $this.seconds += 31.0; [TimeSpan]::FromSeconds($this.seconds) } -Force
+                $phaseTiming=[pscustomobject]@{stage=$Stage;phase=$Phase;watch=$clock;calls=[long]0;files=[long]0;bytes=[long]0;nextHeartbeat=[double]30;heartbeats=0;aggregate=[bool]$Aggregate;ticks=[long]0;silent=[bool]$Silent}
+                Write-StandardValidationPhaseDiagnostic -Timing $phaseTiming -State 'started'
+                $phaseTiming
+            }
+            Mock Get-StandardValidationFileSha256 {
+                param([string]$Path,[string]$Context)
+                if($Context -ceq 'fixture' -and [IO.Path]::GetFullPath($Path).StartsWith($global:Syp280InventoryRoot,[StringComparison]::Ordinal)) {
+                    $global:Syp280HashCallCount++
+                    if($global:Syp280HashCallCount -eq 2) { throw $global:Syp280HashFailure }
+                }
+                & $global:Syp280OriginalFileSha256 -Path $Path -Context $Context
+            }
+            $failure=$null
+            try { Get-StandardValidationInventory -Root $root -Context 'fixture' | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            if($failure -cne 'FAILED|controlled inventory hash failure') { throw "The real inventory must retain its mid-hash failure: '$failure'." }
+            $failedRecords=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $failedRows=@($failedRecords | Where-Object { $_.phase -ceq 'file-inventory' })
+            $failedHeartbeatCount=@($failedRows | Where-Object state -eq 'heartbeat').Count
+            if($failedRows[-1].state -cne 'failed' -or $failedRows[-1].files -ne 2 -or $failedRows[-1].bytes -ne 8 -or $failedHeartbeatCount -lt 1) { throw "Failed inventory must preserve attempted-file accounting and heartbeat before termination; state=$($failedRows[-1].state) files=$($failedRows[-1].files) bytes=$($failedRows[-1].bytes) heartbeats=$failedHeartbeatCount." }
+
+            $capture.GetStringBuilder().Clear() | Out-Null
+            $global:Syp280HashCallCount=0
+            $global:Syp280HashFailure='CANCELLED|controlled inventory cancellation'
+            $failure=$null
+            try { Get-StandardValidationInventory -Root $root -Context 'fixture' | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            if($failure -cne 'CANCELLED|controlled inventory cancellation') { throw "The real inventory must retain its mid-hash cancellation: '$failure'." }
+            $cancelledRecords=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $cancelledRows=@($cancelledRecords | Where-Object { $_.phase -ceq 'file-inventory' })
+            if($cancelledRows[-1].state -cne 'cancelled' -or $cancelledRows[-1].files -ne 2 -or $cancelledRows[-1].bytes -ne 8 -or @($cancelledRows | Where-Object state -eq 'heartbeat').Count -lt 1) { throw 'Cancelled inventory must preserve attempted-file accounting and heartbeat before termination.' }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled=$previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+            Remove-Variable -Name Syp280InventoryRoot,Syp280OriginalFileSha256,Syp280HashCallCount,Syp280HashFailure -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+    }
+
+    Context 'Closure real enumeration success' {
+    # Scenario: The installed-directory closure is enumerated and hashed under a deterministic clock.
+    # Purpose: Require a real enumeration heartbeat while retaining its canonical closure hash and work counts.
+    It 'UnitT32_reports_progress_during_real_closure_enumeration' {
+        $root=New-Syp280P2TwoFileFixture
+        $expectedSha=Get-StandardValidationDirectoryClosureSha256 -Root $root -Context 'fixture'
+        $previousError=[Console]::Error
+        $previousTiming=$script:StandardValidationTimingEnabled
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        try {
+            [Console]::SetError($capture)
+            Mock New-StandardValidationPhase {
+                param([string]$Stage,[string]$Phase,[switch]$Aggregate,[switch]$Silent)
+                $clock=[pscustomobject]@{seconds=[double]0}
+                $clock | Add-Member -MemberType ScriptProperty -Name Elapsed -Value { $this.seconds += 31.0; [TimeSpan]::FromSeconds($this.seconds) } -Force
+                $phaseTiming=[pscustomobject]@{stage=$Stage;phase=$Phase;watch=$clock;calls=[long]0;files=[long]0;bytes=[long]0;nextHeartbeat=[double]30;heartbeats=0;aggregate=[bool]$Aggregate;ticks=[long]0;silent=[bool]$Silent}
+                Write-StandardValidationPhaseDiagnostic -Timing $phaseTiming -State 'started'
+                $phaseTiming
+            }
+            $actualSha=Get-StandardValidationDirectoryClosureSha256 -Root $root -Context 'fixture'
+            if($actualSha -cne $expectedSha){throw 'Real closure enumeration changed the canonical closure SHA-256.'}
+            $records=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $rows=@($records | Where-Object { $_.phase -ceq 'closure-enumeration' })
+            if($rows.Count -lt 3 -or $rows[0].state -cne 'started' -or $rows[-1].state -cne 'completed') { throw "Real closure enumeration needs a heartbeat before completion; states=$($rows.state -join ',')." }
+            if(@($rows | Where-Object { $_.state -ceq 'heartbeat' }).Count -lt 1) { throw 'Real closure enumeration did not emit a heartbeat.' }
+            if($rows[-1].calls -ne 1 -or $rows[-1].files -ne 2 -or $rows[-1].bytes -ne 8 -or $rows[-1].elapsedSeconds -le 0) { throw 'Successful closure enumeration counts or elapsed time differ.' }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled=$previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+        }
+    }
+    }
+
+    Context 'Closure interrupted enumeration' {
+    # Scenario: Actual directory enumeration yields one real file, then reports failure or cancellation.
+    # Purpose: Heartbeat inside the enumeration stream and retain its terminal state without changing files/bytes semantics.
+    It 'UnitT33_reports_mid_enumeration_failure_and_cancellation' {
+        $root=New-Syp280P2TwoFileFixture
+        $previousError=[Console]::Error
+        $previousTiming=$script:StandardValidationTimingEnabled
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        $global:Syp280P2ClosureRoot=[IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+        $global:Syp280P2OriginalGetChildItem=Get-Command Get-ChildItem -CommandType Cmdlet
+        $global:Syp280P2OriginalTimedPhase=(Get-Command Invoke-StandardValidationTimedPhase -CommandType Function).ScriptBlock
+        $global:Syp280P2TimedEnumerationActive=$false
+        $global:Syp280P2EnumerationCount=0
+        $global:Syp280P2EnumerationFailure='FAILED|controlled closure enumeration failure'
+        try {
+            [Console]::SetError($capture)
+            Mock New-StandardValidationPhase {
+                param([string]$Stage,[string]$Phase,[switch]$Aggregate,[switch]$Silent)
+                $clock=[pscustomobject]@{seconds=[double]0}
+                $clock | Add-Member -MemberType ScriptProperty -Name Elapsed -Value { $this.seconds += 31.0; [TimeSpan]::FromSeconds($this.seconds) } -Force
+                $phaseTiming=[pscustomobject]@{stage=$Stage;phase=$Phase;watch=$clock;calls=[long]0;files=[long]0;bytes=[long]0;nextHeartbeat=[double]30;heartbeats=0;aggregate=[bool]$Aggregate;ticks=[long]0;silent=[bool]$Silent}
+                Write-StandardValidationPhaseDiagnostic -Timing $phaseTiming -State 'started'
+                $phaseTiming
+            }
+            Mock Invoke-StandardValidationTimedPhase {
+                param([string]$Stage='validation',[string]$Phase,[scriptblock]$Action,[switch]$Silent)
+                if($Phase -ceq 'closure-enumeration') {
+                    $global:Syp280P2OriginalClosureAction=$Action
+                    $scopedAction={
+                        param($Timing)
+                        $global:Syp280P2TimedEnumerationActive=$true
+                        try { & $global:Syp280P2OriginalClosureAction $Timing }
+                        finally { $global:Syp280P2TimedEnumerationActive=$false }
+                    }.GetNewClosure()
+                    & $global:Syp280P2OriginalTimedPhase -Stage $Stage -Phase $Phase -Action $scopedAction -Silent:$Silent
+                }
+                else {
+                    & $global:Syp280P2OriginalTimedPhase -Stage $Stage -Phase $Phase -Action $Action -Silent:$Silent
+                }
+            }
+            Mock Get-ChildItem {
+                param([string]$LiteralPath,[switch]$Recurse,[switch]$Force)
+                $actualRoot=[IO.Path]::GetFullPath($LiteralPath).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+                if($global:Syp280P2TimedEnumerationActive -and $actualRoot -ceq $global:Syp280P2ClosureRoot) {
+                    & $global:Syp280P2OriginalGetChildItem -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -ErrorAction Stop | ForEach-Object {
+                        $global:Syp280P2EnumerationCount++
+                        if($global:Syp280P2EnumerationCount -gt 1) { throw $global:Syp280P2EnumerationFailure }
+                        $_
+                    }
+                }
+                else { & $global:Syp280P2OriginalGetChildItem -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -ErrorAction Stop }
+            }
+            $failure=$null
+            try { Get-StandardValidationDirectoryClosureSha256 -Root $root -Context 'fixture' | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            if($failure -cne 'FAILED|controlled closure enumeration failure') { throw "The real closure enumerator must retain its failure: '$failure'." }
+            $failedRecords=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $failedRows=@($failedRecords | Where-Object { $_.phase -ceq 'closure-enumeration' })
+            $failedHeartbeatCount=@($failedRows | Where-Object state -eq 'heartbeat').Count
+            if($failedRows[-1].state -cne 'failed' -or $failedRows[-1].files -ne 1 -or $failedRows[-1].bytes -ne 4 -or $failedHeartbeatCount -lt 1) { throw "Failed enumeration must report its yielded first file and heartbeat before termination; state=$($failedRows[-1].state) files=$($failedRows[-1].files) bytes=$($failedRows[-1].bytes) heartbeats=$failedHeartbeatCount." }
+
+            $capture.GetStringBuilder().Clear() | Out-Null
+            $global:Syp280P2EnumerationCount=0
+            $global:Syp280P2EnumerationFailure='CANCELLED|controlled closure enumeration cancellation'
+            $failure=$null
+            try { Get-StandardValidationDirectoryClosureSha256 -Root $root -Context 'fixture' | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            if($failure -cne 'CANCELLED|controlled closure enumeration cancellation') { throw "The real closure enumerator must retain its cancellation: '$failure'." }
+            $cancelledRecords=@($capture.ToString().Trim().Split([char]10) | Where-Object { $_.IndexOf('{') -ge 0 } | ForEach-Object { $_.Substring($_.IndexOf('{')) | ConvertFrom-Json })
+            $cancelledRows=@($cancelledRecords | Where-Object { $_.phase -ceq 'closure-enumeration' })
+            if($cancelledRows[-1].state -cne 'cancelled' -or $cancelledRows[-1].files -ne 1 -or $cancelledRows[-1].bytes -ne 4 -or @($cancelledRows | Where-Object state -eq 'heartbeat').Count -lt 1) { throw 'Cancelled enumeration must report its yielded first file and heartbeat before termination.' }
+        }
+        finally {
+            $script:StandardValidationTimingEnabled=$previousTiming
+            [Console]::SetError($previousError)
+            $capture.Dispose()
+            Remove-Variable -Name Syp280P2ClosureRoot,Syp280P2OriginalGetChildItem,Syp280P2OriginalTimedPhase,Syp280P2OriginalClosureAction,Syp280P2TimedEnumerationActive,Syp280P2EnumerationCount,Syp280P2EnumerationFailure -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+    }
+}
+
 Describe 'SYP258 source validation result gate' {
     BeforeAll {
         $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'

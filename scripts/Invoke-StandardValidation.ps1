@@ -2209,6 +2209,7 @@ function Get-StandardValidationInventory {
             sha256 = (Get-StandardValidationFileSha256 -Path $file.FullName -Context $Context)
             length = [int64]$file.Length
         }
+        Update-StandardValidationPhase -Timing $svPhaseTiming -Calls 0
     }
     if ($entries.Count -eq 0) { throw "INVALID|$Context must contain at least one file." }
     return ,(Sort-StandardValidationInventory -Inventory $entries)
@@ -2260,14 +2261,17 @@ function Get-StandardValidationDirectoryClosureSha256 {
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $svClosureItems = @(Invoke-StandardValidationTimedPhase -Stage $script:StandardValidationTimingStage -Phase 'closure-enumeration' -Silent:(-not $script:StandardValidationTimingEnabled) -Action {
     param($svEnumerationTiming)
-    $svEnumerated = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop)
     $svEnumerationTiming.calls = 1
-    $svEnumerationTiming.files = @($svEnumerated | Where-Object { -not $_.PSIsContainer }).Count
-    foreach ($svFile in $svEnumerated) {
+    $svEnumerated = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -ErrorAction Stop | ForEach-Object {
+        $svFile = $_
+        $svFileCount = if (-not $svFile.PSIsContainer) { 1 } else { 0 }
+        $svFileBytes = 0
         if ($svFile -is [IO.FileInfo] -and ($svFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
-            try { $svEnumerationTiming.bytes += [long]$svFile.Length } catch { }
+            try { $svFileBytes = [long]$svFile.Length } catch { }
         }
-    }
+        Update-StandardValidationPhase -Timing $svEnumerationTiming -Calls 0 -Files $svFileCount -Bytes $svFileBytes
+        $svFile
+    })
     $svEnumerated
 })
 foreach ($item in $svClosureItems) {
@@ -7358,6 +7362,10 @@ function Get-StandardCoreTrackedInventory {
         [Parameter(Mandatory = $true)][bool] $AllowDevelopmentContent
     )
 
+    return Invoke-StandardValidationTimedPhase -Stage $script:StandardValidationTimingStage -Phase 'candidate-inventory' -Silent:(-not $script:StandardValidationTimingEnabled) -Action {
+    param($svPhaseTiming)
+    $svPhaseTiming.calls = 1
+
     $headResult = Invoke-StandardCoreGit -RepositoryRoot $CandidateRoot -WorkingDirectory $ProcessWorkingRoot -Arguments @('rev-parse', '--verify', 'HEAD^{commit}')
     $head = ([string]$headResult.stdout).Trim().ToLowerInvariant()
     if ($head -cne $ExpectedSourceRevision) { throw 'BLOCKED|Candidate HEAD does not equal the supplied full SourceRevision.' }
@@ -7439,11 +7447,14 @@ function Get-StandardCoreTrackedInventory {
         [void](Assert-StandardValidationCanonicalRootPath -Path $sourcePath -Context "candidate tracked path '$path'")
         Assert-StandardValidationRegularFile -Path $sourcePath -Context "candidate tracked path '$path'"
         $file = Get-Item -Force -LiteralPath $sourcePath -ErrorAction Stop
+        $svPhaseTiming.files++
+        try { $svPhaseTiming.bytes += [long]$file.Length } catch { }
         $inventory.Add([pscustomobject][ordered]@{
             path = $path
             sha256 = Get-StandardValidationFileSha256 -Path $sourcePath -Context "candidate tracked path '$path'"
             length = [int64]$file.Length
         })
+        Update-StandardValidationPhase -Timing $svPhaseTiming -Calls 0
     }
     return [pscustomobject][ordered]@{
         sourceRevision = $head
@@ -7452,6 +7463,7 @@ function Get-StandardCoreTrackedInventory {
         inventory = (Sort-StandardValidationInventory -Inventory $inventory.ToArray())
         contentSha256 = Get-StandardValidationInventorySha256 -Inventory $inventory.ToArray()
         contentMode = if ($AllowDevelopmentContent) { 'development' } else { 'immutable-source' }
+    }
     }
 }
 
