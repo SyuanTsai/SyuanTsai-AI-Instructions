@@ -304,9 +304,28 @@ Describe 'SYP214 USER-only bootstrap boundary' {
         foreach($entry in $entries){ (Get-FileHash (Join-Path $targetRoot $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
     }
 
+}
+
+Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEvidence' {
+    BeforeEach {
+        $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $sourceRoot = Join-Path $caseRoot 'source'
+        $sourceArchive = Join-Path $caseRoot 'source.zip'
+        $targetRoot = Join-Path $caseRoot 'consumer'
+        $userHome = Join-Path $caseRoot 'user'
+        $script:TestConfigurationPath = Join-Path $caseRoot 'config.json'
+        $script:TestProvenancePath = Join-Path $caseRoot 'provenance.json'
+        New-TestSource -Path $sourceRoot
+        New-TestRepository -Path $targetRoot
+        New-TestConfiguration -Path $script:TestConfigurationPath
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceRoot '.agents/skills/syp214-fixture') | Out-Null
+        Set-TestText -Path (Join-Path $sourceRoot '.agents/skills/syp214-fixture/SKILL.md') -Value '# Shared fixture'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+    }
+
     # Scenario: Valid USER and old REPO manifests own the same complete immutable Skill.
     # Purpose: Retire only ignored unchanged files, retain backup, and never rebuild after a branch change.
-    It 'InterT40_verified_USER_allows_exact_migration_after_a_mutation_free_dry_run' -Tag 'Syp214FixtureEvidence' {
+    It 'InterT40_verified_USER_allows_exact_migration_after_a_mutation_free_dry_run' {
         # Given
         $entries = New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
         foreach ($entry in $entries) {
@@ -354,7 +373,7 @@ Describe 'SYP214 USER-only bootstrap boundary' {
 
     # Scenario: A failure occurs after the first verified Skill file removal.
     # Purpose: Restore exact original files and manifest through the existing mutation transaction.
-    It 'InterT50_failure_during_migration_restores_exact_files_and_manifest' -Tag 'Syp214FixtureEvidence' {
+    It 'InterT50_failure_during_migration_restores_exact_files_and_manifest' {
         # Given
         $entries = New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
         foreach ($entry in $entries) {
@@ -374,7 +393,7 @@ Describe 'SYP214 USER-only bootstrap boundary' {
 
     # Scenario: A completed or interrupted transaction is recovered from its durable backup.
     # Purpose: Restore exact pre-migration state and refuse later edits or a corrupt backup.
-    It 'InterT60_durable_recovery_<State>' -Tag 'Syp214FixtureEvidence' -TestCases @(@{State='exact'},@{State='later-edit'},@{State='corrupt-backup'},@{State='pending-intent'}) {
+    It 'InterT60_durable_recovery_<State>' -TestCases @(@{State='exact'},@{State='later-edit'},@{State='corrupt-backup'},@{State='pending-intent'}) {
         param($State)
         # Given
         $entries=New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
@@ -422,5 +441,4 @@ Describe 'SYP214 USER-only bootstrap boundary' {
         foreach($entry in $entries){ (Get-FileHash (Join-Path $userHome $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
         Save-Syp214FixtureEvidence ('recovery-'+$State) ([ordered]@{schemaVersion=1;scope='disposable integration fixture';scenario=$State;verified=$true;userBytesPreserved=$true;processKillExecuted=$false})
     }
-
 }
