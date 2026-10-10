@@ -459,6 +459,304 @@ else{
     return $childScript.Replace('__SYP214_NATIVE_HANDLE_EVIDENCE__',$nativeEvidenceSource)
 }
 
+function Invoke-Syp214Bootstrap {
+    param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration, [switch]$CaptureFailure)
+    New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
+    $arguments = @('-NoProfile','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,
+        '-TargetRoot',$targetRoot,'-ConfigurationPath',$script:TestConfigurationPath,
+        '-ProvenancePath',$script:TestProvenancePath,'-UserHome',$userHome)
+    if ($RecoverSkillMigration) { $arguments += @('-RecoverSkillMigration', $RecoverSkillMigration) }
+    if ($WhatIf) { $arguments += '-WhatIf' }
+    if ($FailureAfterSkillRemovalCount) { $arguments += @('-FailureAfterSkillRemovalCount', $FailureAfterSkillRemovalCount) }
+    $output = & $script:TestPowerShellExecutable @arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($CaptureFailure) {
+        return [pscustomobject][ordered]@{ exitCode=$exitCode; output=@($output | ForEach-Object { [string]$_ }) }
+    }
+    if ($exitCode -ne 0) { throw ($output -join "`n") }
+    return $output
+}
+
+function Get-Syp214FileInventory {
+    param([string]$Root,[string[]]$RelativePaths)
+    $resolvedRoot=[IO.Path]::GetFullPath($Root)
+    foreach($relative in @($RelativePaths | Sort-Object -Unique)){
+        $normalized=[string]$relative -replace '\\','/'
+        $full=Join-Path $resolvedRoot $normalized.Replace('/',[string][IO.Path]::DirectorySeparatorChar)
+        if(Test-Path -LiteralPath $full){
+            $item=Get-Item -Force -LiteralPath $full
+            if($item.PSIsContainer){
+                [ordered]@{relativePath=$normalized;type='directory';regularFile=$false;length=$null;sha256=$null}
+            }
+            elseif(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+                [ordered]@{relativePath=$normalized;type='reparse-point';regularFile=$false;length=$null;sha256=$null}
+            }
+            else{
+                [ordered]@{relativePath=$normalized;type='file';regularFile=$true;length=[long]$item.Length
+                    sha256=(Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()}
+            }
+        }
+        else{
+            [ordered]@{relativePath=$normalized;type='missing';regularFile=$false;length=$null;sha256=$null}
+        }
+    }
+}
+
+function Get-Syp214TreeInventory {
+    param([string]$Root)
+    $resolvedRoot=[IO.Path]::GetFullPath($Root)
+    $rootPrefix=$resolvedRoot.TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+    $pending=[System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($resolvedRoot)
+    $records=[System.Collections.Generic.List[object]]::new()
+    while($pending.Count -gt 0){
+        $directory=$pending.Pop()
+        foreach($item in @(Get-ChildItem -Force -LiteralPath $directory | Sort-Object Name)){
+            $relativePath=$item.FullName.Substring($rootPrefix.Length).Replace('\','/')
+            if($relativePath -match '(^|/)\.git(?:/|$)'){ continue }
+            $isReparsePoint=(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            if($item.PSIsContainer){
+                if($isReparsePoint){
+                    $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
+                }
+                else{
+                    $records.Add([ordered]@{relativePath=$relativePath;type='directory';regularFile=$false;length=$null;sha256=$null})
+                    $pending.Push($item.FullName)
+                }
+            }
+            elseif($isReparsePoint){
+                $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
+            }
+            else{
+                $records.Add([ordered]@{relativePath=$relativePath;type='file';regularFile=$true;length=[long]$item.Length
+                    sha256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()})
+            }
+        }
+    }
+    # OrderedDictionary records need an explicit key expression; named-property sorting may not read dictionary keys.
+    return @($records | Sort-Object { [string]$_['relativePath'] })
+}
+
+function Test-Syp214InventoryEqual {
+    param([AllowEmptyCollection()][object[]]$Left,[AllowEmptyCollection()][object[]]$Right)
+    $leftJson=ConvertTo-Json -InputObject @($Left) -Depth 12 -Compress
+    $rightJson=ConvertTo-Json -InputObject @($Right) -Depth 12 -Compress
+    return $leftJson -ceq $rightJson
+}
+
+function Test-Syp214FileInventoryRecordEqual {
+    param([object]$Left,[object]$Right)
+    if($null -eq $Left -or $null -eq $Right){ return $false }
+    $lengthEqual=if($null -eq $Left.length -or $null -eq $Right.length){
+        $null -eq $Left.length -and $null -eq $Right.length
+    }
+    else{ [long]$Left.length -eq [long]$Right.length }
+    return ([string]$Left.relativePath -ceq [string]$Right.relativePath -and
+        [string]$Left.type -ceq [string]$Right.type -and
+        [bool]$Left.regularFile -eq [bool]$Right.regularFile -and
+        $lengthEqual -and [string]$Left.sha256 -ceq [string]$Right.sha256)
+}
+
+function Test-Syp214PointInventoryEqual {
+    param([object]$Left,[object]$Right)
+    return ((Test-Syp214InventoryEqual -Left $Left.files -Right $Right.files) -and
+        (Test-Syp214InventoryEqual -Left $Left.missingFileWitness -Right $Right.missingFileWitness))
+}
+
+function New-Syp214RepositorySnapshotWithFileOverride {
+    param([object]$Snapshot,[object]$TreeFileRecord,[object]$PointFileRecord)
+    $relativePath=[string]$TreeFileRecord.relativePath
+    if([string]$PointFileRecord.relativePath -cne $relativePath){
+        throw "Tree and point inventory drift records disagree on path: $relativePath"
+    }
+    $originalTreeRecords=@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -ceq $relativePath })
+    $originalPointRecords=@($Snapshot.files | Where-Object { [string]$_.relativePath -ceq $relativePath })
+    if($originalTreeRecords.Count -ne 1 -or $originalPointRecords.Count -ne 1){
+        throw "Expected exactly one original inventory record for drift path: $relativePath"
+    }
+    # Keep full records for exact comparison while sorting by the dictionary's explicit relativePath key.
+    $fullTree=@(@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($TreeFileRecord) | Sort-Object { [string]$_['relativePath'] })
+    $files=@(@($Snapshot.files | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($PointFileRecord) | Sort-Object { [string]$_['relativePath'] })
+    return [pscustomobject][ordered]@{
+        fullTree=$fullTree
+        files=$files
+        missingFileWitness=@($files | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object {
+            [ordered]@{relativePath=$_.relativePath;type=$_.type}
+        })
+    }
+}
+
+function Test-Syp214GitCoreStateEqual {
+    param([object]$Left,[object]$Right)
+    return ([string]$Left.head -ceq [string]$Right.head -and
+        [string]$Left.indexSha256 -ceq [string]$Right.indexSha256 -and
+        (Test-Syp214InventoryEqual -Left @($Left.status) -Right @($Right.status)))
+}
+
+function Test-Syp214GitStateEqual {
+    param([object]$Left,[object]$Right)
+    return ((Test-Syp214GitCoreStateEqual -Left $Left -Right $Right) -and
+        (Test-Syp214InventoryEqual -Left @($Left.stashes) -Right @($Right.stashes)))
+}
+
+function Test-Syp214RegularFileInventory {
+    param([object[]]$Inventory)
+    return (@($Inventory).Count -eq 1 -and [string]$Inventory[0].type -ceq 'file' -and
+        [bool]$Inventory[0].regularFile -and $null -ne $Inventory[0].length -and
+        [long]$Inventory[0].length -ge 0 -and [string]$Inventory[0].sha256 -cmatch '^[0-9a-f]{64}$')
+}
+
+function Get-Syp214SafeOutputText {
+    param([string]$Text,[string[]]$PrivateRoots)
+    $safeText=$Text
+    foreach($privateRoot in @($PrivateRoots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object Length -Descending -Unique)){
+        $resolved=[IO.Path]::GetFullPath([string]$privateRoot).TrimEnd([char[]]@('\','/'))
+        if($resolved.Length -gt 2){
+            $safeText=[regex]::Replace($safeText,[regex]::Escape($resolved),'<fixture-path>',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+    return $safeText
+}
+
+function New-Syp214UnrelatedEvidenceFiles {
+    param([string]$Repository,[string]$UserHome)
+    $repositoryPaths=@('.codex/AI-Rules/Personal.md','.github/AI-Rules/Project.md')
+    $userPaths=@('AGENTS.md','local-evidence.bin')
+    foreach($path in @($repositoryPaths | ForEach-Object { Join-Path $Repository $_ }) + @($userPaths | ForEach-Object { Join-Path $UserHome $_ })){
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    }
+    Set-TestText -Path (Join-Path $Repository $repositoryPaths[0]) -Value '# Personal Codex Instructions'
+    Set-TestText -Path (Join-Path $Repository $repositoryPaths[1]) -Value '# Project Copilot Instructions'
+    Set-TestText -Path (Join-Path $UserHome $userPaths[0]) -Value '# USER home Instructions'
+    $userBinaryPath=Join-Path $UserHome $userPaths[1]
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userBinaryPath) | Out-Null
+    [IO.File]::WriteAllBytes($userBinaryPath,[byte[]]@(0x01,0x02,0x03,0xfe))
+    return [pscustomobject][ordered]@{repository=[string[]]$repositoryPaths;user=[string[]]$userPaths}
+}
+
+function Get-Syp214FixtureSnapshot {
+    param([string]$Repository,[string]$UserHome,[object[]]$Entries)
+    $repositoryPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @($script:ManifestPath,'AGENTS.md'))
+    $userPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @('.agents/catalog-skills.manifest.json'))
+    $indexPath=Join-Path $Repository '.git/index'
+    $repositoryFiles=@(Get-Syp214FileInventory -Root $Repository -RelativePaths $repositoryPaths)
+    $userFiles=@(Get-Syp214FileInventory -Root $UserHome -RelativePaths $userPaths)
+    $gitExcludeRelativePath=(Invoke-TestGit $Repository @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+    if([IO.Path]::IsPathRooted($gitExcludeRelativePath)){
+        $gitExcludeFullPath=[IO.Path]::GetFullPath($gitExcludeRelativePath)
+        $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+        if(-not $gitExcludeFullPath.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'Fixture Git info/exclude path is outside its disposable repository.'
+        }
+        $gitExcludeRelativePath=$gitExcludeFullPath.Substring($repositoryPrefix.Length).Replace('\','/')
+    }
+    else{ $gitExcludeRelativePath=$gitExcludeRelativePath.Replace('\','/') }
+    [ordered]@{
+        repository=[ordered]@{
+            files=$repositoryFiles
+            missingFileWitness=@($repositoryFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
+            fullTree=@(Get-Syp214TreeInventory -Root $Repository)
+            gitInfoExclude=@(Get-Syp214FileInventory -Root $Repository -RelativePaths @($gitExcludeRelativePath))
+            head=((Invoke-TestGit $Repository @('rev-parse','HEAD') | Select-Object -First 1).Trim())
+            indexSha256=$(if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()}else{$null})
+            status=@(Invoke-TestGit $Repository @('status','--porcelain'))
+            stashes=@(Invoke-TestGit $Repository @('stash','list','--format=%H%x00%gs'))
+        }
+        user=[ordered]@{
+            files=$userFiles
+            missingFileWitness=@($userFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
+            fullTree=@(Get-Syp214TreeInventory -Root $UserHome)
+        }
+    }
+}
+
+function Get-Syp214JournalInventory {
+    param([string]$JournalPath,[object]$Journal)
+    $journalName=[string](Split-Path -Leaf $JournalPath)
+    $backupStates=@($Journal.states | Where-Object { [string]$_.originalType -ceq 'file' })
+    $relativePaths=@($journalName)
+    $relativePaths+=@($backupStates | ForEach-Object { [string]$_.backupName })
+    $inventory=@(Get-Syp214FileInventory -Root (Split-Path -Parent $JournalPath) -RelativePaths $relativePaths)
+    foreach($item in $inventory){
+        if([string]$item.relativePath -ceq $journalName){
+            $item['kind']='journal'
+            $item['expectedSha256']=$null
+            $item['matchesJournalSha256']=$null
+        }
+        else{
+            $state=@($backupStates | Where-Object { [string]$_.backupName -ceq [string]$item.relativePath })[0]
+            $expectedSha256=[string]$state.backupSha256
+            $matchesJournalSha256=([string]$item.type -ceq 'file' -and [bool]$item.regularFile -and
+                [string]$item.sha256 -cmatch '^[0-9a-f]{64}$' -and
+                [string]$item.sha256 -ceq $expectedSha256)
+            $item['kind']='backup'
+            $item['expectedSha256']=$expectedSha256
+            $item['matchesJournalSha256']=$matchesJournalSha256
+        }
+        $item
+    }
+}
+
+function Test-Syp214JournalInventory {
+    param([object[]]$Inventory,[object]$Journal,[string]$ExpectedCorruptBackupName)
+    $journalRecords=@($Inventory | Where-Object { [string]$_.kind -ceq 'journal' })
+    if($journalRecords.Count -ne 1 -or [string]$journalRecords[0].type -cne 'file' -or
+        -not [bool]$journalRecords[0].regularFile -or
+        $null -eq $journalRecords[0].length -or [long]$journalRecords[0].length -lt 0 -or
+        [string]$journalRecords[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
+
+    $backupStates=@($Journal.states | Where-Object { [string]$_.originalType -ceq 'file' })
+    $backupRecords=@($Inventory | Where-Object { [string]$_.kind -ceq 'backup' })
+    if($backupRecords.Count -ne $backupStates.Count) { return $false }
+    $corruptWitnessFound=$false
+    foreach($state in $backupStates){
+        $record=@($backupRecords | Where-Object { [string]$_.relativePath -ceq [string]$state.backupName })
+        if($record.Count -ne 1 -or [string]$record[0].type -cne 'file' -or
+            -not [bool]$record[0].regularFile -or
+            $null -eq $record[0].length -or [long]$record[0].length -lt 0 -or
+            [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$record[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
+        $matchesJournalSha256=([string]$record[0].sha256 -ceq [string]$state.backupSha256)
+        if([bool]$record[0].matchesJournalSha256 -ne $matchesJournalSha256) { return $false }
+        if([string]$state.backupName -ceq $ExpectedCorruptBackupName){
+            if($matchesJournalSha256) { return $false }
+            $corruptWitnessFound=$true
+        }
+        elseif(-not $matchesJournalSha256){ return $false }
+    }
+    if(-not [string]::IsNullOrEmpty($ExpectedCorruptBackupName) -and -not $corruptWitnessFound) { return $false }
+    return $true
+}
+
+function Get-Syp214RunIdentity {
+    $repositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $testPath=[IO.Path]::GetFullPath($PSCommandPath)
+    $bootstrapPath=[IO.Path]::GetFullPath($script:BootstrapScript)
+    [ordered]@{
+        runId=[string]$env:GITHUB_RUN_ID
+        runAttempt=[string]$env:GITHUB_RUN_ATTEMPT
+        workflow=[string]$env:GITHUB_WORKFLOW
+        event=[string]$env:GITHUB_EVENT_NAME
+        ref=[string]$env:GITHUB_REF
+        sourceHeadCommit=[string]$env:SYP214_SOURCE_HEAD_SHA
+        checkoutHeadCommit=((Invoke-TestGit $repositoryRoot @('rev-parse','HEAD') | Select-Object -First 1).Trim())
+        checkoutTree=((Invoke-TestGit $repositoryRoot @('rev-parse','HEAD^{tree}') | Select-Object -First 1).Trim())
+        testScriptSha256=(Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        bootstrapScriptSha256=(Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        powershellVersion=$PSVersionTable.PSVersion.ToString()
+        powershellExecutable=[IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+        pesterVersion=[string]$env:SYP214_PESTER_VERSION
+    }
+}
+
+function Save-Syp214FixtureEvidence {
+    param([string]$Name,[object]$Value)
+    if (-not $env:SYP214_FIXTURE_EVIDENCE_ROOT) { return }
+    $root=[IO.Path]::GetFullPath($env:SYP214_FIXTURE_EVIDENCE_ROOT)
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    [IO.File]::WriteAllText((Join-Path $root ($Name+'.json')),($Value | ConvertTo-Json -Depth 14)+"`n",[Text.UTF8Encoding]::new($false))
+}
+
 Describe 'SYP214 whole-Skill migration evidence' {
     BeforeEach {
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-catalog-contract.psm1') -Force
@@ -1224,304 +1522,6 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-process-crash-'}
         }
     }
-}
-
-function Invoke-Syp214Bootstrap {
-    param([switch]$WhatIf, [int]$FailureAfterSkillRemovalCount = 0, [string]$RecoverSkillMigration, [switch]$CaptureFailure)
-    New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath
-    $arguments = @('-NoProfile','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,
-        '-TargetRoot',$targetRoot,'-ConfigurationPath',$script:TestConfigurationPath,
-        '-ProvenancePath',$script:TestProvenancePath,'-UserHome',$userHome)
-    if ($RecoverSkillMigration) { $arguments += @('-RecoverSkillMigration', $RecoverSkillMigration) }
-    if ($WhatIf) { $arguments += '-WhatIf' }
-    if ($FailureAfterSkillRemovalCount) { $arguments += @('-FailureAfterSkillRemovalCount', $FailureAfterSkillRemovalCount) }
-    $output = & $script:TestPowerShellExecutable @arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    if ($CaptureFailure) {
-        return [pscustomobject][ordered]@{ exitCode=$exitCode; output=@($output | ForEach-Object { [string]$_ }) }
-    }
-    if ($exitCode -ne 0) { throw ($output -join "`n") }
-    return $output
-}
-
-function Get-Syp214FileInventory {
-    param([string]$Root,[string[]]$RelativePaths)
-    $resolvedRoot=[IO.Path]::GetFullPath($Root)
-    foreach($relative in @($RelativePaths | Sort-Object -Unique)){
-        $normalized=[string]$relative -replace '\\','/'
-        $full=Join-Path $resolvedRoot $normalized.Replace('/',[string][IO.Path]::DirectorySeparatorChar)
-        if(Test-Path -LiteralPath $full){
-            $item=Get-Item -Force -LiteralPath $full
-            if($item.PSIsContainer){
-                [ordered]@{relativePath=$normalized;type='directory';regularFile=$false;length=$null;sha256=$null}
-            }
-            elseif(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
-                [ordered]@{relativePath=$normalized;type='reparse-point';regularFile=$false;length=$null;sha256=$null}
-            }
-            else{
-                [ordered]@{relativePath=$normalized;type='file';regularFile=$true;length=[long]$item.Length
-                    sha256=(Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()}
-            }
-        }
-        else{
-            [ordered]@{relativePath=$normalized;type='missing';regularFile=$false;length=$null;sha256=$null}
-        }
-    }
-}
-
-function Get-Syp214TreeInventory {
-    param([string]$Root)
-    $resolvedRoot=[IO.Path]::GetFullPath($Root)
-    $rootPrefix=$resolvedRoot.TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
-    $pending=[System.Collections.Generic.Stack[string]]::new()
-    $pending.Push($resolvedRoot)
-    $records=[System.Collections.Generic.List[object]]::new()
-    while($pending.Count -gt 0){
-        $directory=$pending.Pop()
-        foreach($item in @(Get-ChildItem -Force -LiteralPath $directory | Sort-Object Name)){
-            $relativePath=$item.FullName.Substring($rootPrefix.Length).Replace('\','/')
-            if($relativePath -match '(^|/)\.git(?:/|$)'){ continue }
-            $isReparsePoint=(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-            if($item.PSIsContainer){
-                if($isReparsePoint){
-                    $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
-                }
-                else{
-                    $records.Add([ordered]@{relativePath=$relativePath;type='directory';regularFile=$false;length=$null;sha256=$null})
-                    $pending.Push($item.FullName)
-                }
-            }
-            elseif($isReparsePoint){
-                $records.Add([ordered]@{relativePath=$relativePath;type='reparse-point';regularFile=$false;length=$null;sha256=$null})
-            }
-            else{
-                $records.Add([ordered]@{relativePath=$relativePath;type='file';regularFile=$true;length=[long]$item.Length
-                    sha256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()})
-            }
-        }
-    }
-    # OrderedDictionary records need an explicit key expression; named-property sorting may not read dictionary keys.
-    return @($records | Sort-Object { [string]$_['relativePath'] })
-}
-
-function Test-Syp214InventoryEqual {
-    param([AllowEmptyCollection()][object[]]$Left,[AllowEmptyCollection()][object[]]$Right)
-    $leftJson=ConvertTo-Json -InputObject @($Left) -Depth 12 -Compress
-    $rightJson=ConvertTo-Json -InputObject @($Right) -Depth 12 -Compress
-    return $leftJson -ceq $rightJson
-}
-
-function Test-Syp214FileInventoryRecordEqual {
-    param([object]$Left,[object]$Right)
-    if($null -eq $Left -or $null -eq $Right){ return $false }
-    $lengthEqual=if($null -eq $Left.length -or $null -eq $Right.length){
-        $null -eq $Left.length -and $null -eq $Right.length
-    }
-    else{ [long]$Left.length -eq [long]$Right.length }
-    return ([string]$Left.relativePath -ceq [string]$Right.relativePath -and
-        [string]$Left.type -ceq [string]$Right.type -and
-        [bool]$Left.regularFile -eq [bool]$Right.regularFile -and
-        $lengthEqual -and [string]$Left.sha256 -ceq [string]$Right.sha256)
-}
-
-function Test-Syp214PointInventoryEqual {
-    param([object]$Left,[object]$Right)
-    return ((Test-Syp214InventoryEqual -Left $Left.files -Right $Right.files) -and
-        (Test-Syp214InventoryEqual -Left $Left.missingFileWitness -Right $Right.missingFileWitness))
-}
-
-function New-Syp214RepositorySnapshotWithFileOverride {
-    param([object]$Snapshot,[object]$TreeFileRecord,[object]$PointFileRecord)
-    $relativePath=[string]$TreeFileRecord.relativePath
-    if([string]$PointFileRecord.relativePath -cne $relativePath){
-        throw "Tree and point inventory drift records disagree on path: $relativePath"
-    }
-    $originalTreeRecords=@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -ceq $relativePath })
-    $originalPointRecords=@($Snapshot.files | Where-Object { [string]$_.relativePath -ceq $relativePath })
-    if($originalTreeRecords.Count -ne 1 -or $originalPointRecords.Count -ne 1){
-        throw "Expected exactly one original inventory record for drift path: $relativePath"
-    }
-    # Keep full records for exact comparison while sorting by the dictionary's explicit relativePath key.
-    $fullTree=@(@($Snapshot.fullTree | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($TreeFileRecord) | Sort-Object { [string]$_['relativePath'] })
-    $files=@(@($Snapshot.files | Where-Object { [string]$_.relativePath -cne $relativePath }) + @($PointFileRecord) | Sort-Object { [string]$_['relativePath'] })
-    return [pscustomobject][ordered]@{
-        fullTree=$fullTree
-        files=$files
-        missingFileWitness=@($files | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object {
-            [ordered]@{relativePath=$_.relativePath;type=$_.type}
-        })
-    }
-}
-
-function Test-Syp214GitCoreStateEqual {
-    param([object]$Left,[object]$Right)
-    return ([string]$Left.head -ceq [string]$Right.head -and
-        [string]$Left.indexSha256 -ceq [string]$Right.indexSha256 -and
-        (Test-Syp214InventoryEqual -Left @($Left.status) -Right @($Right.status)))
-}
-
-function Test-Syp214GitStateEqual {
-    param([object]$Left,[object]$Right)
-    return ((Test-Syp214GitCoreStateEqual -Left $Left -Right $Right) -and
-        (Test-Syp214InventoryEqual -Left @($Left.stashes) -Right @($Right.stashes)))
-}
-
-function Test-Syp214RegularFileInventory {
-    param([object[]]$Inventory)
-    return (@($Inventory).Count -eq 1 -and [string]$Inventory[0].type -ceq 'file' -and
-        [bool]$Inventory[0].regularFile -and $null -ne $Inventory[0].length -and
-        [long]$Inventory[0].length -ge 0 -and [string]$Inventory[0].sha256 -cmatch '^[0-9a-f]{64}$')
-}
-
-function Get-Syp214SafeOutputText {
-    param([string]$Text,[string[]]$PrivateRoots)
-    $safeText=$Text
-    foreach($privateRoot in @($PrivateRoots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object Length -Descending -Unique)){
-        $resolved=[IO.Path]::GetFullPath([string]$privateRoot).TrimEnd([char[]]@('\','/'))
-        if($resolved.Length -gt 2){
-            $safeText=[regex]::Replace($safeText,[regex]::Escape($resolved),'<fixture-path>',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        }
-    }
-    return $safeText
-}
-
-function New-Syp214UnrelatedEvidenceFiles {
-    param([string]$Repository,[string]$UserHome)
-    $repositoryPaths=@('.codex/AI-Rules/Personal.md','.github/AI-Rules/Project.md')
-    $userPaths=@('AGENTS.md','local-evidence.bin')
-    foreach($path in @($repositoryPaths | ForEach-Object { Join-Path $Repository $_ }) + @($userPaths | ForEach-Object { Join-Path $UserHome $_ })){
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-    }
-    Set-TestText -Path (Join-Path $Repository $repositoryPaths[0]) -Value '# Personal Codex Instructions'
-    Set-TestText -Path (Join-Path $Repository $repositoryPaths[1]) -Value '# Project Copilot Instructions'
-    Set-TestText -Path (Join-Path $UserHome $userPaths[0]) -Value '# USER home Instructions'
-    $userBinaryPath=Join-Path $UserHome $userPaths[1]
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $userBinaryPath) | Out-Null
-    [IO.File]::WriteAllBytes($userBinaryPath,[byte[]]@(0x01,0x02,0x03,0xfe))
-    return [pscustomobject][ordered]@{repository=[string[]]$repositoryPaths;user=[string[]]$userPaths}
-}
-
-function Get-Syp214FixtureSnapshot {
-    param([string]$Repository,[string]$UserHome,[object[]]$Entries)
-    $repositoryPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @($script:ManifestPath,'AGENTS.md'))
-    $userPaths=@(@($Entries | ForEach-Object { [string]$_.targetPath }) + @('.agents/catalog-skills.manifest.json'))
-    $indexPath=Join-Path $Repository '.git/index'
-    $repositoryFiles=@(Get-Syp214FileInventory -Root $Repository -RelativePaths $repositoryPaths)
-    $userFiles=@(Get-Syp214FileInventory -Root $UserHome -RelativePaths $userPaths)
-    $gitExcludeRelativePath=(Invoke-TestGit $Repository @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
-    if([IO.Path]::IsPathRooted($gitExcludeRelativePath)){
-        $gitExcludeFullPath=[IO.Path]::GetFullPath($gitExcludeRelativePath)
-        $repositoryPrefix=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
-        if(-not $gitExcludeFullPath.StartsWith($repositoryPrefix,[StringComparison]::OrdinalIgnoreCase)){
-            throw 'Fixture Git info/exclude path is outside its disposable repository.'
-        }
-        $gitExcludeRelativePath=$gitExcludeFullPath.Substring($repositoryPrefix.Length).Replace('\','/')
-    }
-    else{ $gitExcludeRelativePath=$gitExcludeRelativePath.Replace('\','/') }
-    [ordered]@{
-        repository=[ordered]@{
-            files=$repositoryFiles
-            missingFileWitness=@($repositoryFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
-            fullTree=@(Get-Syp214TreeInventory -Root $Repository)
-            gitInfoExclude=@(Get-Syp214FileInventory -Root $Repository -RelativePaths @($gitExcludeRelativePath))
-            head=((Invoke-TestGit $Repository @('rev-parse','HEAD') | Select-Object -First 1).Trim())
-            indexSha256=$(if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()}else{$null})
-            status=@(Invoke-TestGit $Repository @('status','--porcelain'))
-            stashes=@(Invoke-TestGit $Repository @('stash','list','--format=%H%x00%gs'))
-        }
-        user=[ordered]@{
-            files=$userFiles
-            missingFileWitness=@($userFiles | Where-Object { [string]$_.type -ceq 'missing' } | ForEach-Object { [ordered]@{relativePath=$_.relativePath;type=$_.type} })
-            fullTree=@(Get-Syp214TreeInventory -Root $UserHome)
-        }
-    }
-}
-
-function Get-Syp214JournalInventory {
-    param([string]$JournalPath,[object]$Journal)
-    $journalName=[string](Split-Path -Leaf $JournalPath)
-    $backupStates=@($Journal.states | Where-Object { [string]$_.originalType -ceq 'file' })
-    $relativePaths=@($journalName)
-    $relativePaths+=@($backupStates | ForEach-Object { [string]$_.backupName })
-    $inventory=@(Get-Syp214FileInventory -Root (Split-Path -Parent $JournalPath) -RelativePaths $relativePaths)
-    foreach($item in $inventory){
-        if([string]$item.relativePath -ceq $journalName){
-            $item['kind']='journal'
-            $item['expectedSha256']=$null
-            $item['matchesJournalSha256']=$null
-        }
-        else{
-            $state=@($backupStates | Where-Object { [string]$_.backupName -ceq [string]$item.relativePath })[0]
-            $expectedSha256=[string]$state.backupSha256
-            $matchesJournalSha256=([string]$item.type -ceq 'file' -and [bool]$item.regularFile -and
-                [string]$item.sha256 -cmatch '^[0-9a-f]{64}$' -and
-                [string]$item.sha256 -ceq $expectedSha256)
-            $item['kind']='backup'
-            $item['expectedSha256']=$expectedSha256
-            $item['matchesJournalSha256']=$matchesJournalSha256
-        }
-        $item
-    }
-}
-
-function Test-Syp214JournalInventory {
-    param([object[]]$Inventory,[object]$Journal,[string]$ExpectedCorruptBackupName)
-    $journalRecords=@($Inventory | Where-Object { [string]$_.kind -ceq 'journal' })
-    if($journalRecords.Count -ne 1 -or [string]$journalRecords[0].type -cne 'file' -or
-        -not [bool]$journalRecords[0].regularFile -or
-        $null -eq $journalRecords[0].length -or [long]$journalRecords[0].length -lt 0 -or
-        [string]$journalRecords[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
-
-    $backupStates=@($Journal.states | Where-Object { [string]$_.originalType -ceq 'file' })
-    $backupRecords=@($Inventory | Where-Object { [string]$_.kind -ceq 'backup' })
-    if($backupRecords.Count -ne $backupStates.Count) { return $false }
-    $corruptWitnessFound=$false
-    foreach($state in $backupStates){
-        $record=@($backupRecords | Where-Object { [string]$_.relativePath -ceq [string]$state.backupName })
-        if($record.Count -ne 1 -or [string]$record[0].type -cne 'file' -or
-            -not [bool]$record[0].regularFile -or
-            $null -eq $record[0].length -or [long]$record[0].length -lt 0 -or
-            [string]$state.backupSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-            [string]$record[0].sha256 -cnotmatch '^[0-9a-f]{64}$') { return $false }
-        $matchesJournalSha256=([string]$record[0].sha256 -ceq [string]$state.backupSha256)
-        if([bool]$record[0].matchesJournalSha256 -ne $matchesJournalSha256) { return $false }
-        if([string]$state.backupName -ceq $ExpectedCorruptBackupName){
-            if($matchesJournalSha256) { return $false }
-            $corruptWitnessFound=$true
-        }
-        elseif(-not $matchesJournalSha256){ return $false }
-    }
-    if(-not [string]::IsNullOrEmpty($ExpectedCorruptBackupName) -and -not $corruptWitnessFound) { return $false }
-    return $true
-}
-
-function Get-Syp214RunIdentity {
-    $repositoryRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-    $testPath=[IO.Path]::GetFullPath($PSCommandPath)
-    $bootstrapPath=[IO.Path]::GetFullPath($script:BootstrapScript)
-    [ordered]@{
-        runId=[string]$env:GITHUB_RUN_ID
-        runAttempt=[string]$env:GITHUB_RUN_ATTEMPT
-        workflow=[string]$env:GITHUB_WORKFLOW
-        event=[string]$env:GITHUB_EVENT_NAME
-        ref=[string]$env:GITHUB_REF
-        sourceHeadCommit=[string]$env:SYP214_SOURCE_HEAD_SHA
-        checkoutHeadCommit=((Invoke-TestGit $repositoryRoot @('rev-parse','HEAD') | Select-Object -First 1).Trim())
-        checkoutTree=((Invoke-TestGit $repositoryRoot @('rev-parse','HEAD^{tree}') | Select-Object -First 1).Trim())
-        testScriptSha256=(Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        bootstrapScriptSha256=(Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        powershellVersion=$PSVersionTable.PSVersion.ToString()
-        powershellExecutable=[IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
-        pesterVersion=[string]$env:SYP214_PESTER_VERSION
-    }
-}
-
-function Save-Syp214FixtureEvidence {
-    param([string]$Name,[object]$Value)
-    if (-not $env:SYP214_FIXTURE_EVIDENCE_ROOT) { return }
-    $root=[IO.Path]::GetFullPath($env:SYP214_FIXTURE_EVIDENCE_ROOT)
-    New-Item -ItemType Directory -Force -Path $root | Out-Null
-    [IO.File]::WriteAllText((Join-Path $root ($Name+'.json')),($Value | ConvertTo-Json -Depth 14)+"`n",[Text.UTF8Encoding]::new($false))
 }
 
 Describe 'SYP214 USER-only bootstrap boundary' {
