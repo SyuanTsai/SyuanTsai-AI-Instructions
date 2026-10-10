@@ -41,6 +41,424 @@ function New-Syp214LegacySkill {
     return $entries
 }
 
+function Set-Syp214SingleFileSkillFixture {
+    param([string]$Repository,[string]$UserHome,[object[]]$Entries)
+    $skillEntry=@($Entries | Where-Object { [string]$_.targetPath -ceq '.agents/skills/syp214-fixture/SKILL.md' })
+    if($skillEntry.Count -ne 1){ throw 'Expected one fixture Skill.md entry.' }
+    foreach($entry in @($Entries | Where-Object { [string]$_.targetPath -cne '.agents/skills/syp214-fixture/SKILL.md' })){
+        $roots=@($Repository,$UserHome) | Select-Object -Unique
+        foreach($root in $roots){
+            $path=Join-Path $root ([string]$entry.targetPath)
+            if(Test-Path -LiteralPath $path -PathType Leaf){ Remove-Item -LiteralPath $path -Force }
+        }
+    }
+    $repositoryManifestPath=Join-Path $Repository $script:ManifestPath
+    $repositoryManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath $repositoryManifestPath | ConvertFrom-Json
+    $repositoryManifest.files=@($repositoryManifest.files | Where-Object { [string]$_.targetPath -ceq [string]$skillEntry[0].targetPath })
+    [IO.File]::WriteAllText($repositoryManifestPath,($repositoryManifest | ConvertTo-Json -Depth 10)+"`n",[Text.UTF8Encoding]::new($false))
+    $userManifestPath=Join-Path $UserHome '.agents/catalog-skills.manifest.json'
+    $userManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath $userManifestPath | ConvertFrom-Json
+    $userManifest.files=@($userManifest.files | Where-Object { [string]$_.targetPath -ceq [string]$skillEntry[0].targetPath })
+    [IO.File]::WriteAllText($userManifestPath,($userManifest | ConvertTo-Json -Depth 10)+"`n",[Text.UTF8Encoding]::new($false))
+    return ,$skillEntry
+}
+
+function New-Syp214SubstAlias {
+    param([string]$TargetRoot)
+    $substPath=Join-Path $env:SystemRoot 'System32/subst.exe'
+    foreach($letter in @('Z','Y','X','W','V','U','T','S','R','Q','P','O','N')){
+        if(Get-PSDrive -Name $letter -ErrorAction SilentlyContinue){continue}
+        $drive=$letter+':'
+        & $substPath $drive ([IO.Path]::GetFullPath($TargetRoot)) | Out-Null
+        if($LASTEXITCODE -eq 0){return [pscustomobject]@{drive=$drive;path=($drive+'\')}}
+    }
+    throw 'No unused drive letter was available for the SYP214 SUBST alias fixture.'
+}
+
+function Remove-Syp214SubstAlias {
+    param([object]$Alias)
+    if($null -eq $Alias){return}
+    $substPath=Join-Path $env:SystemRoot 'System32/subst.exe'
+    & $substPath /D ([string]$Alias.drive) | Out-Null
+    if($LASTEXITCODE -ne 0){throw "Could not remove the SYP214 temporary SUBST alias $($Alias.drive)."}
+}
+
+function Remove-Syp214TemporaryRecoveryRoot {
+    param([string]$Path,[string]$ExpectedPrefix)
+    $fullPath=[IO.Path]::GetFullPath($Path)
+    $tempPath=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/'))
+    $tempPrefix=$tempPath+[IO.Path]::DirectorySeparatorChar
+    if(-not $fullPath.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase) -or
+        -not ([IO.Path]::GetDirectoryName($fullPath)).Equals($tempPath,[StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $fullPath) -cnotmatch ('^'+[regex]::Escape($ExpectedPrefix)+'[0-9a-f]{32}$')){
+        throw 'Refusing to remove a SYP214 recovery fixture outside its exact temporary task directory.'
+    }
+    if(-not (Test-Path -LiteralPath $fullPath)){return}
+    $pending=[System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($fullPath)
+    while($pending.Count -gt 0){
+        $directory=$pending.Pop()
+        $item=Get-Item -Force -LiteralPath $directory
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+            throw 'Refusing recursive cleanup because a SYP214 temporary recovery fixture contains a reparse point.'
+        }
+        if(-not $item.PSIsContainer){continue}
+        foreach($child in @(Get-ChildItem -Force -LiteralPath $directory -ErrorAction Stop)){
+            if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+                throw 'Refusing recursive cleanup because a SYP214 temporary recovery fixture contains a reparse point.'
+            }
+            if($child.PSIsContainer){$pending.Push($child.FullName)}
+        }
+    }
+    Remove-Item -LiteralPath $fullPath -Recurse -Force
+}
+
+function Get-Syp214GitInfoExcludeFixturePath {
+    param([string]$Repository)
+    $relativePath=(Invoke-TestGit -Repository $Repository -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+    if([IO.Path]::IsPathRooted($relativePath)){return [IO.Path]::GetFullPath($relativePath)}
+    return [IO.Path]::GetFullPath((Join-Path $Repository $relativePath))
+}
+
+function Get-Syp214CrashWriterHandleInspectionSource {
+    @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace Syp214.TestSupport
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeFileTime
+    {
+        public uint Low;
+        public uint High;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public NativeFileTime CreationTime;
+        public NativeFileTime LastAccessTime;
+        public NativeFileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    public sealed class CrashWriterHandleEvidence
+    {
+        public string FinalPath { get; private set; }
+        public uint VolumeSerialNumber { get; private set; }
+        public uint FileIndexHigh { get; private set; }
+        public uint FileIndexLow { get; private set; }
+        public uint NumberOfLinks { get; private set; }
+        public uint NativeFileType { get; private set; }
+        public uint FileAttributes { get; private set; }
+        public long Length { get; private set; }
+        public bool RegularFile { get; private set; }
+
+        internal CrashWriterHandleEvidence(string finalPath, NativeByHandleFileInformation information, uint nativeFileType)
+        {
+            FinalPath = finalPath;
+            VolumeSerialNumber = information.VolumeSerialNumber;
+            FileIndexHigh = information.FileIndexHigh;
+            FileIndexLow = information.FileIndexLow;
+            NumberOfLinks = information.NumberOfLinks;
+            NativeFileType = nativeFileType;
+            FileAttributes = information.FileAttributes;
+            Length = ((long)information.FileSizeHigh << 32) | information.FileSizeLow;
+            RegularFile = nativeFileType == 1 &&
+                (information.FileAttributes & (0x10u | 0x400u)) == 0 &&
+                information.NumberOfLinks == 1;
+        }
+    }
+
+    public static class CrashWriterHandleInspection
+    {
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "GetFileInformationByHandle")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out NativeByHandleFileInformation information);
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "GetFileType")]
+        private static extern uint GetFileType(SafeFileHandle file);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+            EntryPoint = "GetFinalPathNameByHandleW", ExactSpelling = true)]
+        private static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle file,
+            StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        public static CrashWriterHandleEvidence Capture(SafeFileHandle file)
+        {
+            if (file == null || file.IsInvalid || file.IsClosed)
+            {
+                throw new ArgumentException("Crash-writer evidence requires a live held file handle.", "file");
+            }
+
+            NativeByHandleFileInformation information;
+            if (!GetFileInformationByHandle(file, out information))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read identity from the held crash-writer handle.");
+            }
+
+            uint nativeFileType = GetFileType(file);
+            if (nativeFileType == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read type from the held crash-writer handle.");
+            }
+
+            uint capacity = 1024;
+            string finalPath = null;
+            while (capacity <= 32768)
+            {
+                StringBuilder path = new StringBuilder((int)capacity);
+                uint length = GetFinalPathNameByHandleW(file, path, capacity, 0);
+                if (length == 0)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve the held crash-writer handle path.");
+                }
+                if (length < capacity)
+                {
+                    finalPath = path.ToString().Replace('/', '\\');
+                    break;
+                }
+                capacity = length + 1;
+            }
+            if (String.IsNullOrEmpty(finalPath))
+            {
+                throw new IOException("The held crash-writer handle path exceeded the supported evidence bound.");
+            }
+
+            return new CrashWriterHandleEvidence(finalPath, information, nativeFileType);
+        }
+    }
+}
+'@
+}
+
+function Get-Syp214CrashWriterHandleEvidence {
+    param([Parameter(Mandatory=$true)][Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle)
+    if(-not ('Syp214.TestSupport.CrashWriterHandleInspection' -as [type])){
+        Add-Type -TypeDefinition (Get-Syp214CrashWriterHandleInspectionSource) -Language CSharp
+    }
+    return [Syp214.TestSupport.CrashWriterHandleInspection]::Capture($Handle)
+}
+
+function ConvertTo-Syp214HandleFinalPath {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $normalized=$Path.Replace('/','\')
+    if($normalized.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)){
+        $normalized='\\'+$normalized.Substring(8)
+    }
+    elseif($normalized.StartsWith('\\?\',[StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith('\??\',[StringComparison]::OrdinalIgnoreCase)){
+        $normalized=$normalized.Substring(4)
+    }
+    return [IO.Path]::GetFullPath($normalized)
+}
+
+function Get-Syp214MeasuredCrashWriterEvidence {
+    param([Parameter(Mandatory=$true)][IO.FileStream]$Stream)
+    $native=Get-Syp214CrashWriterHandleEvidence -Handle $Stream.SafeFileHandle
+    $Stream.Position=0
+    $memory=[IO.MemoryStream]::new()
+    try{
+        $Stream.CopyTo($memory)
+        [byte[]]$bytes=$memory.ToArray()
+    }
+    finally{$memory.Dispose()}
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$hash=([Convert]::ToHexString($sha.ComputeHash($bytes))).ToLowerInvariant()}
+    finally{$sha.Dispose()}
+    if([long]$native.Length -ne [long]$bytes.LongLength){
+        throw 'SYP214 held-handle length did not match the bytes read from that same stream.'
+    }
+    [ordered]@{
+        finalPath=[string]$native.FinalPath
+        volumeSerialNumber=[uint32]$native.VolumeSerialNumber
+        fileIndexHigh=[uint32]$native.FileIndexHigh
+        fileIndexLow=[uint32]$native.FileIndexLow
+        numberOfLinks=[uint32]$native.NumberOfLinks
+        nativeFileType=[uint32]$native.NativeFileType
+        fileAttributes=[uint32]$native.FileAttributes
+        regularFile=[bool]$native.RegularFile
+        type=$(if([bool]$native.RegularFile){'file'}else{'non-regular'})
+        length=[long]$native.Length
+        sha256=$hash
+    }
+}
+
+function Get-Syp214PathCrashWriterEvidence {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $item=Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    if($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){
+        throw 'SYP214 crash-writer evidence path is not a regular, non-reparse file.'
+    }
+    $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+    try{return Get-Syp214MeasuredCrashWriterEvidence -Stream $stream}
+    finally{$stream.Dispose()}
+}
+
+function Test-Syp214CrashWriterEvidenceMatchesPath {
+    param([Parameter(Mandatory=$true)][object]$Evidence,[Parameter(Mandatory=$true)][string]$Path)
+    try{$actual=Get-Syp214PathCrashWriterEvidence -Path $Path}
+    catch{return $false}
+    return ([string]$Evidence.type -ceq 'file' -and [bool]$Evidence.regularFile -and
+        [uint32]$Evidence.nativeFileType -eq 1 -and [uint32]$Evidence.numberOfLinks -eq 1 -and
+        [string](ConvertTo-Syp214HandleFinalPath ([string]$Evidence.finalPath)) -ceq
+            [string](ConvertTo-Syp214HandleFinalPath ([string]$actual.finalPath)) -and
+        [uint32]$Evidence.volumeSerialNumber -eq [uint32]$actual.volumeSerialNumber -and
+        [uint32]$Evidence.fileIndexHigh -eq [uint32]$actual.fileIndexHigh -and
+        [uint32]$Evidence.fileIndexLow -eq [uint32]$actual.fileIndexLow -and
+        [string]$Evidence.type -ceq [string]$actual.type -and
+        [long]$Evidence.length -eq [long]$actual.length -and
+        [string]$Evidence.sha256 -ceq [string]$actual.sha256)
+}
+
+function Test-Syp214CrashWriterStageIfRetained {
+    param([Parameter(Mandatory=$true)][object]$Evidence,[Parameter(Mandatory=$true)][string]$FinalPath)
+    $evidencePath=ConvertTo-Syp214HandleFinalPath ([string]$Evidence.finalPath)
+    $finalFullPath=[IO.Path]::GetFullPath($FinalPath)
+    if($evidencePath.Equals($finalFullPath,[StringComparison]::OrdinalIgnoreCase)){return $true}
+    $evidenceParent=[IO.Path]::GetDirectoryName($evidencePath)
+    $finalParent=[IO.Path]::GetDirectoryName($finalFullPath)
+    if(-not $evidenceParent.Equals($finalParent,[StringComparison]::OrdinalIgnoreCase) -or
+        [string]$Evidence.type -cne 'file' -or -not [bool]$Evidence.regularFile -or
+        [uint32]$Evidence.nativeFileType -ne 1 -or [uint32]$Evidence.numberOfLinks -ne 1){return $false}
+    if(-not (Test-Path -LiteralPath $evidencePath)){return $true}
+    if(-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)){return $false}
+    return Test-Syp214CrashWriterEvidenceMatchesPath -Evidence $Evidence -Path $evidencePath
+}
+
+function Test-Syp214CrashRecoveryRepositoryTree {
+    param(
+        [Parameter(Mandatory=$true)][object[]]$Before,
+        [Parameter(Mandatory=$true)][object[]]$After,
+        [Parameter(Mandatory=$true)][object]$Evidence,
+        [Parameter(Mandatory=$true)][string]$RepositoryRoot,
+        [Parameter(Mandatory=$true)][string]$FinalPath
+    )
+    if(Test-Syp214InventoryEqual -Left $Before -Right $After){return $true}
+    $beforeRecords=@($Before)
+    $afterRecords=@($After)
+    foreach($record in $beforeRecords){
+        $matches=@($afterRecords | Where-Object { [string]$_.relativePath -ceq [string]$record.relativePath })
+        if($matches.Count -ne 1 -or -not (Test-Syp214FileInventoryRecordEqual -Left $record -Right $matches[0])){return $false}
+    }
+    $extras=@($afterRecords | Where-Object {
+        $candidate=$_
+        @($beforeRecords | Where-Object { [string]$_.relativePath -ceq [string]$candidate.relativePath }).Count -eq 0
+    })
+    if($extras.Count -ne 1){return $false}
+    $evidencePath=ConvertTo-Syp214HandleFinalPath ([string]$Evidence.finalPath)
+    $finalFullPath=[IO.Path]::GetFullPath($FinalPath)
+    if($evidencePath.Equals($finalFullPath,[StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Syp214CrashWriterStageIfRetained -Evidence $Evidence -FinalPath $FinalPath)){return $false}
+    $rootFullPath=[IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([char[]]@('\','/'))
+    $rootPrefix=$rootFullPath+[IO.Path]::DirectorySeparatorChar
+    if(-not $evidencePath.StartsWith($rootPrefix,[StringComparison]::OrdinalIgnoreCase)){return $false}
+    $relativePath=$evidencePath.Substring($rootPrefix.Length).Replace('\','/')
+    $extra=$extras[0]
+    $expected=[pscustomobject][ordered]@{
+        relativePath=$relativePath;type='file';regularFile=$true
+        length=[long]$Evidence.length;sha256=[string]$Evidence.sha256
+    }
+    return ((Test-Syp214FileInventoryRecordEqual -Left $extra -Right $expected) -and
+        (Test-Syp214CrashWriterEvidenceMatchesPath -Evidence $Evidence -Path $evidencePath))
+}
+
+function New-Syp214WriterCrashChildScript {
+    $nativeEvidenceSource=Get-Syp214CrashWriterHandleInspectionSource
+    $childScript=@'
+param([string]$BootstrapScriptPath,[string]$TargetRoot,[string]$RecoveryRoot,[string]$RelativePath,[string]$WriterKind,[string]$MarkerPath,[string]$CompletionPath)
+$ErrorActionPreference='Stop'
+$nativeEvidenceSource=@"
+__SYP214_NATIVE_HANDLE_EVIDENCE__
+"@
+Add-Type -TypeDefinition $nativeEvidenceSource -Language CSharp
+function Get-Syp214ChildMeasuredHandleEvidence {
+    param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,[Parameter(Mandatory=$true)][string]$WriterKind)
+    $native=[Syp214.TestSupport.CrashWriterHandleInspection]::Capture($Stream.SafeFileHandle)
+    $Stream.Position=0
+    $memory=[IO.MemoryStream]::new()
+    try{$Stream.CopyTo($memory);[byte[]]$bytes=$memory.ToArray()}
+    finally{$memory.Dispose()}
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$hash=([Convert]::ToHexString($sha.ComputeHash($bytes))).ToLowerInvariant()}
+    finally{$sha.Dispose()}
+    if([long]$native.Length -ne [long]$bytes.LongLength){
+        throw 'SYP214 child held-handle length did not match bytes read from its stream.'
+    }
+    [ordered]@{
+        writerKind=$WriterKind
+        finalPath=[string]$native.FinalPath
+        volumeSerialNumber=[uint32]$native.VolumeSerialNumber
+        fileIndexHigh=[uint32]$native.FileIndexHigh
+        fileIndexLow=[uint32]$native.FileIndexLow
+        numberOfLinks=[uint32]$native.NumberOfLinks
+        nativeFileType=[uint32]$native.NativeFileType
+        fileAttributes=[uint32]$native.FileAttributes
+        regularFile=[bool]$native.RegularFile
+        type=$(if([bool]$native.RegularFile){'file'}else{'non-regular'})
+        length=[long]$native.Length
+        sha256=$hash
+    }
+}
+$bootstrapText=[IO.File]::ReadAllText($BootstrapScriptPath)
+$prefixEnd=$bootstrapText.IndexOf('$syncStartPath = ',[StringComparison]::Ordinal)
+if($prefixEnd -lt 0){throw 'Could not find the bootstrap definition prefix boundary.'}
+$bootstrapRoot=Split-Path -Parent $BootstrapScriptPath
+$bootstrapRootLiteral="'"+$bootstrapRoot.Replace("'","''")+"'"
+$prefixText=$bootstrapText.Substring(0,$prefixEnd).Replace('$PSScriptRoot',$bootstrapRootLiteral)
+. ([scriptblock]::Create($prefixText)) -TargetRoot $TargetRoot -GitExecutable 'git'
+$backupRoot=Join-Path $RecoveryRoot 'target-backup'
+$journalPath=Join-Path $backupRoot 'skill-migration.json'
+$snapshot=New-TargetMutationSnapshot -TargetRoot $TargetRoot -RelativePaths @($RelativePath) -BackupRoot $backupRoot
+$excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $TargetRoot
+$gitState=Get-RepoSkillMigrationGitState -Repository $TargetRoot -GitExecutable 'git'
+Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot -Path $journalPath -GitState $gitState -Phase 'mutating'
+$script:SkillMigrationJournalContext=[pscustomobject]@{Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState}
+$writerPath=if($WriterKind -ceq 'target'){'Function:\Write-TargetMutationStreamBytes'}else{'Function:\Write-GitInfoExcludeStreamBytes'}
+$processId=$PID
+$prefixWriter={
+    param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,[Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+    $Stream.Position=0
+    $Stream.SetLength(0)
+    $prefixLength=[Math]::Min(3,$Bytes.Length)
+    if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+    $Stream.Flush($true)
+    $evidence=Get-Syp214ChildMeasuredHandleEvidence -Stream $Stream -WriterKind $WriterKind
+    if(-not [bool]$evidence.regularFile -or [string]$evidence.type -cne 'file'){
+        throw 'SYP214 flushed writer handle did not identify one regular disk file.'
+    }
+    [IO.File]::WriteAllText($MarkerPath,($evidence | ConvertTo-Json -Depth 4 -Compress),[Text.UTF8Encoding]::new($false))
+    Stop-Process -Id $processId -Force
+}.GetNewClosure()
+Set-Item -Path $writerPath -Value $prefixWriter
+if($WriterKind -ceq 'target'){
+    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $RelativePath -Bytes ([Text.Encoding]::UTF8.GetBytes('# applied replacement'+"`n"))
+}
+else{
+    Set-ManagedGitInfoExclude -Repository $TargetRoot -ManagedPaths @($RelativePath) -Snapshot $excludeSnapshot
+}
+[IO.File]::WriteAllText($CompletionPath,'writer unexpectedly returned',[Text.UTF8Encoding]::new($false))
+'@
+    return $childScript.Replace('__SYP214_NATIVE_HANDLE_EVIDENCE__',$nativeEvidenceSource)
+}
+
 Describe 'SYP214 whole-Skill migration evidence' {
     BeforeEach {
         Import-Module (Join-Path $PSScriptRoot '../scripts/skills-catalog-contract.psm1') -Force
@@ -131,6 +549,90 @@ Describe 'SYP214 whole-Skill migration evidence' {
         # When / Then
         { Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRoot -Skill $plan[0] } | Should Throw 'concurrently'
         Test-Path (Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md') | Should Be $true
+    }
+
+    # Scenario: Repository and USER roots identify the same physical directory through different path spellings.
+    # Purpose: Reject migration eligibility before USER or Git evidence is observed, regardless of lexical or filesystem aliases.
+    It 'InterT40_rejects_<Alias>_Repository_and_USER_roots_before_observation' -TestCases @(
+        @{Alias='identical'},@{Alias='case-only'},@{Alias='trailing-separator'},@{Alias='junction'},@{Alias='subst'}
+    ) {
+        param($Alias)
+        $substAlias=$null
+        try {
+        # Given
+        $singleEntry=Set-Syp214SingleFileSkillFixture -Repository $targetRoot -UserHome $userHome -Entries $entries
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+        $trusted.files=@($singleEntry)
+        Copy-Item -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json') `
+            -Destination (Join-Path $targetRoot '.agents/catalog-skills.manifest.json') -Force
+        $userAlias=$targetRoot
+        switch($Alias){
+            'case-only' { $userAlias=$targetRoot.ToUpperInvariant() }
+            'trailing-separator' { $userAlias=$targetRoot.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar))+[IO.Path]::DirectorySeparatorChar }
+            'junction' {
+                $userAlias=Join-Path $caseRoot 'consumer-alias'
+                New-Item -ItemType Junction -Path $userAlias -Target $targetRoot | Out-Null
+            }
+            'subst' {
+                $substAlias=New-Syp214SubstAlias -TargetRoot $targetRoot
+                $userAlias=[string]$substAlias.path
+            }
+        }
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $targetRoot -Entries $singleEntry
+        $separateUserBefore=Get-Syp214TreeInventory -Root $userHome
+        $observationCounts=[pscustomobject]@{user=0;git=0}
+        $userObservationMock={ $observationCounts.user++; throw 'SYP214 USER observation reached before root-alias guard.' }.GetNewClosure()
+        $gitObservationMock={ $observationCounts.git++; throw 'SYP214 Git observation reached before root-alias guard.' }.GetNewClosure()
+        Mock Get-UserSharedSkillObservation $userObservationMock -ModuleName repo-shared-skills-migration
+        Mock Get-RepoSkillMigrationGitState $gitObservationMock -ModuleName repo-shared-skills-migration
+        $planningFailure=''
+        $plan=@()
+        # When
+        try {
+            $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest `
+                -TrustedSkills @($trusted) -UserHome $userAlias)
+        }
+        catch { $planningFailure=$_.Exception.Message }
+        # Then
+        $observationCounts.user | Should Be 0
+        $observationCounts.git | Should Be 0
+        if($planningFailure){
+            $planningFailure | Should Match '(?i)((same|identical|overlapping|aliased|distinct|separate|physical).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate|physical)|must (be )?distinct|must differ)'
+        }
+        else{
+            $plan.Count | Should Be 1
+            $plan[0].removable | Should Be $false
+            $plan[0].reason | Should Not BeNullOrEmpty
+        }
+        $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $targetRoot -Entries $singleEntry
+        (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.fullTree -Right $snapshotAfter.repository.fullTree) | Should Be $true
+        (Test-Syp214PointInventoryEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+        (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $separateUserBefore -Right (Get-Syp214TreeInventory -Root $userHome)) | Should Be $true
+        }
+        finally { if($substAlias){Remove-Syp214SubstAlias -Alias $substAlias} }
+    }
+
+    # Scenario: USER is a parent directory of a valid single-file Skill consumer.
+    # Purpose: Keep distinct nested roots eligible while rejecting only identities that resolve to the same directory.
+    It 'InterT45_allows_a_distinct_USER_parent_and_Repository_child' {
+        # Given
+        $pairRoot=Join-Path $caseRoot 'nested-pair'
+        $nestedRepository=Join-Path $pairRoot 'consumer'
+        New-TestRepository -Path $nestedRepository
+        $nestedEntries=New-Syp214LegacySkill -Repository $nestedRepository -UserHome $pairRoot
+        $nestedEntries=Set-Syp214SingleFileSkillFixture -Repository $nestedRepository -UserHome $pairRoot -Entries $nestedEntries
+        $nestedManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $nestedRepository $script:ManifestPath) | ConvertFrom-Json
+        $nestedTrusted=[pscustomobject]@{id='syp214-fixture';sourceId='test-skills';sourceRepository='https://example.com/test-skills.git'
+            sourceCommit=('b'*40);sourceVersion='test@bbbbbbbb';files=@($nestedEntries)}
+        # When
+        $nestedPlan=@(Get-RepoSharedSkillsMigrationPlan -Repository $nestedRepository -Manifest $nestedManifest `
+            -TrustedSkills @($nestedTrusted) -UserHome $pairRoot)
+        # Then
+        $nestedPlan.Count | Should Be 1
+        $nestedPlan[0].removable | Should Be $true
     }
 }
 
@@ -279,6 +781,447 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             $script:SkillMigrationJournalContext = $null
             $ErrorActionPreference = $previousErrorActionPreference
             Set-StrictMode -Off
+        }
+    }
+
+    # Scenario: A managed-file write is interrupted after a flushed prefix reaches the writer stream.
+    # Purpose: Keep the published target complete, recover from durable intent, and preserve later unrelated bytes.
+    It 'InterT30_recovers_managed_writer_prefix_without_publishing_partial_target_bytes' {
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-prefix-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $userHome | Out-Null
+        $unrelatedPath=Join-Path $targetRoot 'project-notes/personal.txt'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unrelatedPath) | Out-Null
+        Set-TestText -Path $unrelatedPath -Value 'unrelated original bytes'
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $newBytes=[Text.Encoding]::UTF8.GetBytes('# intended complete replacement'+"`n")
+        $writerPath='Function:\Write-TargetMutationStreamBytes'
+        $realWriter=$null
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            $realWriter=(Get-Command Write-TargetMutationStreamBytes -CommandType Function).ScriptBlock
+            $interruptionSentinel='SYP214 writer interruption '+[guid]::NewGuid().ToString('N')
+            $interruptAfterPrefix={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $Stream.Position=0
+                $Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $interruptionSentinel
+            }.GetNewClosure()
+            # When
+            $writeFailure=''
+            Set-Item -Path $writerPath -Value $interruptAfterPrefix
+            try { Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $newBytes }
+            catch { $writeFailure=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+            # Then
+            $writeFailure | Should Be $interruptionSentinel
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalBytes) | Should Be $true
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $journalState=@($journal.states | Where-Object { [string]$_.relativePath -ceq $relativePath })
+            $journalState.Count | Should Be 1
+            $journalState[0].mutationApplied | Should Be $true
+            $journalState[0].appliedType | Should Be 'file'
+            (Test-TargetMutationBytesEqual -Left ([Convert]::FromBase64String([string]$journalState[0].appliedBase64)) -Right $newBytes) | Should Be $true
+            Set-TestText -Path $unrelatedPath -Value 'later unrelated bytes'
+            $laterUnrelatedBytes=[IO.File]::ReadAllBytes($unrelatedPath)
+            $recoveryWriterWitness=[pscustomobject]@{count=0}
+            $rejectInPlaceRecoveryWrite={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $recoveryWriterWitness.count++
+                throw 'SYP214 recovery must publish a complete staged file, not use the in-place writer.'
+            }.GetNewClosure()
+            $recoveryError=''
+            Set-Item -Path $writerPath -Value $rejectInPlaceRecoveryWrite
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryError=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+            $recoveryError | Should BeNullOrEmpty
+            $recoveryWriterWitness.count | Should Be 0
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalBytes) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($unrelatedPath)) -Right $laterUnrelatedBytes) | Should Be $true
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+        }
+        finally {
+            if($realWriter){Set-Item -Path $writerPath -Value $realWriter}
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-prefix-'}
+        }
+    }
+
+    # Scenario: Managed .git/info/exclude is interrupted after a flushed prefix reaches its writer stream.
+    # Purpose: Keep the existing ignore bytes published and recover without an in-place write or loss of later project bytes.
+    It 'InterT40_recovers_exclude_writer_prefix_without_publishing_partial_ignore_bytes' {
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-exclude-prefix-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $userHome | Out-Null
+        $unrelatedPath=Join-Path $targetRoot 'project-notes/personal.txt'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unrelatedPath) | Out-Null
+        Set-TestText -Path $unrelatedPath -Value 'unrelated original bytes'
+        $targetWriterPath='Function:\Write-TargetMutationStreamBytes'
+        $excludeWriterPath='Function:\Write-GitInfoExcludeStreamBytes'
+        $realTargetWriter=$null
+        $realExcludeWriter=$null
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            $excludePath=Get-GitInfoExcludePath -Repository $targetRoot
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+            $excludeBefore=[IO.File]::ReadAllBytes($excludePath)
+            $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            $targetBefore=[IO.File]::ReadAllBytes($targetPath)
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            $realExcludeWriter=(Get-Command Write-GitInfoExcludeStreamBytes -CommandType Function).ScriptBlock
+            $interruptionSentinel='SYP214 exclude writer interruption '+[guid]::NewGuid().ToString('N')
+            $interruptAfterPrefix={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $Stream.Position=0
+                $Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $interruptionSentinel
+            }.GetNewClosure()
+            # When
+            $writeFailure=''
+            Set-Item -Path $excludeWriterPath -Value $interruptAfterPrefix
+            try { Set-ManagedGitInfoExclude -Repository $targetRoot -ManagedPaths @($relativePath) -Snapshot $excludeSnapshot }
+            catch { $writeFailure=$_.Exception.Message }
+            finally { Set-Item -Path $excludeWriterPath -Value $realExcludeWriter }
+            # Then
+            $writeFailure | Should Be $interruptionSentinel
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $excludeBefore) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $targetBefore) | Should Be $true
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
+            $journal.exclude.mutationApplied | Should Be $true
+            Set-TestText -Path $unrelatedPath -Value 'later unrelated bytes'
+            $laterUnrelatedBytes=[IO.File]::ReadAllBytes($unrelatedPath)
+            $recoveryTargetWriterWitness=[pscustomobject]@{count=0}
+            $recoveryExcludeWriterWitness=[pscustomobject]@{count=0}
+            $rejectTargetInPlaceWrite={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $recoveryTargetWriterWitness.count++
+                throw 'SYP214 recovery must not mutate a managed target in place.'
+            }.GetNewClosure()
+            $rejectExcludeInPlaceWrite={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $recoveryExcludeWriterWitness.count++
+                throw 'SYP214 recovery must publish a complete staged exclude file.'
+            }.GetNewClosure()
+            $recoveryError=''
+            $realTargetWriter=(Get-Command Write-TargetMutationStreamBytes -CommandType Function).ScriptBlock
+            Set-Item -Path $targetWriterPath -Value $rejectTargetInPlaceWrite
+            Set-Item -Path $excludeWriterPath -Value $rejectExcludeInPlaceWrite
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryError=$_.Exception.Message }
+            finally {
+                Set-Item -Path $targetWriterPath -Value $realTargetWriter
+                Set-Item -Path $excludeWriterPath -Value $realExcludeWriter
+            }
+            $recoveryError | Should BeNullOrEmpty
+            $recoveryTargetWriterWitness.count | Should Be 0
+            $recoveryExcludeWriterWitness.count | Should Be 0
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $excludeBefore) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $targetBefore) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($unrelatedPath)) -Right $laterUnrelatedBytes) | Should Be $true
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+        }
+        finally {
+            if($realTargetWriter){Set-Item -Path $targetWriterPath -Value $realTargetWriter}
+            if($realExcludeWriter){Set-Item -Path $excludeWriterPath -Value $realExcludeWriter}
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-exclude-prefix-'}
+        }
+    }
+
+    # Scenario: A completed target or exclude update is recovered after its restore writer flushes only a prefix.
+    # Purpose: Keep the published applied bytes intact through the interrupted restore, then retry to the full original bytes.
+    It 'InterT50_retries_<WriterKind>_restore_after_a_flushed_prefix_fault' -TestCases @(@{WriterKind='target'},@{WriterKind='exclude'}) {
+        param($WriterKind)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-restore-prefix-'+[guid]::NewGuid().ToString('N'))
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        New-Item -ItemType Directory -Force -Path $userHome | Out-Null
+        $unrelatedPath=Join-Path $targetRoot 'project-notes/personal.txt'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $unrelatedPath) | Out-Null
+        Set-TestText -Path $unrelatedPath -Value 'unrelated original bytes'
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+        [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        $excludeOriginal=[IO.File]::ReadAllBytes($excludePath)
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $newTargetBytes=[Text.Encoding]::UTF8.GetBytes('# fully applied replacement'+"`n")
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $writerPath=if($WriterKind -ceq 'target'){'Function:\Write-TargetMutationStreamBytes'}else{'Function:\Write-GitInfoExcludeStreamBytes'}
+        $realWriter=$null
+        $recoveryRootCreated=$false
+        try {
+            $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+            . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $recoveryRootCreated=$true
+            $snapshot=New-TargetMutationSnapshot -TargetRoot $targetRoot -RelativePaths @($relativePath) -BackupRoot $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot -Repository $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState -Repository $targetRoot -GitExecutable 'git'
+            Save-SkillMigrationJournal -Snapshot $snapshot -ExcludeSnapshot $excludeSnapshot `
+                -Path $journalPath -GitState $gitState -Phase 'mutating'
+            $script:SkillMigrationJournalContext=[pscustomobject]@{
+                Snapshot=$snapshot;ExcludeSnapshot=$excludeSnapshot;Path=$journalPath;GitState=$gitState
+            }
+            if($WriterKind -ceq 'target'){
+                Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $newTargetBytes
+                $appliedBytes=[IO.File]::ReadAllBytes($targetPath)
+            }
+            else{
+                Set-ManagedGitInfoExclude -Repository $targetRoot -ManagedPaths @($relativePath) -Snapshot $excludeSnapshot
+                $appliedBytes=[IO.File]::ReadAllBytes($excludePath)
+            }
+            $script:SkillMigrationJournalContext=$null
+            Set-TestText -Path $unrelatedPath -Value 'later unrelated bytes'
+            $laterUnrelatedBytes=[IO.File]::ReadAllBytes($unrelatedPath)
+            $faultWitness=[pscustomobject]@{count=0}
+            $faultSentinel='SYP214 restore writer prefix fault '+[guid]::NewGuid().ToString('N')
+            $interruptAfterPrefix={
+                param([Parameter(Mandatory=$true)][IO.FileStream]$Stream,
+                    [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes)
+                $faultWitness.count++
+                $Stream.Position=0
+                $Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength -gt 0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $faultSentinel
+            }.GetNewClosure()
+            $restoreFailure=''
+            $realWriter=(Get-Command ($writerPath -replace '^Function:\\','') -CommandType Function).ScriptBlock
+            Set-Item -Path $writerPath -Value $interruptAfterPrefix
+            # When
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $restoreFailure=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+            $publishedTargetStayedApplied=$false
+            $publishedExcludeStayedApplied=$false
+            if($WriterKind -ceq 'target'){
+                $publishedTargetStayedApplied=Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $appliedBytes
+            }
+            else{
+                $publishedExcludeStayedApplied=Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $appliedBytes
+            }
+            # When
+            $retryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $retryFailure=$_.Exception.Message }
+            # Then
+            $faultWitness.count | Should Be 1
+            $restoreFailure | Should Match ([regex]::Escape($faultSentinel))
+            $retryFailure | Should BeNullOrEmpty
+            $publishedTargetStayedApplied | Should Be ($WriterKind -ceq 'target')
+            $publishedExcludeStayedApplied | Should Be ($WriterKind -ceq 'exclude')
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalTarget) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $excludeOriginal) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($unrelatedPath)) -Right $laterUnrelatedBytes) | Should Be $true
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+        }
+        finally {
+            if($realWriter){Set-Item -Path $writerPath -Value $realWriter}
+            $script:SkillMigrationJournalContext=$null
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-restore-prefix-'}
+        }
+    }
+
+    # Scenario: A real child process is terminated after a durable mutation intent and a flushed target/exclude prefix.
+    # Purpose: Exercise abrupt writer death without finally and require recovery to preserve complete original bytes.
+    It 'InterT70_recovers_<WriterKind>_after_the_writer_process_dies' -TestCases @(@{WriterKind='target'},@{WriterKind='exclude'}) {
+        param($WriterKind)
+        # Given
+        $previousErrorActionPreference=$ErrorActionPreference
+        $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('syp214-process-crash-'+[guid]::NewGuid().ToString('N'))
+        $childScriptPath=Join-Path $recoveryRoot 'writer-crash-child.ps1'
+        $markerPath=Join-Path $recoveryRoot 'prefix-flushed.marker'
+        $completionPath=Join-Path $recoveryRoot 'writer-complete.marker'
+        $stdoutPath=Join-Path $recoveryRoot 'child.stdout.log'
+        $stderrPath=Join-Path $recoveryRoot 'child.stderr.log'
+        $backupRoot=Join-Path $recoveryRoot 'target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        $userHome=Join-Path $caseRoot 'user'
+        $childProcess=$null
+        $recoveryRootCreated=$false
+        New-Item -ItemType Directory -Force -Path $recoveryRoot | Out-Null
+        $recoveryRootCreated=$true
+        New-Item -ItemType Directory -Force -Path $userHome | Out-Null
+        $excludePath=Get-Syp214GitInfoExcludeFixturePath -Repository $targetRoot
+        if($WriterKind -ceq 'exclude'){
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        elseif(-not (Test-Path -LiteralPath $excludePath -PathType Leaf)){
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $excludePath) | Out-Null
+            [IO.File]::WriteAllText($excludePath,"# existing project exclusions`n",[Text.UTF8Encoding]::new($false))
+        }
+        $bootstrapPrefix=New-Syp214BootstrapMutationPrefix
+        . $bootstrapPrefix -TargetRoot $targetRoot -GitExecutable 'git'
+        $originalTarget=[IO.File]::ReadAllBytes($targetPath)
+        $originalExclude=[IO.File]::ReadAllBytes($excludePath)
+        $snapshotBefore=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+            -Entries @([pscustomobject]@{targetPath=$relativePath})
+        $childScriptText=New-Syp214WriterCrashChildScript
+        [IO.File]::WriteAllText($childScriptPath,$childScriptText,[Text.UTF8Encoding]::new($false))
+        $childArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$childScriptPath,
+            $script:BootstrapScript,$targetRoot,$recoveryRoot,$relativePath,$WriterKind,$markerPath,$completionPath)
+        $argumentLine=[string]::Join(' ',@($childArguments | ForEach-Object { '"'+([string]$_).Replace('"','\"')+'"' }))
+        try {
+            # When
+            $childProcess=Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList $argumentLine `
+                -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            if(-not $childProcess.WaitForExit(30000)){
+                Stop-Process -Id $childProcess.Id -Force
+                throw 'SYP214 writer crash child exceeded its bounded 30-second wait.'
+            }
+            $childProcess.Refresh()
+            $prefixEvidence=$null
+            $markerReadFailure=''
+            if(Test-Path -LiteralPath $markerPath -PathType Leaf){
+                try{$prefixEvidence=Get-Content -Raw -Encoding UTF8 -LiteralPath $markerPath | ConvertFrom-Json}
+                catch{$markerReadFailure=$_.Exception.Message}
+            }
+            $prefixWasFlushed=$null -ne $prefixEvidence
+            $writerReturned=Test-Path -LiteralPath $completionPath -PathType Leaf
+            $preRecoveryTargetWasOriginal=Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalTarget
+            $preRecoveryExcludeWasOriginal=Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $originalExclude
+            $writerFinalPath=if($WriterKind -ceq 'target'){$targetPath}else{$excludePath}
+            $markerPathIsFinal=$false
+            $markerPathSameParent=$false
+            $preRecoveryWriterFinalMatchesPrefix=$false
+            $preRecoveryWriterStageVerifiedOrCleared=$false
+            if($null -ne $prefixEvidence){
+                try{
+                    $markerFinalPath=ConvertTo-Syp214HandleFinalPath ([string]$prefixEvidence.finalPath)
+                    $expectedFinalPath=[IO.Path]::GetFullPath($writerFinalPath)
+                    $markerPathIsFinal=$markerFinalPath.Equals($expectedFinalPath,[StringComparison]::OrdinalIgnoreCase)
+                    $markerPathSameParent=([IO.Path]::GetDirectoryName($markerFinalPath)).Equals(
+                        [IO.Path]::GetDirectoryName($expectedFinalPath),[StringComparison]::OrdinalIgnoreCase)
+                    if($markerPathIsFinal){
+                        $preRecoveryWriterFinalMatchesPrefix=Test-Syp214CrashWriterEvidenceMatchesPath `
+                            -Evidence $prefixEvidence -Path $writerFinalPath
+                    }
+                    elseif($markerPathSameParent){
+                        $preRecoveryWriterStageVerifiedOrCleared=Test-Syp214CrashWriterStageIfRetained `
+                            -Evidence $prefixEvidence -FinalPath $writerFinalPath
+                    }
+                }
+                catch{}
+            }
+            # When
+            $recoveryFailure=''
+            try { Restore-SkillMigrationJournal -Repository $targetRoot -Path $journalPath | Out-Null }
+            catch { $recoveryFailure=$_.Exception.Message }
+            $snapshotAfter=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome `
+                -Entries @([pscustomobject]@{targetPath=$relativePath})
+            $repositoryTreePreserved=$false
+            $markerStageValidAfterRecovery=$false
+            if($null -ne $prefixEvidence -and ($markerPathIsFinal -or $markerPathSameParent)){
+                $markerStageValidAfterRecovery=Test-Syp214CrashWriterStageIfRetained `
+                    -Evidence $prefixEvidence -FinalPath $writerFinalPath
+                if($WriterKind -ceq 'target'){
+                    $repositoryTreePreserved=Test-Syp214CrashRecoveryRepositoryTree `
+                        -Before $snapshotBefore.repository.fullTree -After $snapshotAfter.repository.fullTree `
+                        -Evidence $prefixEvidence -RepositoryRoot $targetRoot -FinalPath $targetPath
+                }
+                else{
+                    $repositoryTreePreserved=Test-Syp214InventoryEqual `
+                        -Left $snapshotBefore.repository.fullTree -Right $snapshotAfter.repository.fullTree
+                }
+            }
+            # Then
+            $prefixWasFlushed | Should Be $true
+            [string]$markerReadFailure | Should BeNullOrEmpty
+            $writerReturned | Should Be $false
+            ($null -ne $prefixEvidence -and [string]$prefixEvidence.writerKind -ceq $WriterKind -and
+                [string]$prefixEvidence.type -ceq 'file' -and [bool]$prefixEvidence.regularFile -and
+                [uint32]$prefixEvidence.nativeFileType -eq 1 -and [uint32]$prefixEvidence.numberOfLinks -eq 1 -and
+                [long]$prefixEvidence.length -eq 3 -and [regex]::IsMatch([string]$prefixEvidence.sha256,'^[0-9a-f]{64}$')) | Should Be $true
+            ($markerPathIsFinal -or $markerPathSameParent) | Should Be $true
+            if($markerPathIsFinal){
+                $preRecoveryWriterFinalMatchesPrefix | Should Be $true
+            }
+            else{
+                $preRecoveryWriterStageVerifiedOrCleared | Should Be $true
+            }
+            $preRecoveryTargetWasOriginal | Should Be $true
+            $preRecoveryExcludeWasOriginal | Should Be $true
+            $recoveryFailure | Should BeNullOrEmpty
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($targetPath)) -Right $originalTarget) | Should Be $true
+            (Test-TargetMutationBytesEqual -Left ([IO.File]::ReadAllBytes($excludePath)) -Right $originalExclude) | Should Be $true
+            $repositoryTreePreserved | Should Be $true
+            $markerStageValidAfterRecovery | Should Be $true
+            (Test-Syp214GitStateEqual -Left $snapshotBefore.repository -Right $snapshotAfter.repository) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.repository.gitInfoExclude -Right $snapshotAfter.repository.gitInfoExclude) | Should Be $true
+            (Test-Syp214InventoryEqual -Left $snapshotBefore.user.fullTree -Right $snapshotAfter.user.fullTree) | Should Be $true
+        }
+        finally {
+            if($childProcess -and -not $childProcess.HasExited){Stop-Process -Id $childProcess.Id -Force -ErrorAction SilentlyContinue}
+            $ErrorActionPreference=$previousErrorActionPreference
+            Set-StrictMode -Off
+            if($recoveryRootCreated){Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-process-crash-'}
         }
     }
 }
@@ -656,6 +1599,53 @@ Describe 'SYP214 USER-only bootstrap boundary' {
             (Get-FileHash -LiteralPath $userManifest).Hash | Should Be $beforeManifest
         }
         finally { if ($locked) { $locked.Dispose() } }
+    }
+
+    # Scenario: WhatIf or normal bootstrap receives a valid one-file Skill while USER resolves to the consumer directory itself.
+    # Purpose: Fail closed before observation or mutation, and never report the same physical Skill as removable.
+    It 'InterT28_<Mode>_preserves_a_valid_Skill_when_USER_and_Repository_are_identical' -TestCases @(@{Mode='WhatIf'},@{Mode='Apply'}) {
+        param($Mode)
+        # Given
+        $entries=New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
+        $entries=Set-Syp214SingleFileSkillFixture -Repository $targetRoot -UserHome $userHome -Entries $entries
+        Copy-Item -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json') `
+            -Destination (Join-Path $targetRoot '.agents/catalog-skills.manifest.json') -Force
+        $userHome=$targetRoot
+        $sourceSkillPath='.agents/skills/syp214-fixture/SKILL.md'
+        $sourceSkill=Join-Path $sourceRoot $sourceSkillPath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sourceSkill) | Out-Null
+        [IO.File]::Copy((Join-Path $targetRoot $sourceSkillPath),$sourceSkill,$true)
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $entriesForSnapshot=@($entries)
+        $before=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entriesForSnapshot
+        $sourceBefore=@(Get-Syp214FileInventory -Root $sourceRoot -RelativePaths @($sourceSkillPath))
+        $sourceTreeBefore=@(Get-Syp214TreeInventory -Root $sourceRoot)
+        # When
+        if($Mode -ceq 'WhatIf'){$run=Invoke-Syp214Bootstrap -WhatIf -CaptureFailure}
+        else{$run=Invoke-Syp214Bootstrap -CaptureFailure}
+        $outputLines=@($run.output | ForEach-Object { [string]$_ })
+        $outputText=$outputLines -join [Environment]::NewLine
+        $migrationLines=@($outputLines | Where-Object { $_ -match '^Skill migration syp214-fixture: ' })
+        # Then
+        if([int]$run.exitCode -eq 0){
+            if($Mode -ceq 'WhatIf'){
+                $migrationLines.Count | Should Be 1
+                $migrationLines[0] | Should Match '^Skill migration syp214-fixture: preserve:'
+            }
+            $outputText | Should Not Match 'retire verified ignored/untracked copy'
+        }
+        else{
+            $outputText | Should Match '(?i)((same|identical|overlapping|aliased).*(root|directory)|(root|directory).*(same|identical|overlap|alias|distinct|separate)|must (be )?distinct|must differ)'
+            $outputText | Should Not Match 'retire verified ignored/untracked copy'
+        }
+        $after=Get-Syp214FixtureSnapshot -Repository $targetRoot -UserHome $userHome -Entries $entriesForSnapshot
+        (Test-Syp214InventoryEqual -Left $before.repository.fullTree -Right $after.repository.fullTree) | Should Be $true
+        (Test-Syp214PointInventoryEqual -Left $before.repository -Right $after.repository) | Should Be $true
+        (Test-Syp214GitStateEqual -Left $before.repository -Right $after.repository) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $before.repository.gitInfoExclude -Right $after.repository.gitInfoExclude) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $before.user.fullTree -Right $after.user.fullTree) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $sourceBefore -Right (Get-Syp214FileInventory -Root $sourceRoot -RelativePaths @($sourceSkillPath))) | Should Be $true
+        (Test-Syp214InventoryEqual -Left $sourceTreeBefore -Right (Get-Syp214TreeInventory -Root $sourceRoot)) | Should Be $true
     }
 
     # Scenario: A historical manifest lists the same tracked project Skill as a selected shared Skill.
