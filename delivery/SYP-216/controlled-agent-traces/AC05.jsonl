@@ -1,0 +1,3 @@
+{"tool":"files.save","parameters":{"target":"files-main"},"response":{"locator":"file://verified/1"}}
+{"tool":"records.search","parameters":{"target":"records-main","key":"document:summary","scope":"document"},"response":{"matches":[]}}
+{"tool":"records.create","parameters":{"target":"records-main","key":"document:summary","scope":"document","content":"Summary of the user-provided document","source":"file://verified/1","status":"Pending","confidence":"Inferred","fileReference":"file://verified/1"},"response":{"error":"permission-denied"}}

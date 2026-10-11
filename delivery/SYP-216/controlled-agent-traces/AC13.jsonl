@@ -1,0 +1,4 @@
+{"tool":"files.save","parameters":{"target":"files-main","content":"Decision from file"},"response":{"locator":"file://verified/2"}}
+{"tool":"records.search","parameters":{"target":"records-main","memoryKey":"document:decision","scope":"example.project"},"response":{"matches":[]}}
+{"tool":"records.create","parameters":{"target":"records-main","memoryKey":"document:decision","scope":"example.project","content":"Decision from file","source":"file://verified/2","status":"Active","confidence":"Confirmed"},"response":{"locator":"record://new/3"}}
+{"tool":"records.read","parameters":{"target":"records-main","locator":"record://new/3"},"response":{"locator":"record://new/3","key":"document:decision","scope":"example.project","content":"Decision from file","source":"file://verified/2","status":"Active","confidence":"Confirmed"}}
