@@ -37,6 +37,9 @@ function New-Syp214LegacySkill {
             catalogRepository='https://example.com/ai-instructions.git'; catalogCommit=('c'*40)
             catalogId='test-catalog'; lockSha256=('a'*64); files=$userEntries}
         [IO.File]::WriteAllText((Join-Path $UserHome '.agents/catalog-skills.manifest.json'), ($userManifest | ConvertTo-Json -Depth 10))
+        # The real USER updater retains its coordination file after installation.
+        $fixtureLock = [IO.File]::Open((Join-Path $UserHome '.agents/update-agent-environment.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $fixtureLock.Dispose()
     }
     return $entries
 }
@@ -2301,6 +2304,158 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
             Set-StrictMode -Off
             Remove-Syp214TemporaryRecoveryRoot -Path $recoveryRoot -ExpectedPrefix 'syp214-dacl-prefix-'
         }
+    }
+}
+
+Describe 'SYP214 USER migration serialization' {
+    BeforeEach {
+        $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $sourceRoot = Join-Path $caseRoot 'source'
+        $sourceArchive = Join-Path $caseRoot 'source.zip'
+        $targetRoot = Join-Path $caseRoot 'consumer'
+        $userHome = Join-Path $caseRoot 'user'
+        $script:TestConfigurationPath = Join-Path $caseRoot 'config.json'
+        $script:TestProvenancePath = Join-Path $caseRoot 'provenance.json'
+        New-TestSource -Path $sourceRoot
+        New-TestRepository -Path $targetRoot
+        New-TestConfiguration -Path $script:TestConfigurationPath
+        $entries = New-Syp214LegacySkill -Repository $targetRoot -UserHome $userHome
+        foreach ($entry in $entries) {
+            $destination = Join-Path $sourceRoot $entry.targetPath
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            [IO.File]::Copy((Join-Path $targetRoot $entry.targetPath), $destination, $true)
+        }
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+        $userLockPath = Join-Path $userHome '.agents/update-agent-environment.lock'
+    }
+
+    # Scenario: A valid legacy USER installation has no updater coordination file yet.
+    # Purpose: Keep WhatIf mutation-free and limit first Apply's USER change to the explicit empty lock file.
+    It 'InterT05_creates_only_the_coordination_file_on_first_apply_and_keeps_WhatIf_read_only' {
+        # Given
+        Remove-Item -LiteralPath $userLockPath -Force
+        $userFiles = @(Get-ChildItem -LiteralPath $userHome -Recurse -Force -File | ForEach-Object {
+            [pscustomobject]@{path=$_.FullName; sha256=(Get-FileHash -LiteralPath $_.FullName).Hash}
+        })
+        # When / Then
+        Invoke-Syp214Bootstrap -WhatIf | Out-Null
+        Test-Path -LiteralPath $userLockPath | Should Be $false
+        Invoke-Syp214Bootstrap | Out-Null
+        Test-Path -LiteralPath $userLockPath -PathType Leaf | Should Be $true
+        (Get-Item -LiteralPath $userLockPath).Length | Should Be 0
+        foreach ($file in $userFiles) { (Get-FileHash -LiteralPath $file.path).Hash | Should Be $file.sha256 }
+        @(Get-ChildItem -LiteralPath $userHome -Recurse -Force -File).Count | Should Be ($userFiles.Count + 1)
+    }
+
+    # Scenario: USER updater holds its exclusive lock before consumer bootstrap starts.
+    # Purpose: Preserve every REPO Skill and ownership entry while Instructions continue, then allow retirement after release.
+    It 'InterT10_preserves_the_entire_Skill_while_the_USER_updater_holds_its_lock' {
+        # Given
+        $userManifestPath = Join-Path $userHome '.agents/catalog-skills.manifest.json'
+        $userManifestHash = (Get-FileHash -LiteralPath $userManifestPath).Hash
+        $heldLock = [IO.File]::Open($userLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            # When
+            $output = @(Invoke-Syp214Bootstrap)
+            # Then
+            foreach ($entry in $entries) {
+                (Get-FileHash -LiteralPath (Join-Path $targetRoot $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256
+            }
+            $after = Get-Content -Raw -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | ConvertFrom-Json
+            @($after.files | Where-Object { $_.targetPath -like '.agents/skills/*' }).Count | Should Be $entries.Count
+            (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
+            (Get-FileHash -LiteralPath $userManifestPath).Hash | Should Be $userManifestHash
+            ($output -join "`n") | Should Match 'USER.*lock'
+        }
+        finally { $heldLock.Dispose() }
+        Invoke-Syp214Bootstrap | Out-Null
+        foreach ($entry in $entries) { Test-Path -LiteralPath (Join-Path $targetRoot $entry.targetPath) | Should Be $false }
+    }
+
+    # Scenario: Another updater attempts its actual OS lock after evidence collection, deletion and manifest publication, or during rollback.
+    # Purpose: Protect the final check/delete gap and keep USER evidence stable throughout success and failure paths; release on return.
+    It 'InterT20_holds_the_USER_lock_through_<MigrationOutcome>_and_releases_it_afterward' -TestCases @(@{MigrationOutcome='apply'}, @{MigrationOutcome='rollback'}) {
+        param([string]$MigrationOutcome)
+        # Given: Wrap existing production boundaries in a disposable child, without changing the runtime under test.
+        $originalBootstrap = $script:BootstrapScript
+        $bootstrapText = [IO.File]::ReadAllText($originalBootstrap)
+        $runtimeRoot = Split-Path -Parent $originalBootstrap
+        $bootstrapText = $bootstrapText.Replace('$PSScriptRoot', ("'" + $runtimeRoot.Replace("'", "''") + "'"))
+        $probePath = Join-Path $caseRoot 'user-lock-probes.json'
+        $probeLiteral = "'" + $probePath.Replace("'", "''") + "'"
+        $wrappers = @'
+$script:LockProbeResults = @()
+function Assert-Syp214UpdaterLockBlocked {
+    param([string]$Checkpoint)
+    $blocked = $false
+    try {
+        $contender = [IO.File]::Open((Join-Path $UserHome '.agents/update-agent-environment.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $contender.Dispose()
+    }
+    catch [IO.IOException] { $blocked = $true }
+    $script:LockProbeResults += [pscustomobject]@{checkpoint=$Checkpoint; blocked=$blocked}
+    [IO.File]::WriteAllText(PROBE_PATH, (ConvertTo-Json -InputObject @($script:LockProbeResults)))
+    if (-not $blocked) { throw "Competing USER updater acquired the lock at $Checkpoint." }
+}
+$script:OriginalMigrationPlan = (Get-Command Get-RepoSharedSkillsMigrationPlan).ScriptBlock
+function Get-RepoSharedSkillsMigrationPlan {
+    param([string]$Repository,[object]$Manifest,[object[]]$TrustedSkills,[string]$UserHome,[string]$GitExecutable='git')
+    $result = @(& $script:OriginalMigrationPlan @PSBoundParameters)
+    Assert-Syp214UpdaterLockBlocked 'evidence-collected'
+    return $result
+}
+$script:OriginalSkillRemoval = (Get-Command Remove-TargetMutationFile).ScriptBlock
+function Remove-TargetMutationFile {
+    param([object]$Snapshot,[string]$RelativePath)
+    if ($RelativePath -like '.agents/skills/*') { Assert-Syp214UpdaterLockBlocked 'before-skill-removal' }
+    & $script:OriginalSkillRemoval @PSBoundParameters
+    if ($RelativePath -like '.agents/skills/*') { Assert-Syp214UpdaterLockBlocked 'after-skill-removal' }
+}
+$script:OriginalManifestWrite = (Get-Command Set-TargetMutationFileBytes).ScriptBlock
+function Set-TargetMutationFileBytes {
+    param([object]$Snapshot,[string]$RelativePath,[byte[]]$Bytes)
+    if ($RelativePath -ceq '.codex/ai-instructions.manifest.json') { Assert-Syp214UpdaterLockBlocked 'before-manifest-publication' }
+    & $script:OriginalManifestWrite @PSBoundParameters
+    if ($RelativePath -ceq '.codex/ai-instructions.manifest.json') { Assert-Syp214UpdaterLockBlocked 'after-manifest-publication' }
+}
+$script:OriginalSnapshotRestore = (Get-Command Restore-TargetMutationSnapshot).ScriptBlock
+function Restore-TargetMutationSnapshot {
+    param([object]$Snapshot)
+    Assert-Syp214UpdaterLockBlocked 'rollback'
+    & $script:OriginalSnapshotRestore @PSBoundParameters
+}
+'@
+        $wrappers = $wrappers.Replace('PROBE_PATH', $probeLiteral)
+        $boundary = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+        if ($boundary -lt 0) { throw 'Bootstrap definition boundary is missing.' }
+        $childPath = Join-Path $caseRoot 'serialized-bootstrap.ps1'
+        [IO.File]::WriteAllText($childPath, $bootstrapText.Insert($boundary, $wrappers + "`n"), [Text.UTF8Encoding]::new($false))
+        $script:BootstrapScript = $childPath
+        try {
+            # When
+            $run = Invoke-Syp214Bootstrap -FailureAfterSkillRemovalCount $(if ($MigrationOutcome -eq 'rollback') { 1 } else { 0 }) -CaptureFailure
+            # Then
+            $probes = @(Get-Content -Raw -LiteralPath $probePath | ConvertFrom-Json)
+            @($probes | Where-Object { -not $_.blocked }).Count | Should Be 0
+            @($probes | Where-Object { $_.checkpoint -eq 'evidence-collected' }).Count | Should Be 1
+            if ($MigrationOutcome -eq 'apply') {
+                $run.exitCode | Should Be 0
+                @($probes | Where-Object { $_.checkpoint -eq 'after-skill-removal' }).Count | Should Be $entries.Count
+                @($probes | Where-Object { $_.checkpoint -eq 'after-manifest-publication' }).Count | Should Be 1
+                foreach ($entry in $entries) { Test-Path -LiteralPath (Join-Path $targetRoot $entry.targetPath) | Should Be $false }
+            }
+            else {
+                $run.exitCode | Should Not Be 0
+                ($run.output -join "`n") | Should Match 'Injected Skill migration failure'
+                @($probes | Where-Object { $_.checkpoint -eq 'rollback' }).Count | Should Be 1
+                foreach ($entry in $entries) {
+                    (Get-FileHash -LiteralPath (Join-Path $targetRoot $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256
+                }
+            }
+            $released = [IO.File]::Open($userLockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $released.Dispose()
+        }
+        finally { $script:BootstrapScript = $originalBootstrap }
     }
 }
 

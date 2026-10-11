@@ -26,7 +26,7 @@
 
 `~/.agents/skills/` 提供 Codex 與 GitHub Copilot 共用的可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
 
-共用 Catalog Skills 只由 USER updater 安裝／更新至 USER（`~/.agents/skills/`）。Consumer bootstrap 繼續更新 Instructions；USER 缺少或驗證失敗時也不得回退 REPO 安裝，應回報 USER 修復／更新需求。專案自有 Skills 仍可使用並必須保留。
+共用 Catalog Skills 只由 USER updater 安裝／更新至 USER（`~/.agents/skills/`）。Consumer bootstrap 繼續更新 Instructions；USER 缺少或驗證失敗時也不得回退 REPO 安裝，應回報 USER 修復／更新需求。專案自有 Skills 仍可使用並必須保留。 <!-- ai-invariant:base.shared-skills-user-only -->
 
 - 提出或更新實作計畫 → `~/.agents/skills/plan-production-change/SKILL.md`
 - 效能改善、benchmark、query optimization 或 N+1 驗證 → `~/.agents/skills/verify-data-access-performance/SKILL.md`

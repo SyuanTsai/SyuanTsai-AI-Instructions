@@ -823,6 +823,29 @@ namespace CodexAiInstructions
             finally { if (handle != null) handle.Dispose(); }
         }
 
+        public static SafeFileHandle OpenExclusiveUserUpdateLock(string path)
+        {
+            SafeFileHandle handle = CreateFile(
+                path, GenericRead | GenericWrite, 0,
+                IntPtr.Zero, 4 /* OPEN_ALWAYS */, FileAttributeNormal | FileFlagOpenReparsePoint, IntPtr.Zero);
+            try
+            {
+                EnsureValidHandle(handle, "Unable to acquire the exclusive USER updater lock.");
+                ByHandleFileInformation information = GetInformation(handle, "Unable to inspect the USER updater lock.");
+                if ((information.FileAttributes & (FileAttributeReparsePoint | FileAttributeDirectory)) != 0 ||
+                    information.NumberOfLinks != 1)
+                {
+                    throw new IOException("The USER updater lock is not a single-link regular file.");
+                }
+                return handle;
+            }
+            catch
+            {
+                if (handle != null) handle.Dispose();
+                throw;
+            }
+        }
+
         public static SafeFileHandle OpenStandaloneForAtomicDelete(string path)
         {
             SafeFileHandle handle = CreateFile(
@@ -1442,6 +1465,30 @@ function Get-GitPathComparer {
     }
     if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
     return [System.StringComparer]::Ordinal
+}
+
+function Open-UserSkillMigrationLock {
+    param([Parameter(Mandatory=$true)][string]$UserHome)
+    $homePath = Get-FullPathWithoutTrailingSeparator -Path $UserHome
+    if (-not (Test-Path -LiteralPath (Join-Path $homePath '.agents') -PathType Container)) {
+        throw 'USER updater lock unavailable because the USER .agents root is missing.'
+    }
+    $guard = $null
+    $handle = $null
+    try {
+        $guard = [CodexAiInstructions.NativeFileMutation]::OpenForAtomicDirectoryGuard($homePath, '.agents')
+        $handle = [CodexAiInstructions.NativeFileMutation]::OpenExclusiveUserUpdateLock(
+            (Join-Path $homePath '.agents/update-agent-environment.lock'))
+        $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::ReadWrite)
+        $handle = $null
+        $result = [pscustomobject]@{ Stream=$stream; Guard=$guard }
+        $guard = $null
+        return $result
+    }
+    finally {
+        if ($null -ne $handle) { $handle.Dispose() }
+        if ($null -ne $guard) { $guard.Dispose() }
+    }
 }
 
 function Open-RepositoryOperationLock {
@@ -4036,6 +4083,7 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
 
 $repositoryOperationLock = $null
 $repositoryIndexLock = $null
+$userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
     if (-not $WhatIf) {
@@ -4326,11 +4374,17 @@ try {
             $skill
         }
     )
+    $hasHistoricalSkills = $manifestExists -and $manifestSchemaVersion -in @(2,3) -and
+        @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' }).Count -gt 0
+    if ($hasHistoricalSkills -and -not $WhatIf) {
+        try { $userSkillMigrationLock = Open-UserSkillMigrationLock -UserHome $UserHome }
+        catch { Write-Output "USER updater lock unavailable; preserve REPO Skills and retry after USER repair/update completes: $($_.Exception.Message)" }
+    }
     foreach ($readiness in @(Get-UserSharedSkillsReadiness -UserHome $UserHome -CatalogId $provenance.catalogId -TrustedSkills $trustedSkills)) {
         if (-not $readiness.ready) { Write-Output "USER Skill repair/update required for $($readiness.id): $($readiness.reason). REPO fallback is disabled." }
     }
     $skillMigration = @()
-    if ($manifestExists -and $manifestSchemaVersion -in @(2,3)) {
+    if ($hasHistoricalSkills -and ($WhatIf -or $null -ne $userSkillMigrationLock)) {
         $skillMigration = @(Get-RepoSharedSkillsMigrationPlan -Repository $targetRootPath -Manifest $manifest -TrustedSkills $trustedSkills -UserHome $UserHome -GitExecutable $GitExecutable)
     }
     $migrationById = @{}
@@ -4706,6 +4760,10 @@ catch {
     throw $bootstrapError
 }
 finally {
+    if ($null -ne $userSkillMigrationLock) {
+        $userSkillMigrationLock.Stream.Dispose()
+        $userSkillMigrationLock.Guard.Dispose()
+    }
     if ($null -ne $repositoryIndexLock) {
         $repositoryIndexLock.Stream.Dispose()
         if (Test-Path -LiteralPath ([string]$repositoryIndexLock.Path) -PathType Leaf) {

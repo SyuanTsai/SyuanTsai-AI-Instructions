@@ -186,19 +186,25 @@ function Invoke-BootstrapScript {
 
         [string] $WorkingDirectory,
 
+        [string] $UserHome,
+
         [switch] $UseCurrentRepositoryRoot,
 
         [string] $InstructionCommit = ('c' * 40)
     )
 
     New-TestProvenance -ArchivePath $SourceArchivePath -Path $script:TestProvenancePath -InstructionCommit $InstructionCommit
+    if ([string]::IsNullOrWhiteSpace($UserHome)) {
+        $UserHome = Join-Path (Split-Path -Parent $TargetRoot) 'bootstrap-user'
+    }
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
         '-File', $script:BootstrapScript,
         '-SourceArchivePath', $SourceArchivePath,
         '-ConfigurationPath', $ConfigurationPath,
-        '-ProvenancePath', $script:TestProvenancePath
+        '-ProvenancePath', $script:TestProvenancePath,
+        '-UserHome', $UserHome
     )
 
     if (-not $UseCurrentRepositoryRoot) {

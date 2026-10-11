@@ -26,7 +26,7 @@ If an applicable module is missing, identify the missing file and do not invent 
 
 `~/.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
 
-Shared Catalog Skills are installed and updated only in USER (`~/.agents/skills/`) by the USER updater. Consumer bootstrap updates Instructions and never installs shared Skills in REPO, including when USER is missing or invalid; report the USER repair/update requirement. Repository-specific Skills remain available and protected.
+Shared Catalog Skills are installed and updated only in USER (`~/.agents/skills/`) by the USER updater. Consumer bootstrap updates Instructions and never installs shared Skills in REPO, including when USER is missing or invalid; report the USER repair/update requirement. Repository-specific Skills remain available and protected. <!-- ai-invariant:base.shared-skills-user-only -->
 
 - Create or update an implementation plan → `~/.agents/skills/plan-production-change/SKILL.md`
 - Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `~/.agents/skills/verify-data-access-performance/SKILL.md`
