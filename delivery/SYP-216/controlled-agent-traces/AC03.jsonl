@@ -1,0 +1,2 @@
+{"tool":"targets.resolve","parameters":{"purpose":"records"},"response":{"target":"records-main"}}
+{"tool":"targets.resolve","parameters":{"purpose":"files"},"response":{"target":"files-main"}}

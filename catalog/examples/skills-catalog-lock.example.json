@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "3885666efaf4088512d7cf056f1ee18ee42764cba25707e754f27c9faccb87cf",
+  "catalogSha256": "ca09c6b67c5b7b7d1518c5f787f8f0f481eca8d5617890e16b3f54997591faf7",
   "sources": [
     {
       "id": "agent-skills",
@@ -45,9 +45,9 @@
       "contentSha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
     {
-      "id": "manage-notion-ai-memory",
+      "id": "manage-ai-memory",
       "sourceId": "agent-skills",
-      "sourcePath": ".agents/skills/manage-notion-ai-memory",
+      "sourcePath": ".agents/skills/manage-ai-memory",
       "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
     },
     {

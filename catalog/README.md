@@ -60,7 +60,7 @@ Conditional operator 的 production semantics：
 - `anyOfCapabilities` 的每個內層集合代表 alternatives；每個集合至少滿足一項。
 - Capability `kind` 為 `command`、`connector` 或 `environment`；`state` 為 `available`、`authenticated` 或 `configured`。
 - `command` + `available` 可由本機 `Get-Command` 驗證；authentication、connector、API/environment readiness 不得由名稱猜測，必須有明確 runtime evidence。
-- 只有 Skill 在任何安全路徑都無法運作時，connector 或 environment 才屬於安裝期 compatibility。若 Skill 已定義「tool 不可用時略過外部寫入並繼續本機工作」的安全 fallback，該 connector 是執行期 dependency，保留在 Skill metadata／instructions，不得放入 `requiredCapabilities` 阻止 Skill 載入。`manage-notion-ai-memory` 的 Notion MCP 即採此模式。
+- 只有 Skill 在任何安全路徑都無法運作時，connector 或 environment 才屬於安裝期 compatibility。若 Skill 已定義「tool 不可用時略過外部寫入並繼續本機工作」的安全 fallback，該 connector 是執行期 dependency，保留在 Skill metadata／instructions，不得放入 `requiredCapabilities` 阻止 Skill 載入。`manage-ai-memory` 的可選遠端記憶工具即採此模式。
 - Runtime evidence 透過 `AI_INSTRUCTIONS_CAPABILITY_EVIDENCE` 傳入 JSON array，例如：
 
 ```json

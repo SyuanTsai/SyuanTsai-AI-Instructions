@@ -108,7 +108,7 @@ Describe 'production Skills Catalog' {
             'plan-production-change' = 'general'
             'verify-data-access-performance' = 'general'
             'investigate-datadog-logs' = 'general'
-            'manage-notion-ai-memory' = 'general'
+            'manage-ai-memory' = 'general'
             'manage-task-handoff' = 'general'
             'write-copilot-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
@@ -240,26 +240,40 @@ Describe 'production Skills Catalog' {
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
 
-    # Scenario: Durable AI memory is selected while a Notion connector may be unavailable in the current runtime.
-    # Purpose: Keep the Skill opt-in while allowing its own safe non-Notion fallback to run without fabricated capability evidence.
-    It 'InterT19_routes_Notion_memory_through_the_opt_in_ai_memory_profile' {
+    # Scenario: Durable AI memory is selected with an opt-in profile, and the previous stable ID resolves through its tombstone.
+    # Purpose: Keep existing selections working across the rename without requiring any connector at installation time.
+    It 'InterT19_routes_AI_memory_through_the_opt_in_profile_and_legacy_alias' {
         $profile = @($script:catalog.profiles | Where-Object { [string]$_.id -eq 'ai-memory' })
-        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-notion-ai-memory' })
+        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-ai-memory' })
+        $legacy = @($script:catalog.skills | Where-Object { [string]$_.id -eq 'manage-notion-ai-memory' })
 
         $profile.Count | Should Be 1
         [bool]$profile[0].default | Should Be $false
-        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-notion-ai-memory','manage-task-handoff')
+        Assert-StringSequence -Actual @($profile[0].includes) -Expected @('manage-ai-memory','manage-task-handoff')
         $skill.Count | Should Be 1
         [string]$skill[0].group | Should Be 'knowledge-management'
         Assert-StringSequence -Actual @($skill[0].profiles) -Expected @('ai-memory')
         @($skill[0].compatibility.requiredCapabilities).Count | Should Be 0
+        Assert-StringSequence -Actual @($skill[0].lifecycle.aliases) -Expected @('manage-notion-ai-memory')
+        $legacy.Count | Should Be 1
+        [string]$legacy[0].lifecycle.status | Should Be 'removed'
+        [string]$legacy[0].lifecycle.replacementId | Should Be 'manage-ai-memory'
+        @($legacy[0].profiles).Count | Should Be 0
 
         try {
             Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
             $selection = [pscustomobject]@{ profiles=@('ai-memory'); includeSkills=@(); excludeSkills=@() }
             Assert-StringSequence `
                 -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
-                -Expected @('manage-notion-ai-memory','manage-task-handoff')
+                -Expected @('manage-ai-memory','manage-task-handoff')
+            $legacySelection = [pscustomobject]@{ profiles=@(); includeSkills=@('manage-notion-ai-memory'); excludeSkills=@() }
+            Assert-StringSequence `
+                -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $legacySelection) `
+                -Expected @('manage-ai-memory','plan-production-change','verify-data-access-performance')
+            $excludedLegacySelection = [pscustomobject]@{ profiles=@('ai-memory'); includeSkills=@(); excludeSkills=@('manage-notion-ai-memory') }
+            Assert-StringSequence `
+                -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $excludedLegacySelection) `
+                -Expected @('manage-task-handoff')
         }
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }
     }
