@@ -32,10 +32,10 @@
     },
     {
       "id": "ai-memory",
-      "description": "Durable Notion memory and interruption-safe task Handoff workflows.",
+      "description": "Durable adopter-selected AI memory and interruption-safe task Handoff workflows.",
       "default": false,
       "includes": [
-        "manage-notion-ai-memory",
+        "manage-ai-memory",
         "manage-task-handoff"
       ],
       "excludes": []
@@ -145,6 +145,30 @@
         "sourcePath": "skills/manage-notion-ai-memory",
         "targetPath": ".agents/skills/manage-notion-ai-memory"
       },
+      "profiles": [],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "removed",
+        "aliases": [],
+        "replacementId": "manage-ai-memory"
+      }
+    },
+    {
+      "id": "manage-ai-memory",
+      "group": "knowledge-management",
+      "source": {
+        "sourceId": "general",
+        "sourcePath": "skills/manage-ai-memory",
+        "targetPath": ".agents/skills/manage-ai-memory"
+      },
       "profiles": [
         "ai-memory"
       ],
@@ -159,7 +183,9 @@
       "dependencies": [],
       "lifecycle": {
         "status": "active",
-        "aliases": []
+        "aliases": [
+          "manage-notion-ai-memory"
+        ]
       }
     },
     {

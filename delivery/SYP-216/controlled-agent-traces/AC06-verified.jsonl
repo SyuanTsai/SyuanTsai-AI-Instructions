@@ -1,0 +1,3 @@
+{"tool":"records.search","parameters":{"key":"project:example.project:notes-length","scope":"example.project"},"response":{"matches":[]}}
+{"tool":"records.create","parameters":{"key":"project:example.project:notes-length","scope":"example.project","content":"Project example.project may prefer short release notes.","source":"assistant-inference","status":"Pending","confidence":"Inferred"},"response":{"locator":"record://candidate/1"}}
+{"tool":"records.read","parameters":{"locator":"record://candidate/1"},"response":{"key":"project:example.project:notes-length","scope":"example.project","content":"Project example.project may prefer short release notes.","source":"assistant-inference","status":"Pending","confidence":"Inferred"}}
