@@ -2,7 +2,7 @@
 
 這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source。共用 Agent Skills 只由 Catalog 指向的 external repositories 提供，本 Repository 不保存 Skill source 副本。
 
-目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions、`.agents/skills/**` 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。
+目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。共用 Catalog Skills 只由 USER updater 安裝／更新至 `~/.agents/skills/**`；USER 缺少或不可用也不回退 REPO。專案自有 Skills 保留。
 
 ## Production 契約
 
@@ -33,7 +33,7 @@ Test-SkillsCatalogContract `
 1. 驗證 installed config v4、runtime bundle v2、所有 runtime bytes、Catalog 與 Lock。
 2. 依更新 policy 檢查 canonical protected `main` 或 latest GitHub release；預設只通知，不自動安裝。
 3. 依 Catalog selection 解析 external Skills，只取得 lock 中的 immutable commits，驗證 archive 與每個 Skill content inventory。
-4. 將 Codex、GitHub Copilot 與選中的 Skills 組成已驗證 archive，再交給 mutation engine。
+4. 將 Codex、GitHub Copilot Instructions 組成已驗證 archive，再交給 mutation engine；選中的 Skills 只提供可信 USER inventory 核對，不加入 consumer desired set。
 5. 在 common Git directory 的 repository operation lock 內先辨識 reserved tracked Agent artifacts。若存在，於 Repository 外保存 HEAD、branch、完整 active index、status、diff、檔案 bytes 與 SHA-256 inventory；加入精確 `info/exclude` 規則，以 task-scoped identity 建立只含 reserved path deletions 的 `chore: stop tracking local AI instructions` 本機 commit，再依最新來源替換精確 runtime files。無 remote、缺少永久 Git identity 或 detached HEAD 都可安全完成；detached HEAD 會建立 `codex/ai-instructions-remediation-*` 本機 branch。任何後續同步失敗會以 applied-state CAS 還原 HEAD、index、檔案與 exclude snapshot；若外部程序已變更其中狀態則保留外部內容並回報 backup，且 consumer commit 永不自動 push。
 6. Mutation engine 依 manifest hash 更新未被自訂的檔案、建立新檔、移除來源已刪除且未被修改的檔案。既有 target／manifest 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 mutation handle，並拒絕 reparse file 與多重 hard-link alias；寫入在同一 deny-write/delete handle 驗證 snapshot original bytes、寫入並保存 applied bytes。新檔建立會從 target root 起逐層持有可阻擋 rename 的 parent handles，建立後再核對 file handle identity，因此 parent-junction swap 不能把 create 導向 root 外。受管檔案移除同樣在 handle-bound root confinement 內驗證 bytes，再由該 handle 設定 delete disposition，關閉後才完成刪除，不留下 verify-to-delete 或 stale-precheck path-swap 窗口。Exact-hash read-only 檔案會在 handle-bound transaction 內暫時清除 attribute；guard handle 保持開啟，且重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復。Rollback 只處理本交易確實變更且 current state 仍等於 applied state 的路徑；父目錄只在能以 volume/file ID 證明由本交易建立時才會刪除。
 7. Bootstrap 另取得 active worktree 原生 `index.lock`，從 tracked/staged preflight 持有到 target、exclude 與 recovery evidence finalization 完成，使外部 staging 無法在成功交易中途插入。它先驗證 `info/exclude` 的完整 parent chain 都是 common Git metadata 內的 non-reparse directory，再以單一 exclusive read-modify-write handle 將所有 live worktree manifest 的精確受管路徑聯集寫入 managed marker block；manifest/config 固定以 UTF-8 讀取，Git C-quoted path 也以 strict UTF-8 bytes 解碼，因此 Unicode Skill resource 不受 Windows code page 影響。最後以不修改 active working tree/index 的 Git plumbing 建立 branch-neutral `PersonalAgent` recovery stash，並再次驗證 bytes 與 stash tree。
@@ -44,11 +44,11 @@ Test-SkillsCatalogContract `
 - `.codex/AI-Rules/*.en.md` → `.codex/AI-Rules/*.en.md`
 - `.github/copilot-instructions.en.md` → `.github/copilot-instructions.md`
 - `.github/AI-Rules/*.en.md` → `.github/AI-Rules/*.en.md`
-- external `.agents/skills/<skill-id>/**` → `.agents/skills/<skill-id>/**`
+- external `skills/<skill-id>/**`（或 legacy source）→ USER `~/.agents/skills/<skill-id>/**`，只由 USER updater 套用。
 
 `ai-instructions-contract.json` 只用於維護來源的 inventory、locale／platform parity、route、trigger 與 safety invariant regression，不會 fan out。GitHub Copilot 的 `.github/AI-Rules/**` 是由 Base Instructions 依任務明確要求讀取的條件式模組，不是 `.github/instructions/**/*.instructions.md` 的 path-specific 自動載入檔；不得以 `applyTo: "**"` 將所有模組無條件注入。不同 Copilot surface 對 Base 指示讀取其他 Repository 檔案的能力可能不同，導入新 surface 時應依 [GitHub Copilot custom instructions](https://docs.github.com/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot) 驗證 References／instructions inventory，且跨 surface 必須生效的最小安全邊界應保留在 Base。
 
-未被 Git 追蹤、且沒有 manifest ownership 的 project-owned 或 customized 檔案不覆寫。若 manifest 缺失，但本機未追蹤檔案的 bytes 精確等於 immutable source，bootstrap 可安全重建 manifest。Reserved Agent path 一旦已 tracked，則依上一節流程先完整備份並遷移，不再要求逐 Repository 人工清理。
+未被 Git 追蹤、且沒有 manifest ownership 的 project-owned 或 customized 檔案不覆寫。若 Instructions manifest 缺失，但本機未追蹤 Instructions bytes 精確等於 immutable source，bootstrap 可安全重建其 ownership；Skills 缺少 manifest 時只列報，不以同 hash 接管或刪除。Reserved Agent path 一旦已 tracked，則依上一節流程先完整備份並遷移，不再要求逐 Repository 人工清理。
 
 ## 官方 Felo replacement
 
@@ -259,11 +259,15 @@ $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
 
 JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已一致、`1` 表示失敗、`2` 表示 VerifyOnly 偵測到 drift、`3` 表示同一使用者已有更新程序持有 global lock。
 
+## 舊 REPO Skills 遷移
+
+Bootstrap 先按完整 Skill 盤點；只有舊 manifest 的所有 files 都 unchanged、ignored/untracked，且 USER stable ID、可信來源／immutable pin 與完整 inventory 一致，才備份後移除精確舊檔及相應 entries。USER 新版的 hash 不會用來判斷舊 REPO bytes。客製、額外資源、tracked/staged、unknown ownership、missing manifest、USER 不可用或競態都保留整個 Skill，並回報人工處理或 USER 修復需求。`-WhatIf` 只盤點，不寫 manifest、exclude、index 或 payload；遷移日誌及 raw-byte 備份保留在 Repository 外。恢復及 SYP-259 跨主機部署步驟見 [SYP-214 runbook](docs/delivery/syp-214/README.md)。
+
 ## Tracked Agent artifact 自癒
 
-Personal artifacts 必須保持 untracked。Bootstrap 以 `git rev-parse --show-toplevel`、Git common directory、worktree 與 branch identity 序列化每個 Repository；Windows 或 `core.ignorecase=true` 會使用 Git index 的實際 spelling 處理大小寫變體。允許的範圍只包含 root `AGENTS*.md`、`.agents/**`、明確 Codex/GitHub Agent runtime paths，以及舊 manifest 安全列出的 Agent／Skill targets。Manifest 若把 tracked production file 指到 scope 外，會在任何 mutation 前 fail closed。
+Personal artifacts 必須保持 untracked。Bootstrap 以 `git rev-parse --show-toplevel`、Git common directory、worktree 與 branch identity 序列化每個 Repository；Windows 或 `core.ignorecase=true` 會使用 Git index 的實際 spelling 處理大小寫變體。允許的範圍只包含 root `AGENTS*.md`、`.agents/**`（排除 `.agents/skills/**`）、明確 Codex/GitHub Instructions runtime paths，以及舊 manifest 安全列出的 Instructions targets。`.agents/skills/**` 與 `.codex/skills/**` 的 tracked、staged 或專案自有內容不進入 reserved remediation。Manifest 若把 tracked production file 指到 scope 外，會在任何 mutation 前 fail closed。
 
-自癒先把精確目標 bytes、HEAD／branch、active index、porcelain-v2 status、staged／unstaged diff 與 SHA-256 inventory 保存到系統 temp 下的 `codex-agent-artifact-backups`，再更新獨立的 remediated exclude block。取得 Git 原生 `index.lock` 後會先比對 backup index SHA-256；備份後插入的外部 staging 會原樣保留並讓本次 remediation 停止。Commit tree 從原 HEAD 的 private index 建立，只允許 `D` 狀態的 reserved paths；active index 則獨立移除相同 paths，因此無關 staged changes 不會進入 commit。刪除檔案前也會重驗 backup hash。Retired `search-with-felo` 只移除已知舊 implementation 檔名，包含僅存在於 working tree 的舊 implementation；未知鄰近檔案不會被推論式刪除。成功後立即執行正常同步；重跑在沒有 tracked reserved artifact 或已知 retired artifact 時不建立 commit。
+自癒先把精確目標 bytes、HEAD／branch、active index、porcelain-v2 status、staged／unstaged diff 與 SHA-256 inventory 保存到系統 temp 下的 `codex-agent-artifact-backups`，再更新獨立的 remediated exclude block。取得 Git 原生 `index.lock` 後會先比對 backup index SHA-256；備份後插入的外部 staging 會原樣保留並讓本次 remediation 停止。Commit tree 從原 HEAD 的 private index 建立，只允許 `D` 狀態的 reserved paths；active index 則獨立移除相同 paths，因此無關 staged changes 不會進入 commit。刪除檔案前也會重驗 backup hash。Retired `search-with-felo` 名稱本身不是移除證據，客製、未受管與 tracked Skills 都保留。成功後立即執行正常 Instructions 同步；沒有 tracked reserved Instructions artifact 時不建立 remediation commit。
 
 `cleanup-ai-instructions-pollution.ps1` 保留作為舊版 runtime 的明確授權診斷工具，但不是新版 bootstrap 的前置步驟。Consumer remediation commit 只留在本機，任何 runtime 都不得自動 push。
 
@@ -287,7 +291,7 @@ Invoke-Pester -Script .\tests -PassThru
 git diff --check
 ```
 
-Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，透過 real immutable archives 對 disposable target 執行兩次 bootstrap，驗證 manifest v2、external Skills、exact bytes、clean status、unchanged HEAD 與 stable `PersonalAgent` evidence：
+Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，透過 real immutable archives 對 disposable target 執行兩次 bootstrap，先套用 temporary USER Skills，再驗證 consumer Instructions manifest、零共用 Skill entries、USER bytes 不變、project Skill 保留、exact bytes、clean status、unchanged HEAD/index 與 stable `PersonalAgent` evidence：
 
 ```powershell
 .\scripts\test-syp101-production-smoke.ps1

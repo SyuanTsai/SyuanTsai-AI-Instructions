@@ -111,6 +111,9 @@ function Test-IsReservedAgentArtifactPath {
 
     try { $normalized = ConvertTo-RemediationPath -Path $Path }
     catch { return $false }
+    # Skills may be tracked project content. Migration needs whole-Skill ownership evidence.
+    if ($normalized.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { return $false }
     foreach ($exactPath in @(
         'AGENTS.md',
         'AGENTS.en.md',
@@ -124,7 +127,6 @@ function Test-IsReservedAgentArtifactPath {
     }
     foreach ($prefix in @(
         '.agents/',
-        '.codex/skills/',
         '.codex/ai-instructions-licenses/',
         '.github/ai-instructions-licenses/',
         '.github/AI-Rules/',
@@ -189,6 +191,8 @@ function Get-RemediationLegacyManifestPaths {
     foreach ($entry in @($manifest.files)) {
         if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['targetPath']) { continue }
         $targetPath = [string]$entry.targetPath
+        if ($targetPath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+            $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { continue }
         if (-not (Test-IsAllowedLegacyAgentArtifactPath -Path $targetPath)) {
             $isTracked = $false
             try {
@@ -199,7 +203,7 @@ function Get-RemediationLegacyManifestPaths {
             if ($isTracked) { throw "Tracked manifest target is outside the reserved Agent artifact scope: $targetPath" }
             continue
         }
-        [void]$paths.Add((ConvertTo-RemediationPath -Path $targetPath))
+        if (-not $targetPath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -and -not $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { [void]$paths.Add((ConvertTo-RemediationPath -Path $targetPath)) }
     }
     return ,$paths
 }
@@ -263,19 +267,6 @@ function Get-RemediationMutationPaths {
     foreach ($trackedPath in $TrackedPaths) { [void]$paths.Add([string]$trackedPath) }
     if (@($TrackedPaths | Where-Object { $Comparer.Equals([string]$_,'.codex/ai-instructions.manifest.json') }).Count -gt 0) {
         foreach ($manifestPath in $LegacyManifestPaths) { [void]$paths.Add([string]$manifestPath) }
-    }
-    foreach ($retiredPath in @(
-        '.agents/skills/search-with-felo/SKILL.md',
-        '.agents/skills/search-with-felo/agents/openai.yaml',
-        '.agents/skills/search-with-felo/scripts/SearchWithFelo.psm1',
-        '.agents/skills/search-with-felo/scripts/search-with-felo.ps1',
-        '.codex/skills/search-with-felo/SKILL.md',
-        '.codex/skills/search-with-felo/agents/openai.yaml',
-        '.codex/skills/search-with-felo/scripts/SearchWithFelo.psm1',
-        '.codex/skills/search-with-felo/scripts/search-with-felo.ps1'
-    )) {
-        $fullPath = Get-RemediationFullPath -Repository $Repository -RelativePath $retiredPath
-        if (Test-Path -LiteralPath $fullPath -PathType Leaf) { [void]$paths.Add($retiredPath) }
     }
     return @($paths | Sort-Object)
 }
@@ -518,23 +509,6 @@ function Remove-RemediationFiles {
     }
 }
 
-function Remove-EmptyRetiredFeloDirectories {
-    param([Parameter(Mandatory = $true)][string] $Repository)
-
-    foreach ($relativePath in @(
-        '.agents/skills/search-with-felo/scripts',
-        '.agents/skills/search-with-felo/agents',
-        '.agents/skills/search-with-felo',
-        '.codex/skills/search-with-felo/scripts',
-        '.codex/skills/search-with-felo/agents',
-        '.codex/skills/search-with-felo'
-    )) {
-        Assert-RemediationPathHasNoReparsePoint -Repository $Repository -RelativePath $relativePath
-        $fullPath = Get-RemediationFullPath -Repository $Repository -RelativePath $relativePath
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { continue }
-        if (@(Get-ChildItem -Force -LiteralPath $fullPath).Count -eq 0) { [System.IO.Directory]::Delete($fullPath,$false) }
-    }
-}
 
 function Set-RemediationHead {
     param([Parameter(Mandatory = $true)][object] $Transaction)
@@ -714,7 +688,7 @@ function Invoke-AgentArtifactRemediation {
         -MutationPaths $mutationPaths -Comparer $comparer -IndexPath $indexPath -CommonGitDirectory $commonGitDirectory `
         -Head $head -HeadReference $headReference
     $excludePath = Get-RemediationGitInfoExcludePath -Repository $repositoryRoot -GitExecutable $GitExecutable -CommonGitDirectory $commonGitDirectory
-    $excludePatterns = @($mutationPaths + @('.agents/skills/search-with-felo/','.codex/skills/search-with-felo/') | Sort-Object -Unique)
+    $excludePatterns = @($mutationPaths | Sort-Object -Unique)
     $transaction = [pscustomobject][ordered]@{
         Repository=$repositoryRoot
         GitExecutable=$GitExecutable
@@ -747,7 +721,6 @@ function Invoke-AgentArtifactRemediation {
             $transaction.IndexMutated = $true
         }
         Remove-RemediationFiles -Transaction $transaction
-        Remove-EmptyRetiredFeloDirectories -Repository $repositoryRoot
         Set-RemediationHead -Transaction $transaction
         if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit)) { $transaction.HeadUpdated = $true }
 

@@ -433,6 +433,26 @@ function Assert-AiRuleReferences {
         }
     }
 
+    # Scenario: The USER-only safety rule disappears while the other declared Base invariants remain intact.
+    # Purpose: Require this shared installation boundary in the contract and all four Base variants.
+    It 'InterT45_declares_the_USER_only_shared_Skills_safety_invariant' {
+        $contract = Get-AiInstructionContract
+        $identity = 'base.shared-skills-user-only'
+        $declaration = @($contract.baseInvariants | Where-Object { $_.id -ceq $identity })
+        $declaration.Count | Should Be 1
+        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot') -Context 'USER-only invariant platforms'
+        foreach ($platform in @($contract.platforms)) {
+            foreach ($locale in @($contract.locales)) {
+                $path = Get-ContractFullPath -RelativePath (Get-PlatformBaseRelativePath -Platform $platform -LocaleId ([string]$locale.id))
+                $text = Get-AiInstructionText -Path $path
+                @((Get-AiInvariantIds -Text $text) | Where-Object { $_ -ceq $identity }).Count | Should Be 1
+                $withoutRule = [regex]::Replace($text, '(?m)^.*<!-- ai-invariant:base\.shared-skills-user-only -->.*\n?', '')
+                $expected = @($contract.baseInvariants | Where-Object { @($_.platforms) -ccontains [string]$platform.id } | ForEach-Object id)
+                Assert-Throws -Action { Assert-OrdinalStringSet -Actual @(Get-AiInvariantIds -Text $withoutRule) -Expected $expected -Context 'removed USER-only rule' } -Context 'missing USER-only invariant'
+            }
+        }
+    }
+
     # Scenario: A common rule changes on only Codex or Copilot while each localized pair remains present.
     # Purpose: Enforce exact same-locale semantics after normalizing only the declared platform rule root.
     It 'InterT50_keeps_common_rules_normalized_across_platforms' {

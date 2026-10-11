@@ -76,7 +76,76 @@ jobs:
 
       - name: Run real pinned-archive production install and idempotence smoke
         shell: pwsh
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          & ./scripts/test-syp101-production-smoke.ps1
-          if (-not $?) { throw 'The real pinned-archive production smoke failed.' }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'syp101-production-smoke-evidence'
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          $evidencePath = Join-Path $artifactRoot 'smoke-evidence.json'
+          $stdoutPath = Join-Path $artifactRoot 'smoke.stdout.log'
+          $stderrPath = Join-Path $artifactRoot 'smoke.stderr.log'
+          $processResultPath = Join-Path $artifactRoot 'process-result.json'
+          $pwshPath = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw 'Verified portable PowerShell is unavailable for the production smoke child.' }
+          $pwshVersion = (& $pwshPath -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$pwshVersion).Trim() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw 'Production smoke child PowerShell identity does not match the verified runtime.' }
+          $checkoutHead = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutHead -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out smoke commit.' }
+          $checkoutTree = (& git rev-parse --verify 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutTree -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out smoke tree.' }
+          $sourceHead = if ($env:PULL_REQUEST_HEAD_SHA -match '^[0-9a-f]{40}$') { $env:PULL_REQUEST_HEAD_SHA } else { $env:GITHUB_SHA }
+          $repositoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $smokeScript = [IO.Path]::GetFullPath('./scripts/test-syp101-production-smoke.ps1')
+          $scriptHash = (Get-FileHash -LiteralPath $smokeScript -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:SYP101_SOURCE_HEAD_SHA = $sourceHead
+          $command = @($pwshPath, '-NoLogo', '-NoProfile', '-File', $smokeScript, '-RepositoryRoot', $repositoryRoot, '-EvidencePath', $evidencePath)
+          $startedAt = [DateTime]::UtcNow.ToString('o')
+          $childExitCode = $null
+          $completionState = 'launch-failed'
+          $launchError = $null
+          try {
+            & $pwshPath -NoLogo -NoProfile -File $smokeScript -RepositoryRoot $repositoryRoot -EvidencePath $evidencePath 1> $stdoutPath 2> $stderrPath
+            $childExitCode = $LASTEXITCODE
+            $completionState = 'exited'
+          }
+          catch {
+            $launchError = $_.Exception.Message
+          }
+          $completedAt = [DateTime]::UtcNow.ToString('o')
+          $evidenceExists = Test-Path -LiteralPath $evidencePath -PathType Leaf
+          $processResult = [ordered]@{
+            schemaVersion = 1; runId = [string]$env:GITHUB_RUN_ID; runAttempt = [string]$env:GITHUB_RUN_ATTEMPT
+            workflow = [string]$env:GITHUB_WORKFLOW; event = [string]$env:GITHUB_EVENT_NAME; ref = [string]$env:GITHUB_REF
+            sourceHeadCommit = $sourceHead; checkoutHeadCommit = $checkoutHead; checkoutTree = $checkoutTree
+            command = $command; scriptSha256 = $scriptHash; pwshVersion = ([string]$pwshVersion).Trim()
+            pwshExecutable = $pwshPath; verifiedPwshArchiveSha256 = [string]$env:SYP_REQUIRED_PWSH_SHA256
+            startedAtUtc = $startedAt; completedAtUtc = $completedAt; completionState = $completionState
+            childExitCode = $childExitCode; childExitStatus = $(if ($null -eq $childExitCode) { 'unknown' } elseif ($childExitCode -eq 0) { 'passed' } else { 'failed' })
+            launchError = $launchError; evidenceExists = $evidenceExists
+            evidenceSha256 = $(if ($evidenceExists) { (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stdoutPath = $stdoutPath; stdoutLength = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [long](Get-Item -LiteralPath $stdoutPath).Length } else { $null })
+            stdoutSha256 = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stderrPath = $stderrPath; stderrLength = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [long](Get-Item -LiteralPath $stderrPath).Length } else { $null })
+            stderrSha256 = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            evidencePath = $evidencePath
+          }
+          [IO.File]::WriteAllText($processResultPath, ($processResult | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+          if ($completionState -cne 'exited' -or $null -eq $childExitCode -or $childExitCode -ne 0 -or -not $evidenceExists) {
+            throw 'The real pinned-archive production smoke failed or omitted its evidence JSON.'
+          }
+          Write-Host "Production smoke evidence saved: $evidencePath; process result: $processResultPath"
+
+      - name: Upload production smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: syp101-production-smoke-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/syp101-production-smoke-evidence/smoke-evidence.json
+            ${{ runner.temp }}/syp101-production-smoke-evidence/process-result.json
+            ${{ runner.temp }}/syp101-production-smoke-evidence/smoke.stdout.log
+            ${{ runner.temp }}/syp101-production-smoke-evidence/smoke.stderr.log
+          if-no-files-found: warn
+          retention-days: 1

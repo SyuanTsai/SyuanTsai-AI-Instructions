@@ -24,13 +24,15 @@ If an applicable module is missing, identify the missing file and do not invent 
 
 ## Shared Skills
 
-`.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
+`~/.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
 
-- Create or update an implementation plan → `.agents/skills/plan-production-change/SKILL.md`
-- Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `.agents/skills/verify-data-access-performance/SKILL.md`
-- Provide an implementation prompt for GitHub Copilot → `.agents/skills/write-copilot-implementation-prompt/SKILL.md`
-- Query or modify a Jira issue, or use an issue key for work context → `.agents/skills/work-with-jira/SKILL.md`
-- Query or aggregate Datadog logs, analyze APM traces, handle Logs Explorer, trace, or investigation widget URLs, or investigate an incident with Datadog telemetry → `.agents/skills/investigate-datadog-logs/SKILL.md`
+Shared Catalog Skills are installed and updated only in USER (`~/.agents/skills/`) by the USER updater. Consumer bootstrap updates Instructions and never installs shared Skills in REPO, including when USER is missing or invalid; report the USER repair/update requirement. Repository-specific Skills remain available and protected. <!-- ai-invariant:base.shared-skills-user-only -->
+
+- Create or update an implementation plan → `~/.agents/skills/plan-production-change/SKILL.md`
+- Improve or verify performance, benchmark, optimize a query, or investigate N+1 behavior → `~/.agents/skills/verify-data-access-performance/SKILL.md`
+- Provide an implementation prompt for GitHub Copilot → `~/.agents/skills/write-copilot-implementation-prompt/SKILL.md`
+- Query or modify a Jira issue, or use an issue key for work context → `~/.agents/skills/work-with-jira/SKILL.md`
+- Query or aggregate Datadog logs, analyze APM traces, handle Logs Explorer, trace, or investigation widget URLs, or investigate an incident with Datadog telemetry → `~/.agents/skills/investigate-datadog-logs/SKILL.md`
 - Use official Felo search, slides, X search, or landing-page workflows → `~/.agents/skills/felo-search/SKILL.md`, `~/.agents/skills/felo-slides/SKILL.md`, `~/.agents/skills/felo-x-search/SKILL.md`, `~/.agents/skills/felo-landingpage/SKILL.md`
 
 The non-`core` Skills above may be absent because of the selected profile or runtime capabilities. A missing optional Skill is not by itself a task failure: build a GitHub Copilot implementation prompt directly from current repository evidence and Instructions; use Jira or Datadog directly only when an approved connector or API capability is already available; and use the `ExternalResearch` fallback through an approved connector or platform web search when the official Felo Skill is unavailable. If no safe fallback capability exists, report that the capability is not installed or configured and do not invent the missing Skill workflow. <!-- ai-invariant:base.optional-capability-no-invention -->

@@ -69,8 +69,8 @@ Describe 'Agent artifact remediation transaction' {
 
     # Given: A repository has only an untracked customized implementation in the exact retired search-with-felo directory.
     # When: Remediation runs without any tracked reserved path.
-    # Then: It backs up and removes the retired implementation without creating a commit or touching official Felo outside the repository.
-    It 'InterT20_backs_up_and_removes_untracked_retired_custom_FELO_without_a_commit' {
+    # Then: It preserves the unowned implementation and official Felo without mutation.
+    It 'InterT20_preserves_unowned_customized_Skills_without_a_commit' {
         $repository = Join-Path $TestDrive 'untracked-retired-felo'
         New-Item -ItemType Directory -Force -Path $repository | Out-Null
         & git -C $repository init --quiet
@@ -87,22 +87,13 @@ Describe 'Agent artifact remediation transaction' {
         [System.IO.File]::WriteAllText($officialPath,"official FELO`n",(New-Object System.Text.UTF8Encoding($false)))
         $headBefore = (@(& git -C $repository rev-parse HEAD) -join '').Trim()
 
+        # When
         $transaction = Invoke-AgentArtifactRemediation -Repository $repository
-        try {
-            Assert-TestCondition -Condition ($null -ne $transaction) -Message 'The remediation transaction was not returned.'
-            Assert-TestCondition -Condition (@($transaction.Paths).Count -eq 0) -Message 'Untracked FELO cleanup was incorrectly treated as tracked remediation.'
-            Assert-TestCondition -Condition ([string]::IsNullOrEmpty([string]$transaction.NewCommit)) -Message 'Untracked-only cleanup created a commit.'
-            Assert-TestCondition -Condition (((@(& git -C $repository rev-parse HEAD) -join '').Trim()) -eq $headBefore) -Message 'Untracked-only cleanup changed HEAD.'
-            Assert-TestCondition -Condition (-not (Test-Path -LiteralPath (Join-Path $repository '.agents\skills\search-with-felo'))) -Message 'The retired customized FELO directory remains active.'
-            $retiredBackup = (Get-Content -Raw -LiteralPath (Join-Path $transaction.Backup.Root 'files\.agents\skills\search-with-felo\SKILL.md')).Trim()
-            Assert-TestCondition -Condition ($retiredBackup -eq 'customized retired FELO') -Message 'The retired customized FELO file was not backed up exactly.'
-            Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath $officialPath).Trim() -eq 'official FELO') -Message 'The official FELO file was changed.'
-        }
-        finally {
-            if ($null -ne $transaction -and (Test-Path -LiteralPath $transaction.Backup.Root)) {
-                Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force
-            }
-        }
+        # Then
+        Assert-TestCondition -Condition ($null -eq $transaction) -Message 'Unowned/customized Skills must not enter reserved remediation.'
+        Assert-TestCondition -Condition (((@(& git -C $repository rev-parse HEAD) -join '').Trim()) -eq $headBefore) -Message 'Skill preservation changed HEAD.'
+        Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath $retiredPath).Trim() -eq 'customized retired FELO') -Message 'Unowned Skill changed.'
+        Assert-TestCondition -Condition ((Get-Content -Raw -LiteralPath $officialPath).Trim() -eq 'official FELO') -Message 'Official FELO changed.'
     }
 
     # Given: A manifest-like path starts at the filesystem root but otherwise resembles a reserved Agent path.

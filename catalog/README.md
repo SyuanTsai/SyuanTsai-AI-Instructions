@@ -20,7 +20,7 @@
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
-- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。Production Catalog/Lock 在 SYP-155～159 來源合併後已切換到 v2 canonical source；consumer target 仍為 `.agents/skills/<skill-id>/**`。不得把 target path 當成 source layout authority。
+- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。Production Catalog/Lock 在 SYP-155～159 來源合併後已切換到 v2 canonical source；targetPath 仍為 `.agents/skills/<skill-id>/**`，根目錄為 USER Home；consumer Instructions bootstrap 不套用共用 Skills。不得把 target path 當成 source layout authority。
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
@@ -93,6 +93,8 @@ Executable contract 與 JSON Schemas 採相同的 strict object／scalar boundar
 Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、description、metadata 與 non-empty body 實作 fail-closed lexical subset；它不宣稱是完整 YAML conformance authority。完整 frontmatter type／syntax contract 仍必須由 Standard v1 指定的 safe YAML formal validators 執行；subset 無法明確接受的 YAML scalar、tag、duplicate key 或複雜形態一律拒絕，不得以 PowerShell coercion 猜測。
 
 ## Managed manifest v2/v3 and user Skills provenance
+
+新 consumer manifest 只記錄 Instructions 及其 metadata。既有 v2/v3 Skill entries 僅用於保護與精確遷移舊 REPO 副本；generic stale-prune 不得清除它們。v1 沒有逐檔來源 ownership 的 Skill entries 保留，不推論式升級為可刪除副本。缺少／無效 USER、額外檔案或 tracked/staged 任一證據缺口都保留完整 Skill；共用 Skills 的唯一安裝／更新入口是 USER reconciler。獨立專案 Skills 與其他合法 host projection 不受此 consumer 契約禁止。
 
 每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。legacy manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；canonical manifest v3 才允許 `skills/<artifactId>/...` source 對應到 `.agents/skills/<artifactId>/...` target。未知 mapping／schema version 必須 fail closed，target projection 不隨 source root 自動改名。Manifest v2/v3 都不使用 Git submodule metadata。
 

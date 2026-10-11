@@ -328,6 +328,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/delivery/syp-214/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/delivery/syp-214/red-green.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/diagram-design-document-workflow.md",
       "license": "Apache-2.0"
     },
@@ -732,6 +740,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/repo-shared-skills-migration.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/routine_semantic_candidate.py",
       "license": "Apache-2.0"
     },
@@ -1041,6 +1053,10 @@
     },
     {
       "path": "tests/syp101-production-smoke-contract.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/syp214-user-only.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

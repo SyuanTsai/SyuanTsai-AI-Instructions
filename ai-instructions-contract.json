@@ -146,6 +146,13 @@
   ],
   "baseInvariants": [
     {
+      "id": "base.shared-skills-user-only",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
       "id": "base.missing-module-no-invention",
       "platforms": [
         "codex",

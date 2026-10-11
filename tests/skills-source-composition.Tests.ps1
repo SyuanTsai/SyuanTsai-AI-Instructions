@@ -19,6 +19,29 @@ function New-TestSkill {
 }
 
 Describe 'Skills source composition' {
+    # Scenario: A consumer requests Instructions-only composition with a licensed, resource-rich Skill selected.
+    # Purpose: Preserve verified USER inventory evidence while excluding every shared Skill payload from the archive.
+    It 'UnitT01_instruction_only_retains_full_USER_inventory_without_REPO_payload' {
+        # Given
+        $instructionRoot=Join-Path $TestDrive 'instruction-only-evidence'
+        New-Item -ItemType Directory -Force -Path $instructionRoot | Out-Null
+        Set-Content (Join-Path $instructionRoot 'AGENTS.md') 'Instructions'
+        $source=Join-Path $TestDrive 'resource-source'
+        $skill=New-TestSkill $source 'one' 'selected'
+        Set-Content (Join-Path $source 'LICENSE') 'root license'
+        New-Item -ItemType Directory -Force -Path (Join-Path $skill.skillRootPath 'assets/nested') | Out-Null
+        $binary=Join-Path $skill.skillRootPath 'assets/nested/data.bin'
+        [IO.File]::WriteAllBytes($binary,[byte[]]@(0,10,13,128,255))
+        # When
+        $result=New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @($skill) -DestinationRoot (Join-Path $TestDrive 'instructions-evidence') -InstructionsOnly
+        # Then
+        Test-Path (Join-Path $result.RootPath 'AGENTS.md') | Should Be $true
+        @(Get-ChildItem -LiteralPath (Join-Path $result.RootPath '.agents/skills') -Recurse -File).Count | Should Be 0
+        $inventory=@($result.SkillInventories['one'])
+        @($inventory | Where-Object targetPath -eq '.agents/skills/one/assets/nested/data.bin')[0].sha256 | Should Be (Get-FileHash $binary).Hash.ToLowerInvariant()
+        @($inventory | Where-Object targetPath -eq '.agents/skills/one/.ai-instructions-licenses/source/LICENSE').Count | Should Be 1
+        @($inventory | Where-Object targetPath -eq '.agents/skills/one/.ai-instructions-licenses/delivery.json').Count | Should Be 1
+    }
     # Scenario: Only one Skill is selected from a source with root and package-local declarations.
     # Purpose: Deliver inherited licenses with exact source identity while leaving the verified source unchanged.
     It 'UnitT05_delivers_root_and_local_licenses_for_one_selected_skill' {
