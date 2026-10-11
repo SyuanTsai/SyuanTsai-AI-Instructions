@@ -268,6 +268,98 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "delivery/SYP-216/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/acceptance-matrix.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/baseline-red-green.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-outcomes.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC01.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC02.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC03.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC04.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC05.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC06-verified.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC06.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC07.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC08.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC09-verified.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC10.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC11.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC12.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC13.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC14.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC15.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/controlled-agent-traces/AC16.jsonl",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/deployment-handoff.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-216/test-candidate-user-lifecycle.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/delivery/syp-195/README.md",
       "license": "Apache-2.0"
     },
