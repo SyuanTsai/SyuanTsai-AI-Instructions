@@ -25,4 +25,4 @@ This matrix tracks AC01–AC18 against the source package and the isolated centr
 
 The source package retains SYP-257 same-key body checks, index-only recovery, replacement ordering, and history regression. The legacy Notion fixture remains test-only while runtime v3/v4 mapping instructions ship with the new Skill. `manage-task-handoff` stays a separate Skill.
 
-Final source merge SHA, central candidate SHA and hashes, full validation results, and reproduction commands are recorded in the handoff once their immutable commits are available. The candidate is **not deployed**.
+The [deployment handoff](deployment-handoff.md) records the source merge SHA, central candidate revisions and hashes, validation results, and reproduction commands. The candidate is **not deployed**.
