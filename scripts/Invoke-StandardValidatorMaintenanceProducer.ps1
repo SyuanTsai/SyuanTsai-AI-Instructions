@@ -15,6 +15,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    throw 'AI-Instructions local execution is supported on Windows only; Linux, macOS, and WSL are unsupported.'
+}
 if ($CandidateRevision -cnotmatch '^[0-9a-f]{40}$' -or
     $AuthorityRevision -cnotmatch '^[0-9a-f]{40}$' -or
     $RunId -lt 1 -or $RunAttempt -lt 1) {

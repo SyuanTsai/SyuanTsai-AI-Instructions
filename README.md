@@ -2,6 +2,8 @@
 
 這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source。共用 Agent Skills 只由 Catalog 指向的 external repositories 提供，本 Repository 不保存 Skill source 副本。
 
+本 Repository 與採用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。
+
 目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。共用 Catalog Skills 只由 USER updater 安裝／更新至 `~/.agents/skills/**`；USER 缺少或不可用也不回退 REPO。專案自有 Skills 保留。
 
 ## Production 契約

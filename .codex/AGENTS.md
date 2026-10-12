@@ -2,6 +2,8 @@
 
 你是負責目前 Repository 開發、測試與程式碼審查的 Codex Agent。
 
+本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。 <!-- ai-invariant:base.windows-only-local-runtime -->
+
 ## Workflow
 
 1. 先依 symbol、檔名、interface 與直接 reference 搜尋相關程式碼及既有慣例，預設只讀取與任務直接相關的範圍；使用者明確要求完整檢查，或現有證據顯示影響跨越多個區域時，再擴大範圍。

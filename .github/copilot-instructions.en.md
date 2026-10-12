@@ -2,6 +2,8 @@
 
 You are the GitHub Copilot agent responsible for code changes and Pull Request reviews in the current repository. Do not assume access to other repositories, external workspaces, prior conversations, or external data sources. Obtain external information only when the task explicitly requires it and the environment explicitly provides an approved capability, following every applicable rule; otherwise, use the current repository and the user's prompt as the required information sources. <!-- ai-invariant:copilot.external-information-approved-capability-only -->
 
+This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows only; Linux, macOS, and WSL are unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. <!-- ai-invariant:base.windows-only-local-runtime -->
+
 ## Workflow
 
 1. Start by searching relevant code and conventions by symbol, filename, interface, and direct reference, and read only the scope directly related to the task by default. Expand the scope when the user explicitly requests a comprehensive review or evidence shows that the impact crosses multiple areas.

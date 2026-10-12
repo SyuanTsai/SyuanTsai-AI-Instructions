@@ -5258,3 +5258,132 @@ Describe 'Third-party source Pester case evidence' {
         }
     }
 }
+
+Describe 'Windows-only runtime scope and entrypoint guard boundaries' -Tag 'WindowsOnlyRuntimeBoundary' {
+    BeforeAll {
+        $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:StandardPath = Join-Path $script:RepositoryRoot 'docs\standards\skill-repository-standard.md'
+
+        function Assert-True {
+            param([bool] $Condition, [string] $Message)
+            if (-not $Condition) { throw $Message }
+        }
+
+        function Assert-Equal {
+            param($Actual, $Expected, [string] $Message)
+            if ($Actual -ne $Expected) { throw "$Message Expected='$Expected' Actual='$Actual'." }
+        }
+
+        function Assert-Match {
+            param([AllowNull()] $Actual, [string] $Pattern, [string] $Message)
+            if ([string]$Actual -notmatch $Pattern) {
+                $actualDisplay = if ($null -eq $Actual) { '<null>' } else { $Actual }
+                throw "$Message Actual='$actualDisplay' Pattern='$Pattern'."
+            }
+        }
+
+        function Assert-NotMatch {
+            param([string] $Actual, [string] $Pattern, [string] $Message)
+            if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
+        }
+    }
+    # Scenario: The Standard scope sentence omits CI hosts, exempts consumer Agent hosts, or reaches historical/test Skills.
+    # Purpose: Keep current local host scope and owner-reviewed production Skill descriptions precise under unchanged Standard v1.
+    It 'UnitT52_binds_windows_agent_ci_and_owned_skill_description_scope' {
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $scopeLines = @($standard -split '\r?\n' | Where-Object { $_ -match '使用其共用 AI-Instructions／Skills runtime' })
+        Assert-Equal $scopeLines.Count 1 'Standard must keep one explicit shared local Agent/runtime/CI scope paragraph.'
+        Assert-Match $scopeLines[0] '(?i)CI host' 'Standard scope must include local CI hosts.'
+        Assert-Match $scopeLines[0] '(?i)Windows' 'Standard scope must name Windows as the supported host.'
+        Assert-Match $scopeLines[0] '(?i)Linux.*macOS.*WSL' 'Standard scope must identify all unsupported local hosts.'
+        Assert-Match $scopeLines[0] '下游產品的 target/deployment OS' 'Standard scope must preserve downstream product deployment targets.'
+        Assert-NotMatch $scopeLines[0] '(?i)does not restrict downstream repositories|不限制下游(消費)? Repository' 'Standard must not exempt consumer Agent or CI hosts.'
+        Assert-Match $scopeLines[0] '遠端 SaaS' 'Standard scope must preserve remote SaaS operating environments.'
+
+        Assert-Match $scopeLines[0] 'owned production Skills.*active.*dormant.*bundled' 'Description requirement must cover owned active, dormant, and bundled production Skills.'
+        Assert-Match $scopeLines[0] 'Skill-Darktide-Translate' 'Description requirement must include owned independent production Skills outside Catalog membership.'
+        Assert-Match $scopeLines[0] '下一個 owner-reviewed source revision MUST.*SKILL\.md description' 'Description clarification must apply through the next normal source revision.'
+        Assert-Match $scopeLines[0] 'local execution 僅支援 Windows.*Linux/macOS/WSL 不支援' 'Production descriptions must state the supported and unsupported local hosts.'
+        Assert-Match $scopeLines[0] '測試 fixtures、examples 與 historical immutable source references 不屬於此更新範圍' 'Test fixtures and immutable historical references must remain out of scope.'
+        Assert-Match $scopeLines[0] '不將獨立產品 Skill 加入本 Catalog、profile、lock 或 bootstrap' 'Independent production Skills must remain outside central Catalog membership.'
+    }
+
+    # Scenario: A public executable entrypoint can acquire tools or change artifacts before checking its host.
+    # Purpose: Require the guard to be top-level and precede every non-helper operational statement.
+    It 'UnitT53_rejects_unsupported_hosts_before_public_entrypoint_operations' {
+        $entrypoints = @(
+            'scripts/install-ai-instructions-bootstrap.ps1',
+            'scripts/bootstrap-ai-instructions.ps1',
+            'scripts/bootstrap-ai-instructions-installed.ps1',
+            'scripts/bootstrap-ai-instructions-multisource.ps1',
+            'scripts/update-ai-instructions.ps1',
+            'scripts/update-agent-environment.ps1',
+            'scripts/cleanup-ai-instructions-pollution.ps1',
+            'scripts/invoke-ai-instructions-rollout.ps1',
+            'scripts/update-skills-catalog-lock.ps1',
+            'scripts/Invoke-RoutineSemanticScan.ps1',
+            'scripts/Invoke-StandardAuthorityGate.ps1',
+            'scripts/Invoke-StandardValidation.ps1',
+            'scripts/Resolve-StandardValidationTool.ps1',
+            'scripts/Validate-UpstreamAdapter.ps1',
+            'scripts/Validate-ThirdPartySkillSource.ps1',
+            'scripts/Test-StandardEntryPointResult.ps1',
+            'scripts/Prepare-StandardSemanticScanEvidence.ps1',
+            'scripts/Invoke-StandardValidatorMaintenanceProducer.ps1',
+            'scripts/Invoke-StandardValidatorMaintenanceProtectedConsumer.ps1',
+            'scripts/Assert-StandardValidatorMaintenanceReport.ps1',
+            'scripts/Assert-StandardValidatorMaintenanceInputs.ps1',
+            'scripts/Get-StandardValidatorMaintenanceEvidence.ps1'
+        )
+        foreach ($relativePath in $entrypoints) {
+            $path = Join-Path $script:RepositoryRoot $relativePath
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+            Assert-Equal @($parseErrors).Count 0 "Windows entrypoint '$relativePath' must remain parseable."
+            $statements = @($ast.EndBlock.Statements)
+            $guards = @($statements | Where-Object {
+                $_ -is [Management.Automation.Language.IfStatementAst] -and
+                $_.Extent.Text -match 'OSVersion\.Platform' -and
+                $_.Extent.Text -match 'AI-Instructions.*Windows only'
+            })
+            Assert-Equal $guards.Count 1 "Windows entrypoint '$relativePath' must have one top-level local-host guard."
+            $priorStatements = @($statements | Where-Object { $_.Extent.EndOffset -le $guards[0].Extent.StartOffset })
+            foreach ($statement in $priorStatements) {
+                $allowed = $false
+                if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { $allowed = $true }
+                elseif ($statement -is [Management.Automation.Language.PipelineAst] -and
+                    $statement.PipelineElements.Count -eq 1 -and
+                    $statement.PipelineElements[0].GetCommandName() -ceq 'Set-StrictMode') { $allowed = $true }
+                elseif ($statement -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $statement.Left.Extent.Text -match '\$ErrorActionPreference') { $allowed = $true }
+                elseif ($statement -is [Management.Automation.Language.IfStatementAst] -and
+                    $statement.Extent.Text -match 'DefineFunctionsOnly' -and
+                    $statement.Extent.Text -match 'return') { $allowed = $true }
+                if (-not $allowed) { throw "Windows entrypoint '$relativePath' has an operational top-level statement before its host guard at line $($statement.Extent.StartLineNumber)." }
+            }
+        }
+
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1')
+        Assert-True ($resolver.Contains('if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT)')) 'The resolver must reject every non-Windows runtime mode.'
+        $runner = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1')
+        Assert-True ($runner.Contains('if (-not $DefineFunctionsOnly -and [System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT)')) 'Function-only imports must be able to load the runner helpers.'
+        $authorityPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
+        $authority = Get-Content -Raw -Encoding UTF8 -LiteralPath $authorityPath
+        $authorityTokens = $null
+        $authorityErrors = $null
+        $authorityAst = [Management.Automation.Language.Parser]::ParseFile($authorityPath, [ref]$authorityTokens, [ref]$authorityErrors)
+        Assert-Equal @($authorityErrors).Count 0 'The authority gate must remain parseable.'
+        $authorityStatements = @($authorityAst.EndBlock.Statements)
+        $functionImports = @($authorityStatements | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text -match 'DefineFunctionsOnly' -and $_.Extent.Text -match 'return' })
+        $authorityGuards = @($authorityStatements | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text -match 'OSVersion\.Platform' -and $_.Extent.Text -match 'AI-Instructions.*Windows only' })
+        Assert-Equal $functionImports.Count 1 'The authority gate must retain one top-level function-only return.'
+        Assert-Equal $authorityGuards.Count 1 'The authority gate must retain one top-level Windows host guard.'
+        Assert-True ($functionImports[0].Extent.StartOffset -lt $authorityGuards[0].Extent.StartOffset) 'Function-only gate imports must return before executable host validation.'
+
+        $focusedPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-FocusedLinuxContainment.ps1'
+        $focusedError = $null
+        try { & $focusedPath } catch { $focusedError = $_.Exception.Message }
+        Assert-Match $focusedError 'retained development fixture, not supported acceptance evidence' 'The dormant Linux-labelled acceptance script must fail immediately with an unsupported-evidence diagnostic.'
+    }
+}
