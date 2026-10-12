@@ -5258,3 +5258,37 @@ Describe 'Third-party source Pester case evidence' {
         }
     }
 }
+
+Describe 'Windows-only support description scope' -Tag 'WindowsOnlyDescriptionScope' {
+    # Scenario: The Standard scope omits consumer CI, includes deployment targets, or reaches test and historical source text.
+    # Purpose: Keep only the support and owned production Skill description policy that this documentation change establishes.
+    It 'UnitT52_binds_windows_local_agent_ci_and_owned_skill_description_scope' {
+        $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-standard.md'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $scopeLines = @($standard -split '\r?\n' | Where-Object { $_ -match '使用其共用 AI-Instructions／Skills runtime' })
+        $scopeLines.Count | Should -Be 1
+
+        $scopeLines[0] | Should -Match '(?i)CI host'
+        $scopeLines[0] | Should -Match '(?i)Windows'
+        $scopeLines[0] | Should -Match '(?i)Linux.*macOS.*WSL'
+        $scopeLines[0] | Should -Match '下游產品的 target/deployment OS'
+        $scopeLines[0] | Should -Not -Match '(?i)不限制下游(消費)? Repository'
+        $scopeLines[0] | Should -Match '遠端 SaaS'
+
+        $scopeLines[0] | Should -Match 'owned production Skills.*active.*dormant.*bundled'
+        $scopeLines[0] | Should -Match 'Skill-Darktide-Translate'
+        $scopeLines[0] | Should -Match 'Source Repository 宣告的 authority\.commit 與 member hashes'
+        $scopeLines[0] | Should -Match 'snapshot 採用的 exact Standard bytes 綁定為固定版本'
+        $scopeLines[0] | Should -Match '僅當該 snapshot 的 pinned Standard bytes 包含本 Windows 支援規則時'
+        $scopeLines[0] | Should -Match 'source owner MUST 確保該 snapshot 規範的每個 owned production Skill 目前及後續 revision'
+        $scopeLines[0] | Should -Match 'local execution 僅支援 Windows.*Linux/macOS/WSL 不支援'
+        $scopeLines[0] | Should -Match '並保留既有 capability、trigger 與遠端 SaaS 語意'
+        $scopeLines[0] | Should -Match '較早 immutable references 與採用未含此規則之 pinned Standard 的 snapshots 依其原 pinned Standard 判定，不追溯修改'
+        $scopeLines[0] | Should -Match '測試 fixtures 與 examples 不屬於此描述更新範圍'
+        $scopeLines[0] | Should -Match '不將獨立產品 Skill 加入本 Catalog、profile、lock 或 bootstrap'
+
+        $scopeLines[0] | Should -Match 'selection metadata 的支援描述'
+        $scopeLines[0] | Should -Match '不構成 runtime、toolchain、CI enforcement 或 acceptance gate 變更的授權'
+        $scopeLines[0] | Should -Match '具體 defect 或明確 requirement.*依既有統一 contracts 另行授權'
+    }
+}

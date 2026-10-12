@@ -22,7 +22,7 @@
   "profiles": [
     {
       "id": "core",
-      "description": "Core engineering planning and data-access verification workflows.",
+      "description": "Core engineering planning and data-access verification workflows. Local execution is supported on Windows only.",
       "default": true,
       "includes": [
         "plan-production-change",
@@ -32,7 +32,7 @@
     },
     {
       "id": "ai-memory",
-      "description": "Durable adopter-selected AI memory and interruption-safe task Handoff workflows.",
+      "description": "Durable adopter-selected AI memory and interruption-safe task Handoff workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
         "manage-ai-memory",
@@ -42,7 +42,7 @@
     },
     {
       "id": "code-collaboration",
-      "description": "Code delegation and pull-request collaboration workflows.",
+      "description": "Code delegation and pull-request collaboration workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
         "review-bitbucket-pull-request",
@@ -52,7 +52,7 @@
     },
     {
       "id": "atlassian",
-      "description": "Jira and Confluence work-management workflows.",
+      "description": "Jira and Confluence work-management workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
         "publish-requirements-to-confluence",
@@ -62,7 +62,7 @@
     },
     {
       "id": "observability",
-      "description": "Telemetry and incident-investigation workflows.",
+      "description": "Telemetry and incident-investigation workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
         "investigate-datadog-logs"
@@ -71,14 +71,14 @@
     },
     {
       "id": "external-research",
-      "description": "Current public external-research workflows.",
+      "description": "Current public external-research workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [],
       "excludes": []
     },
     {
       "id": "knowledge-capture",
-      "description": "Authorized course and durable knowledge-capture workflows.",
+      "description": "Authorized course and durable knowledge-capture workflows. Local execution is supported on Windows only.",
       "default": false,
       "includes": [
         "capture-private-course-knowledge"

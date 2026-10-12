@@ -2,6 +2,8 @@
 
 本目錄定義 AI Instructions Repository、外部 Agent Skills repositories 與目標 Repository 之間的 production 契約。Installer 與 multi-source bootstrap 直接使用這些 checked-in schemas、source pins、Catalog 與 immutable lock。共用 Skill source 只存在於 Catalog 列出的 external repositories；本 Repository 不保存副本。`Skill-Darktide-Translate`（SYP-88／SYP-92）維持獨立，不加入本 Catalog 或 Lock。
 
+本 Catalog 的 profile 與 Skill `compatibility.platforms` 是選擇 metadata；`any` 維持既有語意，表示該 Skill metadata 未宣告額外作業系統限制，schema 與 parser 相容性不變。這些 metadata 不定義本 Repository 或消費 Repository 的本機 Agent/runtime 支援平台。本機支援範圍及 owned production Skill 的 description 要求，以 [Skill Repository Standard v1](../docs/standards/skill-repository-standard.md) 為準。
+
 ## 文件責任
 
 | 文件 | Schema | 責任 |

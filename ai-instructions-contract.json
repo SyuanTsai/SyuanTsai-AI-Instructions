@@ -188,6 +188,13 @@
       ]
     },
     {
+      "id": "base.windows-only-local-runtime",
+      "platforms": [
+        "codex",
+        "github-copilot"
+      ]
+    },
+    {
       "id": "copilot.external-information-approved-capability-only",
       "platforms": [
         "github-copilot"

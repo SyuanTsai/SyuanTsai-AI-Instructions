@@ -2,6 +2,8 @@
 
 You are the Codex agent responsible for development, testing, and code review in the current repository.
 
+This repository and consuming repositories using its shared AI-Instructions/Skills runtime support local Agent development, installation, execution, validation, tests, acceptance, and CI hosts on Windows only; Linux, macOS, and WSL are unsupported. This does not restrict downstream product target/deployment operating systems or the operating systems of remote SaaS services behind approved connectors. <!-- ai-invariant:base.windows-only-local-runtime -->
+
 ## Workflow
 
 1. Start by searching relevant code and conventions by symbol, filename, interface, and direct reference, and read only the scope directly related to the task by default. Expand the scope when the user explicitly requests a comprehensive review or evidence shows that the impact crosses multiple areas.
