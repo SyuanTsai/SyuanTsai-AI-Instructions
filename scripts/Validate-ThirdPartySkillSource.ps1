@@ -11,9 +11,6 @@ param(
     [switch]$SourceValidationEnvelope
 )
 $ErrorActionPreference='Stop'
-if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw 'AI-Instructions local execution is supported on Windows only; Linux, macOS, and WSL are unsupported.'
-}
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) { throw 'SourceRoot is required.' }
 if ($SourceValidationEnvelope) {
     if ($env:STANDARD_VALIDATION_STAGE_ID -cne 'package-validation' -or $env:STANDARD_VALIDATION_TOOL_ID -cne 'package-adapter' -or

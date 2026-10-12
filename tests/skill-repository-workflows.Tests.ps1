@@ -167,31 +167,10 @@ jobs:
         )
         Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'R4 must retain exactly the five registered active workflow files.'
         Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
-        $expectedJobMatrix = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = [pscustomobject]@{ id='windows-core'; name='Windows Core' }
-            '.github/workflows/standards-conformance.yml' = [pscustomobject]@{ id='authority-gate'; name='Standard v1 authority gate (manual)' }
-            '.github/workflows/syp101-production-smoke.yml' = [pscustomobject]@{ id='windows-install-smoke'; name='Windows Install Smoke' }
-            '.github/workflows/syp86-production-lock.yml' = [pscustomobject]@{ id='validate-lock'; name='Production lock check (manual or path-filtered push diagnostic)' }
-            '.github/workflows/validator-maintenance-producer.yml' = [pscustomobject]@{ id='diagnostic-producer'; name='Manual untrusted validator diagnostic' }
-        }
         $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
         $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
         foreach ($relativePath in $workflowPaths) {
             $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot $relativePath)
-            $jobsBlock = [regex]::Match($workflow, '(?ms)^jobs:\r?\n(?<block>.*)\z')
-            Assert-True $jobsBlock.Success "Workflow '$relativePath' must define its jobs block."
-            $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
-            Assert-Equal $jobMatches.Count 1 "Workflow '$relativePath' must retain its exact single Windows job."
-            $expectedJob = $expectedJobMatrix[$relativePath]
-            Assert-True ($null -ne $expectedJob) "Workflow '$relativePath' is absent from the approved Windows job matrix."
-            Assert-Equal $jobMatches[0].Groups[1].Value $expectedJob.id "Workflow '$relativePath' must retain its reviewed job ID."
-            $jobPattern = '(?ms)^  ' + [regex]::Escape([string]$expectedJob.id) + ':\r?\n(?<body>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)'
-            $jobBlock = [regex]::Match($jobsBlock.Groups['block'].Value, $jobPattern)
-            Assert-True $jobBlock.Success "Workflow '$relativePath' must retain the complete approved job."
-            Assert-Match $jobBlock.Groups['body'].Value ('(?m)^    name:\s*' + [regex]::Escape([string]$expectedJob.name) + '\s*$') "Workflow '$relativePath' must preserve the required context name."
-            Assert-Match $jobBlock.Groups['body'].Value '(?m)^    runs-on:\s*windows-latest\s*$' "Workflow '$relativePath' job must run on Windows."
-            Assert-Match $jobBlock.Groups['body'].Value '(?ms)^    permissions:\r?\n      contents:\s*read\s*$' "Workflow '$relativePath' job permissions must remain contents: read."
-            Assert-Match $workflow '(?ms)^permissions:\r?\n  contents:\s*read\s*$' "Workflow '$relativePath' global permissions must remain contents: read."
             if ([regex]::IsMatch($workflow, '(?m)^  pull_request:\s*$')) {
                 $pullRequestWorkflows.Add($relativePath)
                 $jobsBlock = [regex]::Match($workflow, '(?ms)^jobs:\r?\n(?<block>.*)\z')

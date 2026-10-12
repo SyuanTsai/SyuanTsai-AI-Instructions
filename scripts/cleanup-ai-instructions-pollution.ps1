@@ -8,9 +8,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw 'AI-Instructions local execution is supported on Windows only; Linux, macOS, and WSL are unsupported.'
-}
 
 if (Test-Path Env:GIT_INDEX_FILE) {
     throw 'Pollution cleanup requires the active worktree Git index; unset GIT_INDEX_FILE before retrying.'

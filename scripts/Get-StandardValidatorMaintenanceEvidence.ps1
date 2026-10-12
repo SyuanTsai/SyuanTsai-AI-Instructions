@@ -23,9 +23,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw 'AI-Instructions local execution is supported on Windows only; Linux, macOS, and WSL are unsupported.'
-}
 
 function Assert-MaintenanceAcquisitionEqual {
     param($Actual, $Expected, [string] $Context)

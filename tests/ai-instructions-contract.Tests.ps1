@@ -453,47 +453,6 @@ function Assert-AiRuleReferences {
         }
     }
 
-
-    # Scenario: The declared Windows boundary drifts out of a Base variant or is phrased to exempt consumer Agent hosts.
-    # Purpose: Keep local Agent execution and CI scope aligned while preserving product deployment and remote SaaS scope.
-    It 'InterT46_declares_windows_only_agent_and_ci_hosts_without_downstream_host_exemption' {
-        $contract = Get-AiInstructionContract
-        $identity = 'base.windows-only-local-runtime'
-        $declaration = @($contract.baseInvariants | Where-Object { $_.id -ceq $identity })
-        $declaration.Count | Should Be 1
-        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot') -Context 'Windows-only runtime invariant platforms'
-
-        foreach ($platform in @($contract.platforms)) {
-            foreach ($locale in @($contract.locales)) {
-                $path = Get-ContractFullPath -RelativePath (Get-PlatformBaseRelativePath -Platform $platform -LocaleId ([string]$locale.id))
-                $text = Get-AiInstructionText -Path $path
-                $scopeLine = @($text -split '\n' | Where-Object { $_ -match 'ai-invariant:base\.windows-only-local-runtime' })
-                $scopeLine.Count | Should Be 1
-                $scopeLine[0] | Should Match '(?i)CI'
-                $scopeLine[0] | Should Match '(?i)Windows'
-                $scopeLine[0] | Should Match '(?i)Linux'
-                $scopeLine[0] | Should Match '(?i)macOS'
-                $scopeLine[0] | Should Match '(?i)WSL'
-                $scopeLine[0] | Should Match '(?i)target.?deployment'
-                $scopeLine[0] | Should Not Match '(?i)does not restrict downstream repositories'
-                $scopeLine[0] | Should Not Match '不限制下游(消費)? Repository'
-            }
-        }
-
-        foreach ($relative in @('README.md','catalog/README.md','docs/standards/skill-repository-standard.md')) {
-            $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
-            $scopeLine = @($text -split '\n' | Where-Object { $_ -match '(?i)Windows' -and $_ -match '(?i)Linux' -and $_ -match '(?i)macOS' -and $_ -match '(?i)WSL' -and $_ -match '(?i)target.?deployment' })
-            $scopeLine.Count | Should Be 1
-            $scopeLine[0] | Should Match '(?i)CI'
-            $scopeLine[0] | Should Not Match '(?i)does not restrict downstream repositories'
-            $scopeLine[0] | Should Not Match '不限制下游(消費)? Repository'
-        }
-        $standard = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath 'docs/standards/skill-repository-standard.md')
-        $standard | Should Match 'Skill-Darktide-Translate'
-        $catalog = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath 'catalog/README.md')
-        $catalog | Should Match '(?i)compatibility\.platforms'
-        $catalog | Should Match '(?i)\bany\b'
-    }
     # Scenario: A common rule changes on only Codex or Copilot while each localized pair remains present.
     # Purpose: Enforce exact same-locale semantics after normalizing only the declared platform rule root.
     It 'InterT50_keeps_common_rules_normalized_across_platforms' {

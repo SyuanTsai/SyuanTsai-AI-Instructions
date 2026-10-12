@@ -180,17 +180,11 @@ function Test-CapabilityIdAvailable {
     return [bool](Test-CapabilityRequirement -Requirement $matches[0] -Evidence $Evidence)
 }
 
-function Assert-WindowsOnlySkillsRuntime {
-    if ((Get-CurrentPlatformId) -ne 'windows') {
-        throw 'AI-Instructions Skills selection is supported on Windows only; Linux, macOS, and WSL are unsupported.'
-    }
-}
 function Test-SkillCompatibility {
     param(
         [Parameter(Mandatory = $true)][object] $Skill,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Evidence
     )
-    Assert-WindowsOnlySkillsRuntime
 
     $compatibility = Get-OptionalPropertyValue -Object $Skill -Name 'compatibility'
     if ($null -eq $compatibility) {
@@ -375,8 +369,6 @@ function Resolve-SkillsSelection {
         [Parameter(Mandatory = $true)][object] $Catalog,
         [Parameter(Mandatory = $true)][object] $Selection
     )
-
-    Assert-WindowsOnlySkillsRuntime
 
     $profilesById = @{}
     foreach ($profile in @($Catalog.profiles)) {

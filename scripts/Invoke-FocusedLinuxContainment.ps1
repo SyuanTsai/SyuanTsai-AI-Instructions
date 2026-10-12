@@ -2,7 +2,6 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-throw 'Linux containment is a retained development fixture, not supported acceptance evidence; use the Windows Core gate.'
 
 $resolverPath = Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1'
 $testPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/standard-semantic-bridge.Tests.ps1'

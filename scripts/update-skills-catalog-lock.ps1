@@ -9,9 +9,6 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw 'AI-Instructions local execution is supported on Windows only; Linux, macOS, and WSL are unsupported.'
-}
 $ProgressPreference = 'SilentlyContinue'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

@@ -350,37 +350,4 @@ function New-SelectionCatalog {
             Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
         } 'not valid JSON'
     }
-    # Scenario: Linux/WSL and macOS call the exported selection API, including metadata that would otherwise accept any.
-    # Purpose: Reject unsupported hosts with a stable diagnostic before compatibility can short-circuit.
-    It 'UnitT97_rejects_linux_selection_even_for_any_and_null_compatibility' {
-        InModuleScope skills-selection {
-            Mock Get-CurrentPlatformId { return 'linux' }
-            $emptyCatalog = [pscustomobject]@{ profiles=@(); skills=@() }
-            $emptySelection = [pscustomobject]@{ profiles=@(); includeSkills=@(); excludeSkills=@() }
-            { Resolve-SkillsSelection -Catalog $emptyCatalog -Selection $emptySelection } | Should Throw 'Windows only'
-            { Test-SkillCompatibility -Skill ([pscustomobject]@{ compatibility=$null }) -Evidence @() } | Should Throw 'Windows only'
-        }
-    }
-
-    # Scenario: macOS invokes the exported compatibility operation directly.
-    # Purpose: Enforce the same local host boundary on every unsupported operating system.
-    It 'UnitT98_rejects_macos_compatibility_check' {
-        InModuleScope skills-selection {
-            Mock Get-CurrentPlatformId { return 'macos' }
-            $skill = [pscustomobject]@{ compatibility=[pscustomobject]@{ platforms=@('any'); shells=@(); requiredCapabilities=@(); anyOfCapabilities=@() } }
-            { Test-SkillCompatibility -Skill $skill -Evidence @() } | Should Throw 'Windows only'
-        }
-    }
-
-    # Scenario: Windows selects the generic any compatibility record and handles an empty selection.
-    # Purpose: Preserve metadata/parser semantics on the sole supported local host.
-    It 'UnitT99_keeps_any_compatibility_on_the_supported_windows_host' {
-        Remove-Module skills-selection -Force
-        Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-selection.psm1') -Force
-        $skill = [pscustomobject]@{ compatibility=[pscustomobject]@{ platforms=@('any'); shells=@(); requiredCapabilities=@(); anyOfCapabilities=@() } }
-        (Test-SkillCompatibility -Skill $skill -Evidence @()) | Should Be $true
-        $emptyCatalog = [pscustomobject]@{ profiles=@(); skills=@() }
-        $emptySelection = [pscustomobject]@{ profiles=@(); includeSkills=@(); excludeSkills=@() }
-        @(Resolve-SkillsSelection -Catalog $emptyCatalog -Selection $emptySelection).Count | Should Be 0
-    }
 }
