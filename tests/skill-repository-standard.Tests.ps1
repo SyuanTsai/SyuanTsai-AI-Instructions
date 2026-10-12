@@ -5277,10 +5277,14 @@ Describe 'Windows-only support description scope' -Tag 'WindowsOnlyDescriptionSc
 
         $scopeLines[0] | Should -Match 'owned production Skills.*active.*dormant.*bundled'
         $scopeLines[0] | Should -Match 'Skill-Darktide-Translate'
-        $scopeLines[0] | Should -Match '下一個 owner-reviewed source revision MUST.*SKILL\.md description'
+        $scopeLines[0] | Should -Match 'Source Repository 宣告的 authority\.commit 與 member hashes'
+        $scopeLines[0] | Should -Match 'snapshot 採用的 exact Standard bytes 綁定為固定版本'
+        $scopeLines[0] | Should -Match '僅當該 snapshot 的 pinned Standard bytes 包含本 Windows 支援規則時'
+        $scopeLines[0] | Should -Match 'source owner MUST 確保該 snapshot 規範的每個 owned production Skill 目前及後續 revision'
         $scopeLines[0] | Should -Match 'local execution 僅支援 Windows.*Linux/macOS/WSL 不支援'
-        $scopeLines[0] | Should -Match 'description MUST 保留既有 capability、trigger 與遠端 SaaS 語意'
-        $scopeLines[0] | Should -Match '測試 fixtures、examples 與 historical immutable source references 不屬於此更新範圍'
+        $scopeLines[0] | Should -Match '並保留既有 capability、trigger 與遠端 SaaS 語意'
+        $scopeLines[0] | Should -Match '較早 immutable references 與採用未含此規則之 pinned Standard 的 snapshots 依其原 pinned Standard 判定，不追溯修改'
+        $scopeLines[0] | Should -Match '測試 fixtures 與 examples 不屬於此描述更新範圍'
         $scopeLines[0] | Should -Match '不將獨立產品 Skill 加入本 Catalog、profile、lock 或 bootstrap'
 
         $scopeLines[0] | Should -Match 'selection metadata 的支援描述'
