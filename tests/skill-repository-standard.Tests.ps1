@@ -570,220 +570,7 @@ Describe 'SYP280 P2 inventory diagnostics real loops' {
 }
 
 Describe 'SYP258 source validation result gate' {
-    BeforeAll {
-        $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
-        . $script:SourceGateRunnerPath -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
-
-        function Write-SourceGateFixtureJson {
-            param([string] $Path, $Value)
-            [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding($false)))
-        }
-        function New-SourceGateFixture {
-            param([switch] $CentralRawTests)
-            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
-            $runId = 'c' * 32
-            $runRoot = Join-Path $root ('runs/' + $runId)
-            $snapshot = Join-Path $runRoot 'candidate'
-            $skills = @('alpha', 'beta')
-            foreach ($id in $skills) {
-                $skillRoot = Join-Path $snapshot ('skills/' + $id)
-                [void][IO.Directory]::CreateDirectory($skillRoot)
-                [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), ('fixture ' + $id), (New-Object Text.UTF8Encoding($false)))
-            }
-            if (-not $CentralRawTests) {
-                [void][IO.Directory]::CreateDirectory((Join-Path $snapshot 'tests'))
-                [IO.File]::WriteAllText((Join-Path $snapshot 'tests/Fixture.Tests.ps1'), '# source gate case fixture', (New-Object Text.UTF8Encoding($false)))
-            }
-            $fixtureAuthority = if ($CentralRawTests) { (git -C (Split-Path -Parent $PSScriptRoot) rev-parse HEAD).Trim() } else { 'e' * 40 }
-            $inventory = Get-StandardValidationInventory -Root $snapshot -Context 'source gate fixture'
-            $contentHash = Get-StandardValidationInventorySha256 -Inventory $inventory
-            $caseSnapshotRows=@($inventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{ path=$_.path; sha256=$_.sha256 } })
-            $caseSnapshotSha256=Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $caseSnapshotRows -Depth 3 -Compress)
-            $toolPath = Join-Path $root 'fixture-tool.bin'
-            [IO.File]::WriteAllText($toolPath, 'fixture tool', (New-Object Text.UTF8Encoding($false)))
-            $frozen = @([pscustomobject]@{ path = $toolPath; sha256 = Get-StandardValidationFileSha256 -Path $toolPath -Context 'fixture tool' })
-            $receipts = @()
-            $receiptValues = @{}
-            $fixtureToolsRoot=Join-Path $TestDrive ([IO.Path]::GetFileName($root) + '-tools')
-            [void][IO.Directory]::CreateDirectory($fixtureToolsRoot)
-            $policy = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
-            foreach ($name in @('skill-validator','skill-tools','skillspector')) {
-                $receiptPath = Join-Path $root ($name + '.json')
-                $installRoot=Join-Path $fixtureToolsRoot ($name + '-install')
-                [void][IO.Directory]::CreateDirectory($installRoot)
-                [IO.File]::WriteAllText((Join-Path $installRoot 'dependency.bin'), ('fixture dependency ' + $name), (New-Object Text.UTF8Encoding($false)))
-                $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
-                $identityKind=switch($name) {'skill-validator' {'go-module-version-build-info-and-binary-hash'}; 'skill-tools' {'registry-integrity-and-locked-dependency-closure'}; 'skillspector' {'release-commit-asset-metadata-dependency-closure-and-executable'}}
-                $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
-                if ($name -ceq 'skill-tools') {
-                    $shim=Join-Path $installRoot 'skill-tools.cmd';$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot 'node.exe'
-                    [IO.File]::WriteAllText($shim, '@echo off', (New-Object Text.UTF8Encoding($false)))
-                    [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))
-                    [IO.File]::WriteAllText($node, 'fixture Node runtime', (New-Object Text.UTF8Encoding($false)))
-                    foreach ($filePath in @($shim,$payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package launcher'} }
-                    $receiptValue.executablePath=$shim;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $shim -Context 'fixture shim'
-                    $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $payload
-                    $receiptValue | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $payload -Context 'fixture payload')
-                    $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $node
-                    $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $node -Context 'fixture runtime')
-                    $receiptValue | Add-Member -NotePropertyName executableVerified -NotePropertyValue $true
-                    $launcher.kind='windows-cmd-shim';$launcher.shimPath=$shim;$launcher.shimSha256=$receiptValue.executableSha256;$launcher.payloadPath=$payload;$launcher.payloadSha256=$receiptValue.entryPointSha256;$launcher.runtimePath=$node;$launcher.runtimeSha256=$receiptValue.nodeSha256
-                }
-                else {
-                    $installedExecutable=Join-Path $installRoot ($name + '.exe')
-                    [IO.File]::WriteAllText($installedExecutable, ('fixture executable ' + $name), (New-Object Text.UTF8Encoding($false)))
-                    $receiptValue.executablePath=$installedExecutable;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $installedExecutable -Context 'fixture installed executable'
-                    $frozen += [pscustomobject]@{path=$installedExecutable;sha256=$receiptValue.executableSha256}
-                }
-                $installedClosureSha256=Get-StandardValidationDirectoryClosureSha256 -Root $installRoot -Context 'fixture installed closure'
-                $receiptValue.installedClosureSha256=$installedClosureSha256;$receiptValue.dependencyClosureSha256=$installedClosureSha256
-                $receiptValue.launcherDigestSha256=Get-StandardValidationLauncherDigest -Launcher $launcher -Context 'fixture unsigned launcher'
-                Write-SourceGateFixtureJson -Path $receiptPath -Value $receiptValue
-                $receiptValues[$name]=$receiptValue
-                $binding = [pscustomobject]@{ path=$receiptPath; sha256=Get-StandardValidationFileSha256 -Path $receiptPath -Context 'fixture receipt' }
-                $frozen += $binding; $receipts += $binding
-            }
-            $sourceSpec=[pscustomobject]@{
-                packageAdapter=[pscustomobject]@{command=$toolPath;arguments=@()}
-                skillValidator=[pscustomobject]@{command=$toolPath;arguments=@()}
-                skillTools=[pscustomobject]@{command=$toolPath;arguments=@()}
-                staticAnalyzer=[pscustomobject]@{command=$toolPath;arguments=@()}
-                frozenFiles=$frozen;toolReceipts=$receipts
-            }
-            $centralTestFiles=@('third-party-skill-source.Tests.ps1','third-party-source-envelope.Tests.ps1')
-            $centralBindings=@()
-            if ($CentralRawTests) {
-                $sourceSpec | Add-Member -NotePropertyName testOwnership -NotePropertyValue 'central-third-party-raw-skill-v1'
-                foreach ($file in $centralTestFiles) {
-                    $testPath=Join-Path $PSScriptRoot $file
-                    $testHash=Get-StandardValidationFileSha256 -Path $testPath -Context 'central fixture test'
-                    $centralBindings += [pscustomobject]@{path=('tests/'+$file);sha256=$testHash}
-                    $sourceSpec.frozenFiles += [pscustomobject]@{path=$testPath;sha256=$testHash}
-                }
-            }
-            $adapterPath=Join-Path $runRoot 'source-adapter.json'
-            Write-SourceGateFixtureJson $adapterPath ([pscustomobject]@{
-                schemaVersion=2;adapter='standard-core-adapter-v2';skillsRoot='skills';activeSkills=$skills;sourceValidation=$sourceSpec
-                checks=@([pscustomobject]@{id='repository-general';kind='general';executable=$toolPath;executableSha256=$frozen[0].sha256;arguments=@()},[pscustomobject]@{id='repository-pester';kind='pester';executable=$toolPath;executableSha256=$frozen[0].sha256;arguments=@()})
-            })
-            $adapterHash=Get-StandardValidationFileSha256 -Path $adapterPath -Context 'fixture retained adapter'
-            $adapterBinding=[pscustomobject]@{path=$adapterPath;sha256=$adapterHash}
-            $candidateId = Get-StandardValidationTextSha256 -Value "$('a' * 40)`n$contentHash`n$adapterHash`n$runId"
-            $dispatches = @([pscustomobject]@{ stage='package-validation'; tool='package-adapter'; skill=$null })
-            foreach ($id in $skills) {
-                $dispatches += [pscustomobject]@{ stage='package-validation'; tool='skill-validator'; skill=$id }
-                $dispatches += [pscustomobject]@{ stage='package-validation'; tool='skill-tools'; skill=$id }
-            }
-            $dispatches += [pscustomobject]@{ stage='skillspector-static'; tool='static-analyzer'; skill=$null }
-            $events = @()
-            foreach ($dispatch in $dispatches) {
-                $eventId = [guid]::NewGuid().ToString()
-                $envelope = [pscustomobject]@{ schemaVersion=1; status='passed'; decision='PASS'; candidateIdentity=$candidateId; activeSkills=$skills; findings=@(); analyzerCompleteness='complete'; skillId=$dispatch.skill; skillInventorySha256=$null }
-                if ($CentralRawTests -and $dispatch.tool -ceq 'package-adapter') {
-                    $envelope | Add-Member -NotePropertyName rawSourceEvidence -NotePropertyValue ([pscustomobject]@{contract='third-party-raw-skill-source-v1';validationKind='third-party-package-only';status='passed';releaseEligible=$false;archiveProjectionVerified=$true;candidateIdentity=[pscustomobject]@{repository='https://example.com/example/skills.git';resolvedCommit=('a'*40)};skills=@($skills | ForEach-Object {[pscustomobject]@{id=$_;sourcePath=('skills/'+$_)}})})
-                }
-                if ($null -ne $dispatch.skill) {
-                    $skillInventory = Get-StandardValidationInventory -Root (Join-Path $snapshot ('skills/' + $dispatch.skill)) -Context 'source gate skill fixture'
-                    $envelope.skillInventorySha256 = Get-StandardValidationInventorySha256 -Inventory $skillInventory
-                }
-                if ($dispatch.tool -cne 'package-adapter') {
-                    $nativeReports=@()
-                    $nativeSkills=if ($null -ne $dispatch.skill) {@($dispatch.skill)} else {$skills}
-                    foreach ($nativeSkill in $nativeSkills) {
-                        $nativePath=Join-Path $runRoot ($eventId + '-' + $nativeSkill + '-native.json')
-                        Write-SourceGateFixtureJson $nativePath ([pscustomobject]@{fixture=$true;tool=$dispatch.tool;skillId=$nativeSkill;status='passed'})
-                        $nativeName=if($dispatch.tool -ceq 'static-analyzer'){'skillspector'}else{$dispatch.tool}
-                        $nativeReceipt=$receiptValues[$nativeName]
-                        $nativeCommand=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodePath}else{$nativeReceipt.executablePath}
-                        $nativeCommandHash=if($nativeName -ceq 'skill-tools'){$nativeReceipt.nodeSha256}else{$nativeReceipt.executableSha256}
-                        $nativeArguments=if($nativeName -ceq 'skill-tools'){@($nativeReceipt.entryPointPath,'validate',$nativeSkill)}else{@('validate',$nativeSkill)}
-                        $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$nativeCommand;commandSha256=$nativeCommandHash;arguments=$nativeArguments;exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'fixture native tool report'}
-                    }
-                    $envelope | Add-Member -NotePropertyName nativeReports -NotePropertyValue $nativeReports
-                }
-                $stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
-                $process = [pscustomobject]@{ status='passed'; exitCode=0; cleanedUp=$true; stdout=$stdout; stderr=''; startedAt='2026-01-01T00:00:00Z'; endedAt='2026-01-01T00:00:01Z' }
-                $rawPath = Join-Path $runRoot ($eventId + '.json')
-                Write-SourceGateFixtureJson -Path $rawPath -Value ([pscustomobject]@{ schemaVersion=1; eventId=$eventId; stageId=$dispatch.stage; toolId=$dispatch.tool; skillId=$dispatch.skill; candidateId=$candidateId; process=$process; stdout=$stdout; stderr='' })
-                $events += [pscustomobject]@{ eventId=$eventId; stageId=$dispatch.stage; toolId=$dispatch.tool; skillId=$dispatch.skill; candidateId=$candidateId; commandSha256=$frozen[0].sha256; exitCode=0; status='passed'; outputSha256=Get-StandardValidationOutputHash -Stdout $stdout -Stderr ''; outputPath=$rawPath; cleanedUp=$true }
-            }
-            $checks = @()
-            foreach ($kind in @('general','pester')) {
-                $stdoutPath=Join-Path $runRoot ($kind + '.stdout.txt'); $stderrPath=Join-Path $runRoot ($kind + '.stderr.txt')
-                $counts = [pscustomobject]@{ total=2; passed=2; failed=0; skipped=0 }
-                $stdout = if ($kind -ceq 'pester') { [pscustomobject]@{ schemaVersion=1; report='standard-core-pester-result-v1'; total=2; passed=2; failed=0; skipped=0 } | ConvertTo-Json -Compress } else { 'Repository fixture passed.' }
-                [IO.File]::WriteAllText($stdoutPath, $stdout, (New-Object Text.UTF8Encoding($false)))
-                [IO.File]::WriteAllText($stderrPath, '', (New-Object Text.UTF8Encoding($false)))
-                $checks += [pscustomobject]@{ id=('repository-' + $kind); kind=$kind; status='passed'; exitCode=0; cleanedUp=$true; stdoutPath=$stdoutPath; stdoutSha256=Get-StandardValidationFileSha256 -Path $stdoutPath -Context 'fixture repository output'; stderrPath=$stderrPath; stderrSha256=Get-StandardValidationFileSha256 -Path $stderrPath -Context 'fixture repository errors'; testCounts=if ($kind -ceq 'pester') { $counts } else { $null }; executableSha256=$frozen[0].sha256; argumentsSha256=Get-StandardValidationTextSha256 -Value '[]'; processId=123; startedAt='2026-01-01T00:00:00Z'; endedAt='2026-01-01T00:00:01Z' }
-            }
-            $casePath=Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
-            $caseRows=@(1..2 | ForEach-Object {
-                $expandedPath='Fixture.UnitT' + $_
-                $caseFile=if($CentralRawTests){$centralTestFiles[$_-1]}else{'Fixture.Tests.ps1'}
-                $tuple=ConvertTo-Json -InputObject ([object[]]@($caseFile.ToUpperInvariant(), $_, $expandedPath)) -Compress -Depth 3
-                [pscustomobject]@{ identity=[Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple)); sourceFile=$caseFile; sourceStartOffset=$_; sourceStartLine=$_; expandedPath=$expandedPath; result='Passed'; identityError=$null }
-            })
-            Write-SourceGateFixtureJson $casePath ([pscustomobject]@{
-                schemaVersion=1; report='standard-core-pester-case-inventory-v1'; coreRunId=$runId
-                candidateSnapshotIdentity=[pscustomobject]@{coreRunId=$runId;root=$snapshot}; candidateSnapshotSha256=$caseSnapshotSha256
-                pesterModule=[pscustomobject]@{version='6.0.0';manifestPath='fixture';moduleRoot='fixture';lockPath='fixture';lockSha256='1' * 64;closureSha256Before='2' * 64;closureSha256After='2' * 64}
-                runPath='tests';runScope='complete-unfiltered-tests-tree';testFileInventory=@('Fixture.Tests.ps1');containerFileInventory=@('Fixture.Tests.ps1');discoveredCaseFileInventory=@('Fixture.Tests.ps1')
-                caseDiscoveryCount=2;caseExecutionCount=2;containerCount=1;failedBlockCount=0;failedContainerCount=0;terminalStatus='complete'
-                reportedCounts=[pscustomobject]@{Passed=2;Failed=0;Skipped=0;Inconclusive=0;NotRun=0};shardIdentity='core-full';shardCaseIdentities=@($caseRows.identity)
-                shardUnion=[pscustomobject]@{discoveryCount=2;executionUnionCount=2;complete=$true};discoveryCases=$caseRows;executionCases=$caseRows;complete=$true;errors=@()
-            })
-            if ($CentralRawTests) {
-                $cases=Get-Content -Raw $casePath | ConvertFrom-Json
-                $cases.runScope='complete-central-raw-skill-suite'
-                foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) { $cases.$field=$centralTestFiles }
-                $cases | Add-Member -NotePropertyName testSourceIdentity -NotePropertyValue ([pscustomobject]@{ownership='central-third-party-raw-skill-v1';root=(Split-Path -Parent $PSScriptRoot);authorityRevision=$fixtureAuthority;files=$centralBindings})
-                Write-SourceGateFixtureJson $casePath $cases
-            }
-            $caseBinding=[pscustomobject]@{path=$casePath;sha256=Get-StandardValidationFileSha256 -Path $casePath -Context 'fixture case ledger'}
-            $fixtureReport=[pscustomobject]@{
-                schemaVersion=2; evidence='standard-core-validation-evidence-v2'; generatedAt='2026-01-01T00:00:01Z'; state='PASS'; exitCode=0; runId=$runId; releaseEligible=$false; contentMode='immutable-source'; failure=$null
-                candidate=[pscustomobject]@{ repository='https://example.com/example/skills.git'; sourceRevision='a' * 40; baseRevision='b' * 40; contentSha256=$contentHash; inventory=$inventory; activeSkills=$skills; contentMode='immutable-source'; eventName='pull_request' }
-                authority=[pscustomobject]@{ repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision=$fixtureAuthority; contentMode='source'; runnerSha256='3' * 64; contractSha256='4' * 64 }
-                adapter=[pscustomobject]@{ schemaVersion=2; identity='standard-core-adapter-v2'; sha256=$adapterHash }
-                artifacts=[pscustomobject]@{ runId=$runId; root=$root; outputPath=Join-Path $root 'result.json'; runRoot=$runRoot; snapshotRoot=$snapshot }
-                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision=$fixtureAuthority; activeSkills=$skills; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$sourceSpec.frozenFiles; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
-                checks=$checks
-            }
-            if ($CentralRawTests) { $fixtureReport.sourceValidation | Add-Member -NotePropertyName testOwnership -NotePropertyValue 'central-third-party-raw-skill-v1' }
-            return $fixtureReport
-        }
-        function Invoke-SourceGateFixture {
-            param($Report, [int] $ExitCode=0, [string] $ExpectedAuthorityRevision=('e'*40))
-            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision $ExpectedAuthorityRevision -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode
-        }
-        function Set-SourceGateEnvelope {
-            param($Report, [int] $Index, [scriptblock] $Mutate)
-            $event=$Report.sourceValidation.events[$Index]
-            $raw=Get-Content -Raw $event.outputPath | ConvertFrom-Json
-            $envelope=$raw.stdout | ConvertFrom-Json
-            & $Mutate $envelope
-            $raw.stdout=$envelope | ConvertTo-Json -Depth 30 -Compress
-            $raw.process.stdout=$raw.stdout
-            $event.outputSha256=Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
-            Write-SourceGateFixtureJson -Path $event.outputPath -Value $raw
-        }
-        function Set-SourceGateCases {
-            param($Report, [scriptblock] $Mutate)
-            $binding=$Report.sourceValidation.pesterCaseInventory
-            $cases=Get-Content -Raw $binding.path | ConvertFrom-Json
-            & $Mutate $cases
-            Write-SourceGateFixtureJson $binding.path $cases
-            $binding.sha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'mutated case ledger'
-        }
-        function Set-SourceGateReceipt {
-            param($Report, [scriptblock] $Mutate, [int] $Index=0)
-            $binding=$Report.sourceValidation.toolReceipts[$Index]
-            $receipt=Get-Content -Raw $binding.path | ConvertFrom-Json
-            & $Mutate $receipt
-            Write-SourceGateFixtureJson $binding.path $receipt
-            $binding.sha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'mutated receipt'
-        }
-    }
+    BeforeAll { . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1') }
 
     # Scenario: Ordinary Core returns PASS without package-tool or complete Static evidence.
     # Purpose: V2 prevents repository-only success from satisfying the three source required contexts.
@@ -1013,6 +800,91 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             param([string] $Actual, [string] $Pattern, [string] $Message)
             if ($Actual -match $Pattern) { throw "$Message Pattern='$Pattern'." }
         }
+
+        function Test-Syp325FixturePathChain {
+            param([Parameter(Mandatory)][string] $Path)
+
+            $current = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($Path))
+            while ($null -ne $current) {
+                if (-not $current.Exists -or ($current.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+                $current = $current.Parent
+            }
+            return $true
+        }
+
+        function New-Syp325FixtureRoot {
+            $candidates = [Collections.Generic.List[string]]::new()
+            if (-not [string]::IsNullOrWhiteSpace([string]$env:RUNNER_TEMP)) { $candidates.Add([string]$env:RUNNER_TEMP) }
+            if (-not [string]::IsNullOrWhiteSpace([string]$env:LOCALAPPDATA)) { $candidates.Add((Join-Path $env:LOCALAPPDATA 'Temp')) }
+            if (-not [string]::IsNullOrWhiteSpace([string]$env:TEMP)) { $candidates.Add([string]$env:TEMP) }
+            try {
+                $runtimeTempPath = [IO.Path]::GetTempPath()
+                if (-not [string]::IsNullOrWhiteSpace([string]$runtimeTempPath)) { $candidates.Add([string]$runtimeTempPath) }
+            }
+            catch { }
+            $candidates = @($candidates | Sort-Object { ([string]$_).Length } -Unique)
+            $errors = [Collections.Generic.List[string]]::new()
+
+            foreach ($candidate in $candidates) {
+                try {
+                    $basePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$candidate))
+                    if (-not (Test-Path -LiteralPath $basePath -PathType Container)) { continue }
+                    if (-not (Test-Syp325FixturePathChain -Path $basePath)) { continue }
+
+                    $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+                    $leaf = 'syp325-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+                    $root = [IO.Path]::GetFullPath((Join-Path $basePath $leaf))
+                    if (-not [string]::Equals([IO.Path]::GetDirectoryName($root), $basePath, $pathComparison)) { throw 'The fixture root must be a direct child of its temporary base.' }
+                    $placeholderRunId = 'a' * 32
+                    $fallbackRoot = Join-Path $root 'Temp'
+                    $deepestProbe = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $fallbackRoot ("svt-tools-{0}" -f $placeholderRunId)) ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
+                    if ($deepestProbe.Length -ge 248) { continue }
+                    if (Test-Path -LiteralPath $root) { throw "Refusing to reuse fixture path: $root" }
+                    [void](New-Item -ItemType Directory -Path $root -ErrorAction Stop)
+                    $script:Syp325FixtureRoots.Add([pscustomobject]@{ Root = $root; Base = $basePath })
+
+                    $rootInfo = [IO.DirectoryInfo]::new($root)
+                    if (-not $rootInfo.Exists -or ($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                        throw 'The newly created fixture root is missing or is a reparse point.'
+                    }
+                    if (-not [string]::Equals([IO.Path]::GetFullPath($rootInfo.FullName), $root, $pathComparison)) {
+                        throw 'The created fixture root did not retain its canonical path.'
+                    }
+                    return [pscustomobject]@{ Root = $root; Base = $basePath }
+                }
+                catch { $errors.Add("'$candidate': $($_.Exception.Message)") }
+            }
+
+            throw "Unable to allocate a short create-only SYP325 fixture root. $($errors -join ' | ')"
+        }
+
+        function Remove-Syp325FixtureRoot {
+            param([Parameter(Mandatory)] $Fixture)
+
+            $basePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([string]$Fixture.Base))
+            $root = [IO.Path]::GetFullPath([string]$Fixture.Root)
+            $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+            $prefix = $basePath.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            $registered = @($script:Syp325FixtureRoots | Where-Object {
+                [string]::Equals([IO.Path]::GetFullPath([string]$_.Root), $root, $pathComparison) -and
+                [string]::Equals([IO.Path]::GetFullPath([string]$_.Base), $basePath, $pathComparison)
+            })
+            if ($registered.Count -ne 1 -or -not $root.StartsWith($prefix, $pathComparison) -or
+                -not [string]::Equals([IO.Path]::GetDirectoryName($root), $basePath, $pathComparison) -or
+                [IO.Path]::GetFileName($root) -notmatch '^syp325-[0-9a-f]{12}$') {
+                throw "Refusing to clean a fixture outside its bounded task-owned root: '$root'."
+            }
+            if (-not (Test-Syp325FixturePathChain -Path $basePath)) { throw "Refusing to clean through a missing or reparse parent: '$basePath'." }
+            $rootInfo = [IO.DirectoryInfo]::new($root)
+            if (-not $rootInfo.Exists) { return }
+            if ($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to recursively clean a reparse fixture root: '$root'." }
+            if (-not [string]::Equals([IO.Path]::GetFullPath($rootInfo.FullName), $root, $pathComparison)) {
+                throw "Refusing to clean a noncanonical fixture path: '$root'."
+            }
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+        }
+
+        $script:Syp325FixtureRoots = [Collections.Generic.List[object]]::new()
 
         function Get-CaseSensitiveProperty {
             param($Object, [string] $Name)
@@ -1380,6 +1252,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             }
             return $wheelPath
         }
+    }
+
+    AfterEach {
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        try {
+            foreach ($fixture in @($script:Syp325FixtureRoots.ToArray())) {
+                try { Remove-Syp325FixtureRoot -Fixture $fixture }
+                catch { $cleanupErrors.Add($_.Exception.Message) }
+            }
+        }
+        finally { $script:Syp325FixtureRoots.Clear() }
+        if ($cleanupErrors.Count -gt 0) { throw "SYP325 fixture cleanup failed: $($cleanupErrors -join ' | ')" }
     }
 
     It 'UnitT10_keeps_the_normative_standard_evidence_toolchain_and_resolver_together' {
@@ -2141,16 +2025,18 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
 
-        $requestedRoot = Join-Path $TestDrive 'short-wheel-root'
+        $fixture = New-Syp325FixtureRoot
+        $fixtureRoot = $fixture.Root
+        $requestedRoot = Join-Path $fixtureRoot 'short-wheel-root'
         $short = New-RunOwnedInstallDirectory -Root $requestedRoot -ToolName 'skillspector'
         $long = Join-Path $requestedRoot ("skillspector-{0}" -f [guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $long)
         $sitePackages = Join-Path $short 'venv\Lib\site-packages'
         $longSitePackages = Join-Path $long 'venv\Lib\site-packages'
         $memberLength = 264 - $longSitePackages.Length - 1 - 'pathprobe/'.Length
-        Assert-True ($memberLength -gt 40) 'TestDrive must leave enough space for the synthetic wheel member.'
+        Assert-True ($memberLength -gt 40) 'The short task-owned fixture root must leave enough space for the synthetic wheel member.'
         $member = ('n' * ($memberLength - 4)) + '.txt'
-        $wheelPath = Join-Path $TestDrive 'pathprobe-1.0-py3-none-any.whl'
+        $wheelPath = Join-Path $fixtureRoot 'pathprobe-1.0-py3-none-any.whl'
         Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
         $archive = [IO.Compression.ZipFile]::Open($wheelPath, [IO.Compression.ZipArchiveMode]::Create)
         try {
@@ -2371,7 +2257,9 @@ public sealed class C245SlowTrickleStream : Stream {
         $script:tailCleanup = (Get-Item Function:Remove-BoundedRunOwnedDirectory).ScriptBlock
         $script:tailExpired = $false
         Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-        $tailWheel = Join-Path $TestDrive 'tail-fixture.whl'
+        $fixture = New-Syp325FixtureRoot
+        $fixtureRoot = $fixture.Root
+        $tailWheel = Join-Path $fixtureRoot 'tail-fixture.whl'
         $tailArchive = [IO.Compression.ZipFile]::Open($tailWheel, [IO.Compression.ZipArchiveMode]::Create)
         try { [void]$tailArchive.CreateEntry('skillspector/__init__.py') }
         finally { $tailArchive.Dispose() }
@@ -2379,7 +2267,7 @@ public sealed class C245SlowTrickleStream : Stream {
         $hasher = [Security.Cryptography.SHA256]::Create()
         try { $script:tailHash = ([BitConverter]::ToString($hasher.ComputeHash($script:tailBytes))).Replace('-', '').ToLowerInvariant() }
         finally { $hasher.Dispose() }
-        $script:tailRoot = Join-Path $TestDrive 'tail-install'
+        $script:tailRoot = Join-Path $fixtureRoot 'tail-install'
         $sibling = Join-Path $script:tailRoot 'adjacent-root'
         [void](New-Item -ItemType Directory -Path $sibling -Force)
         Mock Assert-Command { 'python' }
@@ -2534,11 +2422,13 @@ public sealed class C245NonCooperativeStream : Stream {
     It 'UnitT26q_checks_selected_dependency_wheel_members_before_install' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
-        $installPath = New-RunOwnedInstallDirectory -Root (Join-Path $TestDrive 'wheelhouse-root') -ToolName 'skillspector'
+        $fixture = New-Syp325FixtureRoot
+        $fixtureRoot = $fixture.Root
+        $installPath = New-RunOwnedInstallDirectory -Root (Join-Path $fixtureRoot 'wheelhouse-root') -ToolName 'skillspector'
         $sitePackages = Join-Path $installPath 'venv\Lib\site-packages'
         $memberLength = 249 - $sitePackages.Length - 'deep/'.Length - 1
         Assert-True ($memberLength -gt 30) 'The fixture needs room for an overlong dependency member.'
-        $wheelhouse = Join-Path $TestDrive 'dependency-member-wheelhouse'
+        $wheelhouse = Join-Path $fixtureRoot 'dependency-member-wheelhouse'
         [void](New-Item -ItemType Directory -Path $wheelhouse)
         $rootWheel = Join-Path $wheelhouse 'skillspector-1.0-py3-none-any.whl'
         $dependencyWheel = Join-Path $wheelhouse 'dependency-1.0-py3-none-any.whl'
@@ -2563,28 +2453,61 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $failure 'wheel member exceeds safe Windows install path length' 'The selected dependency must fail before pip installation.'
     }
 
-    It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
-        . $script:AuthorityGatePath -DefineFunctionsOnly
+    # Scenario: The validator is invoked from normal/deep repository locations and normal/nested-long owned TEMP roots.
+    # Purpose: Keep test-fixture allocation independent of caller path geometry while exercising the real 84-character authority fallback boundary.
+    It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom_<RepositoryGeometry>_<TempGeometry>' -TestCases @(
+        @{ RepositoryGeometry='normal-repository'; TempGeometry='normal-temp' },
+        @{ RepositoryGeometry='normal-repository'; TempGeometry='long-temp' },
+        @{ RepositoryGeometry='deep-repository'; TempGeometry='normal-temp' },
+        @{ RepositoryGeometry='deep-repository'; TempGeometry='long-temp' }
+    ) {
+        param([string] $RepositoryGeometry, [string] $TempGeometry)
 
+        . $script:AuthorityGatePath -DefineFunctionsOnly
         $names = @('TEMP', 'TMP', 'LOCALAPPDATA')
         $previous = @{}
         foreach ($name in $names) {
             $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         }
+        $originalRepositoryRoot = $script:RepositoryRoot
+        $originalLocation = Get-Location
 
-        $taskRoot = Split-Path -Parent $script:RepositoryRoot
-        $localAppData = Join-Path $taskRoot ('l' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-        $fallbackRoot = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
-        $currentPrefix = 'cur-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-        $currentLength = 84
-        $currentTemp = Join-Path $fallbackRoot ($currentPrefix + ('x' * ($currentLength - $fallbackRoot.Length - $currentPrefix.Length - 1)))
-
-        $ownsLocalAppData = $false
-        $collisionRoot = $null
         try {
-            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
-            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
-            $ownsLocalAppData = $true
+            $contextFixture = New-Syp325FixtureRoot
+            $contextRoot = $contextFixture.Root
+            $repoNormal = Join-Path $contextRoot 'repo-normal'
+            [void](New-Item -ItemType Directory -Path $repoNormal -ErrorAction Stop)
+            $repoDeep = Join-Path $contextRoot 'repo-deep'
+            [void](New-Item -ItemType Directory -Path $repoDeep -ErrorAction Stop)
+            while ($repoDeep.Length -lt 150) {
+                $repoDeep = Join-Path $repoDeep ('r' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+                [void](New-Item -ItemType Directory -Path $repoDeep -ErrorAction Stop)
+            }
+            $tempNormal = Join-Path $contextRoot 'temp-normal'
+            [void](New-Item -ItemType Directory -Path $tempNormal -ErrorAction Stop)
+            $tempLong = Join-Path $contextRoot 'temp-long'
+            [void](New-Item -ItemType Directory -Path $tempLong -ErrorAction Stop)
+            while ($tempLong.Length -lt 150) {
+                $tempLong = Join-Path $tempLong ('t' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+                [void](New-Item -ItemType Directory -Path $tempLong -ErrorAction Stop)
+            }
+            $repositoryContext = if ($RepositoryGeometry -ceq 'normal-repository') { $repoNormal } else { $repoDeep }
+            $tempContext = if ($TempGeometry -ceq 'normal-temp') { $tempNormal } else { $tempLong }
+            $script:RepositoryRoot = [IO.Path]::GetFullPath($repositoryContext)
+            Set-Location -LiteralPath $repositoryContext
+            [Environment]::SetEnvironmentVariable('TEMP', $tempContext, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TMP', $tempContext, [EnvironmentVariableTarget]::Process)
+
+            $fixture = New-Syp325FixtureRoot
+            $taskRoot = $fixture.Root
+            $localAppData = $taskRoot
+            $fallbackRoot = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
+            $currentPrefix = 'cur-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $currentLength = 84
+            $currentTemp = Join-Path $fallbackRoot ($currentPrefix + ('x' * ($currentLength - $fallbackRoot.Length - $currentPrefix.Length - 1)))
+
+            Assert-True ($taskRoot.Length -le 57) 'The derived fixture root must preserve the established fallback path-budget geometry.'
+            Assert-Equal $currentTemp.Length 84 'The synthetic current-temp path must retain the established 84-character geometry.'
             [void](New-Item -ItemType Directory -Path $fallbackRoot -ErrorAction Stop)
             [void](New-Item -ItemType Directory -Path $currentTemp -ErrorAction Stop)
             [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
@@ -2621,9 +2544,8 @@ public sealed class C245NonCooperativeStream : Stream {
             foreach ($name in $names) {
                 [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
             }
-            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
-                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
-            }
+            $script:RepositoryRoot = $originalRepositoryRoot
+            Set-Location -LiteralPath $originalLocation.Path
         }
     }
 
@@ -2636,7 +2558,8 @@ public sealed class C245NonCooperativeStream : Stream {
             $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         }
 
-        $taskRoot = Split-Path -Parent $script:RepositoryRoot
+        $fixture = New-Syp325FixtureRoot
+        $taskRoot = $fixture.Root
         $token = [guid]::NewGuid().ToString('N')
         $longCurrentLength = 110
         $currentLeafLength = $longCurrentLength - $taskRoot.Length - 1
@@ -2674,12 +2597,6 @@ public sealed class C245NonCooperativeStream : Stream {
             foreach ($name in $names) {
                 [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
             }
-            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
-                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if ($ownsLongCurrent -and (Test-Path -LiteralPath $longCurrent)) {
-                Remove-Item -LiteralPath $longCurrent -Recurse -Force -ErrorAction SilentlyContinue
-            }
         }
     }
 
@@ -2695,62 +2612,21 @@ public sealed class C245NonCooperativeStream : Stream {
         }
 
         $token = [guid]::NewGuid().ToString('N')
-        $localAppData = Join-Path $TestDrive ('blocked-' + $token)
+        $fixture = New-Syp325FixtureRoot
+        $taskRoot = $fixture.Root
+        $currentTempFixture = New-Syp325FixtureRoot
+        $localAppData = $taskRoot
         $unavailableFallback = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
         $runId = [guid]::NewGuid().ToString('N')
         $currentTemp = $null
         $expectedToolRoot = $null
         $expectedProbe = $null
-        $ownsCurrentTemp = $false
-        $ownsLocalAppData = $false
 
         try {
-            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
-            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
-            $ownsLocalAppData = $true
             Write-TestUtf8File -Path $unavailableFallback -Text 'the optional fallback is not a directory'
-
-            $tempBaseCandidates = [Collections.Generic.List[string]]::new()
-            foreach ($candidateBase in @(
-                [IO.Path]::GetTempPath(),
-                $(if (-not [string]::IsNullOrWhiteSpace([string]$previous['LOCALAPPDATA'])) { Join-Path $previous['LOCALAPPDATA'] 'Temp' })
-            )) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$candidateBase)) { $tempBaseCandidates.Add([string]$candidateBase) }
-            }
-            $ancestor = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($script:RepositoryRoot)).Parent
-            while ($null -ne $ancestor) {
-                $tempBaseCandidates.Add($ancestor.FullName)
-                $ancestor = $ancestor.Parent
-            }
-
-            $seenTempBases = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-            $tempRootErrors = [Collections.Generic.List[string]]::new()
-            foreach ($candidateBase in $tempBaseCandidates) {
-                $basePath = $null
-                try { $basePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidateBase)) }
-                catch { $tempRootErrors.Add("Invalid temp parent '$candidateBase': $($_.Exception.Message)"); continue }
-                if (-not $seenTempBases.Add($basePath) -or -not (Test-Path -LiteralPath $basePath -PathType Container)) { continue }
-
-                $candidateTemp = Join-Path $basePath ('t-' + $token.Substring(0, 12))
-                $candidateRoot = [IO.Path]::GetFullPath((Join-Path $candidateTemp ("svt-tools-{0}" -f $runId)))
-                $candidateProbe = Join-Path (Join-Path (Join-Path (Join-Path $candidateRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
-                if ($candidateProbe.Length -ge 248) { continue }
-                if (Test-Path -LiteralPath $candidateTemp) {
-                    $tempRootErrors.Add("Refusing to reuse fixture path: $candidateTemp")
-                    continue
-                }
-                try { [void](New-Item -ItemType Directory -Path $candidateTemp -ErrorAction Stop) }
-                catch { $tempRootErrors.Add("Cannot create short current-temp fixture under '$basePath': $($_.Exception.Message)"); continue }
-
-                $currentTemp = $candidateTemp
-                $expectedToolRoot = $candidateRoot
-                $expectedProbe = $candidateProbe
-                $ownsCurrentTemp = $true
-                break
-            }
-            if (-not $ownsCurrentTemp) {
-                throw "Unable to create a short owned temp fixture for the complete Python venv probe path. $($tempRootErrors -join ' | ')"
-            }
+            $currentTemp = $currentTempFixture.Root
+            $expectedToolRoot = [IO.Path]::GetFullPath((Join-Path $currentTemp ("svt-tools-{0}" -f $runId)))
+            $expectedProbe = Join-Path (Join-Path (Join-Path (Join-Path $expectedToolRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
             Assert-True ($expectedProbe.Length -lt 248) ("The available current-temp fixture must leave room for the full Windows Python venv probe path; length=$($expectedProbe.Length), path='$expectedProbe'.")
             [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable('TEMP', $currentTemp, [EnvironmentVariableTarget]::Process)
@@ -2765,12 +2641,6 @@ public sealed class C245NonCooperativeStream : Stream {
         finally {
             foreach ($name in $names) {
                 [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
-            }
-            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
-                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if ($ownsCurrentTemp -and (Test-Path -LiteralPath $currentTemp)) {
-                Remove-Item -LiteralPath $currentTemp -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -3908,6 +3778,37 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $matrix 'persist-credentials' 'Review matrix must record CI checkout credential isolation.'
         Assert-Match $matrix 'wheelhouse' 'Review matrix must record hash-locked SkillSpector dependency acquisition.'
         Assert-NotMatch $matrix 'SYP-167 establishes normative Standard v1 only\.' 'Review matrix must not describe the pre-regression SYP-167 scope.'
+    }
+
+    Context 'SYP325 central validation ownership documentation' {
+    # Scenario: Central validation ownership or its required CI gate is undocumented or drifts from the v2 contracts.
+    # Purpose: Keep the implementation-to-test map explicit while preserving the existing adapter/result and testOwnership schemas.
+    It 'UnitT110_documents_central_validation_owners_tests_and_windows_gate' {
+        $standard=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        foreach($required in @(
+            '12.3 Central reference implementation ownership and CI',
+            'scripts/Invoke-StandardValidation.ps1',
+            'tests/skill-repository-standard.Tests.ps1',
+            'tests/standard-validation-runner.Tests.ps1',
+            'tests/standard-core-pester-adapter.Tests.ps1',
+            'scripts/Resolve-StandardValidationTool.ps1',
+            'tests/standard-validation-resolver-hardening.Tests.ps1',
+            'scripts/Invoke-StandardAuthorityGate.ps1',
+            'docs/standards/validation-security-gate.json',
+            '.github/workflows/pr8-powershell-validation.yml',
+            'tests/skill-repository-workflows.Tests.ps1',
+            'Windows Core', 'ExpectedSkippedCount = 5', 'standards-conformance.yml',
+            'schema v2', 'testOwnership', 'unknown schema or ownership values',
+            'SourceValidation execution remains owned by the central source-validation function',
+            'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
+            'scripts/CorePesterIntegrity.psm1', 'scripts/Test-Repository.ps1', 'tests/validate-catalog.ps1',
+            'candidate==base bytes', 'full discovered tests tree', 'normal reader PR', 'before candidate adoption',
+            'A pin or immutable version update alone MUST NOT transfer ownership',
+            'Source-copy equivalence or removal is deferred to downstream adoption',
+            'identified item by item', 'normal required Windows Core CI gate', 'SYP-325 changes none of the Code trial paths above',
+            'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
+        )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
+    }
     }
 
     # Scenario: The managed lifecycle contract or its machine-readable evidence schema is removed or detached from the central authority.
@@ -5483,3 +5384,666 @@ Describe 'Windows-only support description scope' -Tag 'WindowsOnlyDescriptionSc
         $scopeLines[0] | Should -Match '具體 defect 或明確 requirement.*依既有統一 contracts 另行授權'
     }
 }
+
+Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1')
+        $measurementTempRoot=if(-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){$env:RUNNER_TEMP}else{$env:TEMP}
+        $script:SourceMeasurementEvidenceRoot=Join-Path $measurementTempRoot ('syp325-source-scope-'+[guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($script:SourceMeasurementEvidenceRoot)
+    }
+
+    # Scenario: A resolver receipt remains semantically valid after its bytes change from the setup snapshot.
+    # Purpose: Require the same JSON snapshot used for parsing to match its frozen binding before reuse.
+    It 'UnitT35_rejects_receipt_bytes_changed_after_setup_binding' {
+        $report=New-SourceGateFixture
+        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -ReturnReceiptMap
+        $binding=$report.sourceValidation.toolReceipts[0]
+        $originalBytes=[IO.File]::ReadAllBytes($binding.path)
+        $mutatedBytes=New-Object byte[] ($originalBytes.Length+1)
+        [Array]::Copy($originalBytes,$mutatedBytes,$originalBytes.Length)
+        $mutatedBytes[$mutatedBytes.Length-1]=10
+        [IO.File]::WriteAllBytes($binding.path,$mutatedBytes)
+
+        $retainedRejected=$false
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -RetainedReceiptMap $map -ToolNames @('skill-validator') }
+        catch { $retainedRejected=$true }
+        if(-not $retainedRejected){throw 'A retained resolver receipt must match its setup-time SHA binding before parsed data is reused.'}
+
+        $fullRejected=$false
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId }
+        catch { $fullRejected=$true }
+        if(-not $fullRejected){throw 'A changed resolver receipt must not be parsed as if it were the frozen setup snapshot.'}
+    }
+    # Scenario: A native resolver receipt contains package-only entryPointPath and nodePath fields.
+    # Purpose: Keep those unauthenticated-by-contract extras as shared controls instead of treating them as mapped launch assets.
+    It 'UnitT62_keeps_native_entrypoint_and_node_extras_in_shared_controls' {
+        $report=New-SourceGateFixture -OutsideArtifactCommand
+        $toolsRoot=Split-Path -Parent ([string]((Get-Content -Raw $report.sourceValidation.toolReceipts[0].path | ConvertFrom-Json).installRoot))
+        $script:SourceUntrustedEntryPoint=Join-Path $toolsRoot 'untrusted-native-entry.js'
+        $script:SourceUntrustedNode=Join-Path $toolsRoot 'untrusted-native-node.exe'
+        [IO.File]::WriteAllText($script:SourceUntrustedEntryPoint,'untrusted native entry point',(New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($script:SourceUntrustedNode,'untrusted native runtime',(New-Object Text.UTF8Encoding($false)))
+        Set-SourceGateReceipt -Report $report -Index 0 -Mutate {
+            param($receipt)
+            $receipt | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $script:SourceUntrustedEntryPoint
+            $receipt | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $script:SourceUntrustedEntryPoint -Context 'untrusted native entry point')
+            $receipt | Add-Member -NotePropertyName nodePath -NotePropertyValue $script:SourceUntrustedNode
+            $receipt | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $script:SourceUntrustedNode -Context 'untrusted native runtime')
+        }
+        $report.sourceValidation.frozenFiles += [pscustomobject]@{path=$script:SourceUntrustedEntryPoint;sha256=Get-StandardValidationFileSha256 -Path $script:SourceUntrustedEntryPoint -Context 'frozen untrusted native entry point'}
+        $report.sourceValidation.frozenFiles += [pscustomobject]@{path=$script:SourceUntrustedNode;sha256=Get-StandardValidationFileSha256 -Path $script:SourceUntrustedNode -Context 'frozen untrusted native runtime'}
+        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -ReturnReceiptMap
+        $nativeGroup=$map.groups.byTool['skill-validator']
+        foreach($path in @($script:SourceUntrustedEntryPoint,$script:SourceUntrustedNode)){
+            if(@($nativeGroup.sharedFiles | Where-Object {[string]$_.path -ceq $path}).Count -ne 1){throw "Native receipt extra '$path' must remain in the shared control set."}
+            if(@($nativeGroup.externalAssets | Where-Object {[string]$_.path -ceq $path}).Count -ne 0){throw "Native receipt extra '$path' must not be treated as an authenticated external launch asset."}
+        }
+        if($nativeGroup.roots.Count -ne 1){throw 'Native receipt extras must not merge independent installation closure groups.'}
+    }
+    # Scenario: Source setup validates every tool root, then each dispatch validates its selected closure and shared controls.
+    # Purpose: Observe real SHA-256 paths, bytes, and repeated phase samples while stubbing only child transport.
+    It 'UnitT60_compares_same_tool_dispatch_across_unrelated_closure_sizes' {
+        $states=New-Object 'System.Collections.Generic.List[object]'
+        foreach($variant in @(
+            [pscustomobject]@{name='small-unrelated-B';large=$false;report=(New-SourceGateFixture -OutsideArtifactCommand)},
+            [pscustomobject]@{name='large-unrelated-B';large=$true;report=(New-SourceGateFixture -LargeSkillToolsClosure -OutsideArtifactCommand)}
+        )){
+            $report=$variant.report
+            $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+            $sourceSpec=$adapter.sourceValidation
+            $map=Assert-StandardCoreSourceToolReceipts -Bindings @($sourceSpec.toolReceipts) -FrozenFiles @($sourceSpec.frozenFiles) -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
+            $skillSet=Get-StandardValidationSkillSet -CandidateRoot $report.artifacts.snapshotRoot -SkillsRootRelative 'skills' -DeclaredSkills $report.candidate.activeSkills
+            $trustedRoot=Split-Path -Parent ([string]$sourceSpec.packageAdapter.command)
+            $states.Add([pscustomobject]@{name=$variant.name;large=[bool]$variant.large;report=$report;sourceSpec=$sourceSpec;map=$map;skillSet=$skillSet;trustedRoot=$trustedRoot})
+        }
+        $script:SourceSha256Original=(Get-Command Get-StandardValidationFileSha256 -CommandType Function).ScriptBlock
+        $script:SourceSha256Reads=New-Object 'System.Collections.Generic.List[object]'
+        $script:SourceTransportTool=$null
+        $script:SourceObserverForcedPhase=$null
+        $script:SourceReceiptsForObserver=@()
+
+        Mock Get-StandardValidationFileSha256 {
+            param([string]$Path,[string]$Context)
+            $phase='outside-source-run';$tool=$null
+            $frames=@(Get-PSCallStack)
+            if($null -ne $script:SourceTransportTool){$phase='transport';$tool=[string]$script:SourceTransportTool}
+            elseif(-not [string]::IsNullOrWhiteSpace([string]$script:SourceObserverForcedPhase)){$phase=[string]$script:SourceObserverForcedPhase}
+            else {
+                $sourceFrame=@($frames | Where-Object {$_.FunctionName -match 'Invoke-StandardCoreSourceTools'} | Select-Object -First 1)
+                if($sourceFrame.Count -gt 0){
+                    $frameVariables=$sourceFrame[0].GetFrameVariables()
+                    if($frameVariables.ContainsKey('dispatch') -and $null -ne $frameVariables['dispatch'].Value){
+                        $dispatchValue=$frameVariables['dispatch'].Value
+                        $tool=[string]$dispatchValue.tool
+                        $resultTool=$null
+                        if($frameVariables.ContainsKey('result') -and $null -ne $frameVariables['result'].Value -and $null -ne $frameVariables['result'].Value.event){
+                            $eventValue=$frameVariables['result'].Value.event
+                            if($null -ne $eventValue.PSObject.Properties['tool']){$resultTool=[string]$eventValue.tool}
+                        }
+                        $phase=if($resultTool -ceq $tool){'post-dispatch'}else{'pre-dispatch'}
+                    }
+                    else {$phase='setup'}
+                }
+            }
+            $item=Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+            $watch=[Diagnostics.Stopwatch]::StartNew()
+            try { & $script:SourceSha256Original -Path $Path -Context $Context }
+            finally {
+                $watch.Stop()
+                $script:SourceSha256Reads.Add([pscustomobject]@{path=[string]$Path;bytes=[long]$item.Length;phase=$phase;tool=$tool;elapsedMilliseconds=[Math]::Round($watch.Elapsed.TotalMilliseconds,3)})
+            }
+        }
+        Mock Invoke-StandardValidationCommandAndRecord {
+            param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills)
+            $script:SourceTransportTool=[string]$ToolId
+            try {
+                $nativeReports=@()
+                if([string]$ToolId -cin @('skill-validator','skill-tools','static-analyzer')){
+                    $nativeName=if([string]$ToolId -ceq 'static-analyzer'){'skillspector'}else{[string]$ToolId}
+                    $receiptBinding=@($script:SourceReceiptsForObserver | Where-Object {[IO.Path]::GetFileName([string]$_.path) -ceq ($nativeName+'.json')})[0]
+                    $receipt=Get-Content -Raw $receiptBinding.path | ConvertFrom-Json
+                    $nativeCommand=if($nativeName -ceq 'skill-tools'){$receipt.nodePath}else{$receipt.executablePath}
+                    $nativeCommandHash=if($nativeName -ceq 'skill-tools'){$receipt.nodeSha256}else{$receipt.executableSha256}
+                    $nativeSkills=if(-not [string]::IsNullOrEmpty([string]$SkillId)){@([string]$SkillId)}else{@($ExpectedActiveSkills)}
+                    foreach($nativeSkill in $nativeSkills){
+                        $nativePath=Join-Path $RunRoot (([guid]::NewGuid().ToString('N'))+'-native.json')
+                        Write-SourceGateFixtureJson -Path $nativePath -Value ([pscustomobject]@{tool=$ToolId;skillId=$nativeSkill;status='passed'})
+                        $nativeArguments=if($nativeName -ceq 'skill-tools'){@($receipt.entryPointPath,'validate',$nativeSkill)}else{@('validate',$nativeSkill)}
+                        $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$nativeCommand;commandSha256=$nativeCommandHash;arguments=$nativeArguments;exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'measurement transport report'}
+                    }
+                }
+                $envelope=[pscustomobject]@{nativeReports=@($nativeReports);findings=@();analyzerCompleteness='complete'}
+                return [pscustomobject]@{event=[pscustomobject]@{tool=$ToolId;skill=$SkillId};envelope=$envelope}
+            }
+            finally {$script:SourceTransportTool=$null}
+        }
+
+        $measureClosure={
+            param([object[]]$Rows,[string[]]$Roots,[string[]]$Phases)
+            $scopeRows=New-Object 'System.Collections.Generic.List[object]'
+            foreach($row in $Rows){
+                if([string]$row.phase -cnotin $Phases){continue}
+                if(@($Roots).Count -eq 0){$scopeRows.Add($row);continue}
+                foreach($root in $Roots){
+                    if(Test-StandardValidationPathWithin -Path ([string]$row.path) -Root ([string]$root) -IncludeRoot){$scopeRows.Add($row);break}
+                }
+            }
+            $paths=@($scopeRows | ForEach-Object {[string]$_.path} | Select-Object -Unique)
+            $bytes=[long]0;$elapsed=[double]0
+            foreach($row in $scopeRows){$bytes += [long]$row.bytes;$elapsed += [double]$row.elapsedMilliseconds}
+            $uniqueBytes=[long]0
+            foreach($pathValue in $paths){$uniqueBytes += [long](Get-Item -Force -LiteralPath $pathValue).Length}
+            return [pscustomobject]@{shaReadCount=$scopeRows.Count;shaReadBytes=$bytes;shaElapsedMilliseconds=[Math]::Round($elapsed,3);shaUniquePathCount=$paths.Count;shaUniqueBytes=$uniqueBytes;closurePaths=$paths}
+        }
+        $normalizePath={
+            param([string]$Path,$State)
+            $aGroup=$State.map.groups.byTool['skill-validator']
+            foreach($root in @($aGroup.roots)){
+                if(Test-StandardValidationPathWithin -Path $Path -Root ([string]$root) -IncludeRoot){return 'tool-A/'+([IO.Path]::GetRelativePath([string]$root,$Path).Replace('\','/'))}
+            }
+            foreach($binding in @($State.sourceSpec.toolReceipts)){
+                if([string]::Equals($Path,[string]$binding.path,[StringComparison]::OrdinalIgnoreCase)){return 'receipt/'+[IO.Path]::GetFileName([string]$binding.path)}
+            }
+            foreach($asset in @($aGroup.externalAssets)){
+                if([string]::Equals($Path,[string]$asset.path,[StringComparison]::OrdinalIgnoreCase)){return 'tool-A-external/'+[IO.Path]::GetFileName([string]$asset.path)}
+            }
+            foreach($shared in @($aGroup.sharedFiles)){
+                if([string]::Equals($Path,[string]$shared.path,[StringComparison]::OrdinalIgnoreCase)){return 'shared/'+[IO.Path]::GetFileName([string]$shared.path)}
+            }
+            if(Test-StandardValidationPathWithin -Path $Path -Root ([string]$State.report.artifacts.snapshotRoot) -IncludeRoot){return 'candidate/'+([IO.Path]::GetRelativePath([string]$State.report.artifacts.snapshotRoot,$Path).Replace('\','/'))}
+            foreach($group in @($State.map.groups.groups)){
+                if([string]$group.id -ceq [string]$aGroup.id){continue}
+                foreach($root in @($group.roots)){
+                    if(Test-StandardValidationPathWithin -Path $Path -Root ([string]$root) -IncludeRoot){return 'other/'+[string]$group.id+'/'+([IO.Path]::GetRelativePath([string]$root,$Path).Replace('\','/'))}
+                }
+            }
+            if(Test-StandardValidationPathWithin -Path $Path -Root ([string]$State.report.artifacts.root) -IncludeRoot){
+                $relative=[IO.Path]::GetRelativePath([string]$State.report.artifacts.root,$Path).Replace('\','/')
+                $relative=[regex]::Replace($relative,'(?i)[0-9a-f]{32}(?=-|\.)','{id}')
+                return 'artifacts/'+$relative
+            }
+            return 'outside/'+[IO.Path]::GetFileName($Path)
+        }
+        $measureToolPhase={
+            param([object[]]$Rows,$State)
+            $normalized=@($Rows | ForEach-Object {[pscustomobject]@{path=(& $normalizePath -Path ([string]$_.path) -State $State);bytes=[long]$_.bytes;phase=[string]$_.phase;tool=[string]$_.tool;elapsedMilliseconds=[double]$_.elapsedMilliseconds}})
+            $matrix=@($normalized | Group-Object path | Sort-Object Name | ForEach-Object {
+                $callBytes=[long]0;$elapsed=[double]0;foreach($row in $_.Group){$callBytes += [long]$row.bytes;$elapsed += [double]$row.elapsedMilliseconds}
+                [pscustomobject]@{path=[string]$_.Name;calls=$_.Count;bytes=$callBytes;elapsedMilliseconds=[Math]::Round($elapsed,3)}
+            })
+            $readBytes=[long]0;$readElapsed=[double]0
+            foreach($row in $Rows){$readBytes += [long]$row.bytes;$readElapsed += [double]$row.elapsedMilliseconds}
+            $physicalPaths=@($Rows | ForEach-Object {[string]$_.path} | Select-Object -Unique)
+            $uniqueBytes=[long]0
+            foreach($pathValue in $physicalPaths){$uniqueBytes += [long](Get-Item -Force -LiteralPath $pathValue).Length}
+            $signature=ConvertTo-Json -InputObject @($matrix | ForEach-Object {[pscustomobject]@{path=$_.path;calls=$_.calls;bytes=$_.bytes}}) -Depth 4 -Compress
+            return [pscustomobject]@{shaReadCount=$Rows.Count;shaReadBytes=$readBytes;shaElapsedMilliseconds=[Math]::Round($readElapsed,3);shaUniquePathCount=$physicalPaths.Count;shaUniqueBytes=$uniqueBytes;normalizedPathClassCount=$matrix.Count;pathMatrix=$matrix;pathSignature=$signature;shaReads=@($Rows | ForEach-Object {[pscustomobject]@{path=[string]$_.path;bytes=[long]$_.bytes;phase=[string]$_.phase;tool=[string]$_.tool;elapsedMilliseconds=[double]$_.elapsedMilliseconds}})}
+        }
+        $runSample={
+            param($State,[int]$Sample)
+            $script:SourceSha256Reads.Clear()
+            $script:SourceReceiptsForObserver=@($State.sourceSpec.toolReceipts)
+            $watch=[Diagnostics.Stopwatch]::StartNew()
+            $null=Invoke-StandardCoreSourceTools -Spec $State.sourceSpec -SkillSet $State.skillSet -RunId $State.report.runId `
+                -SourceRevision $State.report.candidate.sourceRevision -AuthorityRevision $State.report.authority.revision `
+                -SnapshotRoot $State.report.artifacts.snapshotRoot -ContentSha256 $State.report.candidate.contentSha256 `
+                -RunRoot $State.report.artifacts.runRoot -AdapterPath $State.report.sourceValidation.adapterSnapshot.path `
+                -AdapterSha256 $State.report.sourceValidation.adapterSnapshot.sha256 -ArtifactsRoot $State.report.artifacts.root `
+                -TrustedToolRoot $State.trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $State.report.artifacts.root 'cancelled')
+            $watch.Stop()
+            $rows=@($script:SourceSha256Reads.ToArray())
+            $allRoots=@($State.map.groups.groups | ForEach-Object {$_.roots} | Select-Object -Unique)
+            $setup=& $measureClosure -Rows $rows -Roots $allRoots -Phases @('setup')
+            foreach($root in $allRoots){
+                $probe=Join-Path ([string]$root) 'dependency.bin'
+                if($setup.closurePaths -notcontains $probe){throw "Full setup did not hash a tool root dependency: $probe"}
+            }
+            if($State.large){foreach($index in 1..2){$probe=Join-Path ([string]$State.map.groups.byTool['skill-tools'].roots[0]) ("dependency-large-$index.bin");if($setup.closurePaths -notcontains $probe){throw "Full setup omitted the unrelated larger closure file: $probe"}}}
+            $dispatchRows=@($rows | Where-Object {$_.phase -cin @('pre-dispatch','post-dispatch') -and $_.tool -ceq 'skill-validator'})
+            if(@($dispatchRows | Where-Object {$_.phase -ceq 'pre-dispatch'}).Count -eq 0 -or @($dispatchRows | Where-Object {$_.phase -ceq 'post-dispatch'}).Count -eq 0){throw 'Selected tool A SHA reads were not separated into pre and post dispatch.'}
+            $aGroup=$State.map.groups.byTool['skill-validator']
+            $aDependency=Join-Path ([string]$aGroup.roots[0]) 'dependency.bin'
+            if(@($dispatchRows | Where-Object {$_.path -ceq $aDependency}).Count -eq 0){throw 'Selected tool A dependency was not hashed during its dispatch.'}
+            $otherRoots=@($State.map.groups.groups | Where-Object {$_.id -cne $aGroup.id} | ForEach-Object {$_.roots} | Select-Object -Unique)
+            foreach($otherRoot in $otherRoots){if(@($dispatchRows | Where-Object {Test-StandardValidationPathWithin -Path ([string]$_.path) -Root ([string]$otherRoot) -IncludeRoot}).Count -gt 0){throw 'Selected tool A dispatch hashed unrelated tool B closure bytes.'}}
+            $preRows=@($dispatchRows | Where-Object {$_.phase -ceq 'pre-dispatch'})
+            $postRows=@($dispatchRows | Where-Object {$_.phase -ceq 'post-dispatch'})
+            if($preRows.Count -eq 0 -or $postRows.Count -eq 0){throw 'Selected tool A must have actual pre and post SHA samples.'}
+            $preMetric=& $measureToolPhase -Rows $preRows -State $State
+            $postMetric=& $measureToolPhase -Rows $postRows -State $State
+            $selectedMetric=& $measureToolPhase -Rows $dispatchRows -State $State
+            $setupRows=@($rows | Where-Object {$_.phase -ceq 'setup'})
+            $transportRows=@($rows | Where-Object {$_.phase -ceq 'transport'})
+            return [pscustomobject]@{variant=$State.name;sample=$Sample;sourceToolsElapsedMilliseconds=[Math]::Round($watch.Elapsed.TotalMilliseconds,3);setup=$setup;setupShaReads=@($setupRows | ForEach-Object {[pscustomobject]@{path=[string]$_.path;bytes=[long]$_.bytes;elapsedMilliseconds=[double]$_.elapsedMilliseconds}});preDispatch=$preMetric;postDispatch=$postMetric;selectedDispatch=$selectedMetric;transportReadCount=$transportRows.Count;transportShaReads=@($transportRows | ForEach-Object {[pscustomobject]@{path=[string]$_.path;bytes=[long]$_.bytes;tool=[string]$_.tool;elapsedMilliseconds=[double]$_.elapsedMilliseconds}})}
+        }
+
+        $results=New-Object 'System.Collections.Generic.List[object]'
+        foreach($state in $states){for($sample=1;$sample -le 3;$sample++){$results.Add((& $runSample -State $state -Sample $sample))}}
+        $small=@($results | Where-Object {$_.variant -ceq 'small-unrelated-B'})
+        $large=@($results | Where-Object {$_.variant -ceq 'large-unrelated-B'})
+        if($small.Count -ne 3 -or $large.Count -ne 3){throw 'Expected three samples for each unrelated tool B closure size.'}
+        $expectedSignature=[string]$small[0].selectedDispatch.pathSignature
+        foreach($sample in @($small)+@($large)){
+            if([string]$sample.selectedDispatch.pathSignature -cne $expectedSignature -or
+                [long]$sample.selectedDispatch.shaReadCount -ne [long]$small[0].selectedDispatch.shaReadCount -or
+                [long]$sample.selectedDispatch.shaReadBytes -ne [long]$small[0].selectedDispatch.shaReadBytes -or
+                [long]$sample.selectedDispatch.shaUniquePathCount -ne [long]$small[0].selectedDispatch.shaUniquePathCount -or
+                [long]$sample.selectedDispatch.shaUniqueBytes -ne [long]$small[0].selectedDispatch.shaUniqueBytes){throw 'The same selected tool A dispatch read a different path/count/byte scope as unrelated tool B changed size.'}
+        }
+
+        foreach($phaseName in @('preDispatch','postDispatch')){
+            $expectedPhase=$small[0].$phaseName
+            foreach($sample in @($small)+@($large)){
+                $actualPhase=$sample.$phaseName
+                if([string]$actualPhase.pathSignature -cne [string]$expectedPhase.pathSignature -or
+                    [long]$actualPhase.shaReadCount -ne [long]$expectedPhase.shaReadCount -or
+                    [long]$actualPhase.shaReadBytes -ne [long]$expectedPhase.shaReadBytes -or
+                    [long]$actualPhase.shaUniquePathCount -ne [long]$expectedPhase.shaUniquePathCount -or
+                    [long]$actualPhase.shaUniqueBytes -ne [long]$expectedPhase.shaUniqueBytes){throw "Selected tool A $phaseName read scope varied with unrelated tool B closure size or sample."}
+            }
+        }
+        $finalReadResults=New-Object 'System.Collections.Generic.List[object]'
+        foreach($state in $states){
+            for($sample=1;$sample -le 3;$sample++){
+                $script:SourceSha256Reads.Clear();$script:SourceObserverForcedPhase='final-report'
+                $watch=[Diagnostics.Stopwatch]::StartNew()
+                try {Invoke-SourceGateFixture -Report $state.report | Out-Null}
+                finally {$watch.Stop();$script:SourceObserverForcedPhase=$null}
+                $finalRows=@($script:SourceSha256Reads.ToArray())
+                $allRoots=@($state.map.groups.groups | ForEach-Object {$_.roots} | Select-Object -Unique)
+                $finalClosure=& $measureClosure -Rows $finalRows -Roots $allRoots -Phases @('final-report')
+                $finalAll=& $measureClosure -Rows $finalRows -Roots @() -Phases @('final-report')
+                foreach($root in $allRoots){$probe=Join-Path ([string]$root) 'dependency.bin';if($finalClosure.closurePaths -notcontains $probe){throw "Full final report read omitted a tool root dependency: $probe"}}
+                if($state.large){foreach($index in 1..2){$probe=Join-Path ([string]$state.map.groups.byTool['skill-tools'].roots[0]) ("dependency-large-$index.bin");if($finalClosure.closurePaths -notcontains $probe){throw "Full final report read omitted the unrelated larger closure file: $probe"}}}
+                $finalReadResults.Add([pscustomobject]@{
+                    variant=$state.name;sample=$sample;phase='final-report';readerElapsedMilliseconds=[Math]::Round($watch.Elapsed.TotalMilliseconds,3)
+                    shaReadCount=$finalAll.shaReadCount;shaReadBytes=$finalAll.shaReadBytes;shaElapsedMilliseconds=$finalAll.shaElapsedMilliseconds;shaUniquePathCount=$finalAll.shaUniquePathCount;shaUniqueBytes=$finalAll.shaUniqueBytes
+                    finalReader=[pscustomobject]@{readerElapsedMilliseconds=[Math]::Round($watch.Elapsed.TotalMilliseconds,3);shaReadCount=$finalAll.shaReadCount;shaReadBytes=$finalAll.shaReadBytes;shaElapsedMilliseconds=$finalAll.shaElapsedMilliseconds;shaUniquePathCount=$finalAll.shaUniquePathCount;shaUniqueBytes=$finalAll.shaUniqueBytes}
+                    closureShaReadCount=$finalClosure.shaReadCount;closureShaReadBytes=$finalClosure.shaReadBytes;closureShaElapsedMilliseconds=$finalClosure.shaElapsedMilliseconds;closureShaUniquePathCount=$finalClosure.shaUniquePathCount;closureShaUniqueBytes=$finalClosure.shaUniqueBytes;closurePaths=@($finalClosure.closurePaths)
+                    shaReads=@($finalRows | ForEach-Object {[pscustomobject]@{path=[string]$_.path;bytes=[long]$_.bytes;elapsedMilliseconds=[double]$_.elapsedMilliseconds}})
+                })
+            }
+        }
+        $smallSetup=$small[0].setup;$largeSetup=$large[0].setup
+        if($largeSetup.shaUniquePathCount -le $smallSetup.shaUniquePathCount -or $largeSetup.shaUniqueBytes -le $smallSetup.shaUniqueBytes){throw 'Full setup did not measure the expected larger unrelated tool B closure.'}
+        $smallFinal=@($finalReadResults | Where-Object {$_.variant -ceq 'small-unrelated-B'})
+        $largeFinal=@($finalReadResults | Where-Object {$_.variant -ceq 'large-unrelated-B'})
+        if($smallFinal.Count -ne 3 -or $largeFinal.Count -ne 3){throw 'Expected three final-reader samples for each unrelated tool B closure size.'}
+        foreach($variantName in @('small-unrelated-B','large-unrelated-B')){
+            $sampleGroup=if($variantName -ceq 'small-unrelated-B'){@($smallFinal)}else{@($largeFinal)}
+            $first=$sampleGroup[0]
+            foreach($sample in $sampleGroup){
+                if([long]$sample.shaReadCount -ne [long]$first.shaReadCount -or [long]$sample.shaReadBytes -ne [long]$first.shaReadBytes -or
+                    [long]$sample.shaUniquePathCount -ne [long]$first.shaUniquePathCount -or [long]$sample.shaUniqueBytes -ne [long]$first.shaUniqueBytes -or
+                    [long]$sample.closureShaUniquePathCount -ne [long]$first.closureShaUniquePathCount -or [long]$sample.closureShaUniqueBytes -ne [long]$first.closureShaUniqueBytes){throw 'Final report reader path/count/byte measurements varied between identical samples.'}
+            }
+        }
+        if($largeFinal[0].closureShaUniquePathCount -le $smallFinal[0].closureShaUniquePathCount -or $largeFinal[0].closureShaUniqueBytes -le $smallFinal[0].closureShaUniqueBytes){throw 'Full final report reader did not measure the expected larger unrelated tool B closure.'}
+        $summarizeMetric={
+            param([object[]]$Samples,[string]$PropertyName,[string[]]$Fields)
+            $summary=[ordered]@{sampleCount=$Samples.Count}
+            foreach($field in $Fields){
+                $values=New-Object 'System.Collections.Generic.List[double]'
+                foreach($sample in $Samples){$metric=$sample.PSObject.Properties[$PropertyName].Value;$values.Add([double]$metric.$field)}
+                $stats=$values.ToArray() | Measure-Object -Average -Minimum -Maximum
+                $summary[$field]=[pscustomobject]@{min=[Math]::Round([double]$stats.Minimum,3);mean=[Math]::Round([double]$stats.Average,3);max=[Math]::Round([double]$stats.Maximum,3)}
+            }
+            return [pscustomobject]$summary
+        }
+        $summarizeValues={
+            param([double[]]$Values)
+            $stats=@($Values) | Measure-Object -Average -Minimum -Maximum
+            return [pscustomobject]@{sampleCount=@($Values).Count;min=[Math]::Round([double]$stats.Minimum,3);mean=[Math]::Round([double]$stats.Average,3);max=[Math]::Round([double]$stats.Maximum,3)}
+        }
+        $summaries=New-Object 'System.Collections.Generic.List[object]'
+        foreach($variantName in @('small-unrelated-B','large-unrelated-B')){
+            $variantSamples=@($results | Where-Object {$_.variant -ceq $variantName})
+            $variantFinal=@($finalReadResults | Where-Object {$_.variant -ceq $variantName})
+            $summaries.Add([pscustomobject]@{
+                variant=$variantName
+                sourceToolsBindingElapsedMilliseconds=& $summarizeValues -Values @($variantSamples | ForEach-Object {[double]$_.sourceToolsElapsedMilliseconds})
+                setup=& $summarizeMetric -Samples $variantSamples -PropertyName 'setup' -Fields @('shaReadCount','shaReadBytes','shaElapsedMilliseconds','shaUniquePathCount','shaUniqueBytes')
+                preDispatch=& $summarizeMetric -Samples $variantSamples -PropertyName 'preDispatch' -Fields @('shaReadCount','shaReadBytes','shaElapsedMilliseconds','shaUniquePathCount','shaUniqueBytes')
+                postDispatch=& $summarizeMetric -Samples $variantSamples -PropertyName 'postDispatch' -Fields @('shaReadCount','shaReadBytes','shaElapsedMilliseconds','shaUniquePathCount','shaUniqueBytes')
+                finalReader=& $summarizeMetric -Samples $variantFinal -PropertyName 'finalReader' -Fields @('readerElapsedMilliseconds','shaReadCount','shaReadBytes','shaElapsedMilliseconds','shaUniquePathCount','shaUniqueBytes')
+            })
+        }
+        $evidenceRoot=$script:SourceMeasurementEvidenceRoot
+        $evidence=[pscustomobject]@{test='UnitT60_compares_same_tool_dispatch_across_unrelated_closure_sizes';evidenceRoot=$evidenceRoot;toolA='skill-validator';unrelatedToolB='skill-tools';smallClosureSamples=@($small);largeClosureSamples=@($large);finalReaderSamples=@($finalReadResults.ToArray());minMeanMaxSummaries=@($summaries.ToArray())}
+        [IO.File]::WriteAllText((Join-Path $evidenceRoot 'dispatch-read-scope-samples.json'),($evidence | ConvertTo-Json -Depth 12),(New-Object Text.UTF8Encoding($false)))
+    }
+    # Scenario: An earlier package adapter mutates a different tool's installed closure before Skillspector dispatch.
+    # Purpose: Prove real pre-dispatch hashing rejects the changed closure before that child transport starts.
+    It 'UnitT61_rejects_changed_other_tool_closure_before_its_child_launch' {
+        $report=New-SourceGateFixture -OutsideArtifactCommand
+        $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+        $sourceSpec=$adapter.sourceValidation
+        $trustedRoot=Split-Path -Parent ([string]$sourceSpec.packageAdapter.command)
+        $skillRecords=@()
+        foreach($id in @($report.candidate.activeSkills)){
+            $skillRoot=Join-Path $report.artifacts.snapshotRoot ('skills/'+$id)
+            $inventory=Get-StandardValidationInventory -Root $skillRoot -Context 'dispatch tamper fixture skill'
+            $skillRecords += [pscustomobject]@{id=$id;inventorySha256=Get-StandardValidationInventorySha256 -Inventory $inventory}
+        }
+        $skillSet=[pscustomobject]@{ids=@($report.candidate.activeSkills);records=$skillRecords;root=(Join-Path $report.artifacts.snapshotRoot 'skills');relative='skills'}
+        $receiptBindings=@($sourceSpec.toolReceipts)
+        $skillSpectorBinding=@($receiptBindings | Where-Object { [IO.Path]::GetFileName([string]$_.path) -ceq 'skillspector.json' })[0]
+        $skillSpectorReceipt=Get-Content -Raw $skillSpectorBinding.path | ConvertFrom-Json
+        $script:SourceTamperFile=Join-Path ([string]$skillSpectorReceipt.installRoot) 'dependency.bin'
+        $script:SourceToolLaunches=New-Object 'System.Collections.Generic.List[string]'
+        $script:SourceFakeReceipts=$receiptBindings
+        Mock Invoke-StandardValidationCommandAndRecord {
+            param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills)
+            $script:SourceToolLaunches.Add([string]$ToolId)
+            if([string]$ToolId -ceq 'package-adapter'){
+                [IO.File]::WriteAllText($script:SourceTamperFile,'changed after setup and before Skillspector dispatch',(New-Object Text.UTF8Encoding($false)))
+            }
+            $nativeReports=@()
+            if([string]$ToolId -cin @('skill-validator','skill-tools','static-analyzer')){
+                $nativeName=if([string]$ToolId -ceq 'static-analyzer'){'skillspector'}else{[string]$ToolId}
+                $binding=@($script:SourceFakeReceipts | Where-Object { [IO.Path]::GetFileName([string]$_.path) -ceq ($nativeName+'.json') })[0]
+                $receipt=Get-Content -Raw $binding.path | ConvertFrom-Json
+                $nativeCommand=if($nativeName -ceq 'skill-tools'){$receipt.nodePath}else{$receipt.executablePath}
+                $nativeCommandHash=if($nativeName -ceq 'skill-tools'){$receipt.nodeSha256}else{$receipt.executableSha256}
+                $nativeSkills=if(-not [string]::IsNullOrEmpty([string]$SkillId)){@([string]$SkillId)}else{@($ExpectedActiveSkills)}
+                foreach($nativeSkill in $nativeSkills){
+                    $nativePath=Join-Path $RunRoot (([guid]::NewGuid().ToString('N'))+'-native.json')
+                    Write-SourceGateFixtureJson -Path $nativePath -Value ([pscustomobject]@{tool=$ToolId;skillId=$nativeSkill;status='passed'})
+                    $nativeArguments=if($nativeName -ceq 'skill-tools'){@($receipt.entryPointPath,'validate',$nativeSkill)}else{@('validate',$nativeSkill)}
+                    $nativeReports += [pscustomobject]@{skillId=$nativeSkill;command=$nativeCommand;commandSha256=$nativeCommandHash;arguments=$nativeArguments;exitCode=0;path=$nativePath;sha256=Get-StandardValidationFileSha256 -Path $nativePath -Context 'dispatch tamper native report'}
+                }
+            }
+            $envelope=[pscustomobject]@{nativeReports=@($nativeReports);findings=@();analyzerCompleteness='complete'}
+            return [pscustomobject]@{event=[pscustomobject]@{tool=$ToolId;skill=$SkillId};envelope=$envelope}
+        }
+
+        $rejected=$false
+        try {
+            Invoke-StandardCoreSourceTools -Spec $sourceSpec -SkillSet $skillSet -RunId $report.runId -SourceRevision $report.candidate.sourceRevision -AuthorityRevision $report.authority.revision -SnapshotRoot $report.artifacts.snapshotRoot -ContentSha256 $report.candidate.contentSha256 -RunRoot $report.artifacts.runRoot -AdapterPath $report.sourceValidation.adapterSnapshot.path -AdapterSha256 $report.sourceValidation.adapterSnapshot.sha256 -ArtifactsRoot $report.artifacts.root -TrustedToolRoot $trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $report.artifacts.root 'cancelled')
+        }
+        catch { $rejected=$true }
+        if(-not $rejected){throw 'A changed Skillspector closure must reject dispatch before its child launch.'}
+        if($script:SourceToolLaunches -contains 'static-analyzer'){throw 'Static analyzer child was launched after its pre-dispatch closure check failed.'}
+        if($script:SourceToolLaunches.Count -ne 5){throw "Expected five earlier child launches; observed $($script:SourceToolLaunches.Count)."}
+
+        $evidenceRoot=$script:SourceMeasurementEvidenceRoot
+        $evidence=[pscustomobject]@{test='UnitT61_rejects_changed_other_tool_closure_before_its_child_launch';mutatedTool='skillspector';mutatedPath=$script:SourceTamperFile;launchedTools=@($script:SourceToolLaunches.ToArray());staticAnalyzerChildLaunchCount=@($script:SourceToolLaunches | Where-Object {$_ -ceq 'static-analyzer'}).Count;rejectionObserved=$rejected}
+        [IO.File]::WriteAllText((Join-Path $evidenceRoot 'other-tool-tamper-before-launch.json'),($evidence | ConvertTo-Json -Depth 5),(New-Object Text.UTF8Encoding($false)))
+    }
+
+    # Scenario: A selected tool's own dependency, executable, package payload, runtime, or closure inventory changes during its child.
+    # Purpose: Require the post-dispatch guard to reject each change before accepting native reports or launching later tools.
+    It 'UnitT63_rejects_same_tool_mutation_and_new_file_after_child_exit' {
+        $cases=@(
+            [pscustomobject]@{name='validator dependency';tool='skill-validator';field='dependency';receipt='skill-validator'},
+            [pscustomobject]@{name='validator executable';tool='skill-validator';field='executable';receipt='skill-validator'},
+            [pscustomobject]@{name='skill-tools payload';tool='skill-tools';field='payload';receipt='skill-tools'},
+            [pscustomobject]@{name='skill-tools runtime';tool='skill-tools';field='runtime';receipt='skill-tools'},
+            [pscustomobject]@{name='new file';tool='skill-validator';field='new-file';receipt='skill-validator'}
+        )
+        $outcomes=New-Object 'System.Collections.Generic.List[object]'
+        foreach($case in $cases){
+            $report=New-SourceGateFixture -OutsideArtifactCommand
+            $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+            $spec=$adapter.sourceValidation
+            $binding=@($spec.toolReceipts | Where-Object {[IO.Path]::GetFileName([string]$_.path) -ceq ($case.receipt+'.json')})[0]
+            $receipt=Get-Content -Raw $binding.path | ConvertFrom-Json
+            $script:SourceTamperTargetTool=[string]$case.tool
+            $script:SourceTamperDone=$false
+            $script:SourceTamperKind=[string]$case.field
+            $script:SourceTamperPath=switch([string]$case.field){
+                'dependency' {Join-Path ([string]$receipt.installRoot) 'dependency.bin'}
+                'executable' {[string]$receipt.executablePath}
+                'payload' {[string]$receipt.entryPointPath}
+                'runtime' {[string]$receipt.nodePath}
+                'new-file' {Join-Path ([string]$receipt.installRoot) 'injected-during-child.bin'}
+            }
+            Set-SourceGateToolTransportMock -Receipts @($spec.toolReceipts) -AfterChild {
+                param($ToolId,$SkillId,$CommandSpec,$RunRoot,$Receipts)
+                if([string]$ToolId -ceq $script:SourceTamperTargetTool -and -not $script:SourceTamperDone){
+                    if($script:SourceTamperKind -ceq 'new-file'){
+                        [IO.File]::WriteAllText($script:SourceTamperPath,'new file added during tool child',(New-Object Text.UTF8Encoding($false)))
+                    }
+                    else {[IO.File]::WriteAllText($script:SourceTamperPath,'tool bytes changed during its child',(New-Object Text.UTF8Encoding($false)))}
+                    $script:SourceTamperDone=$true
+                }
+            }
+            $rejected=$false
+            try { Invoke-SourceGateDispatchFixture -Report $report | Out-Null }
+            catch { $rejected=$true }
+            if(-not $script:SourceTamperDone){throw "The $($case.name) mutation did not occur during its selected child."}
+            if(-not $rejected){throw "The post-dispatch guard accepted a changed $($case.name) closure."}
+            $targetLaunchCount=@($script:SourceToolLaunches | Where-Object {$_ -ceq [string]$case.tool}).Count
+            if($targetLaunchCount -ne 1){throw "The changed $($case.name) tool should launch once, then fail before its next dispatch."}
+            $outcomes.Add([pscustomobject]@{case=[string]$case.name;mutatedPath=[string]$script:SourceTamperPath;targetLaunchCount=$targetLaunchCount;rejectionObserved=$rejected})
+        }
+        [IO.File]::WriteAllText((Join-Path $script:SourceMeasurementEvidenceRoot 'same-tool-post-dispatch-tamper.json'),(@($outcomes.ToArray()) | ConvertTo-Json -Depth 5),(New-Object Text.UTF8Encoding($false)))
+    }
+
+    # Scenario: A later child changes an authenticated external runtime or an unmapped shared control before another tool uses it.
+    # Purpose: Keep external assets scoped to their owning tool while rechecking common controls for every dispatch.
+    It 'UnitT64_rechecks_shared_controls_and_external_runtime_before_use' {
+        foreach($scenario in @('unowned-shared-control','skill-tools-runtime')){
+            $report=if($scenario -ceq 'unowned-shared-control'){New-SourceGateFixture -OutsideArtifactCommand -UnownedSharedControl}else{New-SourceGateFixture -OutsideArtifactCommand}
+            $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+            $spec=$adapter.sourceValidation
+            $skillToolsBinding=@($spec.toolReceipts | Where-Object {[IO.Path]::GetFileName([string]$_.path) -ceq 'skill-tools.json'})[0]
+            $skillToolsReceipt=Get-Content -Raw $skillToolsBinding.path | ConvertFrom-Json
+            $script:SourceSharedMutationPath=if($scenario -ceq 'unowned-shared-control'){[string]$report.unownedSharedControlPath}else{[string]$skillToolsReceipt.nodePath}
+            $script:SourceSharedMutationDone=$false
+            Set-SourceGateToolTransportMock -Receipts @($spec.toolReceipts) -AfterChild {
+                param($ToolId,$SkillId,$CommandSpec,$RunRoot,$Receipts)
+                if([string]$ToolId -ceq 'package-adapter' -and -not $script:SourceSharedMutationDone){
+                    [IO.File]::WriteAllText($script:SourceSharedMutationPath,'changed after setup before tool use',(New-Object Text.UTF8Encoding($false)))
+                    $script:SourceSharedMutationDone=$true
+                }
+            }
+            $rejected=$false
+            try { Invoke-SourceGateDispatchFixture -Report $report | Out-Null }
+            catch { $rejected=$true }
+            if(-not $script:SourceSharedMutationDone -or -not $rejected){throw "The $scenario change must be rejected by its owning pre-dispatch integrity check."}
+            $validatorLaunchCount=@($script:SourceToolLaunches | Where-Object {$_ -ceq 'skill-validator'}).Count
+            $skillToolsLaunchCount=@($script:SourceToolLaunches | Where-Object {$_ -ceq 'skill-tools'}).Count
+            if($scenario -ceq 'unowned-shared-control' -and ($validatorLaunchCount -ne 0 -or $skillToolsLaunchCount -ne 0)){throw 'An unmapped shared control must be checked before any subsequent tool child starts.'}
+            if($scenario -ceq 'skill-tools-runtime' -and ($validatorLaunchCount -ne 1 -or $skillToolsLaunchCount -ne 0)){throw 'The external runtime must remain scoped to skill-tools and be checked before that tool launches.'}
+            [IO.File]::WriteAllText((Join-Path $script:SourceMeasurementEvidenceRoot ($scenario+'.json')),(ConvertTo-Json -InputObject ([pscustomobject]@{scenario=$scenario;path=$script:SourceSharedMutationPath;launchedTools=@($script:SourceToolLaunches.ToArray());rejectionObserved=$rejected}) -Depth 5),(New-Object Text.UTF8Encoding($false)))
+        }
+    }
+
+    # Scenario: A tool installation root or its ancestor is replaced with a reparse point after setup.
+    # Purpose: Prove canonical-root checks reject root and ancestor substitution before selected child launch.
+    It 'UnitT65_rejects_root_and_ancestor_reparse_substitution' {
+        foreach($scope in @('root','ancestor')){
+            $report=New-SourceGateFixture -OutsideArtifactCommand
+            $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+            $spec=$adapter.sourceValidation
+            $validatorBinding=@($spec.toolReceipts | Where-Object {[IO.Path]::GetFileName([string]$_.path) -ceq 'skill-validator.json'})[0]
+            $validatorReceipt=Get-Content -Raw $validatorBinding.path | ConvertFrom-Json
+            $installRoot=[string]$validatorReceipt.installRoot
+            $script:SourceJunctionPath=if($scope -ceq 'root'){$installRoot}else{Split-Path -Parent $installRoot}
+            $script:SourceJunctionBackup=$script:SourceJunctionPath+'.original'
+            $script:SourceJunctionCreated=$false
+            if(Test-Path -LiteralPath $script:SourceJunctionBackup){throw 'The isolated fixture already contains a junction backup path.'}
+            Set-SourceGateToolTransportMock -Receipts @($spec.toolReceipts) -AfterChild {
+                param($ToolId,$SkillId,$CommandSpec,$RunRoot,$Receipts)
+                if([string]$ToolId -ceq 'package-adapter' -and -not $script:SourceJunctionCreated){
+                    Move-Item -LiteralPath $script:SourceJunctionPath -Destination $script:SourceJunctionBackup
+                    New-Item -ItemType Junction -Path $script:SourceJunctionPath -Target $script:SourceJunctionBackup | Out-Null
+                    $script:SourceJunctionCreated=$true
+                }
+            }
+            $rejected=$false
+            try { Invoke-SourceGateDispatchFixture -Report $report | Out-Null }
+            catch { $rejected=$true }
+            finally {
+                if($script:SourceJunctionCreated -and (Test-Path -LiteralPath $script:SourceJunctionPath)){
+                    Remove-Item -LiteralPath $script:SourceJunctionPath -Force
+                    Move-Item -LiteralPath $script:SourceJunctionBackup -Destination $script:SourceJunctionPath
+                }
+            }
+            if(-not $script:SourceJunctionCreated -or -not $rejected){throw "A substituted $scope reparse path must be rejected before tool launch."}
+            if(@($script:SourceToolLaunches | Where-Object {$_ -ceq 'skill-validator'}).Count -ne 0){throw "The validator child must not launch when its $scope path is reparse-substituted."}
+        }
+    }
+
+    # Scenario: A later analyzer child changes a validator closure whose tool already ran.
+    # Purpose: Require the independent full final reader to reject cross-tool contamination after all dispatches complete.
+    It 'UnitT66_final_full_reader_rejects_later_tool_contamination' {
+        $report=New-SourceGateFixture -OutsideArtifactCommand
+        $adapter=Get-Content -Raw $report.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+        $spec=$adapter.sourceValidation
+        $validatorBinding=@($spec.toolReceipts | Where-Object {[IO.Path]::GetFileName([string]$_.path) -ceq 'skill-validator.json'})[0]
+        $validatorReceipt=Get-Content -Raw $validatorBinding.path | ConvertFrom-Json
+        $script:SourceFinalMutationPath=Join-Path ([string]$validatorReceipt.installRoot) 'dependency.bin'
+        $script:SourceFinalMutationDone=$false
+        Set-SourceGateToolTransportMock -Receipts @($spec.toolReceipts) -AfterChild {
+            param($ToolId,$SkillId,$CommandSpec,$RunRoot,$Receipts)
+            if([string]$ToolId -ceq 'static-analyzer' -and -not $script:SourceFinalMutationDone){
+                [IO.File]::WriteAllText($script:SourceFinalMutationPath,'changed after validator execution',(New-Object Text.UTF8Encoding($false)))
+                $script:SourceFinalMutationDone=$true
+            }
+        }
+        Invoke-SourceGateDispatchFixture -Report $report | Out-Null
+        if(-not $script:SourceFinalMutationDone){throw 'The later analyzer child must mutate the already-executed validator closure.'}
+        if(@($script:SourceToolLaunches).Count -ne 6){throw "Expected every source child to complete before final-reader validation; observed $($script:SourceToolLaunches.Count)."}
+        $rejected=$false
+        try { Invoke-SourceGateFixture -Report $report | Out-Null }
+        catch { $rejected=$true }
+        if(-not $rejected){throw 'The final full reader must reject an earlier tool closure contaminated by a later child.'}
+    }
+
+    # Scenario: The process-tree cleanup boundary completes, fails a required namespace proof, or completes because of cancellation.
+    # Purpose: Measure actual owned-child cleanup spans and preserve the bool result and terminal timing state.
+    It 'UnitT67_times_real_owned_process_cleanup_and_preserves_results' {
+        $oldTimingEnabled=$script:StandardValidationTimingEnabled
+        $oldConsoleError=[Console]::Error
+        $writer=New-Object IO.StringWriter
+        $script:StandardValidationTimingEnabled=$true
+        [Console]::SetError($writer)
+        $sentinelStart=New-Object Diagnostics.ProcessStartInfo
+        $sentinelStart.FileName=Join-Path $PSHOME 'pwsh.exe'
+        foreach($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')){[void]$sentinelStart.ArgumentList.Add($argument)}
+        $sentinelStart.UseShellExecute=$false;$sentinelStart.CreateNoWindow=$true;$sentinelStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+        $sentinel=$null
+        $owned=New-Object 'System.Collections.Generic.List[Diagnostics.Process]'
+        $startSleeper={
+            $start=New-Object Diagnostics.ProcessStartInfo
+            $start.FileName=Join-Path $PSHOME 'pwsh.exe'
+            foreach($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')){[void]$start.ArgumentList.Add($argument)}
+            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+            return [Diagnostics.Process]::Start($start)
+        }
+        try {
+            $sentinel=[Diagnostics.Process]::Start($sentinelStart)
+            Start-Sleep -Milliseconds 100
+            for($sample=0;$sample -lt 3;$sample++){
+                $first=& $startSleeper;$owned.Add($first);Start-Sleep -Milliseconds 100
+                $completed=Stop-StandardValidationProcessTree -RootProcessId $first.Id -RootProcess $first -WaitMilliseconds 1000
+                if(-not $completed){throw 'A live owned child should clean up successfully with no required namespace proof.'}
+                if($sentinel.HasExited){throw 'Cleanup must not terminate a process outside the owned root tree.'}
+            }
+
+            $second=& $startSleeper;$owned.Add($second);Start-Sleep -Milliseconds 100
+            $failed=Stop-StandardValidationProcessTree -RootProcessId $second.Id -RootProcess $second -PidNamespaceRequired $true -WaitMilliseconds 1000
+            if($failed){throw 'A missing required PID namespace must preserve the false cleanup result.'}
+            if($sentinel.HasExited){throw 'A failed owned cleanup probe must not terminate the unrelated sentinel process.'}
+
+            $third=& $startSleeper;$owned.Add($third);Start-Sleep -Milliseconds 100
+            $cancelled=Stop-StandardValidationProcessTree -RootProcessId $third.Id -RootProcess $third -CancellationRequested $true -WaitMilliseconds 1000
+            if(-not $cancelled){throw 'Successful cancellation cleanup must preserve the true cleanup result.'}
+            if($sentinel.HasExited){throw 'Cancellation cleanup must not terminate the unrelated sentinel process.'}
+
+            $cleanupRows=@($writer.ToString() -split "`r?`n" | Where-Object {$_ -match '^\[StandardValidation timing\] ' -and $_ -match '"phase":"child-cleanup"' } | ForEach-Object { ($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json })
+            $terminal=@($cleanupRows | Where-Object {$_.state -cin @('completed','failed','cancelled')})
+            $completedSamples=@($terminal | Where-Object {$_.state -ceq 'completed'})
+            if($terminal.Count -ne 5 -or (@($terminal.state | Sort-Object -Unique) -join ';') -cne 'cancelled;completed;failed'){throw "Expected five actual cleanup terminal observations including completed, failed, and cancelled; got $($terminal.state -join ',')."}
+            if($completedSamples.Count -lt 3){throw "Expected at least three independent successful cleanup samples; got $($completedSamples.Count)."}
+            if(@($terminal | Where-Object {$_.calls -ne 1 -or $_.files -ne 0 -or $_.bytes -ne 0 -or $_.elapsedSeconds -lt 0}).Count -ne 0){throw 'Cleanup timing must record one actual cleanup call and zero filesystem-file counts.'}
+            $cleanupEvidencePath=Join-Path $script:SourceMeasurementEvidenceRoot 'child-cleanup-samples.json'
+            [IO.File]::WriteAllText($cleanupEvidencePath,(ConvertTo-Json -InputObject $terminal -Depth 5),(New-Object Text.UTF8Encoding($false)))
+            if(-not [IO.File]::Exists($cleanupEvidencePath)){throw 'Owned process cleanup observations must be saved under the task-run evidence root.'}
+        }
+        finally {
+            foreach($process in $owned){
+                try {if(-not $process.HasExited){$process.Kill();[void]$process.WaitForExit(2000)}} catch {}
+                try {$process.Dispose()} catch {}
+            }
+            if($null -ne $sentinel){try {if(-not $sentinel.HasExited){$sentinel.Kill();[void]$sentinel.WaitForExit(2000)}} catch {};try {$sentinel.Dispose()} catch {}}
+            [Console]::SetError($oldConsoleError)
+            $script:StandardValidationTimingEnabled=$oldTimingEnabled
+        }
+    }
+
+    # Scenario: Final source-report binding returns normally or throws after reading report bytes while an outer collector is already active.
+    # Purpose: Verify whole-reader wall time while counters cover only successful SHA/JSON snapshots (excluding direct ReadAllText calls), then preserve the outcome and restore the prior observer.
+    It 'UnitT68_times_full_report_reads_and_restores_observer_on_success_and_failure' {
+        $oldTimingEnabled=$script:StandardValidationTimingEnabled
+        $oldConsoleError=[Console]::Error
+        $writer=New-Object IO.StringWriter
+        $sentinel=New-StandardValidationPhase -Stage 'test' -Phase 'observer-sentinel' -Aggregate -Silent
+        $script:StandardValidationTimingEnabled=$true
+        $script:StandardValidationReadObserver=$sentinel
+        [Console]::SetError($writer)
+        try {
+            $successReport=New-SourceGateFixture
+            $result=Invoke-SourceGateFixture -Report $successReport
+            if($result -ne $true){throw 'Successful source report validation must preserve its true result.'}
+            if(-not [object]::ReferenceEquals($script:StandardValidationReadObserver,$sentinel)){throw 'The report reader must restore the caller observer after success.'}
+
+            $failedReport=New-SourceGateFixture
+            Set-SourceGateCases -Report $failedReport -Mutate {param($cases) $cases.shardIdentity='wrong-after-read'}
+            $failed=$false;$failureMessage=''
+            try {Invoke-SourceGateFixture -Report $failedReport | Out-Null}
+            catch {$failed=$true;$failureMessage=$_.Exception.Message}
+            if(-not $failed -or $failureMessage -notmatch 'Source Pester snapshot or full case union differs'){throw "The original report validation failure must be preserved; observed '$failureMessage'."}
+            if(-not [object]::ReferenceEquals($script:StandardValidationReadObserver,$sentinel)){throw 'The report reader must restore the caller observer after failure.'}
+
+            $records=@($writer.ToString() -split "`r?`n" | Where-Object {$_ -match '^\[StandardValidation timing\] ' -and $_ -match '"phase":"source-report-binding"' } | ForEach-Object { ($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json })
+            $terminal=@($records | Where-Object {$_.state -in @('completed','failed')})
+            if(@($terminal | Where-Object {$_.state -ceq 'completed' -and $_.files -gt 0 -and $_.bytes -gt 0 -and $_.calls -gt 0}).Count -ne 1 -or
+                @($terminal | Where-Object {$_.state -ceq 'failed' -and $_.files -gt 0 -and $_.bytes -gt 0 -and $_.calls -gt 0}).Count -ne 1){throw 'The full report phase must report actual SHA/JSON reader calls, files, and bytes for success and failure.'}
+            $reportEvidencePath=Join-Path $script:SourceMeasurementEvidenceRoot 'source-report-binding-samples.json'
+            [IO.File]::WriteAllText($reportEvidencePath,(ConvertTo-Json -InputObject $terminal -Depth 5),(New-Object Text.UTF8Encoding($false)))
+            if(-not [IO.File]::Exists($reportEvidencePath)){throw 'Full report binding observations must be saved under the task-run evidence root.'}
+        }
+        finally {
+            [Console]::SetError($oldConsoleError)
+            $script:StandardValidationTimingEnabled=$oldTimingEnabled
+            $script:StandardValidationReadObserver=$null
+        }
+    }
+
+    # Scenario: The same real frozen-file validator reports one outer call and one path/hash call per input file.
+    # Purpose: Verify diagnostic counters reflect actual work rather than the default zero-call phase values.
+    It 'UnitT69_counts_real_frozen_file_path_and_hash_operations' {
+        $report=New-SourceGateFixture
+        $files=@($report.sourceValidation.frozenFiles)
+        if($files.Count -eq 0){throw 'The source fixture must include frozen files for counter validation.'}
+        $expectedBytes=[long]0
+        foreach($file in $files){$expectedBytes += [long](Get-Item -Force -LiteralPath ([string]$file.path)).Length}
+        $oldTimingEnabled=$script:StandardValidationTimingEnabled
+        $oldConsoleError=[Console]::Error
+        $writer=New-Object IO.StringWriter
+        $script:StandardValidationTimingEnabled=$true
+        [Console]::SetError($writer)
+        try {
+            Assert-StandardCoreFrozenFiles -Files $files
+            $records=@($writer.ToString() -split "`r?`n" | Where-Object {$_ -match '^\[StandardValidation timing\] ' -and $_ -match '"phase":"frozen-(files|file-paths|file-hashes)"' } | ForEach-Object { ($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json })
+            $terminal=@($records | Where-Object {$_.state -ceq 'completed'})
+            $outer=@($terminal | Where-Object {$_.phase -ceq 'frozen-files'})
+            $paths=@($terminal | Where-Object {$_.phase -ceq 'frozen-file-paths'})
+            $hashes=@($terminal | Where-Object {$_.phase -ceq 'frozen-file-hashes'})
+            if($outer.Count -ne 1 -or $outer[0].calls -ne 1 -or $outer[0].files -ne $files.Count -or $outer[0].bytes -ne $expectedBytes){throw 'The outer frozen-file validation phase must report one call and the observed file and byte totals.'}
+            if($paths.Count -ne 1 -or $paths[0].calls -ne $files.Count -or $paths[0].files -ne $files.Count){throw 'Frozen-file path diagnostics must report one call per actual input path.'}
+            if($hashes.Count -ne 1 -or $hashes[0].calls -ne $files.Count -or $hashes[0].files -ne $files.Count -or $hashes[0].bytes -ne $expectedBytes){throw 'Frozen-file hash diagnostics must report one call per actual file hash and the observed byte total.'}
+            $evidencePath=Join-Path $script:SourceMeasurementEvidenceRoot 'frozen-file-operation-samples.json'
+            [IO.File]::WriteAllText($evidencePath,(ConvertTo-Json -InputObject $terminal -Depth 5),(New-Object Text.UTF8Encoding($false)))
+            if(-not [IO.File]::Exists($evidencePath)){throw 'Frozen-file operation observations must be saved under the task-run evidence root.'}
+        }
+        finally {
+            [Console]::SetError($oldConsoleError)
+            $script:StandardValidationTimingEnabled=$oldTimingEnabled
+        }
+    }
+    }

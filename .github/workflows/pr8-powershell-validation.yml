@@ -347,5 +347,7 @@ jobs:
             ${{ runner.temp }}/syp214-fixture-evidence/child.stdout.log
             ${{ runner.temp }}/syp214-fixture-evidence/child.stderr.log
             ${{ runner.temp }}/syp214-fixture-evidence/reports/*.json
+            ${{ runner.temp }}/syp325-source-scope-*/**/*.json
+            ${{ runner.temp }}/windows-core/authority-result.json
           if-no-files-found: warn
           retention-days: 1
