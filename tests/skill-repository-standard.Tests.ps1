@@ -2683,9 +2683,9 @@ public sealed class C245NonCooperativeStream : Stream {
         }
     }
 
-    # Scenario: The current temp is usable while the optional per-user fallback cannot be read.
-    # Purpose: An inaccessible fallback must not block allocation in the available current temp.
-    It 'UnitT26hb_keeps_an_available_current_temp_when_the_optional_fallback_is_inaccessible' {
+    # Scenario: The current temp is usable while the optional per-user fallback is not a directory.
+    # Purpose: An unusable fallback must not block allocation in the available current temp.
+    It 'UnitT26hb_keeps_an_available_current_temp_when_the_optional_fallback_is_unusable' {
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
         $names = @('TEMP', 'TMP', 'LOCALAPPDATA')
@@ -2694,43 +2694,84 @@ public sealed class C245NonCooperativeStream : Stream {
             $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         }
 
-        $localAppData = Join-Path $TestDrive ('denied-' + [guid]::NewGuid().ToString('N'))
+        $token = [guid]::NewGuid().ToString('N')
+        $localAppData = Join-Path $TestDrive ('blocked-' + $token)
         $unavailableFallback = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
         $runId = [guid]::NewGuid().ToString('N')
-        $expectedToolRoot = [IO.Path]::GetFullPath((Join-Path $TestDrive ("svt-tools-{0}" -f $runId)))
-        $script:UnavailableAuthorityTempBase = $unavailableFallback
+        $currentTemp = $null
+        $expectedToolRoot = $null
+        $expectedProbe = $null
+        $ownsCurrentTemp = $false
+        $ownsLocalAppData = $false
 
         try {
-            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
-            [Environment]::SetEnvironmentVariable('TEMP', $TestDrive, [EnvironmentVariableTarget]::Process)
-            [Environment]::SetEnvironmentVariable('TMP', $TestDrive, [EnvironmentVariableTarget]::Process)
+            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
+            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
+            $ownsLocalAppData = $true
+            Write-TestUtf8File -Path $unavailableFallback -Text 'the optional fallback is not a directory'
 
-            Mock Get-Item {
-                $path = [IO.Path]::GetFullPath([string]$LiteralPath)
-                if (-not [IO.Directory]::Exists($path) -and -not [IO.File]::Exists($path)) { return }
-                $attributes = [IO.File]::GetAttributes($path)
-                [pscustomobject]@{
-                    PSIsContainer = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
-                    Attributes = $attributes
-                    FullName = $path
+            $tempBaseCandidates = [Collections.Generic.List[string]]::new()
+            foreach ($candidateBase in @(
+                [IO.Path]::GetTempPath(),
+                $(if (-not [string]::IsNullOrWhiteSpace([string]$previous['LOCALAPPDATA'])) { Join-Path $previous['LOCALAPPDATA'] 'Temp' })
+            )) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$candidateBase)) { $tempBaseCandidates.Add([string]$candidateBase) }
+            }
+            $ancestor = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($script:RepositoryRoot)).Parent
+            while ($null -ne $ancestor) {
+                $tempBaseCandidates.Add($ancestor.FullName)
+                $ancestor = $ancestor.Parent
+            }
+
+            $seenTempBases = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $tempRootErrors = [Collections.Generic.List[string]]::new()
+            foreach ($candidateBase in $tempBaseCandidates) {
+                $basePath = $null
+                try { $basePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidateBase)) }
+                catch { $tempRootErrors.Add("Invalid temp parent '$candidateBase': $($_.Exception.Message)"); continue }
+                if (-not $seenTempBases.Add($basePath) -or -not (Test-Path -LiteralPath $basePath -PathType Container)) { continue }
+
+                $candidateTemp = Join-Path $basePath ('t-' + $token.Substring(0, 12))
+                $candidateRoot = [IO.Path]::GetFullPath((Join-Path $candidateTemp ("svt-tools-{0}" -f $runId)))
+                $candidateProbe = Join-Path (Join-Path (Join-Path (Join-Path $candidateRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
+                if ($candidateProbe.Length -ge 248) { continue }
+                if (Test-Path -LiteralPath $candidateTemp) {
+                    $tempRootErrors.Add("Refusing to reuse fixture path: $candidateTemp")
+                    continue
                 }
+                try { [void](New-Item -ItemType Directory -Path $candidateTemp -ErrorAction Stop) }
+                catch { $tempRootErrors.Add("Cannot create short current-temp fixture under '$basePath': $($_.Exception.Message)"); continue }
+
+                $currentTemp = $candidateTemp
+                $expectedToolRoot = $candidateRoot
+                $expectedProbe = $candidateProbe
+                $ownsCurrentTemp = $true
+                break
             }
-            Mock Get-Item -ParameterFilter {
-                [string]::Equals([string]$LiteralPath, [string]$script:UnavailableAuthorityTempBase, [StringComparison]::OrdinalIgnoreCase)
-            } {
-                throw [System.UnauthorizedAccessException]::new('Simulated access denial for the optional temp base.')
+            if (-not $ownsCurrentTemp) {
+                throw "Unable to create a short owned temp fixture for the complete Python venv probe path. $($tempRootErrors -join ' | ')"
             }
+            Assert-True ($expectedProbe.Length -lt 248) ("The available current-temp fixture must leave room for the full Windows Python venv probe path; length=$($expectedProbe.Length), path='$expectedProbe'.")
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TEMP', $currentTemp, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TMP', $currentTemp, [EnvironmentVariableTarget]::Process)
 
             $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
-            Assert-Equal ([IO.Path]::GetFullPath($toolRoot)) $expectedToolRoot 'An inaccessible optional fallback must not redirect a usable current temp candidate.'
-            Assert-True (Test-Path -LiteralPath $expectedToolRoot -PathType Container) 'The available current temp candidate must receive the run-owned root.'
-            Assert-False (Test-Path -LiteralPath $unavailableFallback) 'The inaccessible optional fallback must not be created or modified.'
+            Assert-Equal ([IO.Path]::GetFullPath($toolRoot)) $expectedToolRoot ("An unusable optional fallback must not redirect a usable current temp candidate; helper returned '$toolRoot'.")
+            Assert-True (Test-Path -LiteralPath $expectedToolRoot -PathType Container) ("The available current temp candidate must receive the run-owned root at '$toolRoot'.")
+            Assert-True (Test-Path -LiteralPath $unavailableFallback -PathType Leaf) 'The non-directory fallback blocker must remain untouched.'
+            Assert-Equal ([IO.File]::ReadAllText($unavailableFallback)) 'the optional fallback is not a directory' 'The fallback blocker must remain unchanged.'
         }
         finally {
             foreach ($name in $names) {
                 [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
             }
-            Remove-Variable -Scope Script -Name UnavailableAuthorityTempBase -ErrorAction SilentlyContinue
+            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
+                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($ownsCurrentTemp -and (Test-Path -LiteralPath $currentTemp)) {
+                Remove-Item -LiteralPath $currentTemp -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
