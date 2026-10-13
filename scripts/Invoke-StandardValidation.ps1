@@ -95,6 +95,7 @@ $script:StandardValidationExitCodes = [ordered]@{
 # Tests can still exercise the timing helpers explicitly.
 $script:StandardValidationTimingStage = 'validation'
 $script:StandardValidationClosureTiming = $null
+$script:StandardValidationReadObserver = $null
 $script:StandardValidationTimingEnabled = [bool]$SourceValidation -and -not [bool]$DefineFunctionsOnly
 $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
@@ -742,7 +743,15 @@ function Get-StandardValidationFileSha256 {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "INVALID|$Context file is missing: $Path"
     }
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    $svHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    if ($null -ne $script:StandardValidationReadObserver) {
+        try {
+            $svReadItem = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+            Update-StandardValidationPhase -Timing $script:StandardValidationReadObserver -Calls 1 -Files 1 -Bytes ([long]$svReadItem.Length)
+        }
+        catch { }
+    }
+    return $svHash
 
     }
     finally {
@@ -798,6 +807,9 @@ function Get-StandardValidationJsonSnapshot {
     }
     try {
         $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($null -ne $script:StandardValidationReadObserver) {
+            try { Update-StandardValidationPhase -Timing $script:StandardValidationReadObserver -Calls 1 -Files 1 -Bytes ([long]$bytes.Length) } catch { }
+        }
         $sha256 = Get-StandardValidationBytesSha256 -Bytes $bytes
         $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
         $text = $utf8.GetString($bytes)
@@ -3211,9 +3223,14 @@ function Stop-StandardValidationProcessTree {
         [string] $PidNamespaceId,
         [bool] $PidNamespaceRequired = $false,
         [int] $SubreaperProcessId = 0,
-        [bool] $SubreaperRequired = $false
+        [bool] $SubreaperRequired = $false,
+        [bool] $CancellationRequested = $false
     )
 
+    $svCleanupTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-cleanup' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svCleanupTiming.calls = 1
+    $svCleanupState = 'failed'
+    try {
     $known = New-Object 'System.Collections.Generic.HashSet[int]'
     [void]$known.Add($RootProcessId)
     foreach ($processId in @($KnownProcessIds)) { [void]$known.Add([int]$processId) }
@@ -3366,7 +3383,10 @@ function Stop-StandardValidationProcessTree {
         }
         if ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
             -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
-            -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0) { return $true }
+            -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0) {
+            $svCleanupState = if ($CancellationRequested) { 'cancelled' } else { 'completed' }
+            return $true
+        }
         if ((Get-Date) -ge $deadline) { break }
         Start-Sleep -Milliseconds 50
     } while ($true)
@@ -3409,9 +3429,20 @@ function Stop-StandardValidationProcessTree {
             }
         }
     }
-    return ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
+    $svCleanupSucceeded = ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
         -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
         -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0)
+    if ($svCleanupSucceeded) { $svCleanupState = if ($CancellationRequested) { 'cancelled' } else { 'completed' } }
+    return $svCleanupSucceeded
+    }
+    catch {
+        $svCleanupState = 'failed'
+        throw
+    }
+    finally {
+        $svCleanupTiming.ticks += $svCleanupTiming.watch.ElapsedTicks
+        Complete-StandardValidationPhase -Timing $svCleanupTiming -State $svCleanupState
+    }
 }
 
 function Get-StandardValidationUnixProcessGroupLauncher {
@@ -4049,7 +4080,7 @@ function Invoke-StandardValidationProcess {
             }
             if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
                 $terminationStatus = 'cancelled'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
+                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -CancellationRequested $true -WaitMilliseconds 5000)
                 break
             }
             if ((Get-Date) -gt $deadline) {
@@ -4065,7 +4096,7 @@ function Invoke-StandardValidationProcess {
             $cleanedUp = $cleanedUp -and (Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
         }
         elseif ($null -ne $terminationStatus) {
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000
+            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -CancellationRequested ($terminationStatus -ceq 'cancelled') -WaitMilliseconds 5000
         }
         else {
             $process.WaitForExit()
@@ -7545,92 +7576,375 @@ function Write-StandardCoreCapturedText {
 function Assert-StandardCoreFrozenFiles {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Files)
     if ($Files.Count -eq 0) { throw 'INVALID|Source validation requires frozen tool files.' }
+    $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'frozen-files' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $timing.calls = 1
+    $pathTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'frozen-file-paths' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    $hashTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'frozen-file-hashes' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    $state = 'completed'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in $Files) {
-        Assert-StandardValidationExactPropertySet -Object $file -Expected @('path', 'sha256') -Context 'source frozen file'
-        $path = Assert-StandardValidationCanonicalRootPath -Path ([string]$file.path) -Context 'source frozen file'
-        if (-not [IO.Path]::IsPathRooted([string]$file.path) -or -not $seen.Add($path)) { throw 'INVALID|Duplicate or relative source frozen file.' }
-        Assert-StandardValidationRegularFile -Path $path -Context 'source frozen file'
-        Assert-StandardValidationSha256 -Value ([string]$file.sha256) -Context 'source frozen file'
-        if ((Get-StandardValidationFileSha256 -Path $path -Context 'source frozen file') -cne [string]$file.sha256) { throw "BLOCKED|Source frozen file changed: $path" }
+    try {
+        foreach ($file in $Files) {
+            Assert-StandardValidationExactPropertySet -Object $file -Expected @('path', 'sha256') -Context 'source frozen file'
+            $pathStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+            $item = $null
+            try {
+                $canonicalPath = Assert-StandardValidationCanonicalRootPath -Path ([string]$file.path) -Context 'source frozen file'
+                if (-not [IO.Path]::IsPathRooted([string]$file.path) -or -not $seen.Add($canonicalPath)) { throw 'INVALID|Duplicate or relative source frozen file.' }
+                Assert-StandardValidationRegularFile -Path $canonicalPath -Context 'source frozen file'
+                $item = Get-Item -Force -LiteralPath $canonicalPath -ErrorAction Stop
+            }
+            finally {
+                $pathTiming.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $pathStarted
+                Update-StandardValidationPhase -Timing $pathTiming -Calls 1 -Files 1
+            }
+            Assert-StandardValidationSha256 -Value ([string]$file.sha256) -Context 'source frozen file'
+            $hashStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+            try {
+                if ((Get-StandardValidationFileSha256 -Path $canonicalPath -Context 'source frozen file') -cne [string]$file.sha256) { throw "BLOCKED|Source frozen file changed: $canonicalPath" }
+            }
+            finally {
+                $hashTiming.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $hashStarted
+                Update-StandardValidationPhase -Timing $hashTiming -Calls 1 -Files 1 -Bytes ([long]$item.Length)
+                Update-StandardValidationPhase -Timing $timing -Calls 0 -Files 1 -Bytes ([long]$item.Length)
+            }
+        }
+    }
+    catch {
+        $state = if ($_.Exception.Message.StartsWith('CANCELLED|', [StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        Complete-StandardValidationPhase -Timing $pathTiming -State $state
+        Complete-StandardValidationPhase -Timing $hashTiming -State $state
+        Complete-StandardValidationPhase -Timing $timing -State $state
     }
 }
 
+function Get-StandardCoreSourceToolGroups {
+    param([Parameter(Mandatory = $true)][hashtable] $Receipts, [Parameter(Mandatory = $true)][object[]] $FrozenFiles)
+    $names = @($Receipts.Keys | Sort-Object -CaseSensitive)
+    $roots = @{}
+    $assetPaths = @{}
+    $adjacent = @{}
+    foreach ($name in $names) {
+        $adjacent[$name] = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $receipt = $Receipts[$name]
+        $root = Assert-StandardValidationCanonicalRootPath -Path ([string]$receipt.installRoot) -Context "source $name installed root"
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "BLOCKED|Source $name installed root is missing." }
+        $roots[$name] = $root
+        $paths = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($property in @(
+            @('executablePath'),
+            @('launcher','shimPath'), @('launcher','payloadPath'), @('launcher','runtimePath')
+        )) {
+            $value = $receipt
+            $exists = $true
+            foreach ($propertyName in $property) {
+                if (-not (Test-StandardValidationHasProperty -Object $value -Name $propertyName)) { $exists = $false; break }
+                $value = Get-StandardValidationProperty -Object $value -Name $propertyName
+            }
+            if ($exists -and $value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+                if (-not [IO.Path]::IsPathRooted([string]$value)) { throw "INVALID|Source $name dependency paths must be absolute." }
+                $canonical = Get-StandardValidationFullPath -Path ([string]$value) -Context "source $name dependency path"
+                if (-not $paths.Contains($canonical)) { $paths.Add($canonical) }
+            }
+        }
+        $assetPaths[$name] = @($paths.ToArray())
+    }
+    # Tool installations are coupled only when their installed roots overlap.
+    # External launch assets remain separate per-file controls and never force
+    # an otherwise independent tool closure to be enumerated.
+    for ($left = 0; $left -lt $names.Count; $left++) {
+        for ($right = $left + 1; $right -lt $names.Count; $right++) {
+            $a = [string]$names[$left]
+            $b = [string]$names[$right]
+            if ((Test-StandardValidationPathWithin -Path $roots[$a] -Root $roots[$b] -IncludeRoot) -or
+                (Test-StandardValidationPathWithin -Path $roots[$b] -Root $roots[$a] -IncludeRoot)) {
+                [void]$adjacent[$a].Add($b)
+                [void]$adjacent[$b].Add($a)
+            }
+        }
+    }
+    $knownExternalAssets = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $names) {
+        foreach ($assetPath in $assetPaths[$name]) {
+            if (Test-StandardValidationPathWithin -Path $assetPath -Root $roots[$name] -IncludeRoot) { continue }
+            $assetFullPath = Get-StandardValidationFullPath -Path ([string]$assetPath) -Context "source $name external launch asset"
+            $isKnown = $false
+            foreach ($knownPath in $knownExternalAssets) {
+                if ([string]::Equals($assetFullPath, [string]$knownPath, (Get-StandardValidationPathComparison -Paths @($assetFullPath, [string]$knownPath)))) { $isKnown = $true; break }
+            }
+            if (-not $isKnown) { $knownExternalAssets.Add($assetFullPath) }
+        }
+    }
+    $sharedFiles = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($file in $FrozenFiles) {
+        $pathValue = Get-StandardValidationFullPath -Path ([string]$file.path) -Context 'source frozen shared path'
+        $insideAnyRoot = $false
+        foreach ($toolName in $names) {
+            if (Test-StandardValidationPathWithin -Path $pathValue -Root $roots[$toolName] -IncludeRoot) { $insideAnyRoot = $true; break }
+        }
+        if ($insideAnyRoot) { continue }
+        $isKnownExternalAsset = $false
+        foreach ($assetPath in $knownExternalAssets) {
+            if ([string]::Equals($pathValue, [string]$assetPath, (Get-StandardValidationPathComparison -Paths @($pathValue, [string]$assetPath)))) { $isKnownExternalAsset = $true; break }
+        }
+        if (-not $isKnownExternalAsset) { $sharedFiles.Add($file) }
+    }
+    $remaining = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($name in $names) { [void]$remaining.Add([string]$name) }
+    $groups = New-Object 'System.Collections.Generic.List[object]'
+    $byTool = @{}
+    while ($remaining.Count -gt 0) {
+        $first = [string](@($names | Where-Object { $remaining.Contains([string]$_) } | Select-Object -First 1)[0])
+        $queue = New-Object 'System.Collections.Generic.Queue[string]'
+        $component = New-Object 'System.Collections.Generic.List[string]'
+        [void]$remaining.Remove($first)
+        $queue.Enqueue($first)
+        while ($queue.Count -gt 0) {
+            $current = $queue.Dequeue()
+            $component.Add($current)
+            foreach ($neighbor in $adjacent[$current]) {
+                if ($remaining.Remove([string]$neighbor)) { $queue.Enqueue([string]$neighbor) }
+            }
+        }
+        $members = @($component.ToArray() | Sort-Object -CaseSensitive)
+        $groupRoots = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($member in $members) {
+            if (-not $groupRoots.Contains([string]$roots[$member])) { $groupRoots.Add([string]$roots[$member]) }
+        }
+        $rootFiles = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($file in $FrozenFiles) {
+            $pathValue = Get-StandardValidationFullPath -Path ([string]$file.path) -Context 'source frozen group path'
+            foreach ($groupRoot in $groupRoots) {
+                if (Test-StandardValidationPathWithin -Path $pathValue -Root $groupRoot -IncludeRoot) {
+                    $rootFiles.Add($file)
+                    break
+                }
+            }
+        }
+        $externalAssets = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($member in $members) {
+            foreach ($assetPath in $assetPaths[$member]) {
+                $insideMemberRoot = Test-StandardValidationPathWithin -Path $assetPath -Root $roots[$member] -IncludeRoot
+                if ($insideMemberRoot) { continue }
+                $assetMatches = @($FrozenFiles | Where-Object {
+                    [string]::Equals((Get-StandardValidationFullPath -Path ([string]$_.path) -Context 'source frozen asset path'), [string]$assetPath,
+                        (Get-StandardValidationPathComparison -Paths @([string]$_.path, [string]$assetPath)))
+                })
+                if ($assetMatches.Count -ne 1) { throw "INVALID|Source $member external launch asset is not frozen exactly once." }
+                $externalAssets.Add($assetMatches[0])
+            }
+        }
+        $group = [pscustomobject]@{
+            tools = @($members); roots = @($groupRoots.ToArray()); rootFiles = @($rootFiles.ToArray())
+            sharedFiles = @($sharedFiles.ToArray()); externalAssets = @($externalAssets.ToArray()); id = ($members -join ';')
+        }
+        $groups.Add($group)
+        foreach ($member in $members) { $byTool[[string]$member] = $group }
+    }
+    return [pscustomobject]@{ groups = @($groups.ToArray()); byTool = $byTool; externalAssetsByTool = $assetPaths }
+}
 # Source validation is an explicit use of the existing tool adapters and raw
 # process envelope. Ordinary Core does not load, resolve, or dispatch it.
 function Assert-StandardCoreSourceToolReceipts {
     param([object[]] $Bindings, [object[]] $FrozenFiles, [string] $RunId,
         [string] $CandidateRoot = $script:StandardValidationRepositoryRoot,
-        [string] $ArtifactsRoot = $script:StandardValidationRepositoryRoot)
-    $policy = (Get-StandardValidationJsonSnapshot -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/validation-toolchain.json') -Context 'source tool policy').value
+        [string] $ArtifactsRoot = $script:StandardValidationRepositoryRoot,
+        [object] $RetainedReceiptMap,
+        [string[]] $ToolNames = @(),
+        [string[]] $AdditionalPaths = @(), [switch] $ReturnReceiptMap)
+    $expectedNames = @('skill-validator','skill-tools','skillspector')
     $receipts = @($Bindings)
     if ($receipts.Count -ne 3) { throw 'INVALID|Source validation requires exactly three frozen tool receipts.' }
+
+    if ($null -ne $RetainedReceiptMap) {
+        $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
+        $receiptHashTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-receipt-bytes' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+        $state = 'completed'
+        try {
+            if ($RetainedReceiptMap.schemaVersion -ne 1 -or [string]$RetainedReceiptMap.runId -cne $RunId -or
+                $RetainedReceiptMap.receipts -isnot [hashtable] -or $RetainedReceiptMap.bindings -isnot [hashtable] -or
+                $null -eq $RetainedReceiptMap.groups -or $RetainedReceiptMap.groups.byTool -isnot [hashtable]) {
+                throw 'INVALID|Retained source receipt map has an unsupported identity.'
+            }
+            $mapNames = @($RetainedReceiptMap.receipts.Keys | Sort-Object -CaseSensitive)
+            $bindingNames = @($RetainedReceiptMap.bindings.Keys | Sort-Object -CaseSensitive)
+            if (($mapNames -join ';') -cne (($expectedNames | Sort-Object -CaseSensitive) -join ';') -or
+                ($bindingNames -join ';') -cne (($expectedNames | Sort-Object -CaseSensitive) -join ';') -or
+                $null -eq $RetainedReceiptMap.groups.byTool['skill-validator'] -or
+                $null -eq $RetainedReceiptMap.groups.byTool['skill-tools'] -or
+                $null -eq $RetainedReceiptMap.groups.byTool['skillspector']) {
+                throw 'INVALID|Retained source receipt map has an incomplete or unknown tool inventory.'
+            }
+            $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($name in $expectedNames) {
+                $binding = $RetainedReceiptMap.bindings[$name]
+                Assert-StandardValidationExactPropertySet -Object $binding -Expected @('path','sha256') -Context 'retained source tool receipt'
+                $matches = @($receipts | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
+                if ($matches.Count -ne 1 -or -not $seenPaths.Add([string]$binding.path)) { throw 'INVALID|Current source receipt bindings differ from the setup snapshot.' }
+                $frozenMatches = @($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
+                if ($frozenMatches.Count -ne 1) { throw 'INVALID|Retained source receipt binding is not frozen.' }
+                Assert-StandardValidationCanonicalRootPath -Path ([string]$binding.path) -Context 'retained source tool receipt' | Out-Null
+                Assert-StandardValidationRegularFile -Path ([string]$binding.path) -Context 'retained source tool receipt'
+                $receiptItem = Get-Item -Force -LiteralPath ([string]$binding.path) -ErrorAction Stop
+                $receiptTimingStart = [Diagnostics.Stopwatch]::GetTimestamp()
+                try {
+                    if ((Get-StandardValidationFileSha256 -Path ([string]$binding.path) -Context 'retained source tool receipt') -cne [string]$binding.sha256) {
+                        throw 'BLOCKED|Source resolver receipt bytes changed after their setup binding.'
+                    }
+                }
+                finally {
+                    $receiptHashTiming.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $receiptTimingStart
+                    Update-StandardValidationPhase -Timing $receiptHashTiming -Calls 1 -Files 1 -Bytes ([long]$receiptItem.Length)
+                }
+                $parsed = $RetainedReceiptMap.receipts[$name]
+                if ($null -eq $parsed -or [string]$parsed.toolName -cne $name -or [string]$parsed.resolutionRunId -cne $RunId) {
+                    throw 'INVALID|Retained source resolver receipt identity differs.'
+                }
+            }
+
+            $selectedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            foreach ($value in $ToolNames) {
+                $name = if ([string]$value -ceq 'static-analyzer') { 'skillspector' } else { [string]$value }
+                if ($name -cnotin $expectedNames -or -not $selectedNames.Add($name)) { throw 'INVALID|Source dispatch selected an unknown or duplicate tool.' }
+            }
+            $fileMap = @{}
+            $addFrozen = {
+                param($File, [string] $Context)
+                if ($null -eq $File) { return }
+                Assert-StandardValidationExactPropertySet -Object $File -Expected @('path','sha256') -Context $Context
+                $fullPath = Get-StandardValidationFullPath -Path ([string]$File.path) -Context $Context
+                $key = $fullPath.ToUpperInvariant()
+                if ($fileMap.ContainsKey($key)) {
+                    if ([string]$fileMap[$key].sha256 -cne [string]$File.sha256) { throw 'INVALID|Source validation paths have conflicting frozen hashes.' }
+                    return
+                }
+                $fileMap[$key] = $File
+            }
+            $receiptPathSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($name in $expectedNames) { [void]$receiptPathSet.Add((Get-StandardValidationFullPath -Path ([string]$RetainedReceiptMap.bindings[$name].path) -Context 'source receipt path')) }
+            foreach ($file in @($RetainedReceiptMap.groups.byTool['skill-validator'].sharedFiles)) {
+                if (-not $receiptPathSet.Contains((Get-StandardValidationFullPath -Path ([string]$file.path) -Context 'source shared control'))) { & $addFrozen $file 'source shared control' }
+            }
+            $selectedGroups = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+            foreach ($name in $selectedNames) {
+                $group = $RetainedReceiptMap.groups.byTool[$name]
+                $selectedGroups[[string]$group.id] = $group
+            }
+            foreach ($group in $selectedGroups.Values) {
+                foreach ($file in @($group.rootFiles)) { & $addFrozen $file 'source selected closure file' }
+                foreach ($file in @($group.externalAssets)) {
+                    if (-not $receiptPathSet.Contains((Get-StandardValidationFullPath -Path ([string]$file.path) -Context 'source external asset'))) { & $addFrozen $file 'source selected external asset' }
+                }
+            }
+            foreach ($pathValue in $AdditionalPaths) {
+                if ([string]::IsNullOrWhiteSpace([string]$pathValue) -or -not [IO.Path]::IsPathRooted([string]$pathValue)) { throw 'INVALID|Source dispatch additional paths must be nonempty absolute file paths.' }
+                $pathFull = Get-StandardValidationFullPath -Path ([string]$pathValue) -Context 'source dispatch path'
+                $additionalMatches = @($FrozenFiles | Where-Object { [string]::Equals((Get-StandardValidationFullPath -Path ([string]$_.path) -Context 'source frozen dispatch path'), $pathFull, (Get-StandardValidationPathComparison -Paths @([string]$_.path, $pathFull))) })
+                if ($additionalMatches.Count -ne 1) { throw 'INVALID|Source dispatch path is not frozen exactly once.' }
+                & $addFrozen $additionalMatches[0] 'source dispatch path'
+            }
+            if ($fileMap.Count -gt 0) { Assert-StandardCoreFrozenFiles -Files @($fileMap.Values) }
+
+            foreach ($group in $selectedGroups.Values) {
+                foreach ($root in @($group.roots)) {
+                    $rootKey = Get-StandardValidationFullPath -Path ([string]$root) -Context 'source selected installed root'
+                    Assert-StandardValidationCanonicalRootPath -Path $rootKey -Context 'source selected installed root' | Out-Null
+                    Assert-StandardValidationOutsideRoot -Path $rootKey -Root $CandidateRoot -Context 'source installed closure'
+                    Assert-StandardValidationOutsideRoot -Path $rootKey -Root $ArtifactsRoot -Context 'source installed closure'
+                    $expectedClosures = @()
+                    foreach ($member in @($group.tools)) {
+                        $receipt = $RetainedReceiptMap.receipts[[string]$member]
+                        $receiptRoot = Get-StandardValidationFullPath -Path ([string]$receipt.installRoot) -Context 'source retained installed root'
+                        if ([string]::Equals($receiptRoot, $rootKey, (Get-StandardValidationPathComparison -Paths @($receiptRoot,$rootKey)))) { $expectedClosures += [string]$receipt.installedClosureSha256 }
+                    }
+                    if ($expectedClosures.Count -eq 0 -or @($expectedClosures | Select-Object -Unique).Count -ne 1) { throw 'INVALID|Selected source root has no single authenticated closure binding.' }
+                    if ((Get-StandardValidationDirectoryClosureSha256 -Root $rootKey -Context 'source installed closure') -cne $expectedClosures[0]) { throw 'BLOCKED|Source installed tool closure differs from the setup resolver receipt.' }
+                }
+                foreach ($member in @($group.tools)) {
+                    $receipt = $RetainedReceiptMap.receipts[[string]$member]
+                    $launcherDigest = Assert-StandardValidationLauncherIntegrity -Launcher $receipt.launcher -ToolName ([string]$member) -CommandPath ([string]$receipt.executablePath) -InstallRoot ([string]$receipt.installRoot) -CandidateRoot $CandidateRoot -ArtifactsRoot $ArtifactsRoot -Context 'retained source resolver receipt'
+                    if ($launcherDigest -cne [string]$receipt.launcherDigestSha256) { throw 'BLOCKED|Retained source launcher digest differs.' }
+                }
+            }
+            return $RetainedReceiptMap
+        }
+        catch { $state = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }; throw }
+        finally {
+            Complete-StandardValidationPhase -Timing $receiptHashTiming -State $state
+            Complete-StandardValidationPhase -Timing $timing -State $state
+        }
+    }
+
+    $policy = (Get-StandardValidationJsonSnapshot -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/validation-toolchain.json') -Context 'source tool policy').value
     $receiptNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $receiptMap = [pscustomobject]@{ schemaVersion = 1; runId = $RunId; receipts = @{}; bindings = @{}; groups = $null }
     foreach ($binding in $receipts) {
         Assert-StandardValidationExactPropertySet -Object $binding -Expected @('path','sha256') -Context 'source tool receipt'
         $matches = @($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
         if ($matches.Count -ne 1) { throw 'INVALID|Source tool receipt is not frozen.' }
-        $receipt = (Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source resolver receipt').value
-        foreach ($property in @('schemaVersion','resolvedAtUtc','identityKind','installRoot','executablePath','executableSha256','launcher','launcherDigestSha256')) {
-            [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source resolver receipt')
-        }
+        $receiptSnapshot = Get-StandardValidationJsonSnapshot -Path ([string]$binding.path) -Context 'source resolver receipt'
+        if ([string]$receiptSnapshot.sha256 -cne [string]$binding.sha256) { throw 'BLOCKED|Source resolver receipt snapshot differs from its frozen binding.' }
+        $receipt = $receiptSnapshot.value
+        foreach ($property in @('schemaVersion','resolvedAtUtc','identityKind','installRoot','executablePath','executableSha256','launcher','launcherDigestSha256')) { [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source resolver receipt') }
         if (-not (Test-StandardValidationIntegerRange -Value $receipt.schemaVersion -Minimum 1 -Maximum 1)) { throw 'INVALID|Source resolver receipt schema is unsupported.' }
         [void](Assert-StandardValidationLifecycleTimestamp -Value $receipt.resolvedAtUtc -Context 'source resolver receipt')
         $name = [string]$receipt.toolName
-        if ($name -cnotin @('skill-validator','skill-tools','skillspector') -or -not $receiptNames.Add($name) -or
+        if ($name -cnotin $expectedNames -or -not $receiptNames.Add($name) -or
             [string]$receipt.resolutionRunId -cne $RunId -or $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
             [string]$receipt.channel -cne 'latest-stable' -or [string]$receipt.source -cne [string]$policy.tools.$name.source -or
-            [string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion) -or [string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) {
-            throw 'INVALID|Source resolver receipt has a wrong run, source, channel, or identity.'
-        }
+            [string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion) -or [string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'INVALID|Source resolver receipt has a wrong run, source, channel, or identity.' }
         $identityKind = switch ($name) {
             'skill-validator' { 'go-module-version-build-info-and-binary-hash' }
             'skill-tools' { 'registry-integrity-and-locked-dependency-closure' }
             'skillspector' { 'release-commit-asset-metadata-dependency-closure-and-executable' }
         }
-        if ([string]$receipt.identityKind -cne $identityKind -or [string]$receipt.resolvedVersion -cnotmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-            throw 'INVALID|Source resolver receipt does not identify the installed stable tool.'
-        }
+        if ([string]$receipt.identityKind -cne $identityKind -or [string]$receipt.resolvedVersion -cnotmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'INVALID|Source resolver receipt does not identify the installed stable tool.' }
         if (-not [IO.Path]::IsPathRooted([string]$receipt.installRoot) -or -not [IO.Path]::IsPathRooted([string]$receipt.executablePath) -or
             -not (Test-StandardValidationPathWithin -Path $receipt.executablePath -Root $receipt.installRoot)) { throw 'INVALID|Source resolver executable must be inside its absolute installed root.' }
         Assert-StandardValidationSha256 -Value ([string]$receipt.executableSha256) -Context 'source resolver executable'
         if ($name -ceq 'skill-tools') {
-            foreach ($property in @('nodePath','nodeSha256','entryPointPath','entryPointSha256')) {
-                [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source skill-tools receipt')
-            }
+            foreach ($property in @('nodePath','nodeSha256','entryPointPath','entryPointSha256')) { [void](Get-StandardValidationRequiredProperty -Object $receipt -Name $property -Context 'source skill-tools receipt') }
             if ([string]$receipt.launcher.kind -cnotin @('windows-cmd-shim','unix-node-shim') -or
                 [string]$receipt.launcher.shimPath -cne [string]$receipt.executablePath -or [string]$receipt.launcher.shimSha256 -cne [string]$receipt.executableSha256 -or
                 [string]$receipt.launcher.payloadPath -cne [string]$receipt.entryPointPath -or [string]$receipt.launcher.payloadSha256 -cne [string]$receipt.entryPointSha256 -or
-                [string]$receipt.launcher.runtimePath -cne [string]$receipt.nodePath -or [string]$receipt.launcher.runtimeSha256 -cne [string]$receipt.nodeSha256) {
-                throw 'INVALID|Source skill-tools launcher does not bind its executable, payload and Node runtime.'
-            }
+                [string]$receipt.launcher.runtimePath -cne [string]$receipt.nodePath -or [string]$receipt.launcher.runtimeSha256 -cne [string]$receipt.nodeSha256) { throw 'INVALID|Source skill-tools launcher does not bind its executable, payload and Node runtime.' }
         }
         elseif ([string]$receipt.launcher.kind -cne 'direct-executable') { throw 'INVALID|Source native tool requires its direct executable launcher.' }
-        $launcherDigest = Assert-StandardValidationLauncherIntegrity -Launcher $receipt.launcher -ToolName $name -CommandPath $receipt.executablePath `
-            -InstallRoot $receipt.installRoot -CandidateRoot $CandidateRoot -ArtifactsRoot $ArtifactsRoot -Context 'source resolver receipt'
+        $launcherDigest = Assert-StandardValidationLauncherIntegrity -Launcher $receipt.launcher -ToolName $name -CommandPath $receipt.executablePath -InstallRoot $receipt.installRoot -CandidateRoot $CandidateRoot -ArtifactsRoot $ArtifactsRoot -Context 'source resolver receipt'
         Assert-StandardValidationSha256 -Value ([string]$receipt.launcherDigestSha256) -Context 'source launcher digest'
         if ($launcherDigest -cne [string]$receipt.launcherDigestSha256) { throw 'BLOCKED|Source resolver launcher digest differs.' }
         foreach ($pair in @(@('executablePath','executableSha256'),@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))) {
             if (Test-StandardValidationHasProperty -Object $receipt -Name $pair[0]) {
-                if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) {
-                    throw 'INVALID|Source resolver executable or payload is not frozen.'
-                }
+                if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) { throw 'INVALID|Source resolver executable or payload is not frozen.' }
             }
         }
         if ([string]::IsNullOrWhiteSpace([string]$receipt.installRoot)) { throw 'INVALID|Source tool installed closure is required.' }
         Assert-StandardValidationSha256 -Value ([string]$receipt.installedClosureSha256) -Context 'source installed closure'
         $closure = Get-StandardValidationDirectoryClosureSha256 -Root ([string]$receipt.installRoot) -Context 'source installed closure'
         if ($closure -cne [string]$receipt.installedClosureSha256) { throw 'BLOCKED|Source installed tool closure differs from the resolver receipt.' }
+        $receiptMap.receipts[$name] = $receipt
+        $receiptMap.bindings[$name] = [pscustomobject]@{ path = [string]$binding.path; sha256 = [string]$binding.sha256 }
     }
+    if ($receiptNames.Count -ne 3) { throw 'INVALID|Source resolver receipt inventory is incomplete.' }
+    $receiptMap.groups = Get-StandardCoreSourceToolGroups -Receipts $receiptMap.receipts -FrozenFiles $FrozenFiles
+    if ($ReturnReceiptMap) { return $receiptMap }
+    return
 }
-
 function Assert-StandardCoreNativeReports {
-    param($Envelope, [string] $ToolId, [string[]] $Skills, [object[]] $Receipts, [string] $RunRoot)
+    param($Envelope, [string] $ToolId, [string[]] $Skills, [object[]] $Receipts, [string] $RunRoot, [object] $ReceiptMap)
     if ($ToolId -cnotin @('skill-validator','skill-tools','static-analyzer')) { return }
     $name=if ($ToolId -ceq 'static-analyzer') {'skillspector'} else {$ToolId}
-    $receiptBindings=@($Receipts | Where-Object { [string](Get-StandardValidationJsonSnapshot -Path $_.path -Context 'native report tool receipt').value.toolName -ceq $name })
-    if ($receiptBindings.Count -ne 1) { throw 'FAILED|Native report tool receipt is missing.' }
-    $receipt=(Get-StandardValidationJsonSnapshot -Path $receiptBindings[0].path -Context 'native report tool receipt').value
+    if ($null -ne $ReceiptMap) {
+        if ($ReceiptMap.receipts -isnot [hashtable] -or -not $ReceiptMap.receipts.ContainsKey($name)) { throw 'FAILED|Native report retained receipt is missing.' }
+        $receipt = $ReceiptMap.receipts[$name]
+    }
+    else {
+        $receiptBindings=@($Receipts | Where-Object { [string](Get-StandardValidationJsonSnapshot -Path $_.path -Context 'native report tool receipt').value.toolName -ceq $name })
+        if ($receiptBindings.Count -ne 1) { throw 'FAILED|Native report tool receipt is missing.' }
+        $receipt=(Get-StandardValidationJsonSnapshot -Path $receiptBindings[0].path -Context 'native report tool receipt').value
+    }
     $command=if ($name -ceq 'skill-tools') {[string]$receipt.nodePath} else {[string]$receipt.executablePath}
     $commandHash=if ($name -ceq 'skill-tools') {[string]$receipt.nodeSha256} else {[string]$receipt.executableSha256}
     $reports=Get-StandardValidationProperty -Object $Envelope -Name 'nativeReports'
@@ -7640,12 +7954,12 @@ function Assert-StandardCoreNativeReports {
         if ([string]$native.skillId -cne $Skills[$index] -or [string]$native.command -cne $command -or [string]$native.commandSha256 -cne $commandHash -or
             -not (Test-StandardValidationIntegerRange -Value $native.exitCode -Minimum 0 -Maximum 0) -or
             -not (Test-StandardValidationPathWithin -Path $native.path -Root $RunRoot) -or
-            (Get-StandardValidationFileSha256 -Path $native.path -Context 'native tool report') -cne [string]$native.sha256 -or
             $native.arguments -isnot [array] -or @($native.arguments).Count -eq 0) { throw 'FAILED|Native tool report, command, exit or package binding changed.' }
+        $nativeReportSha256 = Get-StandardValidationFileSha256 -Path $native.path -Context 'native tool report'
+        if ($nativeReportSha256 -cne [string]$native.sha256) { throw 'FAILED|Native tool report, command, exit or package binding changed.' }
         if ($name -ceq 'skill-tools' -and [string]$native.arguments[0] -cne [string]$receipt.entryPointPath) { throw 'FAILED|Native skill-tools invocation does not bind its resolved payload.' }
     }
 }
-
 function Get-StandardCoreCentralRawTestInventory {
     param([string] $AuthorityRevision, [object[]] $FrozenFiles)
     $root=[string]$script:StandardValidationRepositoryRoot
@@ -7681,7 +7995,7 @@ function Invoke-StandardCoreSourceTools {
     }
     Assert-StandardValidationExactPropertySet -Object $Spec -Expected $specFields -Context 'source validation dispatch'
     Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-    Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
+    $receiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -ReturnReceiptMap
     $retainedAdapterPath = Join-Path $RunRoot 'source-core-adapter.json'
     [IO.File]::WriteAllBytes($retainedAdapterPath, [IO.File]::ReadAllBytes($AdapterPath))
     if ((Get-StandardValidationFileSha256 -Path $retainedAdapterPath -Context 'source retained adapter') -cne $AdapterSha256) { throw 'BLOCKED|Source adapter changed before retention.' }
@@ -7708,8 +8022,10 @@ function Invoke-StandardCoreSourceTools {
     $script:StandardValidationLaunchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger.Clear()
     foreach ($dispatch in $dispatches) {
-        Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
+        $selectedTool = if ($dispatch.tool -ceq 'package-adapter') { @() } else { @([string]$dispatch.tool) }
+        $dispatchCommand = $commands[$dispatch.slot]
+        $dispatchPaths = @([string]$dispatchCommand.command) + @($dispatchCommand.arguments | Where-Object { [IO.Path]::IsPathRooted([string]$_) })
+        $receiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -RetainedReceiptMap $receiptMap -ToolNames $selectedTool -AdditionalPaths $dispatchPaths
         $parameters = @{
             CommandSpec=$commands[$dispatch.slot]; RunRoot=$RunRoot; ChildWorkingRoot=$children;
             StageId=$dispatch.stage; ToolId=$dispatch.tool; CandidateId=$candidateId;
@@ -7723,9 +8039,8 @@ function Invoke-StandardCoreSourceTools {
         $result = Invoke-StandardValidationCommandAndRecord @parameters
         $events.Add($result.event)
         $nativeSkills=if ($null -eq $dispatch.skill) {@($SkillSet.ids)} else {@([string]$dispatch.skill.id)}
-        Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot
-        Assert-StandardCoreFrozenFiles -Files @($Spec.frozenFiles)
-        Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot
+        $receiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -RetainedReceiptMap $receiptMap -ToolNames $selectedTool -AdditionalPaths $dispatchPaths
+        Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot -ReceiptMap $receiptMap
         if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
         if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
     }
@@ -7738,10 +8053,16 @@ function Invoke-StandardCoreSourceTools {
     return $sourceResult
 }
 
+# Wall time covers the full report reader; observer counters include successful SHA and JSON snapshot operations only, excluding direct ReadAllText calls.
 function Assert-StandardCoreSourceCheckReport {
     param($Report, [string] $ExpectedSourceRevision, [string] $ExpectedBaseRevision,
         [string] $ExpectedAuthorityRevision, [string] $ExpectedEventName,
         [string] $ArtifactsRoot, [string] $OutputPath, [int] $ProcessExitCode)
+    $svReportTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-report-binding' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    $svReportState = 'failed'
+    $svPreviousReadObserver = $script:StandardValidationReadObserver
+    $script:StandardValidationReadObserver = $svReportTiming
+    try {
     if ($ProcessExitCode -ne 0 -or -not (Test-StandardValidationIntegerRange -Value $Report.schemaVersion -Minimum 2 -Maximum 2) -or [string]$Report.evidence -cne 'standard-core-validation-evidence-v2' -or
         [string]$Report.state -cne 'PASS' -or -not (Test-StandardValidationIntegerRange -Value $Report.exitCode -Minimum 0 -Maximum 0) -or $Report.releaseEligible -isnot [bool] -or $Report.releaseEligible -or
         [string]$Report.contentMode -cne 'immutable-source' -or [string]$Report.candidate.contentMode -cne 'immutable-source' -or
@@ -7760,11 +8081,13 @@ function Assert-StandardCoreSourceCheckReport {
     Assert-StandardCoreFrozenFiles -Files @($source.frozenFiles)
     $expectedId = Get-StandardValidationTextSha256 -Value "$ExpectedSourceRevision`n$($source.contentSha256)`n$($Report.adapter.sha256)`n$($Report.runId)"
     if ([string]$source.candidateId -cne $expectedId) { throw 'FAILED|Source candidate ID does not bind candidate, adapter and run.' }
-    Assert-StandardCoreSourceToolReceipts -Bindings @($source.toolReceipts) -FrozenFiles @($source.frozenFiles) -RunId ([string]$Report.runId) -CandidateRoot $Report.artifacts.snapshotRoot -ArtifactsRoot $ArtifactsRoot
+    $finalReceiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($source.toolReceipts) -FrozenFiles @($source.frozenFiles) -RunId ([string]$Report.runId) -CandidateRoot $Report.artifacts.snapshotRoot -ArtifactsRoot $ArtifactsRoot -ReturnReceiptMap
     if (-not (Test-StandardValidationPathWithin -Path $source.adapterSnapshot.path -Root $Report.artifacts.runRoot) -or
-        [string]$source.adapterSnapshot.sha256 -cne [string]$Report.adapter.sha256 -or
-        (Get-StandardValidationFileSha256 -Path $source.adapterSnapshot.path -Context 'source retained adapter') -cne [string]$Report.adapter.sha256) { throw 'FAILED|Source dispatch adapter bytes changed.' }
-    $adapter=(Get-StandardValidationJsonSnapshot -Path $source.adapterSnapshot.path -Context 'source retained adapter').value
+        [string]$source.adapterSnapshot.sha256 -cne [string]$Report.adapter.sha256) { throw 'FAILED|Source dispatch adapter bytes changed.' }
+    $adapterSha256=Get-StandardValidationFileSha256 -Path $source.adapterSnapshot.path -Context 'source retained adapter'
+    if ($adapterSha256 -cne [string]$Report.adapter.sha256) { throw 'FAILED|Source dispatch adapter bytes changed.' }
+    $adapterSnapshot=Get-StandardValidationJsonSnapshot -Path $source.adapterSnapshot.path -Context 'source retained adapter'
+    $adapter=$adapterSnapshot.value
     if ([string]$adapter.adapter -cne 'standard-core-adapter-v2' -or $adapter.schemaVersion -ne 2 -or
         [string]$adapter.skillsRoot -cne [string]$source.skillsRoot -or (@($adapter.activeSkills) -join ';') -cne (@($source.activeSkills) -join ';')) { throw 'FAILED|Source retained adapter identity differs.' }
     foreach ($field in @('toolReceipts','frozenFiles')) {
@@ -7795,7 +8118,8 @@ function Assert-StandardCoreSourceCheckReport {
         if ("$($event.stageId)|$($event.toolId)|$($event.skillId)" -cne $expected[$index] -or -not $seen.Add([string]$event.eventId) -or
             [string]$event.candidateId -cne [string]$source.candidateId -or [string]$event.status -cne 'passed' -or $event.exitCode -ne 0 -or
             $event.cleanedUp -isnot [bool] -or -not $event.cleanedUp -or -not (Test-StandardValidationPathWithin -Path $event.outputPath -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source process event has a wrong identity, order, result, or cleanup.' }
-        $raw = (Get-StandardValidationJsonSnapshot -Path $event.outputPath -Context 'source raw event').value
+        $rawSnapshot = Get-StandardValidationJsonSnapshot -Path $event.outputPath -Context 'source raw event'
+        $raw = $rawSnapshot.value
         foreach ($field in @('eventId','stageId','toolId','skillId','candidateId')) { if ([string]$raw.$field -cne [string]$event.$field) { throw 'FAILED|Source raw event binding changed.' } }
         if ($raw.process.exitCode -ne 0 -or [string]$raw.process.status -cne 'passed' -or $raw.process.cleanedUp -isnot [bool] -or -not $raw.process.cleanedUp -or
             (Get-StandardValidationOutputHash -Stdout ([string]$raw.stdout) -Stderr ([string]$raw.stderr)) -cne [string]$event.outputSha256) { throw 'FAILED|Source raw output or process result changed.' }
@@ -7821,7 +8145,7 @@ function Assert-StandardCoreSourceCheckReport {
             }
         }
         $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
-        Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot
+        Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot -ReceiptMap $finalReceiptMap
         if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
             ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
     }
@@ -7835,22 +8159,26 @@ function Assert-StandardCoreSourceCheckReport {
         if ($check.status -cne 'passed' -or $check.exitCode -ne 0 -or $check.cleanedUp -isnot [bool] -or -not $check.cleanedUp) { throw 'FAILED|Source repository check did not pass cleanly.' }
         foreach ($stream in @('stdout','stderr')) {
             $path=[string]$check.($stream+'Path')
-            if (-not (Test-StandardValidationPathWithin -Path $path -Root $Report.artifacts.runRoot) -or
-                (Get-StandardValidationFileSha256 -Path $path -Context 'source repository output') -cne [string]$check.($stream+'Sha256')) { throw 'FAILED|Source repository output changed.' }
+            if (-not (Test-StandardValidationPathWithin -Path $path -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source repository output changed.' }
+            $outputSha256=Get-StandardValidationFileSha256 -Path $path -Context 'source repository output'
+            if ($outputSha256 -cne [string]$check.($stream+'Sha256')) { throw 'FAILED|Source repository output changed.' }
         }
     }
     $counts=$Report.checks[1].testCounts
     foreach ($field in @('total','passed','failed','skipped')) { if (-not (Test-StandardValidationIntegerRange -Value $counts.$field -Minimum 0 -Maximum ([decimal][int]::MaxValue))) { throw 'FAILED|Source Pester counts are invalid.' } }
     if ($counts.total -le 0 -or $counts.passed -le 0 -or $counts.failed -ne 0 -or $counts.skipped -ne 0 -or $counts.passed -ne $counts.total) { throw 'FAILED|Source Pester inventory did not fully pass.' }
-    $pesterLines=@(([IO.File]::ReadAllText($Report.checks[1].stdoutPath) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $pesterStdoutPath=[string]$Report.checks[1].stdoutPath
+    $pesterLines=@(([IO.File]::ReadAllText($pesterStdoutPath) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $rawCounts=$pesterLines[-1] | ConvertFrom-Json -ErrorAction Stop
     Assert-StandardValidationExactPropertySet -Object $rawCounts -Expected @('schemaVersion','report','total','passed','failed','skipped') -Context 'source Pester raw counts'
     if ($rawCounts.schemaVersion -ne 1 -or [string]$rawCounts.report -cne 'standard-core-pester-result-v1') { throw 'FAILED|Source Pester raw result is invalid.' }
     foreach ($field in @('total','passed','failed','skipped')) { if (-not (Test-StandardValidationIntegerRange -Value $rawCounts.$field -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or $rawCounts.$field -cne $counts.$field) { throw 'FAILED|Source Pester raw counts differ from the report.' } }
     $binding=$source.pesterCaseInventory
-    if (-not (Test-StandardValidationPathWithin -Path $binding.path -Root $Report.artifacts.runRoot) -or
-        (Get-StandardValidationFileSha256 -Path $binding.path -Context 'source Pester cases') -cne [string]$binding.sha256) { throw 'FAILED|Source Pester case inventory changed.' }
-    $cases=(Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source Pester cases').value
+    if (-not (Test-StandardValidationPathWithin -Path $binding.path -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source Pester case inventory changed.' }
+    $caseSha256=Get-StandardValidationFileSha256 -Path $binding.path -Context 'source Pester cases'
+    if ($caseSha256 -cne [string]$binding.sha256) { throw 'FAILED|Source Pester case inventory changed.' }
+    $casesSnapshot=Get-StandardValidationJsonSnapshot -Path $binding.path -Context 'source Pester cases'
+    $cases=$casesSnapshot.value
     if ($cases.schemaVersion -ne 1 -or [string]$cases.report -cne 'standard-core-pester-case-inventory-v1' -or
         [string]$cases.coreRunId -cne [string]$Report.runId -or [string]$cases.runScope -cne $expectedTestScope -or
         [string]$cases.terminalStatus -cne 'complete' -or $cases.complete -isnot [bool] -or -not $cases.complete -or
@@ -7897,7 +8225,18 @@ function Assert-StandardCoreSourceCheckReport {
     foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) {
         if (@($testFiles).Count -eq 0 -or (@($cases.$field | Sort-Object) -join ';') -cne ($testFiles -join ';')) { throw 'FAILED|Source Pester complete test-file inventory differs.' }
     }
+    $svReportState = 'completed'
     return $true
+    }
+    catch {
+        $svReportState = if ($_.Exception.Message.StartsWith('CANCELLED|', [StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
+        throw
+    }
+    finally {
+        $svReportTiming.ticks += $svReportTiming.watch.ElapsedTicks
+        $script:StandardValidationReadObserver = $svPreviousReadObserver
+        Complete-StandardValidationPhase -Timing $svReportTiming -State $svReportState
+    }
 }
 
 function New-StandardCoreEvidence {

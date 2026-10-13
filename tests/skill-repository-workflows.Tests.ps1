@@ -238,6 +238,28 @@ jobs:
         Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
         Assert-Match $smoke 'test-syp101-production-smoke\.ps1' 'Install Smoke must keep the real pinned-archive installation and idempotence exercise.'
     }
+    Context 'SYP325 central validation CI ownership' {
+    # Scenario: The written ownership map drifts from the normal authority gate or the manual diagnostic workflow.
+    # Purpose: Keep the central runner/resolver/security test owners tied to Windows Core and preserve the existing skip bound.
+    It 'UnitT18_binds_the_central_validation_ownership_map_to_windows_core' {
+        $standard=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skill-repository-standard.md')
+        $required=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+        $diagnostic=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+        Assert-Match $standard '12\.3 Central reference implementation ownership and CI' 'The Standard must publish the central implementation ownership map.'
+        Assert-Match $standard 'Invoke-StandardValidation\.ps1.*skill-repository-standard\.Tests\.ps1.*standard-validation-runner\.Tests\.ps1.*standard-core-pester-adapter\.Tests\.ps1' 'The Standard must map the runner and report owner to its regression paths.'
+        Assert-Match $standard 'Resolve-StandardValidationTool\.ps1.*standard-validation-resolver-hardening\.Tests\.ps1' 'The Standard must map the tool resolver to its hardening regression.'
+        Assert-Match $standard 'Invoke-StandardAuthorityGate\.ps1.*validation-security-gate\.json.*skill-repository-workflows\.Tests\.ps1' 'The Standard must map authority/security ownership to policy and workflow regressions.'
+        foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required Windows Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
+            if(-not $standard.Contains($boundary)){throw "The ownership map is missing the source-reader or adoption boundary '$boundary'."}
+        }
+        Assert-Match $required 'ExpectedSkippedCount = 5' 'Windows Core must retain the established five intentional Windows skips.'
+        Assert-Match $required 'Invoke-StandardAuthorityGate\.ps1' 'Windows Core must run the required authority gate.'
+        Assert-Match $required '\$\{\{ runner\.temp \}\}/syp325-source-scope-\*/\*\*/\*\.json' 'Windows Core must upload task-run-owned SYP325 measurement evidence from runner.temp.'
+        Assert-Match $required '\$\{\{ runner\.temp \}\}/windows-core/authority-result\.json' 'Windows Core must upload the normal authority gate result.'
+        Assert-Match $diagnostic '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance must remain an on-demand diagnostic.'
+        Assert-NotMatch $diagnostic '(?m)^  (pull_request|push):\s*$' 'The manual diagnostic must not be described as the required normal CI gate.'
+    }
+    }
     # Scenario: A new discovered Pester file is added while the isolated-file set remains stable.
     # Purpose: Prove the pure planner assigns every path exactly once, preserves exact coverage across logical partitions, and rejects duplicate or missing inventory entries.
     It 'UnitT16_plans_dynamic_inventory_with_exact_four_partition_coverage' {

@@ -617,6 +617,25 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 
 語意診斷套件 `tests/standard-semantic-inventory-probe.Advanced.ps1`、`tests/standard-semantic-preflight.Advanced.ps1` 與 `tests/standard-semantic-raw-graph.Advanced.ps1` 保留供明確指定的診斷執行，不屬普通必要 authority gate。普通 required Pester 根目錄發現仍執行 `tests/standard-semantic-bridge.Tests.ps1` 中四個 SYP-212 caller RSA snapshot tests；這些測試保護 caller key snapshot，不代表外部 semantic release evidence。
 
+### 12.3 Central reference implementation ownership and CI
+
+本 Repository 的中央實作依信任邊界維護，回歸測試必須直接保護其 owner；一般或手動 CI 均不得取代 required Windows gate：
+
+| Ownership | Reference implementation | Required regression paths |
+|---|---|---|
+| Candidate/authority runner、tool receipt parser、source dispatch integrity、native report reader | `scripts/Invoke-StandardValidation.ps1` | `tests/skill-repository-standard.Tests.ps1`, `tests/standard-validation-runner.Tests.ps1`, `tests/standard-core-pester-adapter.Tests.ps1` |
+| Trusted validation tool acquisition, identity and per-run receipt production | `scripts/Resolve-StandardValidationTool.ps1` | `tests/standard-validation-resolver-hardening.Tests.ps1` |
+| Authority/security policy and admission ordering | `scripts/Invoke-StandardAuthorityGate.ps1`, `docs/standards/validation-security-gate.json` | `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1`, `tests/standard-validation-resolver-hardening.Tests.ps1` |
+| Required workflow wiring and ordinary non-authority Pester execution | `.github/workflows/pr8-powershell-validation.yml` | `tests/skill-repository-workflows.Tests.ps1` |
+
+Required pull request and main-branch validation runs through the Windows Core job in `pr8-powershell-validation.yml`: it parses tracked PowerShell, checks the event diff range, invokes `Invoke-StandardAuthorityGate.ps1` once, then runs the dynamically discovered non-authority Pester suite once. The suite excludes only the five exact authority test paths named by the workflow; its existing `ExpectedSkippedCount = 5` continues to describe the intentional Windows skips and **MUST NOT** be increased to admit another skipped test. `standards-conformance.yml` remains a `workflow_dispatch` diagnostic and cannot replace the required Windows Core job.
+
+SourceValidation execution remains owned by the central source-validation function in `scripts/Invoke-StandardValidation.ps1` and its thin adapter. Consumers retain source-owned functional tests and thin integration contracts in the complete discovered test tree. The optional v2 `testOwnership` selector remains limited to `central-third-party-raw-skill-v1`; unknown schema or ownership values remain rejected, and existing consumers continue to use the v2 adapter and result contracts. A pin or immutable version update alone MUST NOT transfer ownership or permit source-test deletion.
+
+For the Code trial, the current governed source-reader set is `scripts/Invoke-RepositoryCheck.ps1`, `scripts/Invoke-CorePester.ps1`, `scripts/CorePesterIntegrity.psm1`, `scripts/Test-Repository.ps1`, and `tests/validate-catalog.ps1`; those readers require exact candidate==base bytes for governed reader inputs and the full discovered tests tree. This list records the Code trial's verified reader set and is not a universal file inventory for other source repositories. Each source repository MUST retain its own protected reader identities and full discovered tests tree under its approved central policy. Any change to those protected readers or their contract MUST be delivered through a normal reader PR and merged before candidate adoption may rely on it. SYP-325 changes none of the Code trial paths above.
+
+Source-copy equivalence or removal is deferred to downstream adoption. A future adoption may remove only centrally owned framework test copies that are identified item by item and demonstrably replaced by the central tests under the normal required Windows Core CI gate; candidate-owned functional and thin integration tests remain in the full discovered test tree. A pin-only update or source-copy deletion MUST NOT establish equivalence.
+
 每個 conformant Skill repository **MUST** 有：
 
 - Standard v1 conformance regression；

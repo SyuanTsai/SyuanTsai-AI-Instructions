@@ -1570,6 +1570,22 @@ Describe 'Third-party raw Skill tool boundary' {
             if (@($source.properties.PSObject.Properties.Name | Where-Object {$_ -in @('testRoot','testFiles','testFilter')}).Count -ne 0) {throw 'Source callers cannot choose a central suite subset.'}
         }
     }
+    # Scenario: A future v2 pin might be mistaken for authority to change protected readers or remove consumer tests.
+    # Purpose: Keep reader upgrade ordering and downstream source-copy adoption separate from resolver and schema changes.
+    It 'UnitT06_documents_protected_reader_upgrade_before_source_copy_adoption' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @(
+            'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
+            'scripts/CorePesterIntegrity.psm1', 'scripts/Test-Repository.ps1', 'tests/validate-catalog.ps1',
+            'candidate==base bytes', 'full discovered tests tree',
+            'normal reader PR and merged before candidate adoption',
+            'A pin or immutable version update alone MUST NOT transfer ownership',
+            'Source-copy equivalence or removal is deferred to downstream adoption',
+            'identified item by item', 'normal required Windows Core CI gate',
+            'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
+        )) { if(-not $standard.Contains($required)){throw "The reader/adoption contract is missing '$required'."} }
+    }
     # Scenario: The package adapter validates inert bytes and reports the remaining canonical gate.
     # Purpose: Keep package-only results release-ineligible and avoid hidden download/execution fallback.
     It 'UnitT10_keeps_the_adapter_inert_and_release_ineligible' {
