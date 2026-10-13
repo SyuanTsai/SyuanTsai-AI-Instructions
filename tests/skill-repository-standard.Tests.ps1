@@ -822,7 +822,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                 if (-not [string]::IsNullOrWhiteSpace([string]$runtimeTempPath)) { $candidates.Add([string]$runtimeTempPath) }
             }
             catch { }
-            $candidates = @($candidates | Sort-Object { ([string]$_).Length } -Unique)
+            $candidates = @($candidates | Sort-Object { ([string]$_).Length })
             $errors = [Collections.Generic.List[string]]::new()
 
             foreach ($candidate in $candidates) {
