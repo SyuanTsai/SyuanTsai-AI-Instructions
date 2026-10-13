@@ -2566,22 +2566,213 @@ public sealed class C245NonCooperativeStream : Stream {
     It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom' {
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
-        $runId = [guid]::NewGuid().ToString('N')
-        $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
+        $names = @('TEMP', 'TMP', 'LOCALAPPDATA')
+        $previous = @{}
+        foreach ($name in $names) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        }
+
+        $taskRoot = Split-Path -Parent $script:RepositoryRoot
+        $localAppData = Join-Path $taskRoot ('l' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $fallbackRoot = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
+        $currentPrefix = 'cur-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $currentLength = 84
+        $currentTemp = Join-Path $fallbackRoot ($currentPrefix + ('x' * ($currentLength - $fallbackRoot.Length - $currentPrefix.Length - 1)))
+
+        $ownsLocalAppData = $false
+        $collisionRoot = $null
         try {
+            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
+            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
+            $ownsLocalAppData = $true
+            [void](New-Item -ItemType Directory -Path $fallbackRoot -ErrorAction Stop)
+            [void](New-Item -ItemType Directory -Path $currentTemp -ErrorAction Stop)
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TEMP', $currentTemp, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TMP', $currentTemp, [EnvironmentVariableTarget]::Process)
+
+            $collisionRunId = [guid]::NewGuid().ToString('N')
+            $collisionRoot = Join-Path $fallbackRoot ("svt-tools-{0}" -f $collisionRunId)
+            [void][IO.Directory]::CreateDirectory($collisionRoot)
+            $collision = $null
+            try { [void](New-AuthorityRunOwnedToolRoot -RunId $collisionRunId) }
+            catch { $collision = $_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($collision)) 'A same-run root in any candidate must fail create-only instead of escaping into another candidate.'
+            Assert-False (Test-Path -LiteralPath (Join-Path $currentTemp ("svt-tools-{0}" -f $collisionRunId))) 'A collision must not create a duplicate root in the current temp candidate.'
+
+            $runId = [guid]::NewGuid().ToString('N')
+            $expectedCurrentRoot = Join-Path $currentTemp ("svt-tools-{0}" -f $runId)
+            $expectedCurrentProbe = Join-Path (Join-Path (Join-Path (Join-Path $expectedCurrentRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
+            Assert-True ($expectedCurrentRoot.Length -lt 128) 'The synthetic current-temp root must pass the old root-only limit.'
+            Assert-True ($expectedCurrentProbe.Length -ge 248) 'The actual deepest Spector path must exceed the Windows limit in the synthetic current temp.'
+
+            $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
+            $expectedFallbackRoot = Join-Path $fallbackRoot ("svt-tools-{0}" -f $runId)
+            $selectedProbe = Join-Path (Join-Path (Join-Path (Join-Path $toolRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
+            Assert-Equal ([IO.Path]::GetFullPath($toolRoot)) ([IO.Path]::GetFullPath($expectedFallbackRoot)) 'An over-budget current temp must fall back to per-user LocalAppData Temp.'
+            Assert-True ($selectedProbe.Length -lt 248) 'The selected root must keep the actual deepest Spector path below the Windows limit.'
+            Assert-False (Test-Path -LiteralPath $expectedCurrentRoot) 'An over-budget current temp must not receive a partially usable tool root.'
             Assert-True (Test-Path -LiteralPath $toolRoot -PathType Container) 'Authority tools must be created in a run-owned directory.'
             Assert-False ((Get-Item -Force -LiteralPath $toolRoot).Attributes -band [System.IO.FileAttributes]::ReparsePoint) 'Authority tool root must not be a reparse point.'
-            Assert-True ($toolRoot.Length -lt 128) 'Authority tool root must leave path-length headroom for Python venv and pip files.'
+            Assert-True ($toolRoot.Length -lt 128) 'Authority tool root must remain within the established root budget.'
             Assert-Match $toolRoot ('svt-tools-' + $runId) 'Authority tool root must bind to the current run id.'
         }
         finally {
-            if (Test-Path -LiteralPath $toolRoot) {
-                Remove-Item -LiteralPath $toolRoot -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($name in $names) {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
+            }
+            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
+                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
+    }
 
-        $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
-        Assert-Match $gate 'New-AuthorityRunOwnedToolRoot' 'Authority gate must allocate its formal tool root through the short-path helper.'
+    It 'UnitT26ha_fails_before_creation_when_all_authority_tool_candidates_exceed_the_windows_path_budget' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $names = @('TEMP', 'TMP', 'LOCALAPPDATA')
+        $previous = @{}
+        foreach ($name in $names) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        }
+
+        $taskRoot = Split-Path -Parent $script:RepositoryRoot
+        $token = [guid]::NewGuid().ToString('N')
+        $longCurrentLength = 110
+        $currentLeafLength = $longCurrentLength - $taskRoot.Length - 1
+        $longCurrent = Join-Path $taskRoot ('t' + $token.Substring(0, 8) + ('x' * ($currentLeafLength - 9)))
+        $localAppDataLength = 100
+        $localAppDataLeafLength = $localAppDataLength - $taskRoot.Length - 1
+        $localAppData = Join-Path $taskRoot ('l' + $token.Substring(8, 8) + ('y' * ($localAppDataLeafLength - 9)))
+        $fallbackRoot = Join-Path $localAppData 'Temp'
+        $runId = [guid]::NewGuid().ToString('N')
+        $currentToolRoot = Join-Path $longCurrent ("svt-tools-{0}" -f $runId)
+        $fallbackToolRoot = Join-Path $fallbackRoot ("svt-tools-{0}" -f $runId)
+        $ownsLongCurrent = $false
+        $ownsLocalAppData = $false
+
+        try {
+            if (Test-Path -LiteralPath $longCurrent) { throw "Refusing to reuse fixture path: $longCurrent" }
+            [void](New-Item -ItemType Directory -Path $longCurrent -ErrorAction Stop)
+            $ownsLongCurrent = $true
+            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
+            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
+            $ownsLocalAppData = $true
+            [void](New-Item -ItemType Directory -Path $fallbackRoot -ErrorAction Stop)
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TEMP', $longCurrent, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TMP', $longCurrent, [EnvironmentVariableTarget]::Process)
+
+            $failure = $null
+            try { [void](New-AuthorityRunOwnedToolRoot -RunId $runId) }
+            catch { $failure = $_.Exception.Message }
+            Assert-Match $failure '248' 'When every candidate exceeds the complete Windows probe-path budget, fail with a clear early path-budget diagnostic.'
+            Assert-False (Test-Path -LiteralPath $currentToolRoot) 'An over-budget current temp must not receive a tool root.'
+            Assert-False (Test-Path -LiteralPath $fallbackToolRoot) 'An over-budget fallback temp must not receive a tool root.'
+        }
+        finally {
+            foreach ($name in $names) {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
+            }
+            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
+                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($ownsLongCurrent -and (Test-Path -LiteralPath $longCurrent)) {
+                Remove-Item -LiteralPath $longCurrent -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Scenario: The current temp is usable while the optional per-user fallback is not a directory.
+    # Purpose: An unusable fallback must not block allocation in the available current temp.
+    It 'UnitT26hb_keeps_an_available_current_temp_when_the_optional_fallback_is_unusable' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $names = @('TEMP', 'TMP', 'LOCALAPPDATA')
+        $previous = @{}
+        foreach ($name in $names) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        }
+
+        $token = [guid]::NewGuid().ToString('N')
+        $localAppData = Join-Path $TestDrive ('blocked-' + $token)
+        $unavailableFallback = [IO.Path]::GetFullPath((Join-Path $localAppData 'Temp'))
+        $runId = [guid]::NewGuid().ToString('N')
+        $currentTemp = $null
+        $expectedToolRoot = $null
+        $expectedProbe = $null
+        $ownsCurrentTemp = $false
+        $ownsLocalAppData = $false
+
+        try {
+            if (Test-Path -LiteralPath $localAppData) { throw "Refusing to reuse fixture path: $localAppData" }
+            [void](New-Item -ItemType Directory -Path $localAppData -ErrorAction Stop)
+            $ownsLocalAppData = $true
+            Write-TestUtf8File -Path $unavailableFallback -Text 'the optional fallback is not a directory'
+
+            $tempBaseCandidates = [Collections.Generic.List[string]]::new()
+            foreach ($candidateBase in @(
+                [IO.Path]::GetTempPath(),
+                $(if (-not [string]::IsNullOrWhiteSpace([string]$previous['LOCALAPPDATA'])) { Join-Path $previous['LOCALAPPDATA'] 'Temp' })
+            )) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$candidateBase)) { $tempBaseCandidates.Add([string]$candidateBase) }
+            }
+            $ancestor = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($script:RepositoryRoot)).Parent
+            while ($null -ne $ancestor) {
+                $tempBaseCandidates.Add($ancestor.FullName)
+                $ancestor = $ancestor.Parent
+            }
+
+            $seenTempBases = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $tempRootErrors = [Collections.Generic.List[string]]::new()
+            foreach ($candidateBase in $tempBaseCandidates) {
+                $basePath = $null
+                try { $basePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($candidateBase)) }
+                catch { $tempRootErrors.Add("Invalid temp parent '$candidateBase': $($_.Exception.Message)"); continue }
+                if (-not $seenTempBases.Add($basePath) -or -not (Test-Path -LiteralPath $basePath -PathType Container)) { continue }
+
+                $candidateTemp = Join-Path $basePath ('t-' + $token.Substring(0, 12))
+                $candidateRoot = [IO.Path]::GetFullPath((Join-Path $candidateTemp ("svt-tools-{0}" -f $runId)))
+                $candidateProbe = Join-Path (Join-Path (Join-Path (Join-Path $candidateRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' (('p' * 96) + '.probe'))
+                if ($candidateProbe.Length -ge 248) { continue }
+                if (Test-Path -LiteralPath $candidateTemp) {
+                    $tempRootErrors.Add("Refusing to reuse fixture path: $candidateTemp")
+                    continue
+                }
+                try { [void](New-Item -ItemType Directory -Path $candidateTemp -ErrorAction Stop) }
+                catch { $tempRootErrors.Add("Cannot create short current-temp fixture under '$basePath': $($_.Exception.Message)"); continue }
+
+                $currentTemp = $candidateTemp
+                $expectedToolRoot = $candidateRoot
+                $expectedProbe = $candidateProbe
+                $ownsCurrentTemp = $true
+                break
+            }
+            if (-not $ownsCurrentTemp) {
+                throw "Unable to create a short owned temp fixture for the complete Python venv probe path. $($tempRootErrors -join ' | ')"
+            }
+            Assert-True ($expectedProbe.Length -lt 248) ("The available current-temp fixture must leave room for the full Windows Python venv probe path; length=$($expectedProbe.Length), path='$expectedProbe'.")
+            [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TEMP', $currentTemp, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('TMP', $currentTemp, [EnvironmentVariableTarget]::Process)
+
+            $toolRoot = New-AuthorityRunOwnedToolRoot -RunId $runId
+            Assert-Equal ([IO.Path]::GetFullPath($toolRoot)) $expectedToolRoot ("An unusable optional fallback must not redirect a usable current temp candidate; helper returned '$toolRoot'.")
+            Assert-True (Test-Path -LiteralPath $expectedToolRoot -PathType Container) ("The available current temp candidate must receive the run-owned root at '$toolRoot'.")
+            Assert-True (Test-Path -LiteralPath $unavailableFallback -PathType Leaf) 'The non-directory fallback blocker must remain untouched.'
+            Assert-Equal ([IO.File]::ReadAllText($unavailableFallback)) 'the optional fallback is not a directory' 'The fallback blocker must remain unchanged.'
+        }
+        finally {
+            foreach ($name in $names) {
+                [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process)
+            }
+            if ($ownsLocalAppData -and (Test-Path -LiteralPath $localAppData)) {
+                Remove-Item -LiteralPath $localAppData -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($ownsCurrentTemp -and (Test-Path -LiteralPath $currentTemp)) {
+                Remove-Item -LiteralPath $currentTemp -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     It 'UnitT27_requires_ordinary_gate_to_execute_retained_checks_without_external_tooling' {

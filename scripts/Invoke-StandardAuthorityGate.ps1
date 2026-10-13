@@ -211,22 +211,162 @@ function New-AuthorityRunOwnedToolRoot {
         throw 'Authority tool root requires a lowercase 32-character run id.'
     }
 
-    # The authority evidence tree can be nested below a long checkout or CI
-    # artifact path. Keep formal tool installations in a compact, run-owned
-    # sibling under the OS temp root so Python venv/ensurepip deep paths do not
-    # fail on Windows hosts without Long Paths enabled.
-    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-    $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $tempRoot ("svt-tools-{0}" -f $RunId)))
-    if ($toolRoot.Length -ge 128) {
-        throw "Authority tool root is too long for the Windows Python venv path budget: $toolRoot"
+    # Bound the deepest Spector venv path, not only this run-owned parent.
+    # A short parent can still leave pip's site-packages probe beyond MAX_PATH.
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    $pathComparer = if ($isWindowsHost) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
+    $candidateErrors = [System.Collections.Generic.List[string]]::new()
+    $availableCandidates = [System.Collections.Generic.List[object]]::new()
+    $candidatePaths = [System.Collections.Generic.HashSet[string]]::new($pathComparer)
+
+    $baseCandidates = [System.Collections.Generic.List[object]]::new()
+    try {
+        $baseCandidates.Add([pscustomobject]@{
+            Name = 'current TEMP'
+            Path = [System.IO.Path]::GetTempPath()
+        })
     }
-    [void](New-Item -ItemType Directory -Path $toolRoot -ErrorAction Stop)
-    $toolRootItem = Get-Item -Force -LiteralPath $toolRoot -ErrorAction Stop
-    if (-not $toolRootItem.PSIsContainer -or
-        ($toolRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Authority tool root must be a new non-reparse directory: $toolRoot"
+    catch {
+        $candidateErrors.Add("current TEMP is unavailable: $($_.Exception.Message)")
     }
-    return $toolRoot
+
+    if ($isWindowsHost) {
+        $localAppData = [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA', [System.EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            try {
+                $baseCandidates.Add([pscustomobject]@{
+                    Name = 'LocalAppData Temp'
+                    Path = (Join-Path $localAppData 'Temp')
+                })
+            }
+            catch {
+                $candidateErrors.Add("LocalAppData Temp is unavailable: $($_.Exception.Message)")
+            }
+        }
+        else {
+            $candidateErrors.Add('LocalAppData Temp is unavailable because LOCALAPPDATA is empty.')
+        }
+    }
+
+    foreach ($candidate in $baseCandidates) {
+        try {
+            if ([string]::IsNullOrWhiteSpace([string]$candidate.Path)) {
+                throw 'The temp base is empty.'
+            }
+            $basePath = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath([string]$candidate.Path))
+            if (-not $candidatePaths.Add($basePath)) { continue }
+
+            $ancestorPath = $basePath
+            $baseIsUsable = $true
+            while ($true) {
+                try {
+                    $baseItem = Get-Item -Force -LiteralPath $ancestorPath -ErrorAction Stop
+                }
+                catch {
+                    $candidateErrors.Add("$($candidate.Name) is inaccessible at ${ancestorPath}: $($_.Exception.Message)")
+                    $baseIsUsable = $false
+                    break
+                }
+
+                if (-not $baseItem.PSIsContainer -or
+                    ($isWindowsHost -and ($baseItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    $candidateErrors.Add("$($candidate.Name) has a non-directory or reparse-point ancestor: $ancestorPath")
+                    $baseIsUsable = $false
+                    break
+                }
+
+                if (-not $isWindowsHost) { break }
+                $parent = [System.IO.Directory]::GetParent($ancestorPath)
+                if ($null -eq $parent -or [string]::Equals($parent.FullName, $ancestorPath, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+                $ancestorPath = $parent.FullName
+            }
+            if (-not $baseIsUsable) { continue }
+
+            $toolRoot = [System.IO.Path]::GetFullPath((Join-Path $basePath ("svt-tools-{0}" -f $RunId)))
+            $probePath = $null
+            if ($isWindowsHost) {
+                $probeName = ('p' * 96) + '.probe'
+                $probePath = Join-Path (Join-Path (Join-Path (Join-Path $toolRoot ('ss-' + ('a' * 12))) 'venv') 'Lib') (Join-Path 'site-packages' $probeName)
+            }
+            $availableCandidates.Add([pscustomobject]@{
+                Name = [string]$candidate.Name
+                BasePath = $basePath
+                ToolRoot = $toolRoot
+                ProbePath = $probePath
+            })
+        }
+        catch {
+            $candidateErrors.Add("$($candidate.Name) path is invalid: $($_.Exception.Message)")
+        }
+    }
+
+    # Never evade a run-id collision by selecting another temp base.
+    # Only accessible regular candidates take part in the create-only collision check.
+    foreach ($candidate in $availableCandidates) {
+        $existingRoot = $null
+        try {
+            $existingRoot = Get-Item -Force -LiteralPath $candidate.ToolRoot -ErrorAction Stop
+        }
+        catch {
+            if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                throw "Unable to verify the create-only authority tool root in $($candidate.Name): $($_.Exception.Message)"
+            }
+        }
+        if ($null -ne $existingRoot) {
+            throw "Authority tool root already exists for this run in $($candidate.Name): $($candidate.ToolRoot)"
+        }
+    }
+
+    $eligibleCandidateCount = 0
+    foreach ($candidate in $availableCandidates) {
+        if ($isWindowsHost) {
+            if ($candidate.ProbePath.Length -ge 248) {
+                $candidateErrors.Add("$($candidate.Name) exceeds the 248-character Python venv probe-path budget ($($candidate.ProbePath.Length)): $($candidate.BasePath)")
+                continue
+            }
+        }
+        elseif ($candidate.ToolRoot.Length -ge 128) {
+            $candidateErrors.Add("$($candidate.Name) exceeds the existing 128-character tool-root budget: $($candidate.ToolRoot)")
+            continue
+        }
+        $eligibleCandidateCount++
+
+        try {
+            [void](New-Item -ItemType Directory -Path $candidate.ToolRoot -ErrorAction Stop)
+        }
+        catch {
+            $rootAfterFailure = $null
+            try { $rootAfterFailure = Get-Item -Force -LiteralPath $candidate.ToolRoot -ErrorAction Stop }
+            catch {
+                if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                    throw "Unable to verify the create-only authority tool root after allocation failed in $($candidate.Name): $($_.Exception.Message)"
+                }
+            }
+            if ($null -ne $rootAfterFailure) {
+                throw "Authority tool root collided during create-only allocation in $($candidate.Name): $($candidate.ToolRoot)"
+            }
+            $candidateErrors.Add("$($candidate.Name) could not create its run-owned root: $($_.Exception.Message)")
+            continue
+        }
+
+        $toolRootItem = Get-Item -Force -LiteralPath $candidate.ToolRoot -ErrorAction Stop
+        if (-not $toolRootItem.PSIsContainer -or
+            ($toolRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Authority tool root must be a new non-reparse directory: $($candidate.ToolRoot)"
+        }
+        return $candidate.ToolRoot
+    }
+
+    if ($eligibleCandidateCount -eq 0) {
+        if ($isWindowsHost) {
+            throw "No authority tool temp candidate satisfies the Windows Python venv probe-path budget (<248 characters). $($candidateErrors -join ' | ')"
+        }
+        throw "No authority tool temp candidate satisfies the tool-root budget (<128 characters). $($candidateErrors -join ' | ')"
+    }
+    if ($isWindowsHost) {
+        throw "No authority tool temp candidate could create a run-owned root within the Windows Python venv probe-path budget (<248 characters). $($candidateErrors -join ' | ')"
+    }
+    throw "No authority tool temp candidate could create a run-owned root within the tool-root budget (<128 characters). $($candidateErrors -join ' | ')"
 }
 
 function Assert-AuthorityUpstreamAdapterReport {
