@@ -7826,4 +7826,294 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
             $script:StandardValidationTimingEnabled=$oldTimingEnabled
         }
     }
+
+}
+
+Describe 'SYP325 path inspection timing' -Tag 'SYP325' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1')
+        $measurementTempRoot=if(-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){$env:RUNNER_TEMP}else{$env:TEMP}
+        $script:SourceMeasurementEvidenceRoot=Join-Path $measurementTempRoot ('syp325-path-inspection-'+[guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($script:SourceMeasurementEvidenceRoot)
     }
+
+    # Scenario: The frozen-file validator performs real path and metadata inspections, including on paths that the filesystem may reject.
+    # Purpose: Compare emitted subphase call counts with an independent wrapper around the actual PowerShell filesystem cmdlets.
+    It 'UnitT70_reports_real_path_inspection_attempt_counts' {
+        $report=New-SourceGateFixture
+        $files=@($report.sourceValidation.frozenFiles)
+        if($files.Count -eq 0){throw 'The source fixture must include frozen files for path inspection measurement.'}
+        $oldTimingEnabled=$script:StandardValidationTimingEnabled
+        $oldConsoleError=[Console]::Error
+        $capture=[IO.StringWriter]::new()
+        $global:Syp314PathProbeWitness=[ordered]@{
+            case=0L;ancestor=0L;leafTest=0L;leafItem=0L;metadata=0L;samples=(New-Object 'System.Collections.Generic.List[object]')
+        }
+        $global:Syp314OriginalGetItem=Get-Command Get-Item -CommandType Cmdlet
+        $global:Syp314OriginalTestPath=Get-Command Test-Path -CommandType Cmdlet
+        $script:StandardValidationTimingEnabled=$true
+        [Console]::SetError($capture)
+        try {
+            Mock Get-Item {
+                param([string]$Path,[string]$LiteralPath,[switch]$Force,[string]$Filter,[string]$ErrorAction)
+                $frames=@(Get-PSCallStack | ForEach-Object {[string]$_.FunctionName})
+                if($global:Syp314PathProbeWitness.samples.Count -lt 12){$global:Syp314PathProbeWitness.samples.Add($frames)}
+                if($frames -ccontains 'Get-StandardValidationPathCaseBehavior'){$global:Syp314PathProbeWitness.case++}
+                elseif($frames -ccontains 'Assert-StandardValidationCanonicalRootPath'){$global:Syp314PathProbeWitness.ancestor++}
+                elseif($frames -ccontains 'Assert-StandardValidationRegularFile'){$global:Syp314PathProbeWitness.leafItem++}
+                elseif($frames -ccontains 'Assert-StandardCoreFrozenFiles'){$global:Syp314PathProbeWitness.metadata++}
+                $forward=@{}
+                if($PSBoundParameters.ContainsKey('LiteralPath')){$forward.LiteralPath=$LiteralPath}
+                elseif($PSBoundParameters.ContainsKey('Path')){$forward.Path=$Path}
+                if($PSBoundParameters.ContainsKey('Force')){$forward.Force=$true}
+                if($PSBoundParameters.ContainsKey('Filter')){$forward.Filter=$Filter}
+                if($PSBoundParameters.ContainsKey('ErrorAction')){$forward.ErrorAction=$ErrorAction}
+                & $global:Syp314OriginalGetItem @forward
+            }
+            Mock Test-Path {
+                param([string]$Path,[string]$LiteralPath,[string]$PathType,[string]$ErrorAction)
+                $frames=@(Get-PSCallStack | ForEach-Object {[string]$_.FunctionName})
+                if($global:Syp314PathProbeWitness.samples.Count -lt 12){$global:Syp314PathProbeWitness.samples.Add($frames)}
+                if($frames -ccontains 'Assert-StandardValidationRegularFile'){$global:Syp314PathProbeWitness.leafTest++}
+                $forward=@{}
+                if($PSBoundParameters.ContainsKey('LiteralPath')){$forward.LiteralPath=$LiteralPath}
+                elseif($PSBoundParameters.ContainsKey('Path')){$forward.Path=$Path}
+                if($PSBoundParameters.ContainsKey('PathType')){$forward.PathType=$PathType}
+                if($PSBoundParameters.ContainsKey('ErrorAction')){$forward.ErrorAction=$ErrorAction}
+                & $global:Syp314OriginalTestPath @forward
+            }
+
+            Assert-StandardCoreFrozenFiles -Files $files
+
+            $records=@($capture.ToString() -split "`r?`n" | Where-Object {$_ -match '^\[StandardValidation timing\] ' } | ForEach-Object { ($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json })
+            $expected=[ordered]@{
+                'path-case-probes'=[long]$global:Syp314PathProbeWitness.case
+                'path-ancestor-inspections'=[long]$global:Syp314PathProbeWitness.ancestor
+                'path-leaf-tests'=[long]$global:Syp314PathProbeWitness.leafTest
+                'path-leaf-items'=[long]$global:Syp314PathProbeWitness.leafItem
+                'path-metadata-inspections'=[long]$global:Syp314PathProbeWitness.metadata
+            }
+            $evidencePath=Join-Path $script:SourceMeasurementEvidenceRoot 'path-inspection-witness-samples.json'
+            $evidence=[ordered]@{witness=$global:Syp314PathProbeWitness;diagnostics=@($records);counts=$expected}
+            $evidenceBytes=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $evidence -Depth 6))
+            $evidenceStream=[IO.File]::Open($evidencePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{$evidenceStream.Write($evidenceBytes,0,$evidenceBytes.Length);$evidenceStream.Flush($true)}finally{$evidenceStream.Dispose()}
+            if(@($expected.Values | Where-Object {$_ -gt 0}).Count -ne $expected.Count){throw "Independent cmdlet witness did not observe each expected scope: $($expected | ConvertTo-Json -Compress)."}
+            foreach($phaseName in $expected.Keys){
+                $terminal=@($records | Where-Object {$_.phase -ceq $phaseName -and $_.state -ceq 'completed'})
+                if($terminal.Count -ne 1){throw "Expected one completed '$phaseName' diagnostic; found $($terminal.Count)."}
+                if([long]$terminal[0].calls -ne [long]$expected[$phaseName]){throw "'$phaseName' reported $($terminal[0].calls) calls but the independent Get-Item/Test-Path wrapper witnessed $($expected[$phaseName])."}
+                if($terminal[0].files -ne 0 -or $terminal[0].bytes -ne 0){throw "'$phaseName' counts invocations only and must retain zero files and bytes."}
+            }
+            if(-not [IO.File]::Exists($evidencePath)){throw 'Independent path inspection witness evidence must be saved.'}
+        }
+        finally {
+            [Console]::SetError($oldConsoleError)
+            $script:StandardValidationTimingEnabled=$oldTimingEnabled
+            Remove-Variable -Name Syp314PathProbeWitness,Syp314OriginalGetItem,Syp314OriginalTestPath -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'SYP325 retained source lookup timing' -Tag 'SYP325' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1')
+        $measurementTempRoot=if(-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){$env:RUNNER_TEMP}else{$env:TEMP}
+        $script:Syp314LookupEvidenceRoot=Join-Path $measurementTempRoot ('syp325-retained-lookups-'+[guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($script:Syp314LookupEvidenceRoot)
+        if ($null -eq ('Syp314ThrowingTextWriter' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+public sealed class Syp314ThrowingTextWriter : TextWriter
+{
+    private static readonly List<string> Messages = new List<string>();
+    public override Encoding Encoding { get { return Encoding.UTF8; } }
+    public static void ClearMessages() { lock (Messages) { Messages.Clear(); } }
+    public static string[] GetMessages() { lock (Messages) { return Messages.ToArray(); } }
+    public override void WriteLine(string value)
+    {
+        lock (Messages) { Messages.Add(value); }
+        throw new IOException("synthetic diagnostic sink failure");
+    }
+}
+'@
+        }
+
+        function Invoke-Syp314RetainedLookupMeasurement {
+            param([switch]$IncludeFirstFrozenPath,[switch]$CorruptSkillToolsBinding,[switch]$Silent,[System.IO.TextWriter]$DiagnosticWriter)
+            $report=New-SourceGateFixture -OutsideArtifactCommand
+            $files=@($report.sourceValidation.frozenFiles)
+            $AdditionalPaths=if($IncludeFirstFrozenPath){@([string]$files[0].path)}else{@()}
+            $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $files -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
+            $dispatchBindings=@($report.sourceValidation.toolReceipts | ForEach-Object {[pscustomobject]@{path=[string]$_.path;sha256=[string]$_.sha256}})
+            if($CorruptSkillToolsBinding){
+                $targetPath=[string]$map.bindings['skill-tools'].path
+                $target=@($dispatchBindings | Where-Object {$_.path -ceq $targetPath})
+                if($target.Count -ne 1){throw 'Could not isolate the skill-tools binding for a partial-scan failure fixture.'}
+                $target[0].sha256='0000000000000000000000000000000000000000000000000000000000000000'
+            }
+            $oldTimingEnabled=$script:StandardValidationTimingEnabled
+            $oldConsoleError=[Console]::Error
+            $capture=[IO.StringWriter]::new()
+            $previousWhereFunction=Get-Command Where-Object -CommandType Function -ErrorAction SilentlyContinue
+            $global:Syp314OriginalWhereObject=Get-Command Where-Object -CommandType Cmdlet
+            $global:Syp314LookupWitness=[ordered]@{
+                receiptLookups=[long]0;receiptPredicates=[long]0;additionalLookups=[long]0;additionalPredicates=[long]0
+                samples=(New-Object 'System.Collections.Generic.List[object]')
+            }
+            $whereWrapper={
+                [CmdletBinding()]
+                param(
+                    [Parameter(ValueFromPipeline=$true)][object]$InputObject,
+                    [Parameter(Position=0)][scriptblock]$FilterScript
+                )
+                begin {
+                    $currentKind=$null
+                    $frames=@(Get-PSCallStack | ForEach-Object {[string]$_.FunctionName})
+                    $filterText=if($null -eq $FilterScript){''}else{$FilterScript.ToString()}
+                    if($frames -ccontains 'Assert-StandardCoreSourceToolReceipts'){
+                        if($filterText -match 'source frozen dispatch path'){$currentKind='additional'}
+                        elseif($filterText -match '\$binding\.path'){$currentKind='receipt'}
+                    }
+                    if($currentKind -ceq 'receipt'){
+                        $global:Syp314LookupWitness.receiptLookups=[long]$global:Syp314LookupWitness.receiptLookups+1
+                    }
+                    elseif($currentKind -ceq 'additional'){
+                        $global:Syp314LookupWitness.additionalLookups=[long]$global:Syp314LookupWitness.additionalLookups+1
+                    }
+                    if($null -ne $currentKind -and $global:Syp314LookupWitness.samples.Count -lt 64){
+                        $global:Syp314LookupWitness.samples.Add([pscustomobject]@{kind=$currentKind;filter=$filterText;callStack=$frames})
+                    }
+                }
+                process {
+                    if($currentKind -ceq 'receipt'){
+                        $global:Syp314LookupWitness.receiptPredicates=[long]$global:Syp314LookupWitness.receiptPredicates+1
+                        if(& $FilterScript){Write-Output $InputObject}
+                    }
+                    elseif($currentKind -ceq 'additional'){
+                        $global:Syp314LookupWitness.additionalPredicates=[long]$global:Syp314LookupWitness.additionalPredicates+1
+                        if(& $FilterScript){Write-Output $InputObject}
+                    }
+                    else {
+                        $filtered=@(& $global:Syp314OriginalWhereObject -InputObject $InputObject -FilterScript $FilterScript)
+                        foreach($item in $filtered){Write-Output $item}
+                    }
+                }
+            }
+            Set-Item -Path 'Function:\Where-Object' -Value $whereWrapper
+            $script:StandardValidationTimingEnabled=-not $Silent
+            $activeWriter=if($null -ne $DiagnosticWriter){$DiagnosticWriter}else{$capture}
+            [Console]::SetError($activeWriter)
+            $errorMessage=$null
+            $result=$null
+            try {
+                $result=Assert-StandardCoreSourceToolReceipts -Bindings $dispatchBindings -FrozenFiles $files -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -RetainedReceiptMap $map -ToolNames @('skill-validator') -AdditionalPaths $AdditionalPaths
+            }
+            catch {$errorMessage=$_.Exception.Message}
+            finally {
+                $witness=$global:Syp314LookupWitness
+                if($null -ne $previousWhereFunction){Set-Item -Path 'Function:\Where-Object' -Value $previousWhereFunction.ScriptBlock}
+                else {Remove-Item -Path 'Function:\Where-Object' -ErrorAction SilentlyContinue}
+                Remove-Variable -Name Syp314OriginalWhereObject,Syp314LookupWitness -Scope Global -ErrorAction SilentlyContinue
+                [Console]::SetError($oldConsoleError)
+                $script:StandardValidationTimingEnabled=$oldTimingEnabled
+            }
+            $records=@($capture.ToString() -split "`r?`n" | ForEach-Object {if($_ -match '^\[StandardValidation timing\] '){($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json}})
+            return [pscustomobject]@{witness=$witness;records=$records;fileCount=$files.Count;receiptCount=@($report.sourceValidation.toolReceipts).Count;additionalCount=@($AdditionalPaths).Count;result=$result;errorMessage=$errorMessage}
+        }
+    }
+
+    # Scenario: Retained receipt validation scans all three bindings and all frozen files for each selected binding.
+    # Purpose: Compare the emitted lookup and predicate counts with an independent wrapper that observes each real Where-Object invocation and filter-body execution.
+    It 'UnitT71_reports_real_receipt_lookup_and_predicate_counts' {
+        $measurement=Invoke-Syp314RetainedLookupMeasurement
+        $evidencePath=Join-Path $script:Syp314LookupEvidenceRoot 'receipt-lookup-witness.json'
+        $evidence=[ordered]@{witness=$measurement.witness;diagnostics=@($measurement.records);expected=[ordered]@{lookups=6;predicates=3*($measurement.receiptCount+$measurement.fileCount)}}
+        $evidenceBytes=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $evidence -Depth 7))
+        $evidenceStream=[IO.File]::Open($evidencePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$evidenceStream.Write($evidenceBytes,0,$evidenceBytes.Length);$evidenceStream.Flush($true)}finally{$evidenceStream.Dispose()}
+        if($measurement.receiptCount -ne 3 -or $measurement.fileCount -ne 9){throw "Lookup fixture dimensions changed: receipts=$($measurement.receiptCount), frozenFiles=$($measurement.fileCount)."}
+        if($measurement.witness.receiptLookups -ne 6 -or $measurement.witness.receiptPredicates -ne 36){throw "Independent Where-Object witness expected six receipt lookup calls and 36 filter evaluations, observed $($measurement.witness.receiptLookups) and $($measurement.witness.receiptPredicates)."}
+        $lookup=@($measurement.records | Where-Object {$_.phase -ceq 'source-receipt-lookups' -and $_.state -ceq 'completed'})
+        $predicate=@($measurement.records | Where-Object {$_.phase -ceq 'source-receipt-predicates' -and $_.state -ceq 'completed'})
+        if($lookup.Count -ne 1 -or [long]$lookup[0].calls -ne [long]$measurement.witness.receiptLookups -or $lookup[0].files -ne 0 -or $lookup[0].bytes -ne 0){throw 'source-receipt-lookups must report the actual Where-Object invocation count and zero files/bytes.'}
+        if($predicate.Count -ne 1 -or [long]$predicate[0].calls -ne [long]$measurement.witness.receiptPredicates -or $predicate[0].files -ne 0 -or $predicate[0].bytes -ne 0){throw 'source-receipt-predicates must report the actual filter-body execution count and zero files/bytes.'}
+    }
+
+    # Scenario: One additional source dispatch path is checked against every frozen file.
+    # Purpose: Verify its independent lookup and predicate phases reflect observed cmdlet work while retaining the full scan.
+    It 'UnitT72_reports_real_additional_path_lookup_and_predicate_counts' {
+        $measurement=Invoke-Syp314RetainedLookupMeasurement -IncludeFirstFrozenPath
+        $evidencePath=Join-Path $script:Syp314LookupEvidenceRoot 'additional-path-lookup-witness.json'
+        $evidence=[ordered]@{witness=$measurement.witness;diagnostics=@($measurement.records);expected=[ordered]@{lookups=1;predicates=$measurement.fileCount}}
+        $evidenceBytes=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $evidence -Depth 7))
+        $evidenceStream=[IO.File]::Open($evidencePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$evidenceStream.Write($evidenceBytes,0,$evidenceBytes.Length);$evidenceStream.Flush($true)}finally{$evidenceStream.Dispose()}
+        if($measurement.additionalCount -ne 1 -or $measurement.fileCount -ne 9){throw "Additional-path fixture dimensions changed: additional=$($measurement.additionalCount), frozenFiles=$($measurement.fileCount)."}
+        if($measurement.witness.additionalLookups -ne 1 -or $measurement.witness.additionalPredicates -ne $measurement.fileCount){throw "Independent Where-Object witness expected one additional-path lookup and $($measurement.fileCount) filter evaluations, observed $($measurement.witness.additionalLookups) and $($measurement.witness.additionalPredicates)."}
+        $lookup=@($measurement.records | Where-Object {$_.phase -ceq 'source-additional-lookups' -and $_.state -ceq 'completed'})
+        $predicate=@($measurement.records | Where-Object {$_.phase -ceq 'source-additional-predicates' -and $_.state -ceq 'completed'})
+        if($lookup.Count -ne 1 -or [long]$lookup[0].calls -ne [long]$measurement.witness.additionalLookups -or $lookup[0].files -ne 0 -or $lookup[0].bytes -ne 0){throw 'source-additional-lookups must report the actual Where-Object invocation count and zero files/bytes.'}
+        if($predicate.Count -ne 1 -or [long]$predicate[0].calls -ne [long]$measurement.witness.additionalPredicates -or $predicate[0].files -ne 0 -or $predicate[0].bytes -ne 0){throw 'source-additional-predicates must report the actual filter-body execution count and zero files/bytes.'}
+    }
+
+    # Scenario: A corrupted second receipt binding fails after the first receipt is fully scanned, and stderr diagnostics fail on every write.
+    # Purpose: Verify partial counts and failed terminal states are emitted best-effort without replacing the original validation exception.
+    It 'UnitT73_preserves_failed_validation_and_partial_counts_when_diagnostic_sink_throws' {
+        [Syp314ThrowingTextWriter]::ClearMessages()
+        $sink=[Syp314ThrowingTextWriter]::new()
+        $measurement=Invoke-Syp314RetainedLookupMeasurement -CorruptSkillToolsBinding -DiagnosticWriter $sink
+        $records=@([Syp314ThrowingTextWriter]::GetMessages() | ForEach-Object {if($_ -match '^\[StandardValidation timing\] '){($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json}})
+        if($measurement.errorMessage -cnotmatch '^INVALID\|Current source receipt bindings differ from the setup snapshot\.$'){throw "A broken stderr sink replaced the original validation failure: $($measurement.errorMessage)"}
+        $receiptLookups=@($records | Where-Object {$_.phase -ceq 'source-receipt-lookups' -and $_.state -ceq 'failed'})
+        $receiptPredicates=@($records | Where-Object {$_.phase -ceq 'source-receipt-predicates' -and $_.state -ceq 'failed'})
+        $additionalLookups=@($records | Where-Object {$_.phase -ceq 'source-additional-lookups' -and $_.state -ceq 'failed'})
+        $additionalPredicates=@($records | Where-Object {$_.phase -ceq 'source-additional-predicates' -and $_.state -ceq 'failed'})
+        if($receiptLookups.Count -ne 1 -or [long]$receiptLookups[0].calls -ne 3 -or $receiptPredicates.Count -ne 1 -or [long]$receiptPredicates[0].calls -ne 15){throw 'Failed receipt lookup phases did not retain the two successful binding scans plus the failing receipt lookup.'}
+        if($additionalLookups.Count -ne 1 -or [long]$additionalLookups[0].calls -ne 0 -or $additionalPredicates.Count -ne 1 -or [long]$additionalPredicates[0].calls -ne 0){throw 'Unreached additional-path phases must be emitted as failed with zero calls.'}
+        if(@([Syp314ThrowingTextWriter]::GetMessages()).Count -lt 4){throw 'The throwing diagnostic sink was not exercised for all four source lookup phases.'}
+    }
+
+    # Scenario: An explicit cancellation is raised after the first binding has completed its full receipt scan.
+    # Purpose: Verify cancelled terminal states preserve the measured partial lookup and predicate counts.
+    It 'UnitT74_reports_cancelled_terminal_state_with_partial_counts' {
+        $report=New-SourceGateFixture -OutsideArtifactCommand
+        $files=@($report.sourceValidation.frozenFiles)
+        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $files -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
+        $oldTimingEnabled=$script:StandardValidationTimingEnabled
+        $oldConsoleError=[Console]::Error
+        $capture=[IO.StringWriter]::new()
+        $script:StandardValidationTimingEnabled=$true
+        [Console]::SetError($capture)
+        Mock Assert-StandardValidationCanonicalRootPath { throw 'CANCELLED|synthetic retained source cancellation' }
+        $errorMessage=$null
+        try {
+            Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $files -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -RetainedReceiptMap $map -ToolNames @('skill-validator')
+        }
+        catch {$errorMessage=$_.Exception.Message}
+        finally {
+            [Console]::SetError($oldConsoleError)
+            $script:StandardValidationTimingEnabled=$oldTimingEnabled
+            & (Get-Module Pester) { Exit-MockScope }
+        }
+        $records=@($capture.ToString() -split "`r?`n" | ForEach-Object {if($_ -match '^\[StandardValidation timing\] '){($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json}})
+        if($errorMessage -cne 'CANCELLED|synthetic retained source cancellation'){throw "Cancellation was not preserved: $errorMessage"}
+        $lookup=@($records | Where-Object {$_.phase -ceq 'source-receipt-lookups' -and $_.state -ceq 'cancelled'})
+        $predicate=@($records | Where-Object {$_.phase -ceq 'source-receipt-predicates' -and $_.state -ceq 'cancelled'})
+        $additional=@($records | Where-Object {$_.phase -ceq 'source-additional-lookups' -and $_.state -ceq 'cancelled'})
+        if($lookup.Count -ne 1 -or [long]$lookup[0].calls -ne 2 -or $predicate.Count -ne 1 -or [long]$predicate[0].calls -ne 12){throw 'Cancelled receipt lookup phases did not preserve exactly one completed binding scan.'}
+        if($additional.Count -ne 1 -or [long]$additional[0].calls -ne 0){throw 'Unreached additional-path phase did not terminate as cancelled with zero calls.'}
+    }
+
+    # Scenario: Diagnostic phases are disabled while the same retained source validation executes successfully.
+    # Purpose: Keep silent/Core operation free of timing output without changing validation or observed lookup work.
+    It 'UnitT75_keeps_silent_validation_successful_without_timing_output' {
+        $measurement=Invoke-Syp314RetainedLookupMeasurement -Silent
+        if($null -ne $measurement.errorMessage -or $null -eq $measurement.result){throw "Silent retained validation changed the successful result: $($measurement.errorMessage)"}
+        if($measurement.records.Count -ne 0){throw 'Silent retained validation unexpectedly emitted timing diagnostics.'}
+        if($measurement.witness.receiptLookups -ne 6 -or $measurement.witness.receiptPredicates -ne 36){throw 'Silent retained validation changed its actual receipt lookup work.'}
+    }
+}

@@ -575,19 +575,68 @@ function Get-StandardValidationCaseVariant {
     return $null
 }
 
+function New-StandardValidationPathProbeTimings {
+    param([switch] $Silent)
+
+    return [pscustomobject]@{
+        case = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'path-case-probes' -Aggregate -Silent:$Silent
+        ancestor = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'path-ancestor-inspections' -Aggregate -Silent:$Silent
+        leafTest = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'path-leaf-tests' -Aggregate -Silent:$Silent
+        leafItem = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'path-leaf-items' -Aggregate -Silent:$Silent
+        metadata = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'path-metadata-inspections' -Aggregate -Silent:$Silent
+    }
+}
+
+function Add-StandardValidationOperationAttempt {
+    param([Parameter(Mandatory = $true)] $Timing, [Parameter(Mandatory = $true)][long] $StartedAt)
+
+    if ($null -eq $Timing) { return }
+    $Timing.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $StartedAt
+    Update-StandardValidationPhase -Timing $Timing -Calls 1
+}
+
+function Complete-StandardValidationPathProbeTimings {
+    param([Parameter(Mandatory = $true)] $Timings, [Parameter(Mandatory = $true)][ValidateSet('completed','failed','cancelled')][string] $State)
+
+    foreach ($timing in @($Timings.case,$Timings.ancestor,$Timings.leafTest,$Timings.leafItem,$Timings.metadata)) {
+        Complete-StandardValidationPhase -Timing $timing -State $State
+    }
+}
+
+function New-StandardValidationSourceLookupTimings {
+    param([switch] $Silent)
+
+    return [pscustomobject]@{
+        receiptLookups = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-receipt-lookups' -Aggregate -Silent:$Silent
+        receiptPredicates = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-receipt-predicates' -Aggregate -Silent:$Silent
+        additionalLookups = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-additional-lookups' -Aggregate -Silent:$Silent
+        additionalPredicates = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-additional-predicates' -Aggregate -Silent:$Silent
+    }
+}
+
+function Complete-StandardValidationSourceLookupTimings {
+    param([Parameter(Mandatory = $true)] $Timings, [Parameter(Mandatory = $true)][ValidateSet('completed','failed','cancelled')][string] $State)
+
+    foreach ($timing in @($Timings.receiptLookups,$Timings.receiptPredicates,$Timings.additionalLookups,$Timings.additionalPredicates)) {
+        Complete-StandardValidationPhase -Timing $timing -State $State
+    }
+}
+
 function Get-StandardValidationPathCaseBehavior {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context, [object] $PathTimings)
 
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
     $current = $fullPath
     $caseSensitiveEvidence = $false
     while ($true) {
         $item = $null
+        $inspectionStarted = [Diagnostics.Stopwatch]::GetTimestamp()
         try { $item = Get-Item -Force -LiteralPath $current -ErrorAction Stop }
         catch [System.Management.Automation.ItemNotFoundException] { }
         catch [System.IO.FileNotFoundException] { }
         catch [System.IO.DirectoryNotFoundException] { }
         catch { throw "INVALID|$Context path component could not be inspected: $($_.Exception.Message)" }
+        finally { if ($null -ne $PathTimings) { Add-StandardValidationOperationAttempt -Timing $PathTimings.case -StartedAt $inspectionStarted } }
         if ($null -ne $item) {
             $leaf = Split-Path -Leaf $current
             $variantLeaf = if ([string]::IsNullOrEmpty($leaf)) { $null } else { Get-StandardValidationCaseVariant -Value $leaf }
@@ -596,11 +645,13 @@ function Get-StandardValidationPathCaseBehavior {
                 if (-not [string]::IsNullOrWhiteSpace($parent)) {
                     $variantPath = Join-Path $parent $variantLeaf
                     $variantItem = $null
+                    $variantInspectionStarted = [Diagnostics.Stopwatch]::GetTimestamp()
                     try { $variantItem = Get-Item -Force -LiteralPath $variantPath -ErrorAction Stop }
                     catch [System.Management.Automation.ItemNotFoundException] { }
                     catch [System.IO.FileNotFoundException] { }
                     catch [System.IO.DirectoryNotFoundException] { }
                     catch { throw "INVALID|$Context case-behavior probe could not be inspected: $($_.Exception.Message)" }
+                    finally { if ($null -ne $PathTimings) { Add-StandardValidationOperationAttempt -Timing $PathTimings.case -StartedAt $variantInspectionStarted } }
                     if ($null -ne $variantItem) { return 'case-insensitive' }
                     $caseSensitiveEvidence = $true
                 }
@@ -617,12 +668,12 @@ function Get-StandardValidationPathCaseBehavior {
 }
 
 function Get-StandardValidationPathComparison {
-    param([Parameter(Mandatory = $true)][string[]] $Paths)
+    param([Parameter(Mandatory = $true)][string[]] $Paths, [object] $PathTimings)
 
     $hasUnknown = $false
     $hasCaseSensitiveEvidence = $false
     foreach ($path in @($Paths)) {
-        $behavior = Get-StandardValidationPathCaseBehavior -Path $path -Context 'path comparison'
+        $behavior = Get-StandardValidationPathCaseBehavior -Path $path -Context 'path comparison' -PathTimings $PathTimings
         if ($behavior -ceq 'case-insensitive') { return [StringComparison]::OrdinalIgnoreCase }
         if ($behavior -ceq 'case-sensitive') { $hasCaseSensitiveEvidence = $true }
         else { $hasUnknown = $true }
@@ -652,18 +703,20 @@ function Test-StandardValidationReparseItem {
 }
 
 function Assert-StandardValidationCanonicalRootPath {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context, [object] $PathTimings)
 
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
-    $comparison = Get-StandardValidationPathComparison -Paths @($fullPath)
+    $comparison = Get-StandardValidationPathComparison -Paths @($fullPath) -PathTimings $PathTimings
     $current = $fullPath
     while ($true) {
         $item = $null
+        $inspectionStarted = [Diagnostics.Stopwatch]::GetTimestamp()
         try { $item = Get-Item -Force -LiteralPath $current -ErrorAction Stop }
         catch [System.Management.Automation.ItemNotFoundException] { }
         catch [System.IO.FileNotFoundException] { }
         catch [System.IO.DirectoryNotFoundException] { }
         catch { throw "INVALID|$Context path component could not be inspected: $($_.Exception.Message)" }
+        finally { if ($null -ne $PathTimings) { Add-StandardValidationOperationAttempt -Timing $PathTimings.ancestor -StartedAt $inspectionStarted } }
         if ($null -ne $item -and (Test-StandardValidationReparseItem -Item $item)) {
             throw "INVALID|$Context contains a symlinked or reparse-point ancestor: $current"
         }
@@ -845,12 +898,18 @@ function Get-StandardValidationJsonSnapshot {
 }
 
 function Assert-StandardValidationRegularFile {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context, [object] $PathTimings)
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    $leafTestStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+    $isLeaf = $false
+    try { $isLeaf = Test-Path -LiteralPath $Path -PathType Leaf }
+    finally { if ($null -ne $PathTimings) { Add-StandardValidationOperationAttempt -Timing $PathTimings.leafTest -StartedAt $leafTestStarted } }
+    if (-not $isLeaf) {
         throw "INVALID|$Context file is missing: $Path"
     }
-    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    $itemStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+    try { $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop }
+    finally { if ($null -ne $PathTimings) { Add-StandardValidationOperationAttempt -Timing $PathTimings.leafItem -StartedAt $itemStarted } }
     if ($item.PSIsContainer -or $item -isnot [System.IO.FileInfo] -or
         ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "INVALID|$Context must be a regular non-reparse file: $Path"
@@ -7580,6 +7639,7 @@ function Assert-StandardCoreFrozenFiles {
     $timing.calls = 1
     $pathTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'frozen-file-paths' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
     $hashTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'frozen-file-hashes' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+    $pathProbeTimings = New-StandardValidationPathProbeTimings -Silent:(-not $script:StandardValidationTimingEnabled)
     $state = 'completed'
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     try {
@@ -7588,10 +7648,12 @@ function Assert-StandardCoreFrozenFiles {
             $pathStarted = [Diagnostics.Stopwatch]::GetTimestamp()
             $item = $null
             try {
-                $canonicalPath = Assert-StandardValidationCanonicalRootPath -Path ([string]$file.path) -Context 'source frozen file'
+                $canonicalPath = Assert-StandardValidationCanonicalRootPath -Path ([string]$file.path) -Context 'source frozen file' -PathTimings $pathProbeTimings
                 if (-not [IO.Path]::IsPathRooted([string]$file.path) -or -not $seen.Add($canonicalPath)) { throw 'INVALID|Duplicate or relative source frozen file.' }
-                Assert-StandardValidationRegularFile -Path $canonicalPath -Context 'source frozen file'
-                $item = Get-Item -Force -LiteralPath $canonicalPath -ErrorAction Stop
+                Assert-StandardValidationRegularFile -Path $canonicalPath -Context 'source frozen file' -PathTimings $pathProbeTimings
+                $metadataStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                try { $item = Get-Item -Force -LiteralPath $canonicalPath -ErrorAction Stop }
+                finally { Add-StandardValidationOperationAttempt -Timing $pathProbeTimings.metadata -StartedAt $metadataStarted }
             }
             finally {
                 $pathTiming.ticks += [Diagnostics.Stopwatch]::GetTimestamp() - $pathStarted
@@ -7614,6 +7676,7 @@ function Assert-StandardCoreFrozenFiles {
         throw
     }
     finally {
+        Complete-StandardValidationPathProbeTimings -Timings $pathProbeTimings -State $state
         Complete-StandardValidationPhase -Timing $pathTiming -State $state
         Complete-StandardValidationPhase -Timing $hashTiming -State $state
         Complete-StandardValidationPhase -Timing $timing -State $state
@@ -7761,6 +7824,8 @@ function Assert-StandardCoreSourceToolReceipts {
     if ($null -ne $RetainedReceiptMap) {
         $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-integrity' -Silent:(-not $script:StandardValidationTimingEnabled)
         $receiptHashTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-receipt-bytes' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
+        $sourceLookupTimings = New-StandardValidationSourceLookupTimings -Silent:(-not $script:StandardValidationTimingEnabled)
+        $pathProbeTimings = New-StandardValidationPathProbeTimings -Silent:(-not $script:StandardValidationTimingEnabled)
         $state = 'completed'
         try {
             if ($RetainedReceiptMap.schemaVersion -ne 1 -or [string]$RetainedReceiptMap.runId -cne $RunId -or
@@ -7781,13 +7846,31 @@ function Assert-StandardCoreSourceToolReceipts {
             foreach ($name in $expectedNames) {
                 $binding = $RetainedReceiptMap.bindings[$name]
                 Assert-StandardValidationExactPropertySet -Object $binding -Expected @('path','sha256') -Context 'retained source tool receipt'
-                $matches = @($receipts | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
+                $receiptLookupStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                try {
+                    $matches = @($receipts | Where-Object {
+                        $receiptPredicateStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                        try { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 }
+                        finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.receiptPredicates -StartedAt $receiptPredicateStarted }
+                    })
+                }
+                finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.receiptLookups -StartedAt $receiptLookupStarted }
                 if ($matches.Count -ne 1 -or -not $seenPaths.Add([string]$binding.path)) { throw 'INVALID|Current source receipt bindings differ from the setup snapshot.' }
-                $frozenMatches = @($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 })
+                $frozenLookupStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                try {
+                    $frozenMatches = @($FrozenFiles | Where-Object {
+                        $frozenPredicateStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                        try { [string]$_.path -ceq [string]$binding.path -and [string]$_.sha256 -ceq [string]$binding.sha256 }
+                        finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.receiptPredicates -StartedAt $frozenPredicateStarted }
+                    })
+                }
+                finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.receiptLookups -StartedAt $frozenLookupStarted }
                 if ($frozenMatches.Count -ne 1) { throw 'INVALID|Retained source receipt binding is not frozen.' }
-                Assert-StandardValidationCanonicalRootPath -Path ([string]$binding.path) -Context 'retained source tool receipt' | Out-Null
-                Assert-StandardValidationRegularFile -Path ([string]$binding.path) -Context 'retained source tool receipt'
-                $receiptItem = Get-Item -Force -LiteralPath ([string]$binding.path) -ErrorAction Stop
+                Assert-StandardValidationCanonicalRootPath -Path ([string]$binding.path) -Context 'retained source tool receipt' -PathTimings $pathProbeTimings | Out-Null
+                Assert-StandardValidationRegularFile -Path ([string]$binding.path) -Context 'retained source tool receipt' -PathTimings $pathProbeTimings
+                $receiptMetadataStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                try { $receiptItem = Get-Item -Force -LiteralPath ([string]$binding.path) -ErrorAction Stop }
+                finally { Add-StandardValidationOperationAttempt -Timing $pathProbeTimings.metadata -StartedAt $receiptMetadataStarted }
                 $receiptTimingStart = [Diagnostics.Stopwatch]::GetTimestamp()
                 try {
                     if ((Get-StandardValidationFileSha256 -Path ([string]$binding.path) -Context 'retained source tool receipt') -cne [string]$binding.sha256) {
@@ -7841,7 +7924,18 @@ function Assert-StandardCoreSourceToolReceipts {
             foreach ($pathValue in $AdditionalPaths) {
                 if ([string]::IsNullOrWhiteSpace([string]$pathValue) -or -not [IO.Path]::IsPathRooted([string]$pathValue)) { throw 'INVALID|Source dispatch additional paths must be nonempty absolute file paths.' }
                 $pathFull = Get-StandardValidationFullPath -Path ([string]$pathValue) -Context 'source dispatch path'
-                $additionalMatches = @($FrozenFiles | Where-Object { [string]::Equals((Get-StandardValidationFullPath -Path ([string]$_.path) -Context 'source frozen dispatch path'), $pathFull, (Get-StandardValidationPathComparison -Paths @([string]$_.path, $pathFull))) })
+                $additionalLookupStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                try {
+                    $additionalMatches = @($FrozenFiles | Where-Object {
+                        $additionalPredicateStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+                        try {
+                            [string]::Equals((Get-StandardValidationFullPath -Path ([string]$_.path) -Context 'source frozen dispatch path'), $pathFull,
+                                (Get-StandardValidationPathComparison -Paths @([string]$_.path, $pathFull) -PathTimings $pathProbeTimings))
+                        }
+                        finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.additionalPredicates -StartedAt $additionalPredicateStarted }
+                    })
+                }
+                finally { Add-StandardValidationOperationAttempt -Timing $sourceLookupTimings.additionalLookups -StartedAt $additionalLookupStarted }
                 if ($additionalMatches.Count -ne 1) { throw 'INVALID|Source dispatch path is not frozen exactly once.' }
                 & $addFrozen $additionalMatches[0] 'source dispatch path'
             }
@@ -7872,6 +7966,8 @@ function Assert-StandardCoreSourceToolReceipts {
         }
         catch { $state = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }; throw }
         finally {
+            Complete-StandardValidationSourceLookupTimings -Timings $sourceLookupTimings -State $state
+            Complete-StandardValidationPathProbeTimings -Timings $pathProbeTimings -State $state
             Complete-StandardValidationPhase -Timing $receiptHashTiming -State $state
             Complete-StandardValidationPhase -Timing $timing -State $state
         }
