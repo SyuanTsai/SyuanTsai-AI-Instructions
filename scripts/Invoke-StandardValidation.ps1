@@ -7981,12 +7981,1266 @@ function Get-StandardCoreCentralRawTestInventory {
     return $inventory
 }
 
+function Test-StandardCoreSourceReviewOptIn {
+    param([Parameter(Mandatory = $true)] $Spec)
+
+    if (-not (Test-StandardValidationHasProperty -Object $Spec -Name 'sourceReview')) { return $false }
+    $extension = Get-StandardValidationProperty -Object $Spec -Name 'sourceReview'
+    Assert-StandardValidationExactPropertySet -Object $extension -Expected @('schemaVersion', 'contract') -Context 'source human review opt-in'
+    if (-not (Test-StandardValidationIntegerRange -Value $extension.schemaVersion -Minimum 1 -Maximum 1) -or
+        $extension.contract -isnot [string] -or [string]$extension.contract -cne 'standard-source-human-review-v1') {
+        throw 'INVALID|Source human review opt-in must be exactly standard-source-human-review-v1 schema version 1.'
+    }
+    return $true
+}
+
+function Resolve-StandardCoreSourceReviewCandidateFile {
+    param([Parameter(Mandatory = $true)][string] $Value, [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string[]] $Inventory, [Parameter(Mandatory = $true)][string] $Context)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\x00-\x1F\x7F]') { throw "BLOCKED|$Context has an invalid candidate path." }
+    $candidatePath = if ([IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $SkillRoot $Value }
+    $fullPath = Get-StandardValidationFullPath -Path $candidatePath -Context $Context
+    if (-not (Test-StandardValidationPathWithin -Path $fullPath -Root $SkillRoot)) { throw "BLOCKED|$Context escaped its candidate Skill." }
+    $relative = $fullPath.Substring((Get-StandardValidationFullPath -Path $SkillRoot -Context $Context).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Length + 1).Replace('\', '/')
+    if ($relative -notin $Inventory) { throw "BLOCKED|$Context is not present in the frozen candidate Skill inventory." }
+    Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+    Assert-StandardValidationNoReparsePoints -Root $fullPath -Context $Context
+    return [pscustomobject]@{ fullPath = $fullPath; relativePath = $relative }
+}
+
+function New-StandardCoreSourceReviewOccurrence {
+    param([Parameter(Mandatory = $true)][string] $EventId, [Parameter(Mandatory = $true)][string] $ToolId,
+        [Parameter(Mandatory = $true)][AllowNull()][string] $SkillId, [Parameter(Mandatory = $true)][string] $NativeReportPath,
+        [Parameter(Mandatory = $true)][string] $NativeReportSha256, [Parameter(Mandatory = $true)][int] $Ordinal,
+        [Parameter(Mandatory = $true)][string] $Severity, [Parameter(Mandatory = $true)] $Finding)
+
+    $identity = [ordered]@{
+        eventId = $EventId; toolId = $ToolId; skillId = $SkillId; nativeReportPath = $NativeReportPath
+        nativeReportSha256 = $NativeReportSha256; ordinal = $Ordinal; severity = $Severity; finding = $Finding
+    }
+    $sha256 = Get-StandardValidationTextSha256 -Value (Convert-StandardValidationValueToCanonicalJson -Value $identity -Context 'source review finding occurrence')
+    $identity.occurrenceSha256 = $sha256
+    return [pscustomobject]$identity
+}
+
+function Assert-StandardCoreSourceReviewE1PolicyDocument {
+    param([Parameter(Mandatory = $true)] $Document)
+
+    $expectedSkills = @(
+        'configure-bitbucket-api-access', 'configure-confluence-api-access', 'configure-jira-api-access',
+        'publish-requirements-to-confluence', 'review-bitbucket-pull-request'
+    )
+    if (-not (Test-StandardValidationIntegerRange -Value $Document.schemaVersion -Minimum 1 -Maximum 1) -or
+        [string]$Document.policy -cne 'reviewed-skillspector-e1-exact-baselines' -or
+        [string]$Document.scannerSource -cne 'NVIDIA/SkillSpector' -or [string]$Document.scannerVersion -cne '2.12.0' -or
+        [string]$Document.scannerSourceCommit -cne 'c7958a3268d9498644b22edb75d0f051bbc8cbfc' -or
+        [string]$Document.reviewer -cne 'Independent SYP-304 SOL' -or [string]$Document.reviewFindingId -cne 'F304-SOL-22' -or
+        [string]$Document.reviewedSourceRevision -cne '97d6785c4f5f6a975184a585d02568af834d5f3f' -or
+        [string]$Document.authorityRevision -cne 'ff85d5f80fe795b96354e753074b5ce59ad04ecd' -or
+        -not (Test-StandardValidationIntegerRange -Value $Document.reviewedOccurrenceCount -Minimum 17 -Maximum 17) -or
+        $Document.skills -isnot [array] -or @($Document.skills).Count -ne $expectedSkills.Count) {
+        throw 'BLOCKED|The protected reviewed E1 baseline policy metadata or occurrence inventory is invalid.'
+    }
+    $actualSkills = [string[]]@($Document.skills | ForEach-Object { [string]$_.skillId })
+    if (($actualSkills -join "`n") -cne ($expectedSkills -join "`n")) { throw 'BLOCKED|The protected reviewed E1 Skill inventory is invalid.' }
+
+    $totalFindings = 0
+    foreach ($skillPolicy in @($Document.skills)) {
+        if ($skillPolicy -is [array] -or $skillPolicy -is [string] -or $null -eq $skillPolicy -or
+            (($skillPolicy.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'baseline,components,rawReportSha256,skillId' -or
+            [string]$skillPolicy.rawReportSha256 -cnotmatch '^[a-f0-9]{64}$' -or $skillPolicy.components -isnot [array] -or
+            $skillPolicy.baseline.version -ne 2 -or [string]$skillPolicy.baseline.scanner_version -cne '2.12.0' -or
+            $skillPolicy.baseline.rules -isnot [array] -or @($skillPolicy.baseline.rules).Count -ne 0 -or
+            $skillPolicy.baseline.fingerprints -isnot [array]) { throw "BLOCKED|The protected reviewed E1 data is malformed for '$($skillPolicy.skillId)'." }
+        $componentPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $skillCount = 0
+        foreach ($component in @($skillPolicy.components)) {
+            if ($component -is [array] -or $component -is [string] -or $null -eq $component -or
+                (($component.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'length,path,reviewedFindings,sha256' -or
+                [string]::IsNullOrWhiteSpace([string]$component.path) -or $component.path.StartsWith('/') -or
+                [string]$component.path -match '[\\\x00-\x1F\x7F]' -or @(([string]$component.path).Split('/').Where({ $_ -in @('', '.', '..') })).Count -gt 0 -or
+                [string]$component.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+                -not (Test-StandardValidationIntegerRange -Value $component.length -Minimum 1 -Maximum ([decimal][long]::MaxValue)) -or
+                $component.reviewedFindings -isnot [array] -or -not $componentPaths.Add([string]$component.path)) {
+                throw "BLOCKED|The protected reviewed E1 component inventory is malformed for '$($skillPolicy.skillId)'."
+            }
+            foreach ($reviewedFinding in @($component.reviewedFindings)) {
+                if ($reviewedFinding -is [array] -or $reviewedFinding -is [string] -or $null -eq $reviewedFinding -or
+                    (($reviewedFinding.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'disposition,finding,line,reason,ruleId,severity' -or
+                    [string]$reviewedFinding.ruleId -cne 'E1' -or [string]$reviewedFinding.severity -cne 'MEDIUM' -or
+                    -not (Test-StandardValidationIntegerRange -Value $reviewedFinding.line -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+                    [string]::IsNullOrWhiteSpace([string]$reviewedFinding.finding) -or [string]::IsNullOrWhiteSpace([string]$reviewedFinding.reason) -or
+                    [string]$reviewedFinding.disposition -cne 'false-positive') {
+                    throw "BLOCKED|The protected reviewed E1 occurrence is malformed for '$($skillPolicy.skillId)'."
+                }
+                $skillCount++
+            }
+        }
+        if ($skillCount -eq 0 -or $skillCount -ne @($skillPolicy.baseline.fingerprints).Count) {
+            throw "BLOCKED|The protected reviewed E1 fingerprints differ from their exact occurrences for '$($skillPolicy.skillId)'."
+        }
+        foreach ($fingerprint in @($skillPolicy.baseline.fingerprints)) {
+            if ($fingerprint -is [array] -or $fingerprint -is [string] -or $null -eq $fingerprint -or
+                (($fingerprint.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'file,hash,reason,rule_id' -or
+                [string]$fingerprint.hash -cnotmatch '^sha256:[a-f0-9]{64}$' -or [string]$fingerprint.rule_id -cne 'E1' -or
+                [string]::IsNullOrWhiteSpace([string]$fingerprint.file) -or $fingerprint.file.Contains('\') -or
+                @(([string]$fingerprint.file).Split('/').Where({ $_ -in @('', '.', '..') })).Count -gt 0 -or
+                [string]::IsNullOrWhiteSpace([string]$fingerprint.reason)) {
+                throw "BLOCKED|The protected reviewed E1 fingerprint is malformed for '$($skillPolicy.skillId)'."
+            }
+        }
+        $totalFindings += $skillCount
+    }
+    if ($totalFindings -ne 17) { throw 'BLOCKED|The protected reviewed E1 policy must contain exactly 17 occurrences.' }
+    return $true
+}
+
+function Get-StandardCoreSourceReviewE1Policy {
+    param([Parameter(Mandatory = $true)] $Envelope, [Parameter(Mandatory = $true)][object[]] $FrozenFiles)
+
+    $expectedSha256 = '1cca364cf34927eea12b28395ac7135ca706a689bf3d55ae5218fe051c5729fe'
+    $policyReference = Get-StandardValidationProperty -Object $Envelope -Name 'reviewedBaselinePolicy'
+    Assert-StandardValidationExactPropertySet -Object $policyReference -Expected @('artifactPath', 'artifactSha256', 'reviewer', 'reviewFindingId', 'scannerVersion') -Context 'Static reviewed E1 policy reference'
+    if ([string]$policyReference.artifactSha256 -cne $expectedSha256 -or [string]$policyReference.reviewer -cne 'Independent SYP-304 SOL' -or
+        [string]$policyReference.reviewFindingId -cne 'F304-SOL-22' -or [string]$policyReference.scannerVersion -cne '2.12.0') {
+        throw 'BLOCKED|Static reviewed E1 policy reference is not the fixed historical policy.'
+    }
+    $path = Get-StandardValidationFullPath -Path ([string]$policyReference.artifactPath) -Context 'Static reviewed E1 policy'
+    $frozenMatches = @($FrozenFiles | Where-Object {
+        (Get-StandardValidationFullPath -Path ([string]$_.path) -Context 'frozen Static reviewed E1 policy').Equals($path, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]$_.sha256 -ceq $expectedSha256
+    })
+    if ($frozenMatches.Count -ne 1) { throw 'BLOCKED|Static reviewed E1 policy is not bound exactly once by the frozen source closure.' }
+    Assert-StandardValidationRegularFile -Path $path -Context 'Static reviewed E1 policy'
+    Assert-StandardValidationNoReparsePoints -Root $path -Context 'Static reviewed E1 policy'
+    $actualSha256 = Get-StandardValidationFileSha256 -Path $path -Context 'Static reviewed E1 policy'
+    if ($actualSha256 -cne $expectedSha256) { throw 'BLOCKED|Static reviewed E1 policy bytes differ from the fixed historical artifact.' }
+    $policySnapshot = Get-StandardValidationJsonSnapshot -Path $path -Context 'Static reviewed E1 policy' -PreserveDateStrings
+    if ([string]$policySnapshot.sha256 -cne $expectedSha256) { throw 'BLOCKED|Static reviewed E1 policy snapshot bytes differ from the fixed historical artifact.' }
+    $document = $policySnapshot.value
+    [void](Assert-StandardCoreSourceReviewE1PolicyDocument -Document $document)
+    if ([string]$document.reviewer -cne [string]$policyReference.reviewer -or [string]$document.reviewFindingId -cne [string]$policyReference.reviewFindingId -or
+        [string]$document.scannerVersion -cne [string]$policyReference.scannerVersion) { throw 'BLOCKED|Static reviewed E1 policy reference metadata differs from the protected artifact.' }
+    return [pscustomobject][ordered]@{ path = $path; sha256 = $actualSha256; document = $document }
+}
+
+function Test-StandardCoreSourceReviewE1ComponentsMatch {
+    param([Parameter(Mandatory = $true)] $SkillPolicy, [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string[]] $Inventory)
+
+    foreach ($component in @($SkillPolicy.components)) {
+        $relativePath = [string]$component.path
+        if ($Inventory -cnotcontains $relativePath) { return $false }
+        try { $resolved = Resolve-StandardCoreSourceReviewCandidateFile -Value $relativePath -SkillRoot $SkillRoot -Inventory $Inventory -Context 'reviewed E1 component' }
+        catch { return $false }
+        $file = Get-Item -LiteralPath $resolved.fullPath -Force
+        if ($file.Length -ne [long]$component.length -or (Get-StandardValidationFileSha256 -Path $resolved.fullPath -Context 'reviewed E1 component') -cne [string]$component.sha256) { return $false }
+    }
+    return $true
+}
+
+function Read-StandardCoreSourceReviewBoundedFileBytes {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory = $true)][string] $Context)
+
+    $maximumBytes = 1MB
+    if ($ExpectedBytes.Length -gt $maximumBytes) { throw "BLOCKED|$Context expected bytes exceed the fixed 1 MiB bound." }
+    $stream = $null
+    try {
+        $stream = New-Object System.IO.FileStream -ArgumentList @($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        if ($stream.Length -gt $maximumBytes -or $stream.Length -ne $ExpectedBytes.Length) {
+            throw "BLOCKED|$Context length differs from the bounded protected byte sequence."
+        }
+        $observed = New-Object byte[] ([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $observed.Length) {
+            $read = $stream.Read($observed, $offset, $observed.Length - $offset)
+            if ($read -le 0) { throw "BLOCKED|$Context ended before its captured length." }
+            $offset += $read
+        }
+        if ($stream.Position -ne $stream.Length) { throw "BLOCKED|$Context length changed while its bytes were read." }
+        return ,$observed
+    }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+}
+
+function Get-StandardCoreSourceReviewE1SuppressionLedger {
+    param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string[]] $SkillInventory,
+        [Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)] $Native, [Parameter(Mandatory = $true)] $Event,
+        [Parameter(Mandatory = $true)][string] $SkillId, [Parameter(Mandatory = $true)][string] $NativeReportPath,
+        [Parameter(Mandatory = $true)][string] $NativeReportSha256, [Parameter(Mandatory = $true)][string] $RunRoot)
+
+    $baselineMetadata = Get-StandardValidationProperty -Object $Native -Name 'reviewedBaseline'
+    $expectedProperties = @('decision', 'applied', 'componentHashesMatched', 'policyPath', 'policySha256', 'reviewer', 'reviewFindingId',
+        'reviewedSourceRevision', 'authorityRevision', 'reviewedRawReportSha256', 'nativeBaselinePath', 'nativeBaselineSha256',
+        'expectedSuppressedCount', 'actualSuppressedCount')
+    Assert-StandardValidationExactPropertySet -Object $baselineMetadata -Expected $expectedProperties -Context 'Static reviewed E1 baseline native metadata'
+    $policyDocument = $Policy.document
+    $matchingPolicy = @($policyDocument.skills | Where-Object { [string]$_.skillId -ceq $SkillId })
+    if ($matchingPolicy.Count -gt 1) { throw 'BLOCKED|Static reviewed E1 policy contains a duplicate Skill partition.' }
+    $protectedSkill = if ($matchingPolicy.Count -eq 1) { $matchingPolicy[0] } else { $null }
+    $scannerVersion = [string](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $Report -Name 'metadata') -Name 'skillspector_version')
+    if ([string]::IsNullOrWhiteSpace($scannerVersion) -or $scannerVersion -cne [string]$Native.scannerVersion) {
+        throw 'BLOCKED|Static scanner version differs from the native command envelope.'
+    }
+    $componentMatch = $null
+    $applied = $false
+    $decision = 'not-reviewed'
+    if ($null -ne $protectedSkill) {
+        if ($scannerVersion -cne [string]$policyDocument.scannerVersion) { $decision = 'scanner-version-mismatch' }
+        else {
+            $componentMatch = Test-StandardCoreSourceReviewE1ComponentsMatch -SkillPolicy $protectedSkill -SkillRoot $SkillRoot -Inventory $SkillInventory
+            if ($componentMatch) { $applied = $true; $decision = 'applied' } else { $decision = 'component-hash-drift' }
+        }
+    }
+    # The native report path and the immutable policy source path are separately captured.
+    $policyPath = [string]$Policy.path
+    if ([string]$baselineMetadata.decision -cne $decision -or $baselineMetadata.applied -isnot [bool] -or [bool]$baselineMetadata.applied -ne $applied -or
+        ($null -eq $componentMatch -and $null -ne $baselineMetadata.componentHashesMatched) -or
+        ($null -ne $componentMatch -and ($baselineMetadata.componentHashesMatched -isnot [bool] -or [bool]$baselineMetadata.componentHashesMatched -ne $componentMatch)) -or
+        [string]$baselineMetadata.policyPath -cne $policyPath -or [string]$baselineMetadata.policySha256 -cne [string]$Policy.sha256 -or
+        [string]$baselineMetadata.reviewer -cne [string]$policyDocument.reviewer -or [string]$baselineMetadata.reviewFindingId -cne [string]$policyDocument.reviewFindingId -or
+        [string]$baselineMetadata.reviewedSourceRevision -cne [string]$policyDocument.reviewedSourceRevision -or
+        [string]$baselineMetadata.authorityRevision -cne [string]$policyDocument.authorityRevision) { throw 'BLOCKED|Static native reviewed E1 baseline metadata differs from the policy and actual candidate component checks.' }
+    $expectedRawReportSha256 = if ($null -ne $protectedSkill) { [string]$protectedSkill.rawReportSha256 } else { $null }
+    if ($null -eq $expectedRawReportSha256) {
+        if ($null -ne $baselineMetadata.reviewedRawReportSha256) { throw 'BLOCKED|Unreviewed Static Skill reports an unexpected historical raw-report digest.' }
+    }
+    elseif ([string]$baselineMetadata.reviewedRawReportSha256 -cne $expectedRawReportSha256) { throw 'BLOCKED|Static historical raw-report identity differs from its protected E1 partition.' }
+
+    $expectedSuppressed = 0
+    if ($applied) { $expectedSuppressed = [int](@($protectedSkill.components | ForEach-Object { @($_.reviewedFindings) }).Count) }
+    if (-not (Test-StandardValidationIntegerRange -Value $baselineMetadata.expectedSuppressedCount -Minimum $expectedSuppressed -Maximum $expectedSuppressed)) {
+        throw 'BLOCKED|Static native expected E1 suppression count differs from the exact applied partition.'
+    }
+    if (-not (Test-StandardValidationIntegerRange -Value $baselineMetadata.actualSuppressedCount -Minimum 0 -Maximum ([decimal][int]::MaxValue))) {
+        throw 'BLOCKED|Static native actual E1 suppression count is not an integer.'
+    }
+
+    $suppressedCount = Get-StandardValidationProperty -Object $Report -Name 'suppressed_count'
+    $suppressedRows = Get-StandardValidationProperty -Object $Report -Name 'suppressed'
+    if (($suppressedCount -isnot [int] -and $suppressedCount -isnot [long]) -or [long]$suppressedCount -lt 0 -or
+        $suppressedRows -isnot [array] -or [long]$suppressedCount -ne @($suppressedRows).Count -or
+        [long]$baselineMetadata.actualSuppressedCount -ne [long]$suppressedCount -or [long]$suppressedCount -ne $expectedSuppressed) {
+        throw 'BLOCKED|Static suppressed_count, suppressed[] and the exact reviewed E1 partition disagree.'
+    }
+    $baselinePath = $null
+    if ($applied) {
+        $baselinePath = Get-StandardValidationFullPath -Path ([string]$baselineMetadata.nativeBaselinePath) -Context 'materialized Static E1 baseline'
+        if ([string]::IsNullOrWhiteSpace([string]$baselineMetadata.nativeBaselinePath) -or
+            -not (Test-StandardValidationPathWithin -Path $baselinePath -Root $RunRoot) -or
+            [string]$baselineMetadata.nativeBaselineSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'BLOCKED|Applied Static E1 policy lacks a run-owned materialized baseline reference.' }
+        Assert-StandardValidationRegularFile -Path $baselinePath -Context 'materialized Static E1 baseline'
+        Assert-StandardValidationNoReparsePoints -Root $baselinePath -Context 'materialized Static E1 baseline'
+        $expectedBaselineJson = ConvertTo-Json -InputObject $protectedSkill.baseline -Depth 80 -Compress
+        $expectedBaselineBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($expectedBaselineJson + "`n")
+        $baselineBytes = Read-StandardCoreSourceReviewBoundedFileBytes -Path $baselinePath -ExpectedBytes $expectedBaselineBytes -Context 'Materialized Static E1 baseline'
+        if ([Convert]::ToBase64String($baselineBytes) -cne [Convert]::ToBase64String($expectedBaselineBytes) -or
+            (Get-StandardValidationBytesSha256 -Bytes $baselineBytes) -cne [string]$baselineMetadata.nativeBaselineSha256) {
+            throw 'BLOCKED|Materialized Static E1 baseline bytes differ from the exact protected partition.'
+        }
+        $nativeArguments = Get-StandardValidationProperty -Object $Native -Name 'arguments'
+        if ($nativeArguments -isnot [array]) { throw 'BLOCKED|Applied Static E1 baseline is not bound to a typed native argument list.' }
+        $baselineSwitchIndexes = @(); $showSwitchIndexes = @()
+        for ($argumentIndex = 0; $argumentIndex -lt @($nativeArguments).Count; $argumentIndex++) {
+            if ([string]$nativeArguments[$argumentIndex] -ceq '--baseline') { $baselineSwitchIndexes += $argumentIndex }
+            if ([string]$nativeArguments[$argumentIndex] -ceq '--show-suppressed') { $showSwitchIndexes += $argumentIndex }
+        }
+        if ($baselineSwitchIndexes.Count -ne 1 -or $showSwitchIndexes.Count -ne 1 -or $baselineSwitchIndexes[0] + 1 -ge @($nativeArguments).Count -or
+            [string]$nativeArguments[$baselineSwitchIndexes[0] + 1] -cne $baselinePath -or $showSwitchIndexes[0] -ne $baselineSwitchIndexes[0] + 2) {
+            throw 'BLOCKED|Applied Static E1 policy is not bound to the exact native baseline arguments.'
+        }
+        Register-StandardValidationEvidenceArtifact -Path $baselinePath -ExpectedSha256 ([string]$baselineMetadata.nativeBaselineSha256) -Context 'materialized Static E1 baseline'
+    }
+    elseif ($null -ne $baselineMetadata.nativeBaselinePath -or $null -ne $baselineMetadata.nativeBaselineSha256) {
+        throw 'BLOCKED|A non-applied Static E1 partition contains an unverified materialized baseline.'
+    }
+    else {
+        $nativeArguments = Get-StandardValidationProperty -Object $Native -Name 'arguments'
+        if ($nativeArguments -isnot [array]) { throw 'BLOCKED|Non-applied Static E1 policy lacks a typed native argument list.' }
+        if (@($nativeArguments | Where-Object { Test-StandardCoreSourceReviewBaselineArgument -Argument ([string]$_) }).Count -ne 0) {
+            throw 'BLOCKED|Non-applied Static E1 policy unexpectedly supplied a baseline or suppression argument.'
+        }
+    }
+
+    $expectedKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    if ($applied) {
+        foreach ($component in @($protectedSkill.components)) {
+            foreach ($reviewedFinding in @($component.reviewedFindings)) {
+                $expectedKey = ConvertTo-Json -InputObject ([ordered]@{ id = 'E1'; severity = 'MEDIUM'; file = [string]$component.path; line = [int]$reviewedFinding.line; finding = [string]$reviewedFinding.finding }) -Compress -Depth 5
+                if (-not $expectedKeys.Add($expectedKey)) { throw 'BLOCKED|Protected E1 partition contains a duplicate suppression occurrence.' }
+            }
+        }
+    }
+    $ledger = New-Object 'System.Collections.Generic.List[object]'
+    for ($suppressedIndex = 0; $suppressedIndex -lt @($suppressedRows).Count; $suppressedIndex++) {
+        $suppressed = @($suppressedRows)[$suppressedIndex]
+        if ($null -eq $suppressed -or $suppressed -is [string] -or $suppressed -is [ValueType] -or $suppressed -is [array]) { throw 'BLOCKED|Static suppressed occurrence has an unknown shape.' }
+        $location = Get-StandardValidationProperty -Object $suppressed -Name 'location'
+        $line = Get-StandardValidationProperty -Object $location -Name 'start_line'
+        $file = Get-StandardValidationProperty -Object $location -Name 'file'
+        $finding = Get-StandardValidationProperty -Object $suppressed -Name 'finding'
+        $reason = Get-StandardValidationProperty -Object $suppressed -Name 'suppression_reason'
+        $suppressedMarker = Get-StandardValidationProperty -Object $suppressed -Name 'suppressed'
+        if ($suppressedMarker -isnot [bool] -or -not [bool]$suppressedMarker -or [string]$suppressed.id -cne 'E1' -or
+            [string]$suppressed.severity -cne 'MEDIUM' -or $file -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$file) -or
+            -not (Test-StandardValidationIntegerRange -Value $line -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            $finding -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$finding) -or $reason -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$reason)) {
+            throw 'BLOCKED|Static suppression is not a structured reviewed E1/MEDIUM occurrence.'
+        }
+        $fileRelative = [string]$file
+        $approvedReasons = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        if ($null -ne $protectedSkill) {
+            foreach ($fingerprint in @($protectedSkill.baseline.fingerprints)) {
+                if ([string]$fingerprint.rule_id -ceq 'E1' -and [string]$fingerprint.file -ceq $fileRelative) { [void]$approvedReasons.Add([string]$fingerprint.reason) }
+            }
+        }
+        if ($approvedReasons.Count -ne 1 -or [string]$reason -cne [string]$approvedReasons[0]) { throw 'BLOCKED|Static E1 suppression reason is not the unique reviewed reason for its source file.' }
+        $key = ConvertTo-Json -InputObject ([ordered]@{ id = 'E1'; severity = 'MEDIUM'; file = $fileRelative; line = [int]$line; finding = [string]$finding }) -Compress -Depth 5
+        if (-not $expectedKeys.Remove($key)) { throw 'BLOCKED|Static suppressed an unreviewed or duplicate E1 occurrence.' }
+        $ledger.Add([pscustomobject][ordered]@{
+            eventId = [string]$Event.eventId; toolId = [string]$Event.toolId; skillId = $SkillId
+            nativeReportPath = $NativeReportPath; nativeReportSha256 = $NativeReportSha256; ordinal = $suppressedIndex
+            finding = $suppressed; baselineEvidenceSha256 = [string]$baselineMetadata.nativeBaselineSha256
+        })
+    }
+    if ($expectedKeys.Count -ne 0) { throw 'BLOCKED|Static omitted one or more exact reviewed E1 suppression occurrences.' }
+    $additionalRawEvidence = @()
+    if ($applied) { $additionalRawEvidence += [pscustomobject][ordered]@{ path = $baselinePath; sha256 = [string]$baselineMetadata.nativeBaselineSha256 } }
+    return [pscustomobject][ordered]@{ suppressedLedger = [object[]]$ledger.ToArray(); additionalRawEvidence = [object[]]$additionalRawEvidence }
+}
+
+function Test-StandardCoreSourceReviewBaselineArgument {
+    param([Parameter(Mandatory = $true)][string] $Argument)
+
+    return $Argument -cmatch '^(?:--baseline|--show-suppressed|-b|-s)(?:=.+)?$'
+}
+
+function Get-StandardCoreSourceReviewNativeProjection {
+    param([Parameter(Mandatory = $true)] $Envelope, [Parameter(Mandatory = $true)] $Event,
+        [Parameter(Mandatory = $true)][string[]] $Skills, [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][string] $SnapshotRoot, [Parameter(Mandatory = $true)][string] $SkillsRootRelative,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $FrozenFiles)
+
+    $toolId = [string]$Event.toolId
+    $envelopeFindings = Get-StandardValidationProperty -Object $Envelope -Name 'findings'
+    if ($envelopeFindings -isnot [array]) { throw 'BLOCKED|Opted-in source review requires a typed findings array.' }
+    if ($toolId -ceq 'package-adapter') {
+        if (@($envelopeFindings).Count -ne 0) { throw 'BLOCKED|Package adapter findings have no human-review projection.' }
+        return [pscustomobject]@{ occurrences = @(); suppressedLedger = @(); additionalRawEvidence = @() }
+    }
+    if ($toolId -cnotin @('skill-validator', 'skill-tools', 'static-analyzer')) { throw 'BLOCKED|Opted-in source review encountered an unknown native finding producer.' }
+
+    $nativeReports = Get-StandardValidationProperty -Object $Envelope -Name 'nativeReports'
+    if ($nativeReports -isnot [array] -or @($nativeReports).Count -ne $Skills.Count) { throw 'BLOCKED|Opted-in source review requires complete native report coverage.' }
+    $expectedProjection = New-Object 'System.Collections.Generic.List[object]'
+    $occurrences = New-Object 'System.Collections.Generic.List[object]'
+    $suppressedLedger = New-Object 'System.Collections.Generic.List[object]'
+    $additionalRawEvidence = New-Object 'System.Collections.Generic.List[object]'
+    $e1Policy = $null
+    for ($reportIndex = 0; $reportIndex -lt $Skills.Count; $reportIndex++) {
+        $native = $nativeReports[$reportIndex]
+        $skillId = [string]$Skills[$reportIndex]
+        $reportPath = [string]$native.path
+        if ([string]$native.skillId -cne $skillId -or -not (Test-StandardValidationPathWithin -Path $reportPath -Root $RunRoot) -or
+            [string]$native.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'BLOCKED|Opted-in source review native report binding is incomplete.' }
+        Assert-StandardValidationRegularFile -Path $reportPath -Context 'source review native report'
+        Assert-StandardValidationNoReparsePoints -Root $reportPath -Context 'source review native report'
+        $nativeSha256 = Get-StandardValidationFileSha256 -Path $reportPath -Context 'source review native report'
+        if ($nativeSha256 -cne [string]$native.sha256) { throw 'BLOCKED|Source review native report bytes changed.' }
+        $reportSnapshot = Get-StandardValidationJsonSnapshot -Path $reportPath -Context 'source review native report' -PreserveDateStrings
+        if ([string]$reportSnapshot.sha256 -cne $nativeSha256) { throw 'BLOCKED|Source review native report snapshot digest differs from its prebound bytes.' }
+        $report = $reportSnapshot.value
+        $skillRoot = Get-StandardValidationFullPath -Path (Join-Path $SnapshotRoot ($SkillsRootRelative + '/' + $skillId)) -Context 'source review Skill root'
+        $skillInventoryObjects = Get-StandardValidationInventory -Root $skillRoot -Context 'source review Skill inventory'
+        $skillInventory = [string[]]@($skillInventoryObjects | ForEach-Object { [string]$_.path })
+        $skillFindings = New-Object 'System.Collections.Generic.List[object]'
+
+        if ($toolId -ceq 'static-analyzer') {
+            $issues = Get-StandardValidationProperty -Object $report -Name 'issues'
+            if ($issues -isnot [array]) { throw 'BLOCKED|Static native issues are not a complete array.' }
+            $suppressedCount = Get-StandardValidationProperty -Object $report -Name 'suppressed_count'
+            $suppressedRows = Get-StandardValidationProperty -Object $report -Name 'suppressed'
+            $nativeArguments = Get-StandardValidationProperty -Object $native -Name 'arguments'
+            if (($suppressedCount -isnot [int] -and $suppressedCount -isnot [long]) -or [long]$suppressedCount -lt 0 -or
+                $suppressedRows -isnot [array] -or [long]$suppressedCount -ne @($suppressedRows).Count -or $nativeArguments -isnot [array]) {
+                throw 'BLOCKED|Static suppression count, rows, or native arguments are incomplete.'
+            }
+            foreach ($argument in @($nativeArguments)) {
+                if ($argument -isnot [string]) { throw 'BLOCKED|Static native arguments must be a complete string array.' }
+            }
+            $hasBaselineArgument = @($nativeArguments | Where-Object { Test-StandardCoreSourceReviewBaselineArgument -Argument ([string]$_) }).Count -gt 0
+            $hasEnvelopePolicy = Test-StandardValidationHasProperty -Object $Envelope -Name 'reviewedBaselinePolicy'
+            $hasNativeBaseline = Test-StandardValidationHasProperty -Object $native -Name 'reviewedBaseline'
+            $hasReportBaseline = Test-StandardValidationHasProperty -Object $report -Name 'reviewedBaseline'
+            $requiresE1Gate = $hasEnvelopePolicy -or $hasNativeBaseline -or $hasReportBaseline -or $hasBaselineArgument -or
+                [long]$suppressedCount -gt 0 -or @($suppressedRows).Count -gt 0
+            if ($requiresE1Gate) {
+                if ($null -eq $e1Policy) {
+                    $e1Policy = Get-StandardCoreSourceReviewE1Policy -Envelope $Envelope -FrozenFiles $FrozenFiles
+                    $additionalRawEvidence.Add([pscustomobject][ordered]@{ path = [string]$e1Policy.path; sha256 = [string]$e1Policy.sha256 })
+                }
+                $e1Result = Get-StandardCoreSourceReviewE1SuppressionLedger -Policy $e1Policy -SkillRoot $skillRoot -SkillInventory $skillInventory `
+                    -Report $report -Native $native -Event $Event -SkillId $skillId -NativeReportPath $reportPath -NativeReportSha256 $nativeSha256 -RunRoot $RunRoot
+                foreach ($entry in @($e1Result.suppressedLedger)) { $suppressedLedger.Add($entry) }
+                foreach ($reference in @($e1Result.additionalRawEvidence)) { $additionalRawEvidence.Add($reference) }
+            }
+            else {
+                if ([long]$suppressedCount -ne 0 -or @($suppressedRows).Count -ne 0 -or $hasBaselineArgument -or
+                    $hasEnvelopePolicy -or $hasNativeBaseline -or $hasReportBaseline) {
+                    throw 'BLOCKED|Clean Static report cannot claim an absent E1 policy while suppression evidence or baseline arguments are present.'
+                }
+                $expectedArguments = @('scan', $skillRoot, '--no-llm', '--format', 'json', '--output', $reportPath)
+                $argumentOffset = 0
+                if (@($nativeArguments).Count -ge 4 -and [string]$nativeArguments[0] -ceq '-NoProfile') {
+                    if (@($nativeArguments).Count -lt 11 -or [string]$nativeArguments[1] -cne '-NonInteractive' -or
+                        [string]$nativeArguments[2] -cne '-File' -or [string]::IsNullOrWhiteSpace([string]$nativeArguments[3])) {
+                        throw 'BLOCKED|Clean Static launcher arguments do not match the fixed PowerShell launcher form.'
+                    }
+                    $argumentOffset = 4
+                }
+                if (@($nativeArguments).Count -ne ($argumentOffset + $expectedArguments.Count)) {
+                    throw 'BLOCKED|Clean Static arguments contain unknown options and cannot prove that E1 suppression was disabled.'
+                }
+                for ($argumentIndex = 0; $argumentIndex -lt $expectedArguments.Count; $argumentIndex++) {
+                    if ([string]$nativeArguments[$argumentOffset + $argumentIndex] -cne [string]$expectedArguments[$argumentIndex]) {
+                        throw 'BLOCKED|Clean Static arguments differ from the fixed non-suppressing scan invocation.'
+                    }
+                }
+            }
+            $staticCompleteness = Get-StandardValidationProperty -Object $report -Name 'analysis_completeness'
+            $sourceField = Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $report -Name 'skill') -Name 'source'
+            $reportedSkill = Get-StandardValidationProperty -Object $report -Name 'skill'
+            $components = Get-StandardValidationProperty -Object $report -Name 'components'
+            $scannerVersion = [string](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $report -Name 'metadata') -Name 'skillspector_version')
+            $expectedSkillPath = Get-StandardValidationFullPath -Path $skillRoot -Context 'Static source Skill root'
+            if ($report.execution_successful -isnot [bool] -or -not $report.execution_successful -or
+                $staticCompleteness.execution_successful -isnot [bool] -or -not $staticCompleteness.execution_successful -or
+                $staticCompleteness.is_complete -isnot [bool] -or -not $staticCompleteness.is_complete -or
+                [string]$staticCompleteness.status -cne 'complete' -or [double]$staticCompleteness.coverage_percent -ne 100 -or
+                @($staticCompleteness.ledger_exceptions).Count -gt 0 -or @($staticCompleteness.scope_exclusions).Count -gt 0 -or @($staticCompleteness.limitations).Count -gt 0 -or
+                [string]$reportedSkill.name -cne $skillId -or
+                -not ([string]$sourceField).Equals($expectedSkillPath, [StringComparison]::OrdinalIgnoreCase) -or
+                $components -isnot [array] -or @($components).Count -ne @($skillInventory).Count) {
+                throw 'BLOCKED|Static native report lacks the complete candidate-bound SkillSpector 2.12.0 evidence required by the frozen producer.'
+            }
+            $coveredComponents = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            foreach ($component in @($components)) {
+                $componentPath = Get-StandardValidationProperty -Object $component -Name 'path'
+                if ($componentPath -isnot [string] -or $skillInventory -cnotcontains [string]$componentPath -or -not $coveredComponents.Add([string]$componentPath)) {
+                    throw 'BLOCKED|Static native report component coverage differs from the frozen candidate Skill inventory.'
+                }
+            }
+            if ($coveredComponents.Count -ne $skillInventory.Count) { throw 'BLOCKED|Static native report component coverage is incomplete.' }
+            for ($issueIndex = 0; $issueIndex -lt @($issues).Count; $issueIndex++) {
+                $issue = @($issues)[$issueIndex]
+                if ($null -eq $issue -or $issue -is [string] -or $issue -is [ValueType] -or $issue -is [array]) { throw 'BLOCKED|Static issue is not a structured finding.' }
+                if (Test-StandardValidationHasProperty -Object $issue -Name 'suppressed') { throw 'BLOCKED|Static issues must all remain unsuppressed; only the verified top-level E1 ledger may suppress a finding.' }
+                $severityValue = Get-StandardValidationProperty -Object $issue -Name 'severity'
+                if ($severityValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$severityValue)) { throw 'BLOCKED|Static issue severity is missing.' }
+                $severity = ([string]$severityValue).ToLowerInvariant()
+                if (-not (Test-StandardValidationCanonicalSeverity -Severity $severity)) { throw 'BLOCKED|Static issue severity is unknown.' }
+                $location = Get-StandardValidationProperty -Object $issue -Name 'location'
+                $file = Get-StandardValidationProperty -Object $location -Name 'file'
+                if ($file -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$file)) { throw 'BLOCKED|Static issue candidate location is missing.' }
+                $resolved = Resolve-StandardCoreSourceReviewCandidateFile -Value ([string]$file) -SkillRoot $skillRoot -Inventory $skillInventory -Context 'Static native issue location'
+                $finding = [ordered]@{ severity = $severity }
+                foreach ($mapping in @(@('fingerprint', 'match_fingerprint'), @('ruleId', 'id'))) {
+                    $fieldValue = Get-StandardValidationProperty -Object $issue -Name $mapping[1]
+                    if ($null -ne $fieldValue) {
+                        if ($fieldValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$fieldValue) -or [string]$fieldValue -match '[\x00-\x1F\x7F]') { throw 'BLOCKED|Static issue has an invalid optional identity field.' }
+                        $finding[[string]$mapping[0]] = [string]$fieldValue
+                    }
+                }
+                $message = $null
+                foreach ($fieldName in @('explanation', 'message', 'finding')) {
+                    $candidateMessage = Get-StandardValidationProperty -Object $issue -Name $fieldName
+                    if ($candidateMessage -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$candidateMessage)) { $message = [string]$candidateMessage; break }
+                }
+                if ($null -ne $message) {
+                    if ($message -match '[\x00-\x1F\x7F]') { throw 'BLOCKED|Static issue message contains control characters.' }
+                    $finding.message = $message
+                }
+                $candidateRelative = ($SkillsRootRelative.TrimEnd('/') + '/' + $skillId + '/' + $resolved.relativePath).Replace('\', '/')
+                $finding.path = $candidateRelative
+                $expectedProjection.Add([pscustomobject]$finding)
+                $occurrences.Add((New-StandardCoreSourceReviewOccurrence -EventId ([string]$Event.eventId) -ToolId $toolId -SkillId $skillId -NativeReportPath $reportPath -NativeReportSha256 $nativeSha256 -Ordinal $issueIndex -Severity $severity -Finding $issue))
+            }
+        }
+        elseif ($toolId -ceq 'skill-validator') {
+            $skillDir = [string](Get-StandardValidationProperty -Object $report -Name 'skill_dir')
+            $expectedSkillDir = Get-StandardValidationFullPath -Path $skillRoot -Context 'skill-validator Skill root'
+            $results = Get-StandardValidationProperty -Object $report -Name 'results'
+            if ($skillDir -cne $expectedSkillDir -or $report.passed -isnot [bool] -or -not $report.passed -or
+                -not (Test-StandardValidationIntegerRange -Value $report.errors -Minimum 0 -Maximum 0) -or
+                -not (Test-StandardValidationIntegerRange -Value $report.warnings -Minimum 0 -Maximum 0) -or $results -isnot [array] -or @($results).Count -eq 0) {
+                throw 'BLOCKED|skill-validator native report is incomplete or does not bind the candidate Skill.'
+            }
+            for ($resultIndex = 0; $resultIndex -lt @($results).Count; $resultIndex++) {
+                $result = @($results)[$resultIndex]
+                if ($null -eq $result -or $result -is [array] -or $result -is [string] -or $result -is [ValueType]) { throw 'BLOCKED|skill-validator result shape is unknown.' }
+                $level = Get-StandardValidationProperty -Object $result -Name 'level'
+                if ($level -isnot [string] -or [string]$level -cnotin @('pass', 'info')) { throw 'BLOCKED|skill-validator level is unknown.' }
+                $relative = $null
+                if (Test-StandardValidationHasProperty -Object $result -Name 'file') {
+                    $file = Get-StandardValidationProperty -Object $result -Name 'file'
+                    if ($file -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$file)) { throw 'BLOCKED|skill-validator path has an unknown shape.' }
+                    $relative = (Resolve-StandardCoreSourceReviewCandidateFile -Value ([string]$file) -SkillRoot $skillRoot -Inventory $skillInventory -Context 'skill-validator native path').relativePath
+                }
+                if ($level -ceq 'pass') { continue }
+                $category = Get-StandardValidationProperty -Object $result -Name 'category'
+                $message = Get-StandardValidationProperty -Object $result -Name 'message'
+                if ($category -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$category) -or $message -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$message)) { throw 'BLOCKED|skill-validator info finding lacks category or message.' }
+                $relativeText = if ($null -eq $relative) { '' } else { [string]$relative }
+                $fingerprint = Get-StandardValidationTextSha256 -Value ($skillId + "`n" + [string]$category + "`n" + [string]$message + "`n" + $relativeText)
+                $finding = [ordered]@{ severity = 'informational'; fingerprint = $fingerprint; ruleId = [string]$category; message = [string]$message }
+                if ($null -ne $relative) { $finding.path = ($SkillsRootRelative.TrimEnd('/') + '/' + $skillId + '/' + [string]$relative).Replace('\', '/') }
+                $expectedProjection.Add([pscustomobject]$finding)
+                $occurrences.Add((New-StandardCoreSourceReviewOccurrence -EventId ([string]$Event.eventId) -ToolId $toolId -SkillId $skillId -NativeReportPath $reportPath -NativeReportSha256 $nativeSha256 -Ordinal $resultIndex -Severity 'informational' -Finding $result))
+            }
+        }
+        else {
+            if ([string]$report.version -cne '2.1.0' -or @($report.runs).Count -ne 1 -or [string]$report.runs[0].tool.driver.name -cne 'skill-tools') { throw 'BLOCKED|skill-tools native SARIF identity is unknown.' }
+            $run = $report.runs[0]
+            $rules = Get-StandardValidationProperty -Object $run.tool.driver -Name 'rules'
+            $results = Get-StandardValidationProperty -Object $run -Name 'results'
+            if ($rules -isnot [array] -or $results -isnot [array]) { throw 'BLOCKED|skill-tools SARIF rule or result inventory is malformed.' }
+            $ruleById = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+            foreach ($rule in @($rules)) {
+                $ruleId = Get-StandardValidationProperty -Object $rule -Name 'id'
+                if ($rule -is [array] -or $rule -is [string] -or $null -eq $rule -or $ruleId -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$ruleId) -or $ruleById.ContainsKey([string]$ruleId)) { throw 'BLOCKED|skill-tools SARIF rule IDs are missing or duplicated.' }
+                $ruleById.Add([string]$ruleId, $rule)
+            }
+            for ($resultIndex = 0; $resultIndex -lt @($results).Count; $resultIndex++) {
+                $result = @($results)[$resultIndex]
+                if ($null -eq $result -or $result -is [string] -or $result -is [ValueType] -or $result -is [array]) { throw 'BLOCKED|skill-tools SARIF result shape is unknown.' }
+                $ruleId = Get-StandardValidationProperty -Object $result -Name 'ruleId'
+                if ($ruleId -isnot [string] -or -not $ruleById.ContainsKey([string]$ruleId)) { throw 'BLOCKED|skill-tools SARIF result references an unknown rule.' }
+                $rule = $ruleById[[string]$ruleId]
+                $ruleIndex = Get-StandardValidationProperty -Object $result -Name 'ruleIndex'
+                if ($null -ne $ruleIndex -and (-not (Test-StandardValidationIntegerRange -Value $ruleIndex -Minimum 0 -Maximum ($rules.Count - 1)) -or [string]$rules[[int]$ruleIndex].id -cne [string]$ruleId)) { throw 'BLOCKED|skill-tools SARIF ruleIndex does not bind its ruleId.' }
+                $level = Get-StandardValidationProperty -Object $result -Name 'level'
+                if ($null -eq $level) { $level = Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $rule -Name 'defaultConfiguration') -Name 'level' }
+                if ($level -isnot [string] -or [string]$level -cnotin @('none', 'note', 'warning', 'error')) { throw 'BLOCKED|skill-tools SARIF severity is unknown.' }
+                if ([string]$level -cin @('warning', 'error')) { throw 'BLOCKED|skill-tools SARIF contains a blocking result.' }
+                $locations = Get-StandardValidationProperty -Object $result -Name 'locations'
+                if ($null -eq $locations) { $locations = @() }
+                if ($locations -isnot [array]) { throw 'BLOCKED|skill-tools SARIF locations are malformed.' }
+                $relativePaths = New-Object 'System.Collections.Generic.List[string]'
+                foreach ($location in @($locations)) {
+                    $physical = Get-StandardValidationProperty -Object $location -Name 'physicalLocation'
+                    $artifact = Get-StandardValidationProperty -Object $physical -Name 'artifactLocation'
+                    $uri = Get-StandardValidationProperty -Object $artifact -Name 'uri'
+                    if ($uri -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$uri)) { throw 'BLOCKED|skill-tools SARIF location URI is missing.' }
+                    $relativePaths.Add((Resolve-StandardCoreSourceReviewCandidateFile -Value ([string]$uri) -SkillRoot $skillRoot -Inventory $skillInventory -Context 'skill-tools SARIF location').relativePath)
+                }
+                if ([string]$level -ceq 'none') { continue }
+                if ($relativePaths.Count -eq 0) { throw 'BLOCKED|skill-tools SARIF note has no candidate location.' }
+                $messageObject = Get-StandardValidationProperty -Object $result -Name 'message'
+                $message = Get-StandardValidationProperty -Object $messageObject -Name 'text'
+                if ($message -isnot [string]) { $message = Get-StandardValidationProperty -Object $messageObject -Name 'markdown' }
+                if ($message -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$message)) { throw 'BLOCKED|skill-tools SARIF note has no message.' }
+                $fingerprint = $null
+                foreach ($containerName in @('fingerprints', 'partialFingerprints')) {
+                    $container = Get-StandardValidationProperty -Object $result -Name $containerName
+                    if ($null -eq $container) { continue }
+                    $properties = @($container.PSObject.Properties | Where-Object { $_.Value -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_.Value) } | Sort-Object -Property Name -CaseSensitive)
+                    if ($properties.Count -gt 0) { $fingerprint = [string]$properties[0].Value; break }
+                }
+                foreach ($relative in $relativePaths) {
+                    $locationFingerprint = $fingerprint
+                    if ($null -eq $locationFingerprint) {
+                        $locationFingerprint = Get-StandardValidationTextSha256 -Value ([string]$ruleId + "`n" + [string]$message + "`n" + [string]$relative)
+                    }
+                    $expectedProjection.Add([pscustomobject][ordered]@{
+                        severity = 'informational'; fingerprint = $locationFingerprint; ruleId = [string]$ruleId
+                        message = [string]$message; path = ($SkillsRootRelative.TrimEnd('/') + '/' + $skillId + '/' + [string]$relative).Replace('\', '/')
+                    })
+                }
+                $occurrences.Add((New-StandardCoreSourceReviewOccurrence -EventId ([string]$Event.eventId) -ToolId $toolId -SkillId $skillId -NativeReportPath $reportPath -NativeReportSha256 $nativeSha256 -Ordinal $resultIndex -Severity 'informational' -Finding $result))
+            }
+        }
+    }
+    $actualCanonical = Convert-StandardValidationValueToCanonicalJson -Value $envelopeFindings -Context 'source review envelope findings'
+    $expectedCanonical = Convert-StandardValidationValueToCanonicalJson -Value ([object[]]$expectedProjection.ToArray()) -Context 'source review native finding projection'
+    if ($actualCanonical -cne $expectedCanonical) { throw 'BLOCKED|Native source report finding projection differs from the complete envelope findings.' }
+    return [pscustomobject]@{ occurrences = [object[]]$occurrences.ToArray(); suppressedLedger = [object[]]$suppressedLedger.ToArray(); additionalRawEvidence = [object[]]$additionalRawEvidence.ToArray() }
+}
+
+function ConvertFrom-StandardCoreSourceReviewJsonElement {
+    param([Parameter(Mandatory = $true)][System.Text.Json.JsonElement] $Element, [Parameter(Mandatory = $true)][string] $Context)
+
+    switch ($Element.ValueKind) {
+        'Object' {
+            $values = [ordered]@{}
+            $names = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($property in $Element.EnumerateObject()) {
+                if (-not $names.Add([string]$property.Name)) { throw "BLOCKED|$Context contains duplicate or case-colliding JSON properties." }
+                $values[[string]$property.Name] = ConvertFrom-StandardCoreSourceReviewJsonElement -Element $property.Value -Context $Context
+            }
+            return [pscustomobject]$values
+        }
+        'Array' {
+            $items = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($item in $Element.EnumerateArray()) { $items.Add((ConvertFrom-StandardCoreSourceReviewJsonElement -Element $item -Context $Context)) }
+            return ,([object[]]$items.ToArray())
+        }
+        'String' { return $Element.GetString() }
+        'True' { return $true }
+        'False' { return $false }
+        'Null' { return $null }
+        'Number' {
+            [long]$integer = 0
+            if ($Element.TryGetInt64([ref]$integer)) { return $integer }
+            [decimal]$decimalNumber = 0
+            if ($Element.TryGetDecimal([ref]$decimalNumber)) { return $decimalNumber }
+            [double]$floatingNumber = 0
+            if (-not $Element.TryGetDouble([ref]$floatingNumber) -or [double]::IsNaN($floatingNumber) -or [double]::IsInfinity($floatingNumber)) {
+                throw "BLOCKED|$Context contains a non-finite or unsupported JSON number."
+            }
+            return $floatingNumber
+        }
+        default { throw "BLOCKED|$Context contains an unsupported JSON value." }
+    }
+}
+
+function Read-StandardCoreSourceReviewBoundedCanonicalJson {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][long] $MaximumBytes, [Parameter(Mandatory = $true)][string] $Context)
+
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+    if (-not (Test-StandardValidationPathWithin -Path $fullPath -Root $RunRoot) -or
+        -not [string]::Equals($fullPath, (Get-StandardValidationFullPath -Path $Path -Context $Context), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "BLOCKED|$Context must remain under the current run root."
+    }
+    Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+    Assert-StandardValidationNoReparsePoints -Root $fullPath -Context $Context
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $declaredLength = [long]$stream.Length
+        if ($declaredLength -lt 2 -or $declaredLength -gt $MaximumBytes) { throw "BLOCKED|$Context exceeds its declared size limit or is empty." }
+        $bytes = New-Object byte[] ([int]$declaredLength)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw "BLOCKED|$Context ended before its declared file length." }
+            $offset += $read
+        }
+        if ($stream.Length -ne $declaredLength -or $stream.ReadByte() -ne -1) { throw "BLOCKED|$Context changed while its file handle was read." }
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { throw "BLOCKED|$Context must use UTF-8 without a byte-order mark." }
+        $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        try { $jsonText = $utf8.GetString($bytes) }
+        catch { throw "BLOCKED|$Context is not valid strict UTF-8." }
+        $document = $null
+        try {
+            $document = [System.Text.Json.JsonDocument]::Parse($jsonText)
+            $value = ConvertFrom-StandardCoreSourceReviewJsonElement -Element $document.RootElement -Context $Context
+            if ($value -isnot [pscustomobject]) { throw "BLOCKED|$Context JSON root must be an object." }
+            $canonicalText = Convert-StandardValidationValueToCanonicalJson -Value $value -Context $Context
+            $canonicalBytes = $utf8.GetBytes($canonicalText)
+            if ([Convert]::ToBase64String($canonicalBytes) -cne [Convert]::ToBase64String($bytes)) { throw "BLOCKED|$Context bytes are not the fixed canonical JSON encoding." }
+            $sha256 = Get-StandardValidationBytesSha256 -Bytes $bytes
+            return [pscustomobject][ordered]@{ path = $fullPath; bytes = $bytes; sha256 = $sha256; value = $value }
+        }
+        catch {
+            if ([string]$_.Exception.Message -like 'BLOCKED|*') { throw }
+            throw "BLOCKED|$Context could not be parsed as a strict JSON object: $($_.Exception.Message)"
+        }
+        finally { if ($null -ne $document) { $document.Dispose() } }
+    }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+}
+
+function ConvertTo-StandardCoreSourceReviewUtcTime {
+    param([Parameter(Mandatory = $true)] $Value, [Parameter(Mandatory = $true)][string] $Context)
+
+    if ($Value -isnot [string]) { throw "BLOCKED|$Context must be a canonical UTC timestamp string." }
+    [datetime]$parsed = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact([string]$Value, 'o', [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed) -or $parsed.Kind -ne [DateTimeKind]::Utc -or
+        $parsed.ToString('o', [Globalization.CultureInfo]::InvariantCulture) -cne [string]$Value) {
+        throw "BLOCKED|$Context must be a round-trip UTC timestamp ending in Z."
+    }
+    return $parsed
+}
+
+function Write-StandardCoreSourceReviewChallengeCreateOnly {
+    param([Parameter(Mandatory = $true)][string] $RunRoot, [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $CanonicalJson)
+
+    $fullRunRoot = Assert-StandardValidationCanonicalRootPath -Path $RunRoot -Context 'source review run root'
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context 'source review challenge path'
+    if (-not (Test-StandardValidationPathWithin -Path $fullPath -Root $fullRunRoot) -or
+        -not [string]::Equals($fullPath, (Join-Path $fullRunRoot 'source-human-review-challenge-v1.json'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'BLOCKED|Source review challenge must use the fixed file under its run root.'
+    }
+    Assert-StandardValidationNoReparsePoints -Root $fullRunRoot -Context 'source review challenge run root'
+    if ([IO.File]::Exists($fullPath) -or [IO.Directory]::Exists($fullPath)) { throw 'BLOCKED|Source review challenge path already exists before create-only write.' }
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $bytes = $utf8.GetBytes($CanonicalJson)
+    if ($bytes.Length -gt 16MB) { throw 'BLOCKED|Source review challenge exceeds its 16 MiB limit.' }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($fullPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+    $sha256 = Get-StandardValidationBytesSha256 -Bytes $bytes
+    Register-StandardValidationEvidenceArtifact -Path $fullPath -ExpectedSha256 $sha256 -Context 'source human review challenge'
+    return [pscustomobject][ordered]@{ path = $fullPath; sha256 = $sha256; bytes = $bytes }
+}
+
+function Get-StandardCoreSourceReviewBinding {
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Occurrences,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $SuppressedLedger, [Parameter(Mandatory = $true)][string] $CreatedAt,
+        [Parameter(Mandatory = $true)][string] $ExpiresAt, [Parameter(Mandatory = $true)][string] $PolicySha256,
+        [Parameter(Mandatory = $true)][string] $HumanKeySha256, [object[]] $RetainedRawEvidence = @())
+
+    Assert-StandardCoreSourceReviewJsonBindingValue -Value $Report -Context 'source review report binding'
+    $source = Get-StandardValidationProperty -Object $Report -Name 'sourceValidation'
+    $pending = Get-StandardValidationProperty -Object $source -Name 'sourceReviewPending'
+    $expectedRaw = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    if ($RetainedRawEvidence.Count -gt 0) {
+        foreach ($reference in $RetainedRawEvidence) {
+            Assert-StandardValidationExactPropertySet -Object $reference -Expected @('path', 'sha256') -Context 'retained source review raw evidence'
+            $key = Get-StandardValidationFullPath -Path ([string]$reference.path) -Context 'retained source review raw evidence'
+            if (-not $expectedRaw.TryAdd($key, [string]$reference.sha256)) { throw 'BLOCKED|Source review challenge contains duplicate raw evidence paths.' }
+        }
+    }
+    elseif ($null -ne $pending) {
+        foreach ($reference in @($pending.expectedEvidenceArtifacts)) {
+            $key = Get-StandardValidationFullPath -Path ([string]$reference.path) -Context 'captured source event output'
+            if (-not $expectedRaw.TryAdd($key, [string]$reference.sha256)) { throw 'BLOCKED|Captured source event outputs contain a duplicate path.' }
+        }
+    }
+    else { throw 'BLOCKED|Source review reconstruction lacks its signed raw evidence reference set.' }
+
+    $refs = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $addReference = {
+        param([string] $Path, [string] $ExpectedSha256, [string] $Context)
+        $fullPath = Get-StandardValidationFullPath -Path $Path -Context $Context
+        if ($refs.ContainsKey($fullPath)) {
+            if ([string]$refs[$fullPath].sha256 -cne $ExpectedSha256) { throw "BLOCKED|$Context has conflicting digests for the same path." }
+            return
+        }
+        if ($ExpectedSha256 -cnotmatch '^[a-f0-9]{64}$') { throw "BLOCKED|$Context expected digest is malformed." }
+        Assert-StandardValidationRegularFile -Path $fullPath -Context $Context
+        Assert-StandardValidationNoReparsePoints -Root $fullPath -Context $Context
+        $actual = Get-StandardValidationFileSha256 -Path $fullPath -Context $Context
+        if ($actual -cne $ExpectedSha256) { throw "BLOCKED|$Context changed after its expected digest was captured." }
+        $refs.Add($fullPath, [pscustomobject][ordered]@{ path = $fullPath; sha256 = $ExpectedSha256 })
+    }
+
+    foreach ($reference in @($source.frozenFiles)) { & $addReference ([string]$reference.path) ([string]$reference.sha256) 'source frozen closure evidence' }
+    foreach ($reference in @($source.toolReceipts)) { & $addReference ([string]$reference.path) ([string]$reference.sha256) 'source tool receipt' }
+    & $addReference ([string]$source.adapterSnapshot.path) ([string]$source.adapterSnapshot.sha256) 'retained source adapter'
+    $caseInventory = Get-StandardValidationProperty -Object $source -Name 'pesterCaseInventory'
+    if ($null -eq $caseInventory) { throw 'BLOCKED|Source review requires a completed Pester case inventory.' }
+    & $addReference ([string]$caseInventory.path) ([string]$caseInventory.sha256) 'source Pester case inventory'
+
+    foreach ($event in @($source.events)) {
+        $eventPath = Get-StandardValidationFullPath -Path ([string]$event.outputPath) -Context 'source raw event'
+        if (-not $expectedRaw.ContainsKey($eventPath)) { throw 'BLOCKED|A source raw event has no pre-check captured digest.' }
+        & $addReference $eventPath ([string]$expectedRaw[$eventPath]) 'source raw event'
+    }
+    foreach ($check in @($Report.checks)) {
+        foreach ($streamName in @('stdout', 'stderr')) {
+            & $addReference ([string]$check.($streamName + 'Path')) ([string]$check.($streamName + 'Sha256')) "source $($check.id) $streamName"
+        }
+    }
+    foreach ($event in @($source.events)) {
+        $eventPath = Get-StandardValidationFullPath -Path ([string]$event.outputPath) -Context 'source review raw event'
+        if (-not $expectedRaw.ContainsKey($eventPath)) { throw 'BLOCKED|Source raw event has no captured pre-child digest.' }
+        $eventSnapshot = Get-StandardValidationJsonSnapshot -Path $eventPath -Context 'source review raw event' -PreserveDateStrings
+        if ([string]$eventSnapshot.sha256 -cne [string]$expectedRaw[$eventPath]) { throw 'BLOCKED|Source review raw event snapshot digest differs from its pre-child hash.' }
+        $rawEvent = $eventSnapshot.value
+        try { $rawEnvelope = ConvertFrom-Json -InputObject ([string]$rawEvent.stdout) -ErrorAction Stop }
+        catch { throw "BLOCKED|Source review raw event does not retain parseable native report references: $($_.Exception.Message)" }
+        foreach ($native in @((Get-StandardValidationProperty -Object $rawEnvelope -Name 'nativeReports'))) {
+            if ($null -eq $native) { continue }
+            & $addReference ([string]$native.path) ([string]$native.sha256) 'source native report'
+        }
+    }
+    if ($null -ne $pending) {
+        foreach ($native in @($pending.nativeReports)) { & $addReference ([string]$native.path) ([string]$native.sha256) 'captured source native report' }
+        foreach ($reference in @($pending.additionalRawEvidence)) { & $addReference ([string]$reference.path) ([string]$reference.sha256) 'captured source review additional evidence' }
+        foreach ($authorityFile in @($pending.authorityMaterials)) { & $addReference ([string]$authorityFile.path) ([string]$authorityFile.sha256) 'source review authority material' }
+    }
+    else {
+        foreach ($reference in $RetainedRawEvidence) {
+            $candidate = Get-StandardValidationFullPath -Path ([string]$reference.path) -Context 'retained source review raw evidence'
+            if ($refs.ContainsKey($candidate)) { continue }
+            # Extra retained refs are authority-policy/baseline/runner materials. Their expected bytes are signed by the receipt.
+            & $addReference $candidate ([string]$reference.sha256) 'retained source review evidence'
+        }
+    }
+
+    $orderedRawPaths = [string[]]@($refs.Keys)
+    [Array]::Sort($orderedRawPaths, [StringComparer]::Ordinal)
+    $rawEvidence = @($orderedRawPaths | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$refs[$_].path; sha256 = [string]$refs[$_].sha256 } })
+    $sourceExecution = [ordered]@{}
+    foreach ($property in $source.PSObject.Properties) {
+        if ([string]$property.Name -cin @('status', 'sourceReview', 'sourceReviewPending')) { continue }
+        $sourceExecution[[string]$property.Name] = $property.Value
+    }
+    $sourceExecutionSha256 = Get-StandardValidationTextSha256 -Value (Convert-StandardValidationValueToCanonicalJson -Value ([pscustomobject]$sourceExecution) -Context 'source execution binding')
+    $checksSha256 = Get-StandardValidationTextSha256 -Value (Convert-StandardValidationValueToCanonicalJson -Value ([object[]]@($Report.checks)) -Context 'source checks binding')
+    $binding = [pscustomobject][ordered]@{
+        runId = [string]$Report.runId
+        candidateId = [string]$source.candidateId
+        sourceRepository = [string]$Report.candidate.repository
+        sourceRevision = [string]$Report.candidate.sourceRevision
+        baseRevision = [string]$Report.candidate.baseRevision
+        eventName = [string]$Report.candidate.eventName
+        contentSha256 = [string]$Report.candidate.contentSha256
+        authorityRepository = [string]$Report.authority.repository
+        authorityRevision = [string]$Report.authority.revision
+        runnerSha256 = [string]$Report.authority.runnerSha256
+        coreContractSha256 = [string]$Report.authority.contractSha256
+        policySha256 = $PolicySha256
+        humanKeySha256 = $HumanKeySha256
+        adapterIdentity = [string]$Report.adapter.identity
+        adapterSha256 = [string]$Report.adapter.sha256
+        activeSkills = [object[]]@($source.activeSkills)
+        sourceExecutionSha256 = $sourceExecutionSha256
+        checksSha256 = $checksSha256
+        rawEvidence = [object[]]$rawEvidence
+    }
+    return $binding
+}
+
+function Assert-StandardCoreSourceReviewJsonBindingValue {
+    param([AllowNull()] $Value, [Parameter(Mandatory = $true)][string] $Context, [int] $Depth = 0)
+
+    if ($Depth -gt 64) { throw "BLOCKED|$Context exceeds the source-review JSON binding depth limit." }
+    if ($null -eq $Value) { return }
+    if ($Value -is [datetime] -or $Value -is [datetimeoffset]) {
+        throw "BLOCKED|$Context contains a CLR date value; ISO-8601 JSON dates must remain strings during source-review binding."
+    }
+    if ($Value -is [string] -or $Value -is [bool] -or $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64] -or $Value -is [decimal] -or $Value -is [single] -or $Value -is [double]) { return }
+    if ($Value -is [array]) {
+        foreach ($item in $Value) { Assert-StandardCoreSourceReviewJsonBindingValue -Value $item -Context $Context -Depth ($Depth + 1) }
+        return
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Value.Keys)) {
+            if ($key -isnot [string]) { throw "BLOCKED|$Context contains a non-string JSON object property name." }
+            Assert-StandardCoreSourceReviewJsonBindingValue -Value $Value[$key] -Context $Context -Depth ($Depth + 1)
+        }
+        return
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in @($Value.PSObject.Properties)) {
+            if ($property.MemberType -ne 'NoteProperty') {
+                throw "BLOCKED|$Context contains a non-JSON CLR property member."
+            }
+            Assert-StandardCoreSourceReviewJsonBindingValue -Value $property.Value -Context $Context -Depth ($Depth + 1)
+        }
+        return
+    }
+    throw "BLOCKED|$Context contains a non-JSON CLR value that cannot be bound safely."
+}
+
+function Get-StandardCoreSourceReviewAuthorityMaterials {
+    param([Parameter(Mandatory = $true)][string] $AuthorityRevision, [Parameter(Mandatory = $true)][string] $RunnerSha256,
+        [Parameter(Mandatory = $true)][string] $ContractSha256, [string] $ExpectedPolicySha256)
+
+    $authorityRoot = Get-StandardValidationFullPath -Path $script:StandardValidationRepositoryRoot -Context 'source review authority root'
+    $head = ([string](Invoke-StandardCoreGit -RepositoryRoot $authorityRoot -WorkingDirectory $authorityRoot -Arguments @('rev-parse', '--verify', 'HEAD^{commit}')).stdout).Trim().ToLowerInvariant()
+    if ($head -cne $AuthorityRevision) { throw 'BLOCKED|Source review authority revision changed.' }
+    $origin = Invoke-StandardCoreGit -RepositoryRoot $authorityRoot -WorkingDirectory $authorityRoot -Arguments @('config', '--local', '--get-all', 'remote.origin.url')
+    $origins = @(([string]$origin.stdout -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($origins.Count -ne 1 -or (ConvertTo-StandardCoreRepositoryIdentity -Value ([string]$origins[0]) -Context 'source review authority origin') -cne
+        (ConvertTo-StandardCoreRepositoryIdentity -Value $script:StandardValidationAuthorityRepository -Context 'source review authority repository')) {
+        throw 'BLOCKED|Source review authority repository identity changed.'
+    }
+    $materials = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($entry in @(
+            @('scripts/Invoke-StandardValidation.ps1', $RunnerSha256),
+            @('docs/standards/standard-core-validation-v2.json', $ContractSha256),
+            @('docs/standards/validation-security-gate.json', $null),
+            @('docs/standards/trust-anchors/human-approval-public-key.xml', $script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256)
+        )) {
+        $path = Get-StandardValidationFullPath -Path (Join-Path $authorityRoot ([string]$entry[0])) -Context 'source review authority file'
+        Assert-StandardValidationRegularFile -Path $path -Context 'source review authority file'
+        Assert-StandardValidationNoReparsePoints -Root $path -Context 'source review authority file'
+        $sha256 = Get-StandardValidationFileSha256 -Path $path -Context 'source review authority file'
+        if ($null -ne $entry[1] -and $sha256 -cne [string]$entry[1]) { throw 'BLOCKED|Source review runner, contract, or fixed human key bytes changed.' }
+        if ([string]$entry[0] -ceq 'docs/standards/validation-security-gate.json' -and
+            -not [string]::IsNullOrWhiteSpace($ExpectedPolicySha256) -and $sha256 -cne $ExpectedPolicySha256) {
+            throw 'BLOCKED|Source review policy bytes changed after source tool dispatch began.'
+        }
+        $materials.Add([pscustomobject][ordered]@{ path = $path; sha256 = $sha256 })
+    }
+    return [pscustomobject][ordered]@{
+        policySha256 = [string]$materials[2].sha256
+        humanKeySha256 = [string]$materials[3].sha256
+        authorityMaterials = [object[]]$materials.ToArray()
+    }
+}
+
+function New-StandardCoreSourceReviewChallenge {
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Occurrences,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $SuppressedLedger, [Parameter(Mandatory = $true)][int] $TimeoutSeconds)
+
+    $source = Get-StandardValidationProperty -Object $Report -Name 'sourceValidation'
+    $pending = Get-StandardValidationProperty -Object $source -Name 'sourceReviewPending'
+    if ($null -eq $pending -or $pending.needsReview -isnot [bool] -or -not $pending.needsReview) { throw 'BLOCKED|Source review challenge requires a deferred ordinary MEDIUM finding.' }
+    if ($pending.humanKeySha256 -cne [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256) { throw 'BLOCKED|Source review fixed human key digest is not the approved authority value.' }
+    $budgetSeconds = [Math]::Min([int]$TimeoutSeconds, 900)
+    if ($budgetSeconds -lt 1) { throw 'BLOCKED|Source review phase budget must be positive.' }
+    $createdTime = [datetime]::UtcNow
+    $createdAt = $createdTime.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $expiresAt = $createdTime.AddSeconds($budgetSeconds).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    $challengeValue = [pscustomobject][ordered]@{
+        schemaVersion = 1
+        contract = 'standard-source-human-review-v1'
+        scope = 'source-validation-only'
+        createdAt = $createdAt
+        expiresAt = $expiresAt
+        binding = $null
+        findingOccurrences = [object[]]$Occurrences
+        suppressedLedger = [object[]]$SuppressedLedger
+    }
+    $challengeValue.binding = Get-StandardCoreSourceReviewBinding -Report $Report -Occurrences $Occurrences -SuppressedLedger $SuppressedLedger `
+        -CreatedAt $createdAt -ExpiresAt $expiresAt -PolicySha256 ([string]$pending.policySha256) `
+        -HumanKeySha256 ([string]$pending.humanKeySha256)
+    $bindingSha256 = Get-StandardValidationTextSha256 -Value (Convert-StandardValidationValueToCanonicalJson -Value $challengeValue.binding -Context 'source review binding digest')
+    $challengeJson = Convert-StandardValidationValueToCanonicalJson -Value $challengeValue -Context 'source review challenge'
+    if ([Text.Encoding]::UTF8.GetByteCount($challengeJson) -gt 16MB) { throw 'BLOCKED|Source review challenge exceeds its 16 MiB limit.' }
+    $challengePath = Join-Path ([string]$Report.artifacts.runRoot) 'source-human-review-challenge-v1.json'
+    $receiptPath = Join-Path ([string]$Report.artifacts.runRoot) 'source-human-review-receipt-v1.json'
+    if ([IO.File]::Exists($receiptPath) -or [IO.Directory]::Exists($receiptPath)) { throw 'BLOCKED|Source review receipt path existed before the challenge was issued.' }
+    $written = Write-StandardCoreSourceReviewChallengeCreateOnly -RunRoot ([string]$Report.artifacts.runRoot) -Path $challengePath -CanonicalJson $challengeJson
+    return [pscustomobject][ordered]@{
+        value = $challengeValue
+        path = [string]$written.path
+        sha256 = [string]$written.sha256
+        bindingSha256 = $bindingSha256
+        receiptPath = $receiptPath
+        createdAt = $createdAt
+        expiresAt = $expiresAt
+        phaseBudgetSeconds = $budgetSeconds
+    }
+}
+
+function Get-StandardCoreSourceReviewReceiptSignaturePayload {
+    param([Parameter(Mandatory = $true)] $Receipt)
+
+    $receiptPayload = [ordered]@{}
+    foreach ($property in $Receipt.PSObject.Properties) {
+        if ([string]$property.Name -ceq 'signature') { continue }
+        $receiptPayload[[string]$property.Name] = $property.Value
+    }
+    $signedPayload = [pscustomobject][ordered]@{
+        domain = 'standard-source-human-review-v1'
+        receipt = [pscustomobject]$receiptPayload
+    }
+    return Convert-StandardValidationValueToCanonicalJson -Value $signedPayload -Context 'source human review signature payload'
+}
+
+function Read-StandardCoreSourceReviewHumanPublicKey {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $context = 'fixed source review human public key'
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context $context
+    Assert-StandardValidationRegularFile -Path $fullPath -Context $context
+    Assert-StandardValidationNoReparsePoints -Root $fullPath -Context $context
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $declaredLength = [long]$stream.Length
+        if ($declaredLength -lt 32 -or $declaredLength -gt 16KB) { throw 'BLOCKED|Fixed source review public key has an invalid bounded file length.' }
+        $bytes = New-Object byte[] ([int]$declaredLength)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw 'BLOCKED|Fixed source review public key ended before its declared file length.' }
+            $offset += $read
+        }
+        if ($stream.Length -ne $declaredLength -or $stream.ReadByte() -ne -1) { throw 'BLOCKED|Fixed source review public key changed while its file handle was read.' }
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw 'BLOCKED|Fixed source review public key must use UTF-8 without a byte-order mark.'
+        }
+        $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        try { $xml = $utf8.GetString($bytes) }
+        catch { throw 'BLOCKED|Fixed source review public key is not strict UTF-8.' }
+        if ([string]::IsNullOrWhiteSpace($xml) -or
+            $xml -notmatch '(?is)^\s*<RSAKeyValue>\s*<Modulus>[^<]+</Modulus>\s*<Exponent>[^<]+</Exponent>\s*</RSAKeyValue>\s*$' -or
+            $xml -match '(?i)<D(?:\s|>)') { throw 'BLOCKED|Source review public key must be a public-only RSA XML key.' }
+        return [pscustomobject][ordered]@{
+            path = $fullPath
+            bytes = $bytes
+            sha256 = Get-StandardValidationBytesSha256 -Bytes $bytes
+            xml = $xml
+        }
+    }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+}
+
+function Assert-StandardCoreSourceReviewReceipt {
+    param([Parameter(Mandatory = $true)] $Receipt, [Parameter(Mandatory = $true)] $Challenge,
+        [Parameter(Mandatory = $true)][string] $ChallengeSha256, [Parameter(Mandatory = $true)][string] $AcceptedAt)
+
+    $context = 'source human review receipt'
+    Assert-StandardValidationExactPropertySet -Object $Receipt -Expected @(
+        'schemaVersion', 'contract', 'scope', 'challengeSha256', 'runId', 'decision', 'approvalId', 'approver',
+        'hostId', 'actorId', 'issuedAt', 'findingDisposition', 'signature'
+    ) -Context $context
+    if (-not (Test-StandardValidationIntegerRange -Value $Receipt.schemaVersion -Minimum 1 -Maximum 1) -or
+        $Receipt.contract -isnot [string] -or [string]$Receipt.contract -cne 'standard-source-human-review-v1' -or
+        $Receipt.scope -isnot [string] -or [string]$Receipt.scope -cne 'source-validation-only' -or
+        $Receipt.challengeSha256 -isnot [string] -or [string]$Receipt.challengeSha256 -cne $ChallengeSha256 -or
+        $Receipt.runId -isnot [string] -or [string]$Receipt.runId -cne [string]$Challenge.binding.runId -or
+        $Receipt.decision -isnot [string] -or [string]$Receipt.decision -cne 'approved' -or $Receipt.findingDisposition -isnot [array]) {
+        throw 'BLOCKED|Source review receipt does not bind the current approved source challenge.'
+    }
+    foreach ($field in @('approvalId', 'approver', 'hostId', 'actorId')) {
+        [void](Assert-StandardValidationApprovalScalar -Value $Receipt.$field -Name $field -Context $context)
+    }
+    $challengeCreated = ConvertTo-StandardCoreSourceReviewUtcTime -Value $Challenge.createdAt -Context 'source review challenge creation time'
+    $challengeExpires = ConvertTo-StandardCoreSourceReviewUtcTime -Value $Challenge.expiresAt -Context 'source review challenge expiry time'
+    $receiptIssued = ConvertTo-StandardCoreSourceReviewUtcTime -Value $Receipt.issuedAt -Context 'source review receipt issue time'
+    $acceptedTime = ConvertTo-StandardCoreSourceReviewUtcTime -Value $AcceptedAt -Context 'source review receipt acceptance time'
+    if ($challengeExpires -le $challengeCreated -or ($challengeExpires - $challengeCreated).TotalSeconds -gt 900 -or
+        $receiptIssued -lt $challengeCreated -or $receiptIssued -gt $acceptedTime -or $acceptedTime -gt $challengeExpires -or $receiptIssued -gt $challengeExpires) {
+        throw 'BLOCKED|Source review receipt falls outside the signed challenge review window.'
+    }
+
+    $occurrences = @($Challenge.findingOccurrences)
+    $dispositions = @($Receipt.findingDisposition)
+    if ($dispositions.Count -ne $occurrences.Count) { throw 'BLOCKED|Source review receipt must disposition every finding occurrence exactly once.' }
+    $allowedEvidence = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($reference in @($Challenge.binding.rawEvidence)) { [void]$allowedEvidence.Add([string]$reference.sha256) }
+    foreach ($occurrence in $occurrences) { [void]$allowedEvidence.Add([string]$occurrence.occurrenceSha256) }
+    $seenOccurrences = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $occurrences.Count; $index++) {
+        $occurrence = $occurrences[$index]
+        $disposition = $dispositions[$index]
+        Assert-StandardValidationExactPropertySet -Object $disposition -Expected @(
+            'occurrenceSha256', 'severity', 'classification', 'decision', 'rationale', 'scope', 'evidenceReferences'
+        ) -Context "source review disposition[$index]"
+        if ($disposition.occurrenceSha256 -isnot [string] -or [string]$disposition.occurrenceSha256 -cne [string]$occurrence.occurrenceSha256 -or
+            -not $seenOccurrences.Add([string]$disposition.occurrenceSha256) -or $disposition.severity -isnot [string] -or [string]$disposition.severity -cne [string]$occurrence.severity -or
+            $disposition.scope -isnot [string] -or [string]$disposition.scope -cne 'source-validation-only' -or $disposition.rationale -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string]$disposition.rationale) -or [string]$disposition.rationale -match '[\x00-\x1F\x7F]' -or
+            $disposition.evidenceReferences -isnot [array] -or @($disposition.evidenceReferences).Count -eq 0) {
+            throw 'BLOCKED|Source review disposition is missing, duplicated, or not bound to its complete occurrence.'
+        }
+        $seenReferences = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($reference in @($disposition.evidenceReferences)) {
+            if ($reference -isnot [string] -or [string]$reference -cnotmatch '^[a-f0-9]{64}$' -or
+                -not $seenReferences.Add([string]$reference) -or -not $allowedEvidence.Contains([string]$reference)) {
+                throw 'BLOCKED|Source review disposition evidence reference is not unique bound challenge material.'
+            }
+        }
+        if ([string]$occurrence.severity -ceq 'medium') {
+            if ($disposition.classification -isnot [string] -or $disposition.decision -isnot [string] -or
+                [string]$disposition.classification -cnotin @('ordinary', 'exploitability', 'security-boundary', 'release-blocker') -or
+                [string]$disposition.decision -cnotin @('approved', 'requires-fix')) { throw 'BLOCKED|Source review MEDIUM disposition is unknown.' }
+            if ([string]$disposition.classification -cne 'ordinary' -or [string]$disposition.decision -cne 'approved') {
+                throw 'BLOCKED|A blocking MEDIUM finding cannot be accepted by source human review.'
+            }
+        }
+        elseif ([string]$occurrence.severity -cin @('low', 'informational')) {
+            if ($disposition.classification -isnot [string] -or $disposition.decision -isnot [string] -or
+                [string]$disposition.classification -cne 'retained' -or [string]$disposition.decision -cne 'retained') {
+                throw 'BLOCKED|Source human review must retain LOW and informational findings without reclassification.'
+            }
+        }
+        else { throw 'BLOCKED|Source human review cannot receive HIGH, CRITICAL, or unknown severity.' }
+    }
+
+    $signature = Get-StandardValidationRequiredProperty -Object $Receipt -Name 'signature' -Context $context
+    if ($signature -isnot [string] -or [string]$signature -notmatch '^[A-Za-z0-9+/]+={0,2}$' -or ([string]$signature).Length % 4 -ne 0) {
+        throw 'BLOCKED|Source review signature is not valid base64.'
+    }
+    $signatureBytes = $null
+    try { $signatureBytes = [Convert]::FromBase64String([string]$signature) }
+    catch { throw 'BLOCKED|Source review signature is not valid base64.' }
+    $trustRoot = Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'fixed human approval trust-anchor root'
+    $publicKeyPath = Get-StandardValidationTrustAnchorPath -KeyId 'humanApproval' -TrustAnchorRoot $trustRoot
+    $publicKey = Read-StandardCoreSourceReviewHumanPublicKey -Path $publicKeyPath
+    $actualKeySha256 = [string]$publicKey.sha256
+    if ($actualKeySha256 -cne [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 -or
+        [string]$Challenge.binding.humanKeySha256 -cne $actualKeySha256) { throw 'BLOCKED|Source review public key is not the fixed immutable human authority key.' }
+    $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider
+    try {
+        try { $rsa.FromXmlString([string]$publicKey.xml) } catch { throw 'BLOCKED|Source review public key could not be parsed.' }
+        $payload = Get-StandardCoreSourceReviewReceiptSignaturePayload -Receipt $Receipt
+        $payloadBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($payload)
+        if (-not $rsa.VerifyData($payloadBytes, 'SHA256', $signatureBytes)) { throw 'BLOCKED|Source review trusted human signature verification failed.' }
+    }
+    finally { $rsa.Dispose() }
+    return $true
+}
+
+function Wait-StandardCoreSourceReviewReceipt {
+    param([Parameter(Mandatory = $true)][string] $ReceiptPath, [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][int] $PhaseBudgetSeconds, [string] $CancellationPath)
+
+    $deadline = [datetime]::UtcNow.AddSeconds($PhaseBudgetSeconds)
+    $lastProgress = [datetime]::MinValue
+    while ($true) {
+        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
+            throw 'CANCELLED|Source human review was cancelled during the bounded receipt wait.'
+        }
+        $now = [datetime]::UtcNow
+        $remaining = [Math]::Max(0, [int][Math]::Ceiling(($deadline - $now).TotalSeconds))
+        if ([IO.File]::Exists($ReceiptPath) -or [IO.Directory]::Exists($ReceiptPath)) {
+            if ([IO.Directory]::Exists($ReceiptPath)) { throw 'BLOCKED|Source human review receipt path is not a regular file.' }
+            $receipt = Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $ReceiptPath -RunRoot $RunRoot -MaximumBytes 1MB -Context 'source human review receipt'
+            $acceptedAt = [datetime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            return [pscustomobject][ordered]@{ path = [string]$receipt.path; sha256 = [string]$receipt.sha256; value = $receipt.value; acceptedAt = $acceptedAt }
+        }
+        if ($remaining -le 0) { throw 'BLOCKED|Source human review receipt did not arrive before the bounded review window expired.' }
+        if (($now - $lastProgress).TotalSeconds -ge 15) {
+            [Console]::Error.WriteLine("source-human-review challenge=$($ReceiptPath.Replace('source-human-review-receipt-v1.json','source-human-review-challenge-v1.json')) receipt=$ReceiptPath reviewRemainingSeconds=$remaining")
+            $lastProgress = $now
+        }
+        Start-Sleep -Milliseconds ([Math]::Min(250, [Math]::Max(1, [int](($deadline - [datetime]::UtcNow).TotalMilliseconds))))
+    }
+}
+
+function Assert-StandardCoreSourceReviewReport {
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Occurrences,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $SuppressedLedger, [Parameter(Mandatory = $true)][bool] $HasMediumFinding)
+
+    $source = Get-StandardValidationProperty -Object $Report -Name 'sourceValidation'
+    $summary = Get-StandardValidationProperty -Object $source -Name 'sourceReview'
+    if ($null -eq $summary) { throw 'FAILED|Opted-in source review evidence is missing.' }
+    if ([string]$summary.status -ceq 'not-required') {
+        if ($HasMediumFinding) { throw 'FAILED|A MEDIUM finding cannot use the not-required source review variant.' }
+        Assert-StandardValidationExactPropertySet -Object $summary -Expected @('schemaVersion', 'contract', 'status') -Context 'source review not-required evidence'
+        return $true
+    }
+    if ([string]$summary.status -cne 'accepted' -or -not $HasMediumFinding) { throw 'FAILED|Accepted source review evidence must bind at least one MEDIUM occurrence.' }
+    $runRoot = Get-StandardValidationFullPath -Path ([string]$Report.artifacts.runRoot) -Context 'source review report run root'
+    $challengePath = Join-Path $runRoot 'source-human-review-challenge-v1.json'
+    $receiptPath = Join-Path $runRoot 'source-human-review-receipt-v1.json'
+    if ([string]$summary.challenge.path -cne $challengePath -or [string]$summary.receipt.path -cne $receiptPath) { throw 'FAILED|Source review artifact references must use the fixed run-owned paths.' }
+    $challengeSnapshot = Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $challengePath -RunRoot $runRoot -MaximumBytes 16MB -Context 'source human review challenge'
+    if ([string]$challengeSnapshot.sha256 -cne [string]$summary.challenge.sha256 -or
+        [string]$summary.bindingSha256 -cne (Get-StandardValidationTextSha256 -Value (Convert-StandardValidationValueToCanonicalJson -Value $challengeSnapshot.value.binding -Context 'source review binding digest'))) {
+        throw 'FAILED|Source review challenge digest or binding summary differs.'
+    }
+    $challenge = $challengeSnapshot.value
+    Assert-StandardValidationExactPropertySet -Object $challenge -Expected @('schemaVersion', 'contract', 'scope', 'createdAt', 'expiresAt', 'binding', 'findingOccurrences', 'suppressedLedger') -Context 'source review challenge'
+    Assert-StandardValidationExactPropertySet -Object $challenge.binding -Expected @(
+        'runId', 'candidateId', 'sourceRepository', 'sourceRevision', 'baseRevision', 'eventName', 'contentSha256',
+        'authorityRepository', 'authorityRevision', 'runnerSha256', 'coreContractSha256', 'policySha256', 'humanKeySha256',
+        'adapterIdentity', 'adapterSha256', 'activeSkills', 'sourceExecutionSha256', 'checksSha256', 'rawEvidence'
+    ) -Context 'source review challenge binding'
+    if (-not (Test-StandardValidationIntegerRange -Value $challenge.schemaVersion -Minimum 1 -Maximum 1) -or
+        [string]$challenge.contract -cne 'standard-source-human-review-v1' -or [string]$challenge.scope -cne 'source-validation-only' -or
+        [string]$challenge.binding.runId -cne [string]$Report.runId -or $challenge.findingOccurrences -isnot [array] -or
+        $challenge.suppressedLedger -isnot [array] -or $challenge.binding.rawEvidence -isnot [array]) { throw 'FAILED|Source review challenge shape or run binding is invalid.' }
+    [void](ConvertTo-StandardCoreSourceReviewUtcTime -Value $challenge.createdAt -Context 'source review challenge creation time')
+    [void](ConvertTo-StandardCoreSourceReviewUtcTime -Value $challenge.expiresAt -Context 'source review challenge expiry time')
+    $retainedEvidence = [object[]]@($challenge.binding.rawEvidence)
+    $authorityMaterials = Get-StandardCoreSourceReviewAuthorityMaterials -AuthorityRevision ([string]$Report.authority.revision) `
+        -RunnerSha256 ([string]$Report.authority.runnerSha256) -ContractSha256 ([string]$Report.authority.contractSha256)
+    if ([string]$challenge.binding.policySha256 -cne [string]$authorityMaterials.policySha256 -or
+        [string]$challenge.binding.humanKeySha256 -cne [string]$authorityMaterials.humanKeySha256) { throw 'FAILED|Source review policy or fixed human key changed after challenge creation.' }
+    $rebuilt = Get-StandardCoreSourceReviewBinding -Report $Report -Occurrences $Occurrences -SuppressedLedger $SuppressedLedger `
+        -CreatedAt ([string]$challenge.createdAt) -ExpiresAt ([string]$challenge.expiresAt) -PolicySha256 ([string]$authorityMaterials.policySha256) `
+        -HumanKeySha256 ([string]$authorityMaterials.humanKeySha256) -RetainedRawEvidence $retainedEvidence
+    $expectedChallenge = [pscustomobject][ordered]@{
+        schemaVersion = 1; contract = 'standard-source-human-review-v1'; scope = 'source-validation-only'
+        createdAt = [string]$challenge.createdAt; expiresAt = [string]$challenge.expiresAt; binding = $rebuilt
+        findingOccurrences = [object[]]$Occurrences; suppressedLedger = [object[]]$SuppressedLedger
+    }
+    if ((Convert-StandardValidationValueToCanonicalJson -Value $challenge -Context 'retained source review challenge') -cne
+        (Convert-StandardValidationValueToCanonicalJson -Value $expectedChallenge -Context 'rebuilt source review challenge')) {
+        throw 'FAILED|Retained source review challenge differs from the full report, native finding, or raw evidence reconstruction.'
+    }
+    if ([string]$summary.challenge.sha256 -cne $challengeSnapshot.sha256 -or
+        [string]$summary.key.id -cne 'humanApproval' -or [string]$summary.key.sha256 -cne [string]$challenge.binding.humanKeySha256 -or
+        [string]$summary.window.createdAt -cne [string]$challenge.createdAt -or [string]$summary.window.expiresAt -cne [string]$challenge.expiresAt) {
+        throw 'FAILED|Source review accepted summary does not bind the retained challenge window or fixed key.'
+    }
+    $receiptSnapshot = Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $receiptPath -RunRoot $runRoot -MaximumBytes 1MB -Context 'source human review receipt'
+    if ([string]$receiptSnapshot.sha256 -cne [string]$summary.receipt.sha256) { throw 'FAILED|Source review receipt bytes differ from the retained summary.' }
+    [void](Assert-StandardCoreSourceReviewReceipt -Receipt $receiptSnapshot.value -Challenge $challenge -ChallengeSha256 $challengeSnapshot.sha256 -AcceptedAt ([string]$summary.window.acceptedAt))
+    return $true
+}
+
+function Assert-StandardCoreSourceReviewDispatchBindings {
+    param([Parameter(Mandatory = $true)][string] $CandidateRoot, [Parameter(Mandatory = $true)][string] $SnapshotRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision, [Parameter(Mandatory = $true)][string] $ExpectedBaseRevision,
+        [Parameter(Mandatory = $true)][string] $SourceRepository, [Parameter(Mandatory = $true)][string] $AuthorityRevision,
+        [Parameter(Mandatory = $true)][string] $ExpectedContentSha256, [Parameter(Mandatory = $true)][string] $AdapterPath,
+        [Parameter(Mandatory = $true)][string] $AdapterSha256, [Parameter(Mandatory = $true)][string] $RunnerPath,
+        [Parameter(Mandatory = $true)][string] $RunnerSha256, [Parameter(Mandatory = $true)][string] $ContractPath,
+        [Parameter(Mandatory = $true)][string] $ContractSha256, [Parameter(Mandatory = $true)] $SourceEvidence,
+        [Parameter(Mandatory = $true)] $Pending, [Parameter(Mandatory = $true)][object[]] $CheckEvidence,
+        [Parameter(Mandatory = $true)][object[]] $AdapterChecks, [Parameter(Mandatory = $true)][object[]] $FrozenFiles)
+
+    Assert-StandardValidationSnapshotUnchanged -SnapshotRoot $SnapshotRoot -ExpectedSnapshotContentSha256 $ExpectedContentSha256
+    $candidateAfter = Get-StandardCoreTrackedInventory -CandidateRoot $CandidateRoot -ProcessWorkingRoot ([string](Split-Path -Parent $SnapshotRoot)) `
+        -ExpectedSourceRevision $ExpectedSourceRevision -ExpectedBaseRevision $ExpectedBaseRevision -SourceRepository $SourceRepository -AllowDevelopmentContent $false
+    if ([string]$candidateAfter.contentSha256 -cne $ExpectedContentSha256) { throw 'BLOCKED|Candidate tracked source changed during the source human review phase.' }
+    Assert-StandardCoreFrozenFiles -Files $FrozenFiles
+    Assert-StandardValidationEvidenceArtifacts
+    if ((Get-StandardValidationFileSha256 -Path $AdapterPath -Context 'source review adapter revalidation') -cne $AdapterSha256 -or
+        (Get-StandardValidationFileSha256 -Path ([string]$SourceEvidence.adapterSnapshot.path) -Context 'source review retained adapter') -cne [string]$SourceEvidence.adapterSnapshot.sha256) {
+        throw 'BLOCKED|Source review adapter bytes changed during repository checks or receipt wait.'
+    }
+    if ((Get-StandardValidationFileSha256 -Path $RunnerPath -Context 'source review runner revalidation') -cne $RunnerSha256 -or
+        (Get-StandardValidationFileSha256 -Path $ContractPath -Context 'source review contract revalidation') -cne $ContractSha256) {
+        throw 'BLOCKED|Source review authority runner or contract changed during repository checks or receipt wait.'
+    }
+    $materials = Get-StandardCoreSourceReviewAuthorityMaterials -AuthorityRevision $AuthorityRevision -RunnerSha256 $RunnerSha256 -ContractSha256 $ContractSha256
+    if ([string]$materials.policySha256 -cne [string]$Pending.policySha256 -or
+        [string]$materials.humanKeySha256 -cne [string]$Pending.humanKeySha256 -or
+        (Convert-StandardValidationValueToCanonicalJson -Value ([object[]]$materials.authorityMaterials) -Context 'source review fixed authority material') -cne
+        (Convert-StandardValidationValueToCanonicalJson -Value ([object[]]$Pending.authorityMaterials) -Context 'captured source review authority material')) {
+        throw 'BLOCKED|Source review authority policy or fixed key material changed during repository checks or receipt wait.'
+    }
+    foreach ($reference in @($Pending.expectedEvidenceArtifacts)) {
+        if ((Get-StandardValidationFileSha256 -Path ([string]$reference.path) -Context 'source review raw event revalidation') -cne [string]$reference.sha256) {
+            throw 'BLOCKED|Source review raw event bytes changed during repository checks or receipt wait.'
+        }
+    }
+    foreach ($reference in @($Pending.nativeReports)) {
+        if ((Get-StandardValidationFileSha256 -Path ([string]$reference.path) -Context 'source review native report revalidation') -cne [string]$reference.sha256) {
+            throw 'BLOCKED|Source review native report bytes changed during repository checks or receipt wait.'
+        }
+    }
+    foreach ($reference in @($Pending.additionalRawEvidence)) {
+        if ((Get-StandardValidationFileSha256 -Path ([string]$reference.path) -Context 'source review additional evidence revalidation') -cne [string]$reference.sha256) {
+            throw 'BLOCKED|Source review additional evidence bytes changed during repository checks or receipt wait.'
+        }
+    }
+    foreach ($check in $CheckEvidence) {
+        foreach ($streamName in @('stdout', 'stderr')) {
+            if ((Get-StandardValidationFileSha256 -Path ([string]$check.($streamName + 'Path')) -Context "source review $($check.id) $streamName revalidation") -cne [string]$check.($streamName + 'Sha256')) {
+                throw "BLOCKED|Source review check $streamName bytes changed during repository checks or receipt wait."
+            }
+        }
+    }
+    foreach ($check in $AdapterChecks) {
+        if ((Get-StandardValidationFileSha256 -Path ([string]$check._resolvedExecutable) -Context 'source review check executable revalidation') -cne [string]$check.executableSha256) {
+            throw 'BLOCKED|Source review repository check executable changed during receipt wait.'
+        }
+    }
+    return $true
+}
+
 function Invoke-StandardCoreSourceTools {
     param($Spec, $SkillSet, [string] $RunId, [string] $SourceRevision, [string] $AuthorityRevision,
         [string] $SnapshotRoot, [string] $ContentSha256, [string] $RunRoot,
         [string] $AdapterPath, [string] $AdapterSha256, [string] $ArtifactsRoot,
         [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath)
+    $sourceReviewOptIn = Test-StandardCoreSourceReviewOptIn -Spec $Spec
     $specFields=@('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts')
+    if ($sourceReviewOptIn) { $specFields += 'sourceReview' }
     $testOwnership=Get-StandardValidationProperty -Object $Spec -Name 'testOwnership'
     if (Test-StandardValidationHasProperty -Object $Spec -Name 'testOwnership') {
         if ($testOwnership -isnot [string] -or $testOwnership -cne 'central-third-party-raw-skill-v1') { throw 'INVALID|Unknown source test ownership.' }
@@ -8021,6 +9275,11 @@ function Invoke-StandardCoreSourceTools {
     $script:StandardValidationAuthorityEvidence = $null
     $script:StandardValidationLaunchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger.Clear()
+    $sourceReviewOccurrences = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewSuppressedLedger = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewNativeReports = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewAdditionalRawEvidence = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewNeedsReview = $false
     foreach ($dispatch in $dispatches) {
         $selectedTool = if ($dispatch.tool -ceq 'package-adapter') { @() } else { @([string]$dispatch.tool) }
         $dispatchCommand = $commands[$dispatch.slot]
@@ -8041,7 +9300,22 @@ function Invoke-StandardCoreSourceTools {
         $nativeSkills=if ($null -eq $dispatch.skill) {@($SkillSet.ids)} else {@([string]$dispatch.skill.id)}
         $receiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -RetainedReceiptMap $receiptMap -ToolNames $selectedTool -AdditionalPaths $dispatchPaths
         Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot -ReceiptMap $receiptMap
-        if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
+        if ($sourceReviewOptIn) {
+            $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $result.envelope -Event $result.event -Skills $nativeSkills `
+                -RunRoot $RunRoot -SnapshotRoot $SnapshotRoot -SkillsRootRelative $SkillSet.relative -FrozenFiles ([object[]]@($Spec.frozenFiles))
+            foreach ($occurrence in @($projection.occurrences)) { $sourceReviewOccurrences.Add($occurrence) }
+            foreach ($entry in @($projection.suppressedLedger)) { $sourceReviewSuppressedLedger.Add($entry) }
+            foreach ($reference in @($projection.additionalRawEvidence)) { $sourceReviewAdditionalRawEvidence.Add($reference) }
+            foreach ($native in @((Get-StandardValidationProperty -Object $result.envelope -Name 'nativeReports'))) {
+                if ($null -eq $native) { continue }
+                $sourceReviewNativeReports.Add([pscustomobject][ordered]@{ path = [string]$native.path; sha256 = [string]$native.sha256 })
+            }
+        }
+        $hasMediumFinding = [bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")
+        if ($hasMediumFinding) {
+            if (-not $sourceReviewOptIn) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
+            $sourceReviewNeedsReview = $true
+        }
         if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
     }
     $sourceResult = [pscustomobject][ordered]@{
@@ -8050,6 +9324,17 @@ function Invoke-StandardCoreSourceTools {
         skillsRoot=$SkillSet.relative; toolReceipts=@($Spec.toolReceipts); frozenFiles=@($Spec.frozenFiles); events=@($events.ToArray()); adapterSnapshot=[pscustomobject]@{path=$retainedAdapterPath;sha256=$AdapterSha256}
     }
     if ($null -ne $testOwnership) { $sourceResult | Add-Member -NotePropertyName testOwnership -NotePropertyValue $testOwnership }
+    if ($sourceReviewOptIn) {
+        Assert-StandardValidationEvidenceArtifacts
+        $sourceResult | Add-Member -NotePropertyName sourceReviewPending -NotePropertyValue ([pscustomobject][ordered]@{
+            needsReview = [bool]$sourceReviewNeedsReview
+            occurrences = [object[]]$sourceReviewOccurrences.ToArray()
+            suppressedLedger = [object[]]$sourceReviewSuppressedLedger.ToArray()
+            nativeReports = [object[]]$sourceReviewNativeReports.ToArray()
+            additionalRawEvidence = [object[]]$sourceReviewAdditionalRawEvidence.ToArray()
+            expectedEvidenceArtifacts = [object[]]@($script:StandardValidationEvidenceArtifactLedger | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$_.path; sha256 = [string]$_.sha256 } })
+        })
+    }
     return $sourceResult
 }
 
@@ -8090,6 +9375,28 @@ function Assert-StandardCoreSourceCheckReport {
     $adapter=$adapterSnapshot.value
     if ([string]$adapter.adapter -cne 'standard-core-adapter-v2' -or $adapter.schemaVersion -ne 2 -or
         [string]$adapter.skillsRoot -cne [string]$source.skillsRoot -or (@($adapter.activeSkills) -join ';') -cne (@($source.activeSkills) -join ';')) { throw 'FAILED|Source retained adapter identity differs.' }
+    $adapterSourceReviewOptIn = Test-StandardCoreSourceReviewOptIn -Spec $adapter.sourceValidation
+    $reportHasSourceReview = Test-StandardValidationHasProperty -Object $source -Name 'sourceReview'
+    if ($adapterSourceReviewOptIn -ne $reportHasSourceReview) { throw 'FAILED|Source review evidence must exactly match retained adapter opt-in.' }
+    if ($reportHasSourceReview) {
+        $sourceReview = Get-StandardValidationProperty -Object $source -Name 'sourceReview'
+        if (-not (Test-StandardValidationIntegerRange -Value $sourceReview.schemaVersion -Minimum 1 -Maximum 1) -or
+            [string]$sourceReview.contract -cne 'standard-source-human-review-v1') { throw 'FAILED|Source review evidence version or contract is invalid.' }
+        if ([string]$sourceReview.status -ceq 'not-required') {
+            Assert-StandardValidationExactPropertySet -Object $sourceReview -Expected @('schemaVersion', 'contract', 'status') -Context 'source review not-required evidence'
+        }
+        elseif ([string]$sourceReview.status -ceq 'accepted') {
+            Assert-StandardValidationExactPropertySet -Object $sourceReview -Expected @('schemaVersion', 'contract', 'status', 'challenge', 'receipt', 'bindingSha256', 'key', 'window') -Context 'source review accepted evidence'
+            Assert-StandardValidationExactPropertySet -Object $sourceReview.challenge -Expected @('path', 'sha256') -Context 'source review challenge reference'
+            Assert-StandardValidationExactPropertySet -Object $sourceReview.receipt -Expected @('path', 'sha256') -Context 'source review receipt reference'
+            Assert-StandardValidationExactPropertySet -Object $sourceReview.key -Expected @('id', 'sha256') -Context 'source review key reference'
+            Assert-StandardValidationExactPropertySet -Object $sourceReview.window -Expected @('createdAt', 'expiresAt', 'acceptedAt') -Context 'source review acceptance window'
+            if ([string]$sourceReview.challenge.sha256 -cnotmatch '^[a-f0-9]{64}$' -or [string]$sourceReview.receipt.sha256 -cnotmatch '^[a-f0-9]{64}$' -or
+                [string]$sourceReview.bindingSha256 -cnotmatch '^[a-f0-9]{64}$' -or [string]$sourceReview.key.id -cne 'humanApproval' -or
+                [string]$sourceReview.key.sha256 -cne [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256) { throw 'FAILED|Source review accepted evidence does not name the fixed authority binding.' }
+        }
+        else { throw 'FAILED|Source review evidence has an unsupported status.' }
+    }
     foreach ($field in @('toolReceipts','frozenFiles')) {
         if ((ConvertTo-Json -InputObject $adapter.sourceValidation.$field -Depth 20 -Compress) -cne (ConvertTo-Json -InputObject $source.$field -Depth 20 -Compress)) { throw 'FAILED|Source tool identity differs from the dispatched adapter.' }
     }
@@ -8108,6 +9415,9 @@ function Assert-StandardCoreSourceCheckReport {
     $expected += 'skillspector-static|static-analyzer|'
     if (@($source.events).Count -ne $expected.Count) { throw 'FAILED|Source process inventory is incomplete.' }
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $sourceReviewOccurrences = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewSuppressedLedger = New-Object 'System.Collections.Generic.List[object]'
+    $sourceReviewHasMedium = $false
     for ($index=0; $index -lt $expected.Count; $index++) {
         $event = @($source.events)[$index]
         $slot=switch ([string]$event.toolId) { 'package-adapter' {'packageAdapter'}; 'skill-validator' {'skillValidator'}; 'skill-tools' {'skillTools'}; 'static-analyzer' {'staticAnalyzer'}; default {throw 'FAILED|Source tool role is unknown.'} }
@@ -8146,8 +9456,19 @@ function Assert-StandardCoreSourceCheckReport {
         }
         $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
         Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot -ReceiptMap $finalReceiptMap
-        if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
-            ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
+        $hasMediumFinding = [bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings')
+        if ($hasMediumFinding) {
+            if (-not $adapterSourceReviewOptIn) { throw 'FAILED|Source report contains a MEDIUM finding without the retained source-review opt-in.' }
+            $sourceReviewHasMedium = $true
+        }
+        if ($adapterSourceReviewOptIn) {
+            $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills $nativeSkills `
+                -RunRoot $Report.artifacts.runRoot -SnapshotRoot $Report.artifacts.snapshotRoot -SkillsRootRelative ([string]$source.skillsRoot) `
+                -FrozenFiles ([object[]]@($source.frozenFiles))
+            foreach ($occurrence in @($projection.occurrences)) { $sourceReviewOccurrences.Add($occurrence) }
+            foreach ($entry in @($projection.suppressedLedger)) { $sourceReviewSuppressedLedger.Add($entry) }
+        }
+        if ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source report findings or Static coverage did not pass.' }
     }
     if (@($Report.checks).Count -ne 2 -or $Report.checks[0].kind -cne 'general' -or $Report.checks[1].kind -cne 'pester') { throw 'FAILED|Source report requires the complete repository checks.' }
     for ($checkIndex=0; $checkIndex -lt @($Report.checks).Count; $checkIndex++) {
@@ -8197,7 +9518,7 @@ function Assert-StandardCoreSourceCheckReport {
     elseif ($null -ne (Get-StandardValidationProperty -Object $cases -Name 'testSourceIdentity')) { throw 'FAILED|Candidate-owned tests cannot substitute another test source.' }
     # Preserve the existing Pester sidecar representation: its snapshot digest
     # is the sorted path/hash JSON digest, distinct from the Core tree digest.
-    $pesterInventory = @($snapshotInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{path=[string]$_.path;sha256=[string]$_.sha256} })
+    $pesterInventory = @($snapshotInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject][ordered]@{path=[string]$_.path;sha256=[string]$_.sha256} })
     $pesterSnapshotHash = Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $pesterInventory -Depth 3 -Compress)
     if ([string]$cases.candidateSnapshotSha256 -cne $pesterSnapshotHash -or [string]$cases.shardIdentity -cne 'core-full' -or
         $cases.shardUnion.complete -isnot [bool] -or -not $cases.shardUnion.complete -or
@@ -8224,6 +9545,10 @@ function Assert-StandardCoreSourceCheckReport {
     $testFiles=@($testInventory | Where-Object { [string]$_.path -clike 'tests/*.Tests.ps1' } | ForEach-Object { ([string]$_.path).Substring(6) } | Sort-Object)
     foreach ($field in @('testFileInventory','containerFileInventory','discoveredCaseFileInventory')) {
         if (@($testFiles).Count -eq 0 -or (@($cases.$field | Sort-Object) -join ';') -cne ($testFiles -join ';')) { throw 'FAILED|Source Pester complete test-file inventory differs.' }
+    }
+    if ($adapterSourceReviewOptIn) {
+        [void](Assert-StandardCoreSourceReviewReport -Report $Report -Occurrences ([object[]]$sourceReviewOccurrences.ToArray()) `
+            -SuppressedLedger ([object[]]$sourceReviewSuppressedLedger.ToArray()) -HasMediumFinding ([bool]$sourceReviewHasMedium))
     }
     $svReportState = 'completed'
     return $true
@@ -8272,6 +9597,30 @@ function New-StandardCoreEvidence {
     }
     if ($null -ne $SourceEvidence) { $result | Add-Member -NotePropertyName sourceValidation -NotePropertyValue $SourceEvidence }
     return $result
+}
+
+function Resolve-StandardCoreSourceReviewTerminalEvidence {
+    param([Parameter(Mandatory = $true)][string] $State, $SourceEvidence, [string] $ChallengePath,
+        [string] $ReceiptPath, [string] $FailureMessage)
+
+    $terminalState = $State
+    $terminalSource = $SourceEvidence
+    $terminalMessage = $FailureMessage
+    $pending = Get-StandardValidationProperty -Object $SourceEvidence -Name 'sourceReviewPending'
+    if ($null -ne $pending) {
+        if ($terminalState -ceq 'PASS') {
+            $terminalState = 'FAILED'
+            $terminalMessage = 'Source review remained provisional when the run reached final evidence publication.'
+        }
+        $terminalSource = $null
+        if (-not [string]::IsNullOrWhiteSpace($ChallengePath)) {
+            $retained = "Run-owned source review challenge retained at '$ChallengePath'"
+            if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) { $retained += "; fixed receipt path '$ReceiptPath'" }
+            if ([string]::IsNullOrWhiteSpace($terminalMessage)) { $terminalMessage = $retained }
+            else { $terminalMessage = "$terminalMessage $retained." }
+        }
+    }
+    return [pscustomobject][ordered]@{ state = $terminalState; sourceEvidence = $terminalSource; failureMessage = $terminalMessage }
 }
 
 function Invoke-StandardCoreValidationRun {
@@ -8326,6 +9675,9 @@ function Invoke-StandardCoreValidationRun {
     $adapterValue = $null
     $adapterChecks = @()
     $toolHashes = @{}
+    $sourceReviewPolicySha256BeforeTools = $null
+    $sourceReviewChallengePath = $null
+    $sourceReviewReceiptPath = $null
     $finalWritten = $false
     try {
         if ($TimeoutSeconds -lt 1) { throw 'INVALID|TimeoutSeconds must be at least one second.' }
@@ -8533,11 +9885,25 @@ function Invoke-StandardCoreValidationRun {
         }
         if ($SourceValidation) {
             if ($authorityContentMode -cne 'source') { throw 'BLOCKED|Source validation requires immutable authority bytes.' }
+            if (Test-StandardCoreSourceReviewOptIn -Spec $adapterValue.sourceValidation) {
+                $reviewPolicyPath = Join-Path $authorityRoot 'docs/standards/validation-security-gate.json'
+                Assert-StandardValidationRegularFile -Path $reviewPolicyPath -Context 'source review policy before tools'
+                Assert-StandardValidationNoReparsePoints -Root $reviewPolicyPath -Context 'source review policy before tools'
+                $sourceReviewPolicySha256BeforeTools = Get-StandardValidationFileSha256 -Path $reviewPolicyPath -Context 'source review policy before tools'
+            }
             $sourceEvidence = Invoke-StandardCoreSourceTools -Spec $adapterValue.sourceValidation -SkillSet $skillSet `
                 -RunId $runId -SourceRevision $SourceRevision -AuthorityRevision $AuthorityRevision `
                 -SnapshotRoot $snapshotRoot -ContentSha256 $candidateSnapshot.contentSha256 -RunRoot $runRoot `
                 -AdapterPath $adapterFull -AdapterSha256 $adapterSha256 -ArtifactsRoot $artifactRootFull `
                 -TrustedToolRoot $trustedRootFull -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath
+            $sourceReviewPending = Get-StandardValidationProperty -Object $sourceEvidence -Name 'sourceReviewPending'
+            if ($null -ne $sourceReviewPending -and [bool]$sourceReviewPending.needsReview) {
+                $reviewMaterials = Get-StandardCoreSourceReviewAuthorityMaterials -AuthorityRevision $AuthorityRevision `
+                    -RunnerSha256 $runnerSha256 -ContractSha256 $contractSha256 -ExpectedPolicySha256 $sourceReviewPolicySha256BeforeTools
+                $sourceReviewPending | Add-Member -NotePropertyName policySha256 -NotePropertyValue ([string]$reviewMaterials.policySha256)
+                $sourceReviewPending | Add-Member -NotePropertyName humanKeySha256 -NotePropertyValue ([string]$reviewMaterials.humanKeySha256)
+                $sourceReviewPending | Add-Member -NotePropertyName authorityMaterials -NotePropertyValue ([object[]]$reviewMaterials.authorityMaterials)
+            }
             $candidateAfter = Get-StandardCoreTrackedInventory -CandidateRoot $candidateRootFull -ProcessWorkingRoot $runRoot -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -SourceRepository $SourceRepository -AllowDevelopmentContent $false
             if ($candidateAfter.contentSha256 -cne $candidateSnapshot.contentSha256) { throw 'BLOCKED|Candidate changed during source tool dispatch.' }
         }
@@ -8621,6 +9987,57 @@ function Invoke-StandardCoreValidationRun {
             Assert-StandardCoreFrozenFiles -Files @($adapterValue.sourceValidation.frozenFiles)
             $casePath = Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
             $sourceEvidence | Add-Member -NotePropertyName pesterCaseInventory -NotePropertyValue ([pscustomobject]@{path=$casePath;sha256=(Get-StandardValidationFileSha256 -Path $casePath -Context 'source Pester inventory')})
+            $sourceReviewPending = Get-StandardValidationProperty -Object $sourceEvidence -Name 'sourceReviewPending'
+            if ($null -ne $sourceReviewPending) {
+                $reviewOccurrences = [object[]]@($sourceReviewPending.occurrences)
+                $reviewSuppressedLedger = [object[]]@($sourceReviewPending.suppressedLedger)
+                if ([bool]$sourceReviewPending.needsReview) {
+                    [void](Assert-StandardCoreSourceReviewDispatchBindings -CandidateRoot $candidateRootFull -SnapshotRoot $snapshotRoot `
+                        -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -SourceRepository $SourceRepository `
+                        -AuthorityRevision $AuthorityRevision -ExpectedContentSha256 $candidateSnapshot.contentSha256 -AdapterPath $adapterFull `
+                        -AdapterSha256 $adapterSha256 -RunnerPath $runnerPath -RunnerSha256 $runnerSha256 -ContractPath $contractPath `
+                        -ContractSha256 $contractSha256 -SourceEvidence $sourceEvidence -Pending $sourceReviewPending `
+                        -CheckEvidence ([object[]]$checkEvidence.ToArray()) -AdapterChecks ([object[]]$adapterChecks) `
+                        -FrozenFiles ([object[]]@($adapterValue.sourceValidation.frozenFiles)))
+                    $reviewCandidateReport = New-StandardCoreEvidence -RunId $runId -State PASS -ExitCode 0 -ContentMode $contentMode `
+                        -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence `
+                        -Checks ([object[]]$checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence
+                    $challenge = New-StandardCoreSourceReviewChallenge -Report $reviewCandidateReport -Occurrences $reviewOccurrences `
+                        -SuppressedLedger $reviewSuppressedLedger -TimeoutSeconds $TimeoutSeconds
+                    $sourceReviewChallengePath = [string]$challenge.path
+                    $sourceReviewReceiptPath = [string]$challenge.receiptPath
+                    [Console]::Error.WriteLine("source-human-review challenge=$($challenge.path) receipt=$($challenge.receiptPath) reviewRemainingSeconds=$($challenge.phaseBudgetSeconds)")
+                    $received = Wait-StandardCoreSourceReviewReceipt -ReceiptPath $challenge.receiptPath -RunRoot $runRoot `
+                        -PhaseBudgetSeconds $challenge.phaseBudgetSeconds -CancellationPath $CancellationPath
+                    [void](Assert-StandardCoreSourceReviewDispatchBindings -CandidateRoot $candidateRootFull -SnapshotRoot $snapshotRoot `
+                        -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -SourceRepository $SourceRepository `
+                        -AuthorityRevision $AuthorityRevision -ExpectedContentSha256 $candidateSnapshot.contentSha256 -AdapterPath $adapterFull `
+                        -AdapterSha256 $adapterSha256 -RunnerPath $runnerPath -RunnerSha256 $runnerSha256 -ContractPath $contractPath `
+                        -ContractSha256 $contractSha256 -SourceEvidence $sourceEvidence -Pending $sourceReviewPending `
+                        -CheckEvidence ([object[]]$checkEvidence.ToArray()) -AdapterChecks ([object[]]$adapterChecks) `
+                        -FrozenFiles ([object[]]@($adapterValue.sourceValidation.frozenFiles)))
+                    [void](Assert-StandardCoreSourceReviewReceipt -Receipt $received.value -Challenge $challenge.value `
+                        -ChallengeSha256 $challenge.sha256 -AcceptedAt $received.acceptedAt)
+                    $sourceEvidence | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+                        schemaVersion = 1
+                        contract = 'standard-source-human-review-v1'
+                        status = 'accepted'
+                        challenge = [pscustomobject][ordered]@{ path = [string]$challenge.path; sha256 = [string]$challenge.sha256 }
+                        receipt = [pscustomobject][ordered]@{ path = [string]$received.path; sha256 = [string]$received.sha256 }
+                        bindingSha256 = [string]$challenge.bindingSha256
+                        key = [pscustomobject][ordered]@{ id = 'humanApproval'; sha256 = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 }
+                        window = [pscustomobject][ordered]@{ createdAt = [string]$challenge.createdAt; expiresAt = [string]$challenge.expiresAt; acceptedAt = [string]$received.acceptedAt }
+                    })
+                }
+                else {
+                    $sourceEvidence | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+                        schemaVersion = 1
+                        contract = 'standard-source-human-review-v1'
+                        status = 'not-required'
+                    })
+                }
+                [void]$sourceEvidence.PSObject.Properties.Remove('sourceReviewPending')
+            }
             $proposed = New-StandardCoreEvidence -RunId $runId -State PASS -ExitCode 0 -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence
             [void](Assert-StandardCoreSourceCheckReport -Report $proposed -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -ExpectedAuthorityRevision $AuthorityRevision -ExpectedEventName $EventName -ArtifactsRoot $artifactRootFull -OutputPath $outputFull -ProcessExitCode 0)
         }
@@ -8668,6 +10085,11 @@ function Invoke-StandardCoreValidationRun {
                 $failureMessage = "Core artifact lock ownership check failed before final evidence publication: $($_.Exception.Message)"
             }
         }
+        $terminalSourceResult = Resolve-StandardCoreSourceReviewTerminalEvidence -State $state -SourceEvidence $sourceEvidence `
+            -ChallengePath $sourceReviewChallengePath -ReceiptPath $sourceReviewReceiptPath -FailureMessage $failureMessage
+        $state = [string]$terminalSourceResult.state
+        $sourceEvidenceForReport = $terminalSourceResult.sourceEvidence
+        $failureMessage = [string]$terminalSourceResult.failureMessage
         $exitCode = [int]$script:StandardValidationExitCodes[$state]
         $finalEvidence = New-StandardCoreEvidence `
             -RunId $runId `
@@ -8679,7 +10101,7 @@ function Invoke-StandardCoreValidationRun {
             -Adapter $adapterEvidence `
             -Checks @($checkEvidence.ToArray()) `
             -Artifacts $artifactEvidence `
-            -SourceEvidence $sourceEvidence `
+            -SourceEvidence $sourceEvidenceForReport `
             -FailureMessage $failureMessage
         if ($null -ne $outputReservationStream) {
             try {
@@ -8691,7 +10113,7 @@ function Invoke-StandardCoreValidationRun {
                 if ($state -eq 'PASS') {
                     $state = 'FAILED'
                     $failureMessage = "Core evidence write failed: $($_.Exception.Message)"
-                    $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence -FailureMessage $failureMessage
+                    $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidenceForReport -FailureMessage $failureMessage
                 }
             }
             try { $outputReservationStream.Dispose() } catch { }

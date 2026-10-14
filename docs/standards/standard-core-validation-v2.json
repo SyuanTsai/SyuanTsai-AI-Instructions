@@ -65,6 +65,16 @@
     "semantic": "Source checks cover stages 1–5 only; no provider, consent, signer, key or release prerequisite. Existing explicit Semantic and full lifecycle retain their own contract.",
     "requiredCheckGate": "Assert-StandardCoreSourceCheckReport; Core-only PASS never qualifies. Same-workflow projection only; no release/install/publish authorization.",
     "testOwnership": "Omitted: complete unfiltered candidate tests tree. Explicit central-third-party-raw-skill-v1: successful candidate-bound raw package evidence, complete fixed central raw suite, same immutable authority revision and frozen files, separately bound testSourceIdentity; no caller-defined root or test filter. Both modes require the complete actual discovery/execution union and zero unpassed cases.",
+    "sourceHumanReview": {
+      "contract": "standard-source-human-review-v1",
+      "selection": "Optional exact sourceValidation.sourceReview extension with schemaVersion=1; no extension preserves existing v2 behavior. Ordinary MEDIUM is eligible only when this extension is present.",
+      "challenge": "After every source tool and every repository check passes and all owned children are cleaned up, revalidate the saved pre-check source/native/raw bindings and write one canonical challenge under the fresh runRoot. Bind every finding occurrence, full original native finding, tool/event/skill, native report digest and ordinal, complete checks, source, candidate, authority, adapter, execution receipts and raw evidence.",
+      "receipt": "Accept only a bounded canonical UTF-8 receipt for that exact challenge, signed with RSA/SHA256 by the fixed immutable humanApproval public key and the source-review-v1 domain. Require a complete one-to-one disposition list with rationale, source-only scope and evidence references. Caller-selected keys, unsigned claims, old human-approval receipts, supervisor signatures, missing/duplicate findings and blocking MEDIUM decisions are rejected.",
+      "window": "Wait once in the same runner process for at most min(TimeoutSeconds, 900) seconds. Cancellation is CANCELLED and missing/late receipt is BLOCKED. Preserve the signed challenge window when strict readers later re-read an artifact; do not treat elapsed age from reader time as invalidating a valid completed run.",
+      "severity": "High, Critical, unknown severity, incomplete or ambiguous native mapping, incomplete coverage, failed process, failed cleanup or failed/skipped repository tests remain blocking. Only every MEDIUM occurrence classified ordinary with decision=approved can complete source validation.",
+      "cleanPath": "An opted-in run with no MEDIUM emits sourceValidation.sourceReview.status=not-required without reading the human key or waiting. A run without the extension emits no sourceValidation.sourceReview property and retains the original v2 no-review path.",
+      "authority": "Both dispatcher and Assert-StandardCoreSourceCheckReport independently rebuild and verify the same challenge and receipt from retained bytes and the fixed authority key. Accepted source evidence always remains releaseEligible=false and cannot satisfy publish, install or release approval."
+    },
     "releaseEligible": false
   },
   "releaseEligible": false

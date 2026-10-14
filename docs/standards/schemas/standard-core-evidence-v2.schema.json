@@ -20,7 +20,7 @@
     "adapter": { "oneOf": [{ "$ref": "#/$defs/adapter" }, { "type": "null" }] },
     "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } },
     "artifacts": { "oneOf": [{ "$ref": "#/$defs/artifacts" }, { "type": "null" }] },
-    "sourceValidation": {"type": "object", "additionalProperties": false, "required": ["status", "runId", "candidateId", "sourceRevision", "contentSha256", "authorityRevision", "activeSkills", "toolReceipts", "frozenFiles", "events", "skillsRoot", "adapterSnapshot"], "properties": {"status": {"const": "passed"}, "runId": {"type": "string", "pattern": "^[a-f0-9]{32}$"}, "candidateId": {"$ref": "#/$defs/sha256"}, "sourceRevision": {"$ref": "#/$defs/revision"}, "contentSha256": {"$ref": "#/$defs/sha256"}, "authorityRevision": {"$ref": "#/$defs/revision"}, "activeSkills": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "testOwnership": {"const": "central-third-party-raw-skill-v1"}, "toolReceipts": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/sourceFrozenFile"}}, "frozenFiles": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceFrozenFile"}}, "events": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/sourceEvent"}}, "skillsRoot": {"type": "string", "minLength": 1}, "pesterCaseInventory": {"$ref": "#/$defs/sourceFrozenFile"}, "adapterSnapshot": {"$ref": "#/$defs/sourceFrozenFile"}}},
+    "sourceValidation": {"type": "object", "additionalProperties": false, "required": ["status", "runId", "candidateId", "sourceRevision", "contentSha256", "authorityRevision", "activeSkills", "toolReceipts", "frozenFiles", "events", "skillsRoot", "adapterSnapshot"], "properties": {"status": {"const": "passed"}, "runId": {"type": "string", "pattern": "^[a-f0-9]{32}$"}, "candidateId": {"$ref": "#/$defs/sha256"}, "sourceRevision": {"$ref": "#/$defs/revision"}, "contentSha256": {"$ref": "#/$defs/sha256"}, "authorityRevision": {"$ref": "#/$defs/revision"}, "activeSkills": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "testOwnership": {"const": "central-third-party-raw-skill-v1"}, "toolReceipts": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/sourceFrozenFile"}}, "frozenFiles": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceFrozenFile"}}, "events": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/sourceEvent"}}, "skillsRoot": {"type": "string", "minLength": 1}, "pesterCaseInventory": {"$ref": "#/$defs/sourceFrozenFile"}, "adapterSnapshot": {"$ref": "#/$defs/sourceFrozenFile"}, "sourceReview": {"$ref": "#/$defs/sourceReviewEvidence"}}},
     "failure": { "oneOf": [{ "$ref": "#/$defs/failure" }, { "type": "null" }] }
   },
   "allOf": [
@@ -34,6 +34,40 @@
   "$defs": {
     "sourceFrozenFile": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
     "sourceEvent": {"type": "object", "additionalProperties": false, "required": ["eventId", "stageId", "toolId", "candidateId", "commandSha256", "exitCode", "status", "outputSha256", "outputPath", "cleanedUp"], "properties": {"eventId": {"type": "string", "format": "uuid"}, "stageId": {"type": "string", "minLength": 1}, "toolId": {"type": "string", "minLength": 1}, "skillId": {"type": ["string", "null"]}, "candidateId": {"$ref": "#/$defs/sha256"}, "commandSha256": {"$ref": "#/$defs/sha256"}, "exitCode": {"type": "integer"}, "status": {"enum": ["passed", "failed", "startup-failed", "timeout", "cancelled", "cleanup-failed", "invalid-output"]}, "outputSha256": {"$ref": "#/$defs/sha256"}, "outputPath": {"type": "string", "minLength": 1}, "cleanedUp": {"type": "boolean"}}},
+    "sourceReviewEvidence": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "contract", "status"],
+          "properties": {
+            "schemaVersion": { "const": 1 },
+            "contract": { "const": "standard-source-human-review-v1" },
+            "status": { "const": "not-required" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "contract", "status", "challenge", "receipt", "bindingSha256", "key", "window"],
+          "properties": {
+            "schemaVersion": { "const": 1 },
+            "contract": { "const": "standard-source-human-review-v1" },
+            "status": { "const": "accepted" },
+            "challenge": { "$ref": "#/$defs/sourceReviewArtifact" },
+            "receipt": { "$ref": "#/$defs/sourceReviewArtifact" },
+            "bindingSha256": { "$ref": "#/$defs/sha256" },
+            "key": {
+              "type": "object", "additionalProperties": false, "required": ["id", "sha256"],
+              "properties": { "id": { "const": "humanApproval" }, "sha256": { "const": "1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b" } }
+            },
+            "window": {
+              "type": "object", "additionalProperties": false, "required": ["createdAt", "expiresAt", "acceptedAt"],
+              "properties": { "createdAt": { "type": "string", "format": "date-time" }, "expiresAt": { "type": "string", "format": "date-time" }, "acceptedAt": { "type": "string", "format": "date-time" } }
+            }
+          }
+        }
+      ]
+    },
+    "sourceReviewArtifact": { "type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": { "path": { "type": "string", "minLength": 1 }, "sha256": { "$ref": "#/$defs/sha256" } } },
     "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "revision": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
     "inventoryEntry": {

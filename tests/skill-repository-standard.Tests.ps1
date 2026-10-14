@@ -717,10 +717,10 @@ Describe 'SYP258 source validation result gate' {
     ) {
         param([string]$Name,[int]$Index,[scriptblock]$Change)
         $report=New-SourceGateFixture
-        Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId
+        Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root
         Set-SourceGateReceipt -Report $report -Mutate $Change -Index $Index
         $rejected=$false
-        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId } catch {$rejected=$true}
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root } catch {$rejected=$true}
         if(-not $rejected){throw "Unsigned resolver receipt '$Name' was accepted."}
     }
 
@@ -742,6 +742,1786 @@ Describe 'SYP258 source validation result gate' {
         }
         $valid=Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath -ErrorAction SilentlyContinue
         if($valid -ne $Expected){throw "Source '$Kind' without case sidecar has schema validity '$valid', expected '$Expected'."}
+    }
+}
+
+Describe 'SYP314 source human review v1 contract' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1')
+        $script:Syp314AdapterSchemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-adapter-v2.schema.json'
+    }
+
+    # Scenario: An existing v2 source adapter opts into the explicit source-human-review-v1 extension.
+    # Purpose: Keep the old no-review v2 adapter valid while accepting only the closed, typed v1 opt-in.
+    It 'UnitT10_accepts_the_versioned_source_review_extension_and_preserves_the_v2_baseline' {
+        $fixture = New-SourceGateFixture
+        $adapter = Get-Content -Raw -Encoding UTF8 $fixture.sourceValidation.adapterSnapshot.path | ConvertFrom-Json
+        $plainJson = $adapter | ConvertTo-Json -Depth 100
+        if (-not (Test-Json -Json $plainJson -SchemaFile $script:Syp314AdapterSchemaPath -ErrorAction SilentlyContinue)) {
+            throw 'An existing no-review source adapter must remain valid under v2.'
+        }
+
+        $adapter.sourceValidation | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+            schemaVersion = 1
+            contract = 'standard-source-human-review-v1'
+        })
+        $reviewJson = $adapter | ConvertTo-Json -Depth 100
+        if (-not (Test-Json -Json $reviewJson -SchemaFile $script:Syp314AdapterSchemaPath -ErrorAction SilentlyContinue)) {
+            throw 'The explicit source-human-review-v1 adapter extension must validate.'
+        }
+
+        $adapter.sourceValidation.sourceReview.schemaVersion = 2
+        if (Test-Json -Json ($adapter | ConvertTo-Json -Depth 100) -SchemaFile $script:Syp314AdapterSchemaPath -ErrorAction SilentlyContinue) {
+            throw 'Unknown source-review versions must be rejected.'
+        }
+        $adapter.sourceValidation.sourceReview.schemaVersion = 1
+        $adapter.sourceValidation.sourceReview | Add-Member -NotePropertyName reviewerKey -NotePropertyValue 'caller-selected'
+        if (Test-Json -Json ($adapter | ConvertTo-Json -Depth 100) -SchemaFile $script:Syp314AdapterSchemaPath -ErrorAction SilentlyContinue) {
+            throw 'The source-review extension must reject caller-selected keys and unknown fields.'
+        }
+    }
+
+    # Scenario: A valid legacy source report has no adapter opt-in but adds a self-asserted nested sourceReview summary.
+    # Purpose: Require the strict reader to bind review output to the retained adapter and reject downgrade or invented variants.
+    It 'UnitT20_rejects_source_review_output_without_retained_adapter_opt_in' {
+        $report = New-SourceGateFixture
+        if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'The no-review v2 report must pass before mutation.' }
+        $report.sourceValidation | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+            schemaVersion = 1
+            contract = 'standard-source-human-review-v1'
+            status = 'not-required'
+        })
+        $rejected = $false
+        try { Invoke-SourceGateFixture -Report $report | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'A report cannot add not-required source review without adapter opt-in.' }
+    }
+
+    # Scenario: A v2 source evidence report carries a typed not-required or accepted review result.
+    # Purpose: Keep output variants closed and release-ineligible while preserving pre-extension v2 evidence validity.
+    It 'UnitT30_validates_closed_source_review_evidence_variants' {
+        $report = New-SourceGateFixture
+        $schema = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $legacyJson = $report | ConvertTo-Json -Depth 100
+        if (-not (Test-Json -Json $legacyJson -SchemaFile $schema -ErrorAction SilentlyContinue)) {
+            throw 'An existing no-review evidence report must remain schema-valid.'
+        }
+
+        $report.sourceValidation | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+            schemaVersion = 1
+            contract = 'standard-source-human-review-v1'
+            status = 'not-required'
+        })
+        if (-not (Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schema -ErrorAction SilentlyContinue)) {
+            throw 'The no-finding review variant must be schema-valid.'
+        }
+
+        $report.sourceValidation.sourceReview = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            contract = 'standard-source-human-review-v1'
+            status = 'accepted'
+            challenge = [pscustomobject]@{ path = 'runs/cccccccccccccccccccccccccccccccc/source-human-review-challenge-v1.json'; sha256 = 'a' * 64 }
+            receipt = [pscustomobject]@{ path = 'runs/cccccccccccccccccccccccccccccccc/source-human-review-receipt-v1.json'; sha256 = 'b' * 64 }
+            bindingSha256 = 'c' * 64
+            key = [pscustomobject]@{ id = 'humanApproval'; sha256 = '1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b' }
+            window = [pscustomobject]@{ createdAt = '2026-10-13T00:00:00.0000000Z'; expiresAt = '2026-10-13T00:15:00.0000000Z'; acceptedAt = '2026-10-13T00:01:00.0000000Z' }
+        }
+        if (-not (Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schema -ErrorAction SilentlyContinue)) {
+            throw 'The accepted review evidence variant must be schema-valid.'
+        }
+        $report.sourceValidation.sourceReview | Add-Member -NotePropertyName approved -NotePropertyValue $true
+        if (Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schema -ErrorAction SilentlyContinue) {
+            throw 'Unknown source-review evidence claims must be rejected.'
+        }
+        [void]$report.sourceValidation.sourceReview.PSObject.Properties.Remove('approved')
+        $report.sourceValidation.sourceReview.key.sha256 = 'd' * 64
+        if (Test-Json -Json ($report | ConvertTo-Json -Depth 100) -SchemaFile $schema -ErrorAction SilentlyContinue) {
+            throw 'The accepted variant must pin the immutable humanApproval authority hash.'
+        }
+    }
+
+    It 'UnitT40_projects_actual_skill_validator_info_results_with_original_ordinals' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-validator-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), 'fixture skill', (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'extra.md'), 'fixture extra', (New-Object Text.UTF8Encoding($false)))
+        $runRoot = Join-Path $TestDrive ('source-review-validator-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $skillDir = Get-StandardValidationFullPath -Path $skillRoot -Context 'test skill root'
+        $nativeReport = [pscustomobject][ordered]@{
+            skill_dir = $skillDir; passed = $true; errors = 0; warnings = 0
+            results = @(
+                [pscustomobject][ordered]@{ level = 'pass'; file = 'SKILL.md'; category = 'schema'; message = 'valid' },
+                [pscustomobject][ordered]@{ level = 'info'; file = 'extra.md'; category = 'coverage'; message = 'optional signal'; timestamp = '2026-10-13T00:00:00Z' },
+                [pscustomobject][ordered]@{ level = 'info'; category = 'review'; message = 'no file location' }
+            )
+        }
+        $nativePath = Join-Path $runRoot 'validator-native.json'
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef = [pscustomobject]@{ path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'test native report'; skillId = 'alpha' }
+        $fingerprint1 = Get-StandardValidationTextSha256 -Value "alpha`ncoverage`noptional signal`nextra.md"
+        $fingerprint2 = Get-StandardValidationTextSha256 -Value "alpha`nreview`nno file location`n"
+        $envelope = [pscustomobject]@{
+            findings = @(
+                [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = $fingerprint1; ruleId = 'coverage'; message = 'optional signal'; path = 'skills/alpha/extra.md' },
+                [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = $fingerprint2; ruleId = 'review'; message = 'no file location' }
+            )
+            nativeReports = @($nativeRef)
+        }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'skill-validator' }
+
+        $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @()
+        if (@($projection.occurrences).Count -ne 2) { throw 'Each native info result must remain a distinct review occurrence.' }
+        if ([int]$projection.occurrences[0].ordinal -ne 1) { throw 'A preceding pass result must retain the original native result ordinal.' }
+        if ([int]$projection.occurrences[1].ordinal -ne 2) { throw 'A no-file info result must retain its original native result ordinal.' }
+        if ([string]$projection.occurrences[0].severity -cne 'informational') { throw 'skill-validator info must map to informational.' }
+        if ($projection.occurrences[0].finding.timestamp -isnot [string] -or [string]$projection.occurrences[0].finding.timestamp -cne '2026-10-13T00:00:00Z') {
+            throw 'A legal ISO timestamp in the complete original native finding must retain its original string type and value.'
+        }
+        if ($projection.occurrences[0].finding.timestamp -isnot [string] -or [string]$projection.occurrences[0].finding.timestamp -cne '2026-10-13T00:00:00Z') {
+            throw 'A legal ISO timestamp in the complete original native finding must retain its original string type and value.'
+        }
+        if ([string]$projection.occurrences[1].finding.message -cne 'no file location') { throw 'The complete original native finding must be retained.' }
+
+        $envelope.findings = @($envelope.findings[0])
+        $rejected = $false
+        try { Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @() | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'An omitted native info projection must be rejected.' }
+    }
+
+    It 'UnitT41_projects_every_skill_tools_sarif_note_location_but_keeps_one_raw_occurrence' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-sarif-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        foreach ($name in @('SKILL.md', 'extra.md')) { [IO.File]::WriteAllText((Join-Path $skillRoot $name), 'fixture', (New-Object Text.UTF8Encoding($false))) }
+        $runRoot = Join-Path $TestDrive ('source-review-sarif-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $nativeReport = [pscustomobject][ordered]@{
+            version = '2.1.0'
+            runs = @([pscustomobject][ordered]@{
+                tool = [pscustomobject]@{ driver = [pscustomobject]@{ name = 'skill-tools'; rules = @([pscustomobject]@{ id = 'quality-note' }) } }
+                results = @([pscustomobject][ordered]@{
+                    ruleId = 'quality-note'; ruleIndex = 0; level = 'note'
+                    locations = @(
+                        [pscustomobject]@{ physicalLocation = [pscustomobject]@{ artifactLocation = [pscustomobject]@{ uri = 'SKILL.md' } } },
+                        [pscustomobject]@{ physicalLocation = [pscustomobject]@{ artifactLocation = [pscustomobject]@{ uri = 'extra.md' } } }
+                    )
+                    message = [pscustomobject]@{ text = 'reviewable note' }
+                    fingerprints = [pscustomobject][ordered]@{ zFingerprint = 'later'; aFingerprint = 'stable-first' }
+                })
+            })
+        }
+        $nativePath = Join-Path $runRoot 'skill-tools.sarif.json'
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 30), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef = [pscustomobject]@{ path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'test SARIF report'; skillId = 'alpha' }
+        $finding = { param($path) [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'stable-first'; ruleId = 'quality-note'; message = 'reviewable note'; path = $path } }
+        $envelope = [pscustomobject]@{ findings = @((& $finding 'skills/alpha/SKILL.md'), (& $finding 'skills/alpha/extra.md')); nativeReports = @($nativeRef) }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'skill-tools' }
+
+        $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @()
+        if (@($projection.occurrences).Count -ne 1) { throw 'One SARIF result with several locations must remain one raw result occurrence.' }
+        if ([int]$projection.occurrences[0].ordinal -ne 0) { throw 'The SARIF result occurrence must use the raw results-array ordinal.' }
+        if (@($projection.occurrences[0].finding.locations).Count -ne 2) { throw 'The complete SARIF result must retain both native locations.' }
+        if (@($envelope.findings).Count -ne 2) { throw 'The complete canonical projection must expand one note to each candidate location.' }
+
+        $envelope.findings = @($envelope.findings[0])
+        $rejected = $false
+        try { Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @() | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'Omitting the second location from a SARIF note projection must be rejected.' }
+    }
+
+    # Scenario: A SARIF note has multiple locations but carries neither fingerprints nor partialFingerprints.
+    # Purpose: Reproduce the frozen producer's location-specific fallback fingerprint for every projection while retaining one raw occurrence.
+    It 'UnitT46_uses_each_location_for_sarif_fingerprint_fallback' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-sarif-fallback-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        foreach ($name in @('SKILL.md', 'extra.md')) { [IO.File]::WriteAllText((Join-Path $skillRoot $name), 'fixture', (New-Object Text.UTF8Encoding($false))) }
+        $runRoot = Join-Path $TestDrive ('source-review-sarif-fallback-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $nativeReport = [pscustomobject][ordered]@{
+            version = '2.1.0'
+            runs = @([pscustomobject][ordered]@{
+                tool = [pscustomobject]@{ driver = [pscustomobject]@{ name = 'skill-tools'; rules = @([pscustomobject]@{ id = 'quality-note' }) } }
+                results = @([pscustomobject][ordered]@{
+                    ruleId = 'quality-note'; ruleIndex = 0; level = 'note'
+                    locations = @(
+                        [pscustomobject]@{ physicalLocation = [pscustomobject]@{ artifactLocation = [pscustomobject]@{ uri = 'SKILL.md' } } },
+                        [pscustomobject]@{ physicalLocation = [pscustomobject]@{ artifactLocation = [pscustomobject]@{ uri = 'extra.md' } } }
+                    )
+                    message = [pscustomobject]@{ text = 'reviewable note without native fingerprints' }
+                })
+            })
+        }
+        $nativePath = Join-Path $runRoot 'skill-tools-fallback.sarif.json'
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 30), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef = [pscustomobject]@{ path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'test SARIF fallback report'; skillId = 'alpha' }
+        $pathOneFingerprint = Get-StandardValidationTextSha256 -Value "quality-note`nreviewable note without native fingerprints`nSKILL.md"
+        $pathTwoFingerprint = Get-StandardValidationTextSha256 -Value "quality-note`nreviewable note without native fingerprints`nextra.md"
+        $finding = { param($path, $fingerprint) [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = $fingerprint; ruleId = 'quality-note'; message = 'reviewable note without native fingerprints'; path = $path } }
+        $envelope = [pscustomobject]@{
+            findings = @((& $finding 'skills/alpha/SKILL.md' $pathOneFingerprint), (& $finding 'skills/alpha/extra.md' $pathTwoFingerprint))
+            nativeReports = @($nativeRef)
+        }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'skill-tools' }
+
+        $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @()
+        if (@($projection.occurrences).Count -ne 1 -or [int]$projection.occurrences[0].ordinal -ne 0) { throw 'The fallback must retain one occurrence at the raw SARIF result ordinal.' }
+        if ([string]$envelope.findings[0].fingerprint -ceq [string]$envelope.findings[1].fingerprint) { throw 'Each location must use its own fallback fingerprint input.' }
+    }
+
+    # Scenario: A clean complete Skillspector report has no historical E1 baseline policy or suppression metadata.
+    # Purpose: Preserve the ordinary no-E1 report path while requiring the native zero-count and empty suppression ledger.
+    It 'UnitT47_accepts_complete_static_report_without_e1_policy_when_suppression_is_empty' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-static-clean-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), 'fixture skill', (New-Object Text.UTF8Encoding($false)))
+        $runRoot = Join-Path $TestDrive ('source-review-static-clean-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $nativeReport = [pscustomobject][ordered]@{
+            metadata = [pscustomobject]@{ skillspector_version = '2.12.0' }
+            execution_successful = $true
+            analysis_completeness = [pscustomobject]@{
+                execution_successful = $true; is_complete = $true; status = 'complete'; coverage_percent = 100
+                ledger_exceptions = @(); scope_exclusions = @(); limitations = @()
+            }
+            skill = [pscustomobject]@{ name = 'alpha'; source = $skillRoot }
+            components = @([pscustomobject]@{ path = 'SKILL.md' })
+            issues = @()
+            suppressed_count = 0
+            suppressed = @()
+        }
+        $nativePath = Join-Path $runRoot 'skillspector-clean.json'
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef = [pscustomobject]@{
+            skillId = 'alpha'; command = 'skillspector'; commandSha256 = 'a' * 64
+            arguments = @('scan', $skillRoot, '--no-llm', '--format', 'json', '--output', $nativePath)
+            exitCode = 0; path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'clean Static report'
+        }
+        $envelope = [pscustomobject]@{ findings = @(); nativeReports = @($nativeRef); analyzerCompleteness = 'complete' }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'static-analyzer' }
+
+        $frozenPath = Join-Path $snapshotRoot 'frozen-source-marker.txt'
+        [IO.File]::WriteAllText($frozenPath, 'synthetic frozen source marker', (New-Object Text.UTF8Encoding($false)))
+        $frozenFiles = @([pscustomobject][ordered]@{ path = $frozenPath; sha256 = Get-StandardValidationFileSha256 -Path $frozenPath -Context 'clean Static frozen source marker' })
+        $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles $frozenFiles
+        if (@($projection.occurrences).Count -ne 0 -or @($projection.suppressedLedger).Count -ne 0 -or @($projection.additionalRawEvidence).Count -ne 0) {
+            throw 'A clean no-E1 report must yield no review occurrences, suppression ledger, or historical-policy artifacts.'
+        }
+
+        $nativeReport.suppressed_count = 1
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef.sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'mutated clean Static report'
+        $suppressionRejected = $false
+        try { Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('alpha') -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles $frozenFiles | Out-Null }
+        catch { $suppressionRejected = $true }
+        if (-not $suppressionRejected) { throw 'A suppression count without the exact fixed E1 policy must be rejected.' }
+    }
+
+    # Scenario: Ordinary candidate-controlled paths contain option-like words that resemble E1 switches.
+    # Purpose: Detect baseline/suppression only from actual option tokens while retaining the strict no-E1 argument grammar.
+    It 'UnitT50_accepts_no_e1_static_arguments_when_candidate_paths_contain_option_words' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-static-path-baseline-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/establish-baseline'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), 'fixture skill', (New-Object Text.UTF8Encoding($false)))
+        $runRoot = Join-Path $TestDrive ('source-review-static-path-suppressed-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $nativePath = Join-Path $runRoot 'show-suppressed-baseline-output.json'
+        $nativeReport = [pscustomobject][ordered]@{
+            metadata = [pscustomobject]@{ skillspector_version = '2.12.0' }
+            execution_successful = $true
+            analysis_completeness = [pscustomobject]@{
+                execution_successful = $true; is_complete = $true; status = 'complete'; coverage_percent = 100
+                ledger_exceptions = @(); scope_exclusions = @(); limitations = @()
+            }
+            skill = [pscustomobject]@{ name = 'establish-baseline'; source = $skillRoot }
+            components = @([pscustomobject]@{ path = 'SKILL.md' }); issues = @(); suppressed_count = 0; suppressed = @()
+        }
+        [IO.File]::WriteAllText($nativePath, ($nativeReport | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $nativeRef = [pscustomobject]@{
+            skillId = 'establish-baseline'; command = 'skillspector'; commandSha256 = 'a' * 64
+            arguments = @('scan', $skillRoot, '--no-llm', '--format', 'json', '--output', $nativePath)
+            exitCode = 0; path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'Static option-word paths report'
+        }
+        $envelope = [pscustomobject]@{ findings = @(); nativeReports = @($nativeRef); analyzerCompleteness = 'complete' }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'static-analyzer' }
+        $frozenMarker = Join-Path $snapshotRoot 'frozen-source-marker.txt'
+        [IO.File]::WriteAllText($frozenMarker, 'synthetic frozen source marker', (New-Object Text.UTF8Encoding($false)))
+        $frozenFiles = @([pscustomobject][ordered]@{ path = $frozenMarker; sha256 = Get-StandardValidationFileSha256 -Path $frozenMarker -Context 'Static option-word frozen source marker' })
+
+        $projection = Get-StandardCoreSourceReviewNativeProjection -Envelope $envelope -Event $event -Skills @('establish-baseline') `
+            -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles $frozenFiles
+        if (@($projection.occurrences).Count -ne 0) { throw 'Option-like path names must not create an E1 suppression requirement.' }
+        foreach ($token in @('--baseline', '--show-suppressed', '-b', '-s', '--baseline=path.json', '--show-suppressed=true', '-b=path.json', '-s=true')) {
+            if (-not (Test-StandardCoreSourceReviewBaselineArgument -Argument $token)) { throw "The E1 detector must recognize the exact switch token '$token'." }
+        }
+        foreach ($token in @('establish-baseline', 'show-suppressed-baseline-output.json', '--not-baseline')) {
+            if (Test-StandardCoreSourceReviewBaselineArgument -Argument $token) { throw "A path or unrelated switch '$token' must not be treated as an E1 option." }
+        }
+    }
+
+    # Scenario: File hashes are captured before review, but a JSON reader reports a digest for different bytes.
+    # Purpose: Bind parsed policy/native/event values to the exact separately retained expected digest.
+    It 'UnitT51_rejects_review_json_snapshots_that_disagree_with_prebound_file_hashes' {
+        $originalSnapshot = (Get-Command Get-StandardValidationJsonSnapshot -CommandType Function).ScriptBlock
+        $snapshotPathToCorrupt = $null
+        $script:SourceReviewOriginalJsonSnapshot = $originalSnapshot
+        $script:SourceReviewSnapshotPathToCorrupt = $null
+        $script:SourceReviewSawPreserveDateStrings = $false
+        Mock Get-StandardValidationJsonSnapshot {
+            param([string]$Path, [string]$Context, [switch]$PreserveDateStrings)
+            if ($PreserveDateStrings) { $script:SourceReviewSawPreserveDateStrings = $true }
+            $snapshot = & $script:SourceReviewOriginalJsonSnapshot -Path $Path -Context $Context -PreserveDateStrings:$PreserveDateStrings
+            if ($null -ne $script:SourceReviewSnapshotPathToCorrupt -and
+                [string]::Equals([IO.Path]::GetFullPath($Path), [IO.Path]::GetFullPath([string]$script:SourceReviewSnapshotPathToCorrupt), [StringComparison]::OrdinalIgnoreCase)) {
+                $snapshot.sha256 = '0' * 64
+            }
+            return $snapshot
+        }
+
+        $snapshotRoot = Join-Path $TestDrive ('source-review-snapshot-binding-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), 'fixture', (New-Object Text.UTF8Encoding($false)))
+        $runRoot = Join-Path $TestDrive ('source-review-snapshot-binding-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+
+        $nativePath = Join-Path $runRoot 'validator.json'
+        $nativeValue = [pscustomobject][ordered]@{
+            skill_dir = Get-StandardValidationFullPath -Path $skillRoot -Context 'snapshot-binding Skill root'
+            passed = $true; errors = 0; warnings = 0
+            results = @([pscustomobject][ordered]@{ level = 'info'; category = 'review'; message = 'retained native result' })
+        }
+        [IO.File]::WriteAllText($nativePath, ($nativeValue | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+        $nativeReference = [pscustomobject][ordered]@{ path = $nativePath; sha256 = Get-StandardValidationFileSha256 -Path $nativePath -Context 'bound native report'; skillId = 'alpha' }
+        $nativeFinding = [pscustomobject][ordered]@{
+            severity = 'informational'; fingerprint = (Get-StandardValidationTextSha256 -Value "alpha`nreview`nretained native result`n")
+            ruleId = 'review'; message = 'retained native result'
+        }
+        $nativeEnvelope = [pscustomobject][ordered]@{ findings = @($nativeFinding); nativeReports = @($nativeReference) }
+        $nativeEvent = [pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'skill-validator' }
+        $script:SourceReviewSnapshotPathToCorrupt = $nativePath
+        $nativeRejected = $false
+        try {
+            Get-StandardCoreSourceReviewNativeProjection -Envelope $nativeEnvelope -Event $nativeEvent -Skills @('alpha') `
+                -RunRoot $runRoot -SnapshotRoot $snapshotRoot -SkillsRootRelative 'skills' -FrozenFiles @() | Out-Null
+        }
+        catch { $nativeRejected = $true }
+        if (-not $nativeRejected) { throw 'Native report JSON whose snapshot digest differs from its frozen hash must be rejected.' }
+
+        $eventPath = Join-Path $runRoot 'source-event.json'
+        $eventStdout = '{"findings":[],"nativeReports":[]}'
+        $eventValue = [pscustomobject][ordered]@{ stdout = $eventStdout }
+        [IO.File]::WriteAllText($eventPath, ($eventValue | ConvertTo-Json -Depth 8 -Compress), (New-Object Text.UTF8Encoding($false)))
+        $adapterPath = Join-Path $runRoot 'adapter.json'
+        $casePath = Join-Path $runRoot 'cases.json'
+        $stdoutPath = Join-Path $runRoot 'check.stdout.txt'
+        $stderrPath = Join-Path $runRoot 'check.stderr.txt'
+        foreach ($filePath in @($adapterPath, $casePath, $stdoutPath, $stderrPath)) { [IO.File]::WriteAllText($filePath, 'synthetic retained evidence', (New-Object Text.UTF8Encoding($false))) }
+        $eventHash = Get-StandardValidationFileSha256 -Path $eventPath -Context 'prebound source event'
+        $sourceEvidence = [pscustomobject][ordered]@{
+            status = 'passed'; runId = 'e' * 32; candidateId = 'f' * 64; sourceRevision = 'a' * 40; contentSha256 = 'b' * 64
+            authorityRevision = 'c' * 40; activeSkills = @('alpha'); skillsRoot = 'skills'; frozenFiles = @(); toolReceipts = @()
+            events = @([pscustomobject][ordered]@{ eventId = [guid]::NewGuid().ToString(); outputPath = $eventPath })
+            adapterSnapshot = [pscustomobject][ordered]@{ path = $adapterPath; sha256 = Get-StandardValidationFileSha256 -Path $adapterPath -Context 'retained test adapter' }
+            pesterCaseInventory = [pscustomobject][ordered]@{ path = $casePath; sha256 = Get-StandardValidationFileSha256 -Path $casePath -Context 'retained test case inventory' }
+            sourceReviewPending = [pscustomobject][ordered]@{
+                expectedEvidenceArtifacts = @([pscustomobject][ordered]@{ path = $eventPath; sha256 = $eventHash })
+                nativeReports = @(); additionalRawEvidence = @(); authorityMaterials = @()
+            }
+        }
+        $report = [pscustomobject][ordered]@{
+            runId = [string]$sourceEvidence.runId; candidate = [pscustomobject][ordered]@{
+                repository = 'https://example.test/source.git'; sourceRevision = 'a' * 40; baseRevision = 'd' * 40
+                eventName = 'pull_request'; contentSha256 = 'b' * 64
+            }
+            authority = [pscustomobject][ordered]@{ repository = 'https://example.test/authority.git'; revision = 'c' * 40; runnerSha256 = '1' * 64; contractSha256 = '2' * 64 }
+            adapter = [pscustomobject][ordered]@{ identity = 'standard-core-adapter-v2'; sha256 = '3' * 64 }
+            checks = @(); sourceValidation = $sourceEvidence
+        }
+        $script:SourceReviewSnapshotPathToCorrupt = $eventPath
+        $eventRejected = $false
+        try {
+            Get-StandardCoreSourceReviewBinding -Report $report -Occurrences @() -SuppressedLedger @() `
+                -CreatedAt '2026-01-01T00:00:00Z' -ExpiresAt '2026-01-01T00:01:00Z' -PolicySha256 ('4' * 64) -HumanKeySha256 ('5' * 64) | Out-Null
+        }
+        catch { $eventRejected = $true }
+        if (-not $eventRejected) { throw 'Raw source event JSON whose snapshot digest differs from the pre-child hash must be rejected.' }
+        if (-not $script:SourceReviewSawPreserveDateStrings) { throw 'Opted-in source review JSON snapshots must preserve ISO date strings.' }
+    }
+
+    # Scenario: A materialized E1 baseline can be attacker-controlled in size before validation.
+    # Purpose: Reject oversized expected and observed bytes before allocating or reading the file contents.
+    It 'UnitT53_bounds_materialized_e1_baseline_reads_before_allocation' {
+        $folder = Join-Path $TestDrive ('source-review-bounded-baseline-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($folder)
+        $smallPath = Join-Path $folder 'expected-baseline.json'
+        $expectedBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('{"version":2}' + "`n")
+        [IO.File]::WriteAllBytes($smallPath, $expectedBytes)
+        $observed = Read-StandardCoreSourceReviewBoundedFileBytes -Path $smallPath -ExpectedBytes $expectedBytes -Context 'bounded-baseline test'
+        if ([Convert]::ToBase64String($observed) -cne [Convert]::ToBase64String($expectedBytes)) { throw 'A small matching baseline must be read exactly.' }
+
+        $oversizedPath = Join-Path $folder 'oversized-sparse-baseline.json'
+        $stream = New-Object System.IO.FileStream -ArgumentList @($oversizedPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $stream.SetLength(1MB + 1) } finally { $stream.Dispose() }
+        $oversizedRejected = $false
+        try { Read-StandardCoreSourceReviewBoundedFileBytes -Path $oversizedPath -ExpectedBytes $expectedBytes -Context 'oversized baseline test' | Out-Null }
+        catch { $oversizedRejected = $true }
+        if (-not $oversizedRejected) { throw 'An oversized sparse baseline must be rejected from its opened handle length before reading.' }
+
+        $expectedSizeRejected = $false
+        try { Read-StandardCoreSourceReviewBoundedFileBytes -Path (Join-Path $folder 'missing.json') -ExpectedBytes (New-Object byte[] (1MB + 1)) -Context 'oversized expected baseline test' | Out-Null }
+        catch { $expectedSizeRejected = $true }
+        if (-not $expectedSizeRejected) { throw 'Oversized protected expected bytes must be rejected before the observed file is opened.' }
+    }
+
+    # Synthetic in-memory policy partition exercises receiver projection only; it does not establish or imitate the production policy trust path.
+    It 'UnitT42_binds_top_level_e1_suppression_to_the_exact_materialized_baseline' {
+        $snapshotRoot = Join-Path $TestDrive ('source-review-static-' + [guid]::NewGuid().ToString('N'))
+        $skillRoot = Join-Path $snapshotRoot 'skills/alpha'
+        [void][IO.Directory]::CreateDirectory($skillRoot)
+        $skillPath = Join-Path $skillRoot 'SKILL.md'
+        [IO.File]::WriteAllText($skillPath, 'fixture skill', (New-Object Text.UTF8Encoding($false)))
+        $runRoot = Join-Path $TestDrive ('source-review-static-run-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+
+        $reason = 'The independent reviewed report identifies this exact E1 occurrence as a false positive.'
+        $findingText = 'A historically reviewed detector false positive.'
+        $component = [pscustomobject][ordered]@{
+            path = 'SKILL.md'
+            sha256 = Get-StandardValidationFileSha256 -Path $skillPath -Context 'test E1 component'
+            length = (Get-Item -LiteralPath $skillPath).Length
+            reviewedFindings = @([pscustomobject][ordered]@{ ruleId = 'E1'; severity = 'MEDIUM'; line = 12; finding = $findingText; disposition = 'false-positive'; reason = $reason })
+        }
+        $baseline = [pscustomobject][ordered]@{
+            version = 2; scanner_version = '2.12.0'; rules = @()
+            fingerprints = @([pscustomobject][ordered]@{ hash = 'sha256:' + ('f' * 64); rule_id = 'E1'; file = 'SKILL.md'; reason = $reason })
+        }
+        $skillPolicy = [pscustomobject][ordered]@{ skillId = 'alpha'; rawReportSha256 = 'b' * 64; components = @($component); baseline = $baseline }
+        $policyDocument = [pscustomobject][ordered]@{
+            reviewer = 'Synthetic E1 unit fixture'; reviewFindingId = 'SYNTHETIC-E1-UNIT'
+            reviewedSourceRevision = 'a' * 40
+            authorityRevision = 'b' * 40
+            scannerVersion = '2.12.0'; skills = @($skillPolicy)
+        }
+        $policy = [pscustomobject][ordered]@{
+            path = Join-Path $runRoot 'synthetic-e1-unit-policy.json'
+            sha256 = 'd' * 64
+            document = $policyDocument
+        }
+        $baselinePath = Join-Path $runRoot 'b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
+        $baselineJson = ConvertTo-Json -InputObject $baseline -Depth 80 -Compress
+        [IO.File]::WriteAllText($baselinePath, $baselineJson + "`n", (New-Object Text.UTF8Encoding($false)))
+        $baselineSha256 = Get-StandardValidationFileSha256 -Path $baselinePath -Context 'fixture materialized E1 baseline'
+        $suppressed = [pscustomobject][ordered]@{
+            suppressed = $true; id = 'E1'; severity = 'MEDIUM'
+            location = [pscustomobject][ordered]@{ file = 'SKILL.md'; start_line = 12 }
+            finding = $findingText; suppression_reason = $reason
+        }
+        $native = [pscustomobject][ordered]@{
+            scannerVersion = '2.12.0'
+            arguments = @('scan', $skillRoot, '--no-llm', '--format', 'json', '--output', (Join-Path $runRoot 'report.json'), '--baseline', $baselinePath, '--show-suppressed')
+            reviewedBaseline = [pscustomobject][ordered]@{
+                decision = 'applied'; applied = $true; componentHashesMatched = $true; policyPath = $policy.path; policySha256 = $policy.sha256
+                reviewer = 'Synthetic E1 unit fixture'; reviewFindingId = 'SYNTHETIC-E1-UNIT'
+                reviewedSourceRevision = 'a' * 40; authorityRevision = 'b' * 40
+                reviewedRawReportSha256 = 'b' * 64; nativeBaselinePath = $baselinePath; nativeBaselineSha256 = $baselineSha256
+                expectedSuppressedCount = 1; actualSuppressedCount = 1
+            }
+        }
+        $report = [pscustomobject][ordered]@{ metadata = [pscustomobject]@{ skillspector_version = '2.12.0' }; suppressed_count = 1; suppressed = @($suppressed) }
+        $event = [pscustomobject]@{ eventId = [guid]::NewGuid().ToString(); toolId = 'static-analyzer' }
+        $inventory = [string[]]@((Get-StandardValidationInventory -Root $skillRoot -Context 'fixture Skill inventory') | ForEach-Object { [string]$_.path })
+        $ledger = Get-StandardCoreSourceReviewE1SuppressionLedger -Policy $policy -SkillRoot $skillRoot -SkillInventory $inventory `
+            -Report $report -Native $native -Event $event -SkillId 'alpha' -NativeReportPath (Join-Path $runRoot 'report.json') `
+            -NativeReportSha256 ('c' * 64) -RunRoot $runRoot
+        if (@($ledger.suppressedLedger).Count -ne 1) { throw 'The native top-level E1 suppression must remain in its separate ledger.' }
+        if ([string]$ledger.suppressedLedger[0].baselineEvidenceSha256 -cne $baselineSha256) { throw 'The ledger must bind the exact run-materialized baseline bytes.' }
+        if ([string]$ledger.suppressedLedger[0].finding.suppression_reason -cne $reason) { throw 'The ledger must retain the native E1 reason and occurrence.' }
+        if (@($ledger.additionalRawEvidence).Count -ne 1 -or [string]$ledger.additionalRawEvidence[0].sha256 -cne $baselineSha256) { throw 'The baseline artifact must be added to challenge raw evidence.' }
+
+        $report.suppressed_count = 2
+        $rejected = $false
+        try { Get-StandardCoreSourceReviewE1SuppressionLedger -Policy $policy -SkillRoot $skillRoot -SkillInventory $inventory -Report $report -Native $native -Event $event -SkillId 'alpha' -NativeReportPath (Join-Path $runRoot 'report.json') -NativeReportSha256 ('c' * 64) -RunRoot $runRoot | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'The native typed E1 suppression count must match the complete top-level ledger.' }
+    }
+
+    It 'UnitT43_requires_canonical_bounded_source_review_json_and_rejects_duplicate_properties' {
+        $runRoot = Join-Path $TestDrive ('source-review-json-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $path = Join-Path $runRoot 'review.json'
+        $value = [pscustomobject][ordered]@{ schemaVersion = 1; value = 'safe' }
+        $canonical = Convert-StandardValidationValueToCanonicalJson -Value $value -Context 'test source review JSON'
+        [IO.File]::WriteAllText($path, $canonical, (New-Object Text.UTF8Encoding($false)))
+        $read = Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $path -RunRoot $runRoot -MaximumBytes 1024 -Context 'test source review JSON'
+        if ([string]$read.value.value -cne 'safe') { throw 'Canonical JSON must parse as a retained strict snapshot.' }
+
+        [IO.File]::WriteAllText($path, '{"schemaVersion":1,"SchemaVersion":1}', (New-Object Text.UTF8Encoding($false)))
+        $rejected = $false
+        try { Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $path -RunRoot $runRoot -MaximumBytes 1024 -Context 'duplicate source review JSON' | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'Duplicate and case-colliding JSON properties must be rejected before binding.' }
+
+        $tooLarge = $false
+        try { Read-StandardCoreSourceReviewBoundedCanonicalJson -Path $path -RunRoot $runRoot -MaximumBytes 2 -Context 'oversized source review JSON' | Out-Null }
+        catch { $tooLarge = $true }
+        if (-not $tooLarge) { throw 'The declared input byte length must be checked before allocation.' }
+    }
+
+    It 'UnitT54_rejects_non_json_clr_dates_before_source_review_canonicalization' {
+        $jsonValue = [pscustomobject][ordered]@{
+            createdAt = '2026-10-13T13:44:11.5149948Z'
+            checks = @([pscustomobject][ordered]@{ passed = $true; count = 2 })
+        }
+        Assert-StandardCoreSourceReviewJsonBindingValue -Value $jsonValue -Context 'source review JSON guard test'
+
+        $report = [pscustomobject][ordered]@{
+            sourceValidation = [pscustomobject][ordered]@{ createdAt = [DateTime]::UtcNow }
+        }
+        $errorMessage = $null
+        try {
+            Get-StandardCoreSourceReviewBinding -Report $report -Occurrences @() -SuppressedLedger @() `
+                -CreatedAt '2026-01-01T00:00:00Z' -ExpiresAt '2026-01-01T00:01:00Z' `
+                -PolicySha256 ('4' * 64) -HumanKeySha256 ('5' * 64) | Out-Null
+        }
+        catch { $errorMessage = [string]$_.Exception.Message }
+        if ($errorMessage -notmatch '^BLOCKED\|.*CLR date value.*ISO-8601 JSON dates must remain strings') {
+            throw 'The source-review binding must reject a PowerShell DateTime before generic canonicalization.'
+        }
+
+        $scriptPropertyValue = [pscustomobject][ordered]@{ safe = 'value' }
+        $scriptPropertyValue | Add-Member -MemberType ScriptProperty -Name unsafe -Value { throw 'A scripted getter must not execute during source-review binding.' }
+        $memberError = $null
+        try { Assert-StandardCoreSourceReviewJsonBindingValue -Value $scriptPropertyValue -Context 'source review JSON member guard test' }
+        catch { $memberError = [string]$_.Exception.Message }
+        if ($memberError -notmatch '^BLOCKED\|.*non-JSON CLR property member') {
+            throw 'The source-review guard must reject scripted properties without evaluating their getters.'
+        }
+    }
+
+    It 'UnitT44_omits_provisional_source_evidence_from_schema_valid_failure_reports_<Case>' -TestCases @(
+        @{Case='missing-receipt';State='BLOCKED';Challenge=$true;Reason='Source human review receipt did not arrive.'},
+        @{Case='timeout';State='BLOCKED';Challenge=$true;Reason='Source human review receipt exceeded its bounded window.'},
+        @{Case='cancelled';State='CANCELLED';Challenge=$true;Reason='Core validation was cancelled during source review.'},
+        @{Case='forged-receipt';State='BLOCKED';Challenge=$true;Reason='Source review trusted human signature verification failed.'},
+        @{Case='pester-failure';State='FAILED';Challenge=$false;Reason='Source Pester checks failed before challenge creation.'}
+    ) {
+        param([string]$Case, [string]$State, [bool]$Challenge, [string]$Reason)
+        $schema = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $pendingSource = [pscustomobject][ordered]@{
+            status = 'passed'
+            runId = 'a' * 32
+            sourceReviewPending = [pscustomobject][ordered]@{ needsReview = $true; occurrences = @(); suppressedLedger = @() }
+        }
+        $challengePath = if ($Challenge) { Join-Path $TestDrive ('runs/' + ([guid]::NewGuid().ToString('N')) + '/source-human-review-challenge-v1.json') } else { '' }
+        $receiptPath = if ($Challenge) { Join-Path (Split-Path -Parent $challengePath) 'source-human-review-receipt-v1.json' } else { '' }
+        $terminal = Resolve-StandardCoreSourceReviewTerminalEvidence -State $State -SourceEvidence $pendingSource -ChallengePath $challengePath -ReceiptPath $receiptPath -FailureMessage $Reason
+        if ([string]$terminal.state -cne $State -or $null -ne $terminal.sourceEvidence) { throw "A $Case run must remain terminal and omit provisional sourceValidation." }
+        if ([string]$terminal.failureMessage -cnotmatch [regex]::Escape($Reason)) { throw "A $Case report must preserve its failure reason." }
+        if ($Challenge -and [string]$terminal.failureMessage -cnotmatch [regex]::Escape($challengePath)) { throw "A $Case report must identify the retained challenge path." }
+
+        $report = New-StandardCoreEvidence -RunId ([guid]::NewGuid().ToString('N')) -State ([string]$terminal.state) `
+            -ExitCode ([int]$script:StandardValidationExitCodes[[string]$terminal.state]) -ContentMode 'immutable-source' `
+            -Checks @() -SourceEvidence $terminal.sourceEvidence -FailureMessage ([string]$terminal.failureMessage)
+        $json = $report | ConvertTo-Json -Depth 100
+        if (-not (Test-Json -Json $json -SchemaFile $schema -ErrorAction SilentlyContinue)) { throw "The $Case terminal report must be valid under the closed evidence schema." }
+        if (Test-StandardValidationHasProperty -Object $report -Name 'sourceValidation') { throw "The $Case report must not serialize an internal sourceReviewPending variant." }
+        if ([string]$report.failure.state -cne $State -or [string]$report.state -cne $State -or [bool]$report.releaseEligible) { throw "The $Case report must retain its terminal state and remain release-ineligible." }
+    }
+
+    # Synthetic ephemeral signer verifies the receiver crypto path only; no private key is persisted and this is not a production approval.
+    It 'UnitT45_verifies_a_complete_synthetic_source_review_receipt_with_the_domain_bound_human_key' {
+        $key = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $secondKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $publicPath = Join-Path $TestDrive ('source-review-ephemeral-public-' + [guid]::NewGuid().ToString('N') + '.xml')
+        $oldHash = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256
+        $getterPath = 'Function:\Get-StandardValidationTrustAnchorPath'
+        $getterItem = Get-Item -LiteralPath $getterPath
+        $oldGetter = $getterItem.ScriptBlock
+        try {
+            [IO.File]::WriteAllText($publicPath, $key.ToXmlString($false), (New-Object Text.UTF8Encoding($false)))
+            $publicHash = Get-StandardValidationFileSha256 -Path $publicPath -Context 'synthetic ephemeral public key'
+            $publicPathForGetter = $publicPath
+            Set-Item -LiteralPath $getterPath -Value ({ param([string]$KeyId, [string]$TrustAnchorRoot) if ($KeyId -cne 'humanApproval') { throw 'Unexpected synthetic key id.' }; return $publicPathForGetter }.GetNewClosure())
+            $script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 = $publicHash
+
+            $created = [DateTime]::UtcNow.AddSeconds(-30)
+            $expires = $created.AddMinutes(10)
+            $issued = [DateTime]::UtcNow
+            $createdAt = $created.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $expiresAt = $expires.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $issuedAt = $issued.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $acceptedAt = [DateTime]::UtcNow.AddSeconds(1).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $occurrenceSha256 = Get-StandardValidationTextSha256 -Value 'synthetic full MEDIUM occurrence'
+            $challenge = [pscustomobject][ordered]@{
+                schemaVersion = 1; contract = 'standard-source-human-review-v1'; scope = 'source-validation-only'
+                createdAt = $createdAt; expiresAt = $expiresAt
+                binding = [pscustomobject][ordered]@{ runId = 'c' * 32; humanKeySha256 = $publicHash; rawEvidence = @() }
+                findingOccurrences = @([pscustomobject][ordered]@{ occurrenceSha256 = $occurrenceSha256; severity = 'medium' })
+            }
+            $disposition = [pscustomobject][ordered]@{
+                occurrenceSha256 = $occurrenceSha256; severity = 'medium'; classification = 'ordinary'; decision = 'approved'
+                rationale = 'Synthetic unit-test rationale for a fixture occurrence.'; scope = 'source-validation-only'; evidenceReferences = @($occurrenceSha256)
+            }
+            $receipt = [pscustomobject][ordered]@{
+                schemaVersion = 1; contract = 'standard-source-human-review-v1'; scope = 'source-validation-only'
+                challengeSha256 = 'a' * 64; runId = 'c' * 32; decision = 'approved'
+                approvalId = 'synthetic-approval'; approver = 'Synthetic Human Reviewer'; hostId = 'synthetic-host'; actorId = 'synthetic-actor'
+                issuedAt = $issuedAt; findingDisposition = @($disposition); signature = ''
+            }
+            $payload = Get-StandardCoreSourceReviewReceiptSignaturePayload -Receipt $receipt
+            $signature = $key.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($payload), 'SHA256')
+            $receipt.signature = [Convert]::ToBase64String($signature)
+            if (-not (Assert-StandardCoreSourceReviewReceipt -Receipt $receipt -Challenge $challenge -ChallengeSha256 ('a' * 64) -AcceptedAt $acceptedAt)) {
+                throw 'The receiver must accept a complete correctly domain-signed synthetic receipt.'
+            }
+
+            $signedTypeCases = @(
+                @{ target = 'receipt'; field = 'contract'; value = 'standard-source-human-review-v1' },
+                @{ target = 'receipt'; field = 'scope'; value = 'source-validation-only' },
+                @{ target = 'receipt'; field = 'challengeSha256'; value = 'a' * 64 },
+                @{ target = 'receipt'; field = 'runId'; value = 'c' * 32 },
+                @{ target = 'receipt'; field = 'decision'; value = 'approved' },
+                @{ target = 'disposition'; field = 'occurrenceSha256'; value = $occurrenceSha256 },
+                @{ target = 'disposition'; field = 'severity'; value = 'medium' },
+                @{ target = 'disposition'; field = 'scope'; value = 'source-validation-only' },
+                @{ target = 'disposition'; field = 'classification'; value = 'ordinary' },
+                @{ target = 'disposition'; field = 'decision'; value = 'approved' }
+            )
+            foreach ($typeCase in $signedTypeCases) {
+                $receiptCopyProperties = [ordered]@{}
+                foreach ($property in $receipt.PSObject.Properties) {
+                    if ([string]$property.Name -ceq 'findingDisposition') {
+                        $copiedDispositions = New-Object 'System.Collections.Generic.List[object]'
+                        foreach ($item in @($receipt.findingDisposition)) {
+                            $itemProperties = [ordered]@{}
+                            foreach ($itemProperty in $item.PSObject.Properties) { $itemProperties[[string]$itemProperty.Name] = $itemProperty.Value }
+                            $copiedDispositions.Add([pscustomobject]$itemProperties)
+                        }
+                        $receiptCopyProperties[[string]$property.Name] = [object[]]$copiedDispositions.ToArray()
+                    }
+                    else { $receiptCopyProperties[[string]$property.Name] = $property.Value }
+                }
+                $typedReceipt = [pscustomobject]$receiptCopyProperties
+                if ([string]$typeCase.target -ceq 'receipt') {
+                    $typedReceipt.PSObject.Properties[[string]$typeCase.field].Value = @([string]$typeCase.value)
+                }
+                else {
+                    $typedReceipt.findingDisposition[0].PSObject.Properties[[string]$typeCase.field].Value = @([string]$typeCase.value)
+                }
+                $typedPayload = Get-StandardCoreSourceReviewReceiptSignaturePayload -Receipt $typedReceipt
+                $typedReceipt.signature = [Convert]::ToBase64String($key.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($typedPayload), 'SHA256'))
+                $wrongTypeRejected = $false
+                try { Assert-StandardCoreSourceReviewReceipt -Receipt $typedReceipt -Challenge $challenge -ChallengeSha256 ('a' * 64) -AcceptedAt $acceptedAt | Out-Null }
+                catch { $wrongTypeRejected = $true }
+                if (-not $wrongTypeRejected) { throw "The signed $($typeCase.target).$($typeCase.field) array must be rejected without relying on signature failure." }
+            }
+
+            $receipt.approver = 'Tampered after signing'
+            $tamperingRejected = $false
+            try { Assert-StandardCoreSourceReviewReceipt -Receipt $receipt -Challenge $challenge -ChallengeSha256 ('a' * 64) -AcceptedAt $acceptedAt | Out-Null }
+            catch { $tamperingRejected = $true }
+            if (-not $tamperingRejected) { throw 'A changed principal must invalidate the complete signed receipt payload.' }
+
+            $receipt.approver = 'Synthetic Human Reviewer'
+            $wrongKeySignature = $secondKey.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($payload), 'SHA256')
+            $receipt.signature = [Convert]::ToBase64String($wrongKeySignature)
+            $wrongKeyRejected = $false
+            try { Assert-StandardCoreSourceReviewReceipt -Receipt $receipt -Challenge $challenge -ChallengeSha256 ('a' * 64) -AcceptedAt $acceptedAt | Out-Null }
+            catch { $wrongKeyRejected = $true }
+            if (-not $wrongKeyRejected) { throw 'A signature from a different ephemeral key must be rejected.' }
+        }
+        finally {
+            Set-Item -LiteralPath $getterPath -Value $oldGetter
+            $script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 = $oldHash
+            $key.Dispose()
+            $secondKey.Dispose()
+        }
+    }
+
+    It 'UnitT49_hashes_and_parses_the_same_bounded_fixed_public_key_bytes' {
+        $key = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $otherKey = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $path = Join-Path $TestDrive ('source-review-key-snapshot-' + [guid]::NewGuid().ToString('N') + '.xml')
+        try {
+            $firstXml = $key.ToXmlString($false)
+            [IO.File]::WriteAllText($path, $firstXml, (New-Object Text.UTF8Encoding($false)))
+            $firstBytes = [IO.File]::ReadAllBytes($path)
+            $snapshot = Read-StandardCoreSourceReviewHumanPublicKey -Path $path
+            if ([string]$snapshot.sha256 -cne (Get-StandardValidationBytesSha256 -Bytes $firstBytes) -or
+                [Convert]::ToBase64String([byte[]]$snapshot.bytes) -cne [Convert]::ToBase64String($firstBytes) -or
+                [string]$snapshot.xml -cne $firstXml) { throw 'The fixed public key digest and parsed XML must come from one bounded byte snapshot.' }
+
+            [IO.File]::WriteAllText($path, $otherKey.ToXmlString($false), (New-Object Text.UTF8Encoding($false)))
+            if ([string]$snapshot.sha256 -cne (Get-StandardValidationBytesSha256 -Bytes ([byte[]]$snapshot.bytes)) -or [string]$snapshot.xml -cne $firstXml) {
+                throw 'A later path replacement must not change the public key bytes that were hashed and parsed together.'
+            }
+        }
+        finally { $key.Dispose(); $otherKey.Dispose() }
+    }
+
+    # Scenario: Synthetic helper fixtures exercise challenge creation and cryptographic receipt verification.
+    # Purpose: Keep this helper-level roundtrip distinct from the required normal-entry integration coverage.
+    It 'UnitT48_accepts_a_complete_synthetic_helper_level_challenge_receipt_roundtrip' {
+        $runRoot = Join-Path $TestDrive ('source-review-roundtrip-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($runRoot)
+        $key = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $publicPath = Join-Path $runRoot 'synthetic-human-public.xml'
+        $oldKeyHash = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256
+        $trustGetterPath = 'Function:\Get-StandardValidationTrustAnchorPath'
+        $authorityGetterPath = 'Function:\Get-StandardCoreSourceReviewAuthorityMaterials'
+        $oldTrustGetter = (Get-Item -LiteralPath $trustGetterPath).ScriptBlock
+        $oldAuthorityGetter = (Get-Item -LiteralPath $authorityGetterPath).ScriptBlock
+        try {
+            [IO.File]::WriteAllText($publicPath, $key.ToXmlString($false), (New-Object Text.UTF8Encoding($false)))
+            $publicHash = Get-StandardValidationFileSha256 -Path $publicPath -Context 'roundtrip synthetic human public key'
+            $publicPathForGetter = $publicPath
+            Set-Item -LiteralPath $trustGetterPath -Value ({
+                param([string]$KeyId, [string]$TrustAnchorRoot)
+                if ($KeyId -cne 'humanApproval') { throw 'Unexpected synthetic trust-anchor key id.' }
+                return $publicPathForGetter
+            }.GetNewClosure())
+            $script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 = $publicHash
+
+            $authorityFiles = @(
+                [pscustomobject][ordered]@{ path = (Join-Path $runRoot 'authority-runner.ps1'); content = 'synthetic runner bytes' },
+                [pscustomobject][ordered]@{ path = (Join-Path $runRoot 'authority-contract.json'); content = '{"synthetic":true}' },
+                [pscustomobject][ordered]@{ path = (Join-Path $runRoot 'authority-policy.json'); content = '{"synthetic":"review policy"}' },
+                [pscustomobject][ordered]@{ path = $publicPath; content = $null }
+            )
+            $authorityRefs = @()
+            foreach ($authorityFile in $authorityFiles) {
+                if ($null -ne $authorityFile.content) { [IO.File]::WriteAllText($authorityFile.path, [string]$authorityFile.content, (New-Object Text.UTF8Encoding($false))) }
+                $authorityRefs += [pscustomobject][ordered]@{ path = [string]$authorityFile.path; sha256 = Get-StandardValidationFileSha256 -Path ([string]$authorityFile.path) -Context 'roundtrip synthetic authority material' }
+            }
+            $policyHash = [string]$authorityRefs[2].sha256
+            $runnerHash = [string]$authorityRefs[0].sha256
+            $contractHash = [string]$authorityRefs[1].sha256
+            $syntheticAuthority = [pscustomobject][ordered]@{ policySha256 = $policyHash; humanKeySha256 = $publicHash; authorityMaterials = [object[]]$authorityRefs }
+            $authorityForGetter = $syntheticAuthority
+            Set-Item -LiteralPath $authorityGetterPath -Value ({
+                param([string]$AuthorityRevision, [string]$RunnerSha256, [string]$ContractSha256, [string]$ExpectedPolicySha256)
+                if ($RunnerSha256 -cne $authorityForGetter.authorityMaterials[0].sha256 -or
+                    $ContractSha256 -cne $authorityForGetter.authorityMaterials[1].sha256 -or
+                    (-not [string]::IsNullOrWhiteSpace($ExpectedPolicySha256) -and $ExpectedPolicySha256 -cne $authorityForGetter.policySha256)) {
+                    throw 'Synthetic authority helper received a mismatched runner, contract or policy binding.'
+                }
+                return $authorityForGetter
+            }.GetNewClosure())
+
+            $nativePath = Join-Path $runRoot 'native-report.json'
+            [IO.File]::WriteAllText($nativePath, '{"syntheticNativeReport":true}', (New-Object Text.UTF8Encoding($false)))
+            $nativeHash = Get-StandardValidationFileSha256 -Path $nativePath -Context 'roundtrip native report'
+            $adapterPath = Join-Path $runRoot 'adapter.json'
+            $casePath = Join-Path $runRoot 'pester-case-inventory.json'
+            $stdoutPath = Join-Path $runRoot 'repository.stdout.txt'
+            $stderrPath = Join-Path $runRoot 'repository.stderr.txt'
+            foreach ($path in @($adapterPath, $casePath, $stdoutPath, $stderrPath)) {
+                [IO.File]::WriteAllText($path, 'synthetic evidence bytes', (New-Object Text.UTF8Encoding($false)))
+            }
+            $eventId = [guid]::NewGuid().ToString()
+            $eventPath = Join-Path $runRoot 'source-event.json'
+            $nativeOutput = [pscustomobject][ordered]@{ nativeReports = @([pscustomobject][ordered]@{ path = $nativePath; sha256 = $nativeHash }) }
+            $eventRaw = [pscustomobject][ordered]@{ stdout = ($nativeOutput | ConvertTo-Json -Depth 8 -Compress) }
+            [IO.File]::WriteAllText($eventPath, ($eventRaw | ConvertTo-Json -Depth 8 -Compress), (New-Object Text.UTF8Encoding($false)))
+            $eventHash = Get-StandardValidationFileSha256 -Path $eventPath -Context 'roundtrip source event'
+            $adapterHash = Get-StandardValidationFileSha256 -Path $adapterPath -Context 'roundtrip source adapter'
+            $caseHash = Get-StandardValidationFileSha256 -Path $casePath -Context 'roundtrip Pester case inventory'
+            $stdoutHash = Get-StandardValidationFileSha256 -Path $stdoutPath -Context 'roundtrip repository stdout'
+            $stderrHash = Get-StandardValidationFileSha256 -Path $stderrPath -Context 'roundtrip repository stderr'
+            $runId = [guid]::NewGuid().ToString('N')
+            $candidateId = Get-StandardValidationTextSha256 -Value 'synthetic source candidate identity'
+            $sourceEvidence = [pscustomobject][ordered]@{
+                status = 'passed'; runId = $runId; candidateId = $candidateId; sourceRevision = 'a' * 40
+                contentSha256 = 'b' * 64; authorityRevision = 'c' * 40; activeSkills = @('alpha')
+                skillsRoot = 'skills'; toolReceipts = @(); frozenFiles = @()
+                events = @([pscustomobject][ordered]@{ eventId = $eventId; toolId = 'skill-validator'; outputPath = $eventPath })
+                adapterSnapshot = [pscustomobject][ordered]@{ path = $adapterPath; sha256 = $adapterHash }
+                pesterCaseInventory = [pscustomobject][ordered]@{ path = $casePath; sha256 = $caseHash }
+            }
+            $occurrence = New-StandardCoreSourceReviewOccurrence -EventId $eventId -ToolId 'skill-validator' -SkillId 'alpha' `
+                -NativeReportPath $nativePath -NativeReportSha256 $nativeHash -Ordinal 1 -Severity 'medium' `
+                -Finding ([pscustomobject][ordered]@{ severity = 'medium'; finding = 'synthetic ordinary MEDIUM'; path = 'skills/alpha/SKILL.md' })
+            $pending = [pscustomobject][ordered]@{
+                needsReview = $true; occurrences = @($occurrence); suppressedLedger = @()
+                nativeReports = @([pscustomobject][ordered]@{ path = $nativePath; sha256 = $nativeHash })
+                additionalRawEvidence = @()
+                expectedEvidenceArtifacts = @([pscustomobject][ordered]@{ path = $eventPath; sha256 = $eventHash })
+                policySha256 = $policyHash; humanKeySha256 = $publicHash; authorityMaterials = [object[]]$authorityRefs
+            }
+            $sourceEvidence | Add-Member -NotePropertyName sourceReviewPending -NotePropertyValue $pending
+            $report = New-StandardCoreEvidence -RunId $runId -State 'PASS' -ExitCode 0 -ContentMode 'immutable-source' `
+                -Candidate ([pscustomobject][ordered]@{
+                    repository = 'https://example.com/synthetic/skills.git'; sourceRevision = 'a' * 40; baseRevision = 'd' * 40
+                    eventName = 'pull_request'; contentSha256 = 'b' * 64
+                }) `
+                -Authority ([pscustomobject][ordered]@{ repository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision = 'c' * 40; runnerSha256 = $runnerHash; contractSha256 = $contractHash }) `
+                -Adapter ([pscustomobject][ordered]@{ identity = 'standard-core-adapter-v2'; sha256 = $adapterHash }) `
+                -Checks @([pscustomobject][ordered]@{ id = 'repository-general'; status = 'passed'; stdoutPath = $stdoutPath; stdoutSha256 = $stdoutHash; stderrPath = $stderrPath; stderrSha256 = $stderrHash }) `
+                -Artifacts ([pscustomobject][ordered]@{ runId = $runId; root = (Split-Path -Parent $runRoot); outputPath = (Join-Path (Split-Path -Parent $runRoot) 'result.json'); runRoot = $runRoot; snapshotRoot = (Join-Path $runRoot 'candidate') }) `
+                -SourceEvidence $sourceEvidence
+
+            $script:StandardValidationEvidenceArtifactLedger.Clear()
+            $challenge = New-StandardCoreSourceReviewChallenge -Report $report -Occurrences @($occurrence) -SuppressedLedger @() -TimeoutSeconds 20
+            if ([string]$challenge.value.binding.runId -cne $runId -or
+                [string]$challenge.value.binding.sourceExecutionSha256 -notmatch '^[a-f0-9]{64}$') {
+                throw 'The challenge must place the complete closed source binding directly under binding.'
+            }
+            $disposition = [pscustomobject][ordered]@{
+                occurrenceSha256 = [string]$occurrence.occurrenceSha256; severity = 'medium'; classification = 'ordinary'; decision = 'approved'
+                rationale = 'Synthetic integration rationale for this exact fixture occurrence.'; scope = 'source-validation-only'
+                evidenceReferences = @([string]$occurrence.occurrenceSha256, $nativeHash)
+            }
+            $issuedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $receipt = [pscustomobject][ordered]@{
+                schemaVersion = 1; contract = 'standard-source-human-review-v1'; scope = 'source-validation-only'
+                challengeSha256 = [string]$challenge.sha256; runId = $runId; decision = 'approved'
+                approvalId = 'synthetic-roundtrip'; approver = 'Synthetic Human Reviewer'; hostId = 'synthetic-host'; actorId = 'synthetic-actor'
+                issuedAt = $issuedAt; findingDisposition = @($disposition); signature = ''
+            }
+            $receiptPayload = Get-StandardCoreSourceReviewReceiptSignaturePayload -Receipt $receipt
+            $receipt.signature = [Convert]::ToBase64String($key.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($receiptPayload), 'SHA256'))
+            $receiptTempPath = Join-Path $runRoot 'receipt.pending'
+            [IO.File]::WriteAllText($receiptTempPath, (Convert-StandardValidationValueToCanonicalJson -Value $receipt -Context 'synthetic roundtrip receipt'), (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::Move($receiptTempPath, [string]$challenge.receiptPath)
+            $received = Wait-StandardCoreSourceReviewReceipt -ReceiptPath $challenge.receiptPath -RunRoot $runRoot -PhaseBudgetSeconds 5
+            [void](Assert-StandardCoreSourceReviewReceipt -Receipt $received.value -Challenge $challenge.value -ChallengeSha256 $challenge.sha256 -AcceptedAt $received.acceptedAt)
+
+            $sourceEvidence.PSObject.Properties.Remove('sourceReviewPending')
+            $sourceEvidence | Add-Member -NotePropertyName sourceReview -NotePropertyValue ([pscustomobject][ordered]@{
+                schemaVersion = 1; contract = 'standard-source-human-review-v1'; status = 'accepted'
+                challenge = [pscustomobject][ordered]@{ path = $challenge.path; sha256 = $challenge.sha256 }
+                receipt = [pscustomobject][ordered]@{ path = $received.path; sha256 = $received.sha256 }
+                bindingSha256 = $challenge.bindingSha256
+                key = [pscustomobject][ordered]@{ id = 'humanApproval'; sha256 = $publicHash }
+                window = [pscustomobject][ordered]@{ createdAt = $challenge.createdAt; expiresAt = $challenge.expiresAt; acceptedAt = $received.acceptedAt }
+            })
+            if (-not (Assert-StandardCoreSourceReviewReport -Report $report -Occurrences @($occurrence) -SuppressedLedger @() -HasMediumFinding $true)) {
+                throw 'The strict report reader must reconstruct and accept the same signed synthetic challenge in-process.'
+            }
+        }
+        finally {
+            Set-Item -LiteralPath $trustGetterPath -Value $oldTrustGetter
+            Set-Item -LiteralPath $authorityGetterPath -Value $oldAuthorityGetter
+            $script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 = $oldKeyHash
+            $script:SourceReviewRoundtripAuthority = $null
+            $key.Dispose()
+        }
+    }
+
+    # Scenario: The ordinary Core entry point runs a complete immutable candidate source pass, issues a same-run challenge, accepts a separately delivered synthetic test receipt, and passes its strict reader again.
+    # Purpose: Prove the full subprocess/check/receipt lifecycle without claiming a production human issuer or a release approval.
+    It 'InterT60_runs_full_normal_SourceValidation_with_external_synthetic_issuer_and_full_reader' {
+        $attemptId = [guid]::NewGuid().ToString('N')
+        $checkoutRoot = Split-Path -Parent $PSScriptRoot
+        $evidenceRoot = Join-Path $checkoutRoot 'evidence/implementation'
+        [void][IO.Directory]::CreateDirectory($evidenceRoot)
+        $attemptRoot = Join-Path $evidenceRoot ('source-review-normal-' + $attemptId)
+        [void][IO.Directory]::CreateDirectory($attemptRoot)
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if ([string]::IsNullOrWhiteSpace($localAppData)) { throw 'InterT60 cannot locate the external per-user temporary directory.' }
+        $externalTempRoot = Join-Path $localAppData 'Temp'
+        [void][IO.Directory]::CreateDirectory($externalTempRoot)
+        $fixtureRoot = Join-Path $externalTempRoot ('syp314-' + $attemptId)
+        [void][IO.Directory]::CreateDirectory($fixtureRoot)
+
+        $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+        $runProcess = $null
+        $readerProcess = $null
+        $runProcessStarted = $false
+        $readerProcessStarted = $false
+        $runTerminatedByFixture = $false
+        $readerTerminatedByFixture = $false
+        $runStartAttemptedAt = $null
+        $readerStartAttemptedAt = $null
+        $runStartedAt = $null
+        $challengeWaitStartedAt = $null
+        $challengeWaitEndedAt = $null
+        $challengeObservedAt = $null
+        $challengeWaitLimitSeconds = 360
+        $readerWaitLimitSeconds = 60
+        $issuerException = $null
+        $readerStartedAt = $null
+        $runArgs = @()
+        $readerArgs = @()
+        $runStdoutText = ''
+        $runStderrText = ''
+        $readerStdoutText = ''
+        $readerStderrText = ''
+        $runExitCode = $null
+        $readerExitCode = $null
+        $runProcessId = $null
+        $readerProcessId = $null
+        $runEndedAt = $null
+        $readerEndedAt = $null
+        $runStartFailure = $null
+        $readerStartFailure = $null
+        $runTerminationFailure = $null
+        $readerTerminationFailure = $null
+        $runOutput = Join-Path $attemptRoot 'core-run.stdout.txt'
+        $runError = Join-Path $attemptRoot 'core-run.stderr.txt'
+        $readerOutput = Join-Path $attemptRoot 'strict-reader.stdout.txt'
+        $readerError = Join-Path $attemptRoot 'strict-reader.stderr.txt'
+        $runReceiptPath = Join-Path $attemptRoot 'core-run-process-receipt.json'
+        $readerReceiptPath = Join-Path $attemptRoot 'strict-reader-process-receipt.json'
+        $reportPath = $null
+        $requestedReportPath = $null
+        $runId = [guid]::NewGuid().ToString('N')
+        $challengePath = $null
+        $reviewReceiptPath = $null
+        $sourceRevision = $null
+        $baseRevision = $null
+        $authorityRevision = $null
+        $sourceRepository = 'https://example.test/fixture/syp314-normal-review.git'
+        $artifactsRoot = Join-Path $fixtureRoot 'artifacts'
+        $trustedRoot = [string]$PSHOME
+        $publicKeyHash = $null
+        $finalReport = $null
+        $runProcessOutcome = $null
+        $readerProcessOutcome = $null
+        $startFailureProbe = $null
+        $noChallengeTimeoutProbe = $null
+        $noChallengeProbeCleanup = $null
+
+        # Reuse the runner's actual hashing, canonicalization, closure, and receipt-payload helpers in this fixture process.
+        # The production run and independent strict-reader check below still execute in separate child processes.
+        . (Join-Path $checkoutRoot 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $fixtureRoot -AdapterPath (Join-Path $fixtureRoot 'source-adapter.json') -ArtifactsRoot $artifactsRoot -SourceRepository $sourceRepository -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -RunId $runId -DefineFunctionsOnly
+
+        function Invoke-InterT60Git {
+            param([string]$Repository, [string[]]$GitArguments)
+            $gitOutput = @(& git -C $Repository @GitArguments 2>&1 | ForEach-Object { [string]$_ })
+            if ($LASTEXITCODE -ne 0) { throw "InterT60 git failed ($LASTEXITCODE): $($GitArguments -join ' ')`n$($gitOutput -join "`n")" }
+            return ($gitOutput -join "`n").Trim()
+        }
+
+        function Write-InterT60CreateOnly {
+            param([string]$Path, [byte[]]$Bytes, [scriptblock]$BeforePublish)
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $parentPath = Split-Path -Parent $fullPath
+            if (-not [IO.Directory]::Exists($parentPath)) { throw "InterT60 create-only parent directory is missing: $parentPath" }
+            if ([IO.File]::Exists($fullPath)) { throw "InterT60 create-only destination already exists: $fullPath" }
+            $temporaryPath = Join-Path $parentPath ('.' + [IO.Path]::GetFileName($fullPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+            try {
+                $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) }
+                finally { $stream.Dispose() }
+                if ($null -ne $BeforePublish) { & $BeforePublish $fullPath $temporaryPath }
+                [IO.File]::Move($temporaryPath, $fullPath)
+            }
+            catch {
+                $failure = $_.Exception
+                if ([IO.File]::Exists($temporaryPath)) { try { [IO.File]::Delete($temporaryPath) } catch { } }
+                throw $failure
+            }
+        }
+
+        function Complete-InterT60ChildProcess {
+            param([Diagnostics.Process]$Process, [bool]$Started, [string]$Name, [int]$WaitAfterKillMilliseconds = 5000)
+            $record = [ordered]@{ name = $Name; started = $Started; state = 'not-started'; processId = $null; exitCode = $null; endedAt = $null; terminatedByFixture = $false; terminationFailure = $null }
+            if (-not $Started) { return [pscustomobject]$record }
+            if ($null -eq $Process) {
+                $record.state = 'start-state-invalid'
+                $record.terminationFailure = 'A started child has no retained Process object.'
+                return [pscustomobject]$record
+            }
+            try {
+                $record.processId = [int]$Process.Id
+                if (-not $Process.HasExited) {
+                    try { $Process.Kill($true); $record.terminatedByFixture = $true }
+                    catch { if (-not $Process.HasExited) { throw } }
+                    if (-not $Process.WaitForExit($WaitAfterKillMilliseconds)) {
+                        $record.state = 'termination-incomplete'
+                        $record.terminationFailure = "$Name did not exit within the $WaitAfterKillMilliseconds ms post-kill bound."
+                        return [pscustomobject]$record
+                    }
+                }
+                if ($Process.HasExited) {
+                    $record.exitCode = [int]$Process.ExitCode
+                    $record.endedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                    $record.state = if ($record.terminatedByFixture) { 'terminated-by-fixture' } else { 'completed' }
+                }
+                else {
+                    $record.state = 'termination-incomplete'
+                    $record.terminationFailure = "$Name remained active after the post-kill wait."
+                }
+            }
+            catch {
+                $record.state = 'termination-incomplete'
+                $record.terminationFailure = $_.Exception.ToString()
+            }
+            return [pscustomobject]$record
+        }
+
+        function Wait-InterT60Challenge {
+            param([string]$Path, [Diagnostics.Process]$Process, [bool]$Started, [int]$TimeoutSeconds, [int]$WaitAfterKillMilliseconds = 5000)
+            $waitStartedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            while (-not [IO.File]::Exists($Path) -and $Started -and $null -ne $Process -and -not $Process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 200
+            }
+            $waitEndedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $challengeExists = [IO.File]::Exists($Path)
+            $processOutcome = $null
+            if (-not $challengeExists) {
+                $processOutcome = Complete-InterT60ChildProcess -Process $Process -Started $Started -Name 'core-run' -WaitAfterKillMilliseconds $WaitAfterKillMilliseconds
+            }
+            [pscustomobject][ordered]@{
+                challengeExists = $challengeExists
+                waitStartedAt = $waitStartedAt
+                waitEndedAt = $waitEndedAt
+                challengeObservedAt = $(if ($challengeExists) { $waitEndedAt } else { $null })
+                processOutcome = $processOutcome
+            }
+        }
+
+        try {
+        $atomicProbePath = Join-Path $attemptRoot ('atomic-create-only-' + $attemptId + '.json')
+        $atomicProbeBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('{"atomic":"complete"}')
+        $atomicProbeBeforePublish = {
+            param([string]$FinalPath, [string]$TemporaryPath)
+            if ([IO.File]::Exists($FinalPath)) { throw 'InterT60 final receipt path became visible before publication.' }
+            if (-not [IO.File]::Exists($TemporaryPath)) { throw 'InterT60 completed temporary receipt was not present before publication.' }
+            $probeStream = [IO.File]::Open($TemporaryPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            try {
+                $probeBytes = [byte[]]::new([int]$probeStream.Length)
+                $readOffset = 0
+                while ($readOffset -lt $probeBytes.Length) {
+                    $readCount = $probeStream.Read($probeBytes, $readOffset, $probeBytes.Length - $readOffset)
+                    if ($readCount -le 0) { throw 'InterT60 completed temporary receipt ended before its recorded length.' }
+                    $readOffset += $readCount
+                }
+            }
+            finally { $probeStream.Dispose() }
+            if ([Convert]::ToBase64String($probeBytes) -cne [Convert]::ToBase64String($atomicProbeBytes)) { throw 'InterT60 temporary receipt bytes were incomplete before publication.' }
+        }.GetNewClosure()
+        Write-InterT60CreateOnly -Path $atomicProbePath -Bytes $atomicProbeBytes -BeforePublish $atomicProbeBeforePublish
+        $atomicProbeHash = Get-StandardValidationFileSha256 -Path $atomicProbePath -Context 'InterT60 atomic publication probe bytes'
+        $atomicProbeDigest = [Security.Cryptography.SHA256]::Create()
+        try { $atomicProbeExpectedHash = ([BitConverter]::ToString($atomicProbeDigest.ComputeHash($atomicProbeBytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $atomicProbeDigest.Dispose() }
+        $atomicProbeDuplicateRejected = $false
+        try { Write-InterT60CreateOnly -Path $atomicProbePath -Bytes ([byte[]]@(0x7b)) }
+        catch { $atomicProbeDuplicateRejected = $true }
+        if ($atomicProbeHash -cne $atomicProbeExpectedHash -or -not $atomicProbeDuplicateRejected -or (Get-StandardValidationFileSha256 -Path $atomicProbePath -Context 'InterT60 duplicate publication preservation') -cne $atomicProbeHash) {
+            throw 'InterT60 duplicate publication overwrote the completed first receipt.'
+        }
+        $atomicProbeLeftovers = @(Get-ChildItem -LiteralPath $attemptRoot -File -Filter ('.' + [IO.Path]::GetFileName($atomicProbePath) + '.*.tmp') -ErrorAction SilentlyContinue)
+        if ($atomicProbeLeftovers.Count -ne 0) { throw 'InterT60 atomic create-only writer left a temporary publication file behind.' }
+
+            $pwshPath = Join-Path $PSHOME 'pwsh.exe'
+            if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw "InterT60 PowerShell runtime is missing: $pwshPath" }
+
+            $failedStartPath = Join-Path $attemptRoot ('missing-child-' + [guid]::NewGuid().ToString('N') + '.exe')
+            $failedStartInfo = New-Object Diagnostics.ProcessStartInfo
+            $failedStartInfo.FileName = $failedStartPath; $failedStartInfo.UseShellExecute = $false
+            $failedStartProcess = New-Object Diagnostics.Process; $failedStartProcess.StartInfo = $failedStartInfo
+            $failedStartError = $null
+            $failedStartReportedStarted = $false
+            try { $failedStartReportedStarted = [bool]$failedStartProcess.Start() }
+            catch { $failedStartError = $_.Exception.ToString() }
+            if ($failedStartReportedStarted) {
+                $failedStartOutcome = Complete-InterT60ChildProcess -Process $failedStartProcess -Started $true -Name 'intentional-start-failure-probe'
+                $failedStartProcess.Dispose()
+                throw 'InterT60 intentional missing child unexpectedly started.'
+            }
+            if ([string]::IsNullOrWhiteSpace($failedStartError)) { $failedStartError = 'Process.Start returned false.' }
+            $failedStartOutcome = Complete-InterT60ChildProcess -Process $failedStartProcess -Started $false -Name 'intentional-start-failure-probe'
+            $failedStartProcess.Dispose()
+            if ([string]$failedStartOutcome.state -cne 'not-started' -or $null -ne $failedStartOutcome.processId -or $null -ne $failedStartOutcome.exitCode -or [bool]$failedStartOutcome.terminatedByFixture) {
+                throw 'InterT60 failed-start cleanup touched an unassociated Process object or reported a fabricated process result.'
+            }
+            $startFailureProbe = [ordered]@{ executable = $failedStartPath; processStartError = $failedStartError; outcome = $failedStartOutcome }
+
+            $noChallengeProbePath = Join-Path $attemptRoot ('intentionally-absent-challenge-' + [guid]::NewGuid().ToString('N') + '.json')
+            $noChallengeProbeStartInfo = New-Object Diagnostics.ProcessStartInfo
+            $noChallengeProbeStartInfo.FileName = $pwshPath; $noChallengeProbeStartInfo.WorkingDirectory = $fixtureRoot; $noChallengeProbeStartInfo.UseShellExecute = $false
+            $noChallengeProbeStartInfo.CreateNoWindow = $true; $noChallengeProbeStartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30')) { $noChallengeProbeStartInfo.ArgumentList.Add([string]$argument) }
+            $noChallengeProbeProcess = New-Object Diagnostics.Process; $noChallengeProbeProcess.StartInfo = $noChallengeProbeStartInfo
+            $noChallengeProbeStarted = $false
+            try {
+                if (-not $noChallengeProbeProcess.Start()) { throw 'InterT60 no-challenge timeout probe child failed to start.' }
+                $noChallengeProbeStarted = $true
+                $noChallengeProbeResult = Wait-InterT60Challenge -Path $noChallengeProbePath -Process $noChallengeProbeProcess -Started $noChallengeProbeStarted -TimeoutSeconds 1 -WaitAfterKillMilliseconds 5000
+                if ([bool]$noChallengeProbeResult.challengeExists -or [string]$noChallengeProbeResult.processOutcome.state -cne 'terminated-by-fixture' -or -not $noChallengeProbeProcess.HasExited) {
+                    throw 'InterT60 no-challenge timeout did not kill and reap only its started child within the post-kill bound.'
+                }
+                $noChallengeTimeoutProbe = [ordered]@{ challengePath = $noChallengeProbePath; challengeExisted = [bool]$noChallengeProbeResult.challengeExists; waitStartedAt = $noChallengeProbeResult.waitStartedAt; waitEndedAt = $noChallengeProbeResult.waitEndedAt; waitLimitSeconds = 1; processOutcome = $noChallengeProbeResult.processOutcome }
+            }
+            finally {
+                $noChallengeProbeCleanup = Complete-InterT60ChildProcess -Process $noChallengeProbeProcess -Started $noChallengeProbeStarted -Name 'no-challenge-timeout-probe-final-cleanup'
+                $noChallengeProbeProcess.Dispose()
+                if ([string]$noChallengeProbeCleanup.state -ceq 'termination-incomplete') { throw 'InterT60 no-challenge timeout probe child remained active after its bounded final cleanup.' }
+            }
+            $pesterManifestOverride = [string]$env:SYP314_PESTER4_MANIFEST
+            if ([string]::IsNullOrWhiteSpace($pesterManifestOverride)) {
+                $loadedPester = @(Get-Module -Name Pester | Where-Object { [string]$_.Version -ceq '4.10.1' } | Select-Object -First 1)
+                if ($loadedPester.Count -eq 0) {
+                    $loadedPester = @(Get-Module -ListAvailable -Name Pester | Where-Object { [string]$_.Version -ceq '4.10.1' } | Select-Object -First 1)
+                }
+                if ($loadedPester.Count -ne 1) { throw 'InterT60 requires the actual installed Pester 4.10.1 module used for this run.' }
+                $pesterModuleRoot = [string]$loadedPester[0].ModuleBase
+                $pesterManifest = Join-Path $pesterModuleRoot 'Pester.psd1'
+            }
+            else {
+                $pesterManifest = [IO.Path]::GetFullPath($pesterManifestOverride)
+                $pesterModuleRoot = Split-Path -Parent $pesterManifest
+            }
+            if (-not (Test-Path -LiteralPath $pesterManifest -PathType Leaf)) { throw "InterT60 Pester 4.10.1 manifest is missing: $pesterManifest" }
+            $pesterModuleFiles = @(Get-ChildItem -LiteralPath $pesterModuleRoot -Recurse -File -Force | Sort-Object -Property FullName -CaseSensitive)
+            if ($pesterModuleFiles.Count -eq 0 -or -not ($pesterModuleFiles.FullName -ccontains $pesterManifest)) { throw 'InterT60 Pester module manifest and payload are incomplete.' }
+            $nodeCommand = Get-Command -Name 'node.exe' -ErrorAction Stop
+            $nodePath = if ($nodeCommand.PSObject.Properties.Name -contains 'Path') { [string]$nodeCommand.Path } else { [string]$nodeCommand.Source }
+            if ([string]::IsNullOrWhiteSpace($nodePath) -or -not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw 'InterT60 requires the actual Node runtime used by the skill-tools resolver shape.' }
+            $nodeDirectory = Get-Item -LiteralPath (Split-Path -Parent $nodePath) -Force
+            if (($nodeDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $nodeTarget = [string]$nodeDirectory.Target
+                if ([string]::IsNullOrWhiteSpace($nodeTarget)) { throw 'InterT60 cannot resolve the actual Node application directory through its command alias.' }
+                if (-not [IO.Path]::IsPathRooted($nodeTarget)) { $nodeTarget = Join-Path (Split-Path -Parent $nodeDirectory.FullName) $nodeTarget }
+                $nodePath = [IO.Path]::GetFullPath((Join-Path $nodeTarget (Split-Path -Leaf $nodePath)))
+            }
+            if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { throw 'InterT60 resolved Node application path is missing.' }
+
+            $authorityRoot = Join-Path $fixtureRoot 'authority'
+            $candidateRoot = Join-Path $fixtureRoot 'candidate'
+            $toolRoot = Join-Path $fixtureRoot 'tools'
+            $receiptRoot = Join-Path $fixtureRoot 'receipts'
+            foreach ($path in @($authorityRoot, $candidateRoot, $toolRoot, $receiptRoot, $artifactsRoot)) { [void][IO.Directory]::CreateDirectory($path) }
+            $runnerSource = Join-Path $checkoutRoot 'scripts/Invoke-StandardValidation.ps1'
+            $contractSource = Join-Path $checkoutRoot 'docs/standards/standard-core-validation-v2.json'
+            $securityPolicySource = Join-Path $checkoutRoot 'docs/standards/validation-security-gate.json'
+            $toolchainSource = Join-Path $checkoutRoot 'docs/standards/validation-toolchain.json'
+            $adapterSchemaSource = Join-Path $checkoutRoot 'docs/standards/schemas/standard-core-adapter-v2.schema.json'
+            $evidenceSchemaSource = Join-Path $checkoutRoot 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+            $authorityFiles = @(
+                [pscustomobject]@{ source = $runnerSource; relative = 'scripts/Invoke-StandardValidation.ps1' },
+                [pscustomobject]@{ source = $contractSource; relative = 'docs/standards/standard-core-validation-v2.json' },
+                [pscustomobject]@{ source = $securityPolicySource; relative = 'docs/standards/validation-security-gate.json' },
+                [pscustomobject]@{ source = $toolchainSource; relative = 'docs/standards/validation-toolchain.json' },
+                [pscustomobject]@{ source = $adapterSchemaSource; relative = 'docs/standards/schemas/standard-core-adapter-v2.schema.json' },
+                [pscustomobject]@{ source = $evidenceSchemaSource; relative = 'docs/standards/schemas/standard-core-evidence-v2.schema.json' }
+            )
+            foreach ($entry in $authorityFiles) {
+                $destination = Join-Path $authorityRoot ([string]$entry.relative)
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+                [IO.File]::Copy([string]$entry.source, $destination, $false)
+            }
+            $trustDirectory = Join-Path $authorityRoot 'docs/standards/trust-anchors'
+            [void][IO.Directory]::CreateDirectory($trustDirectory)
+            $publicKeyPath = Join-Path $trustDirectory 'human-approval-public-key.xml'
+            [IO.File]::WriteAllText($publicKeyPath, $rsa.ToXmlString($false), (New-Object Text.UTF8Encoding($false)))
+            $publicKeyHash = Get-StandardValidationFileSha256 -Path $publicKeyPath -Context 'InterT60 synthetic public key bytes'
+            $tempEvidenceSchema = Join-Path $authorityRoot 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+            $schemaText = [IO.File]::ReadAllText($tempEvidenceSchema)
+            $officialHumanKeyHash = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256
+            if (-not $schemaText.Contains($officialHumanKeyHash)) { throw 'InterT60 copied evidence schema did not contain the fixed production humanApproval hash.' }
+            $schemaText = $schemaText.Replace($officialHumanKeyHash, [string]$publicKeyHash)
+            [IO.File]::WriteAllText($tempEvidenceSchema, $schemaText, (New-Object Text.UTF8Encoding($false)))
+
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('init', '-b', 'main'))
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('config', 'user.name', 'SYP314 integration fixture'))
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('config', 'user.email', 'syp314-fixture@example.test'))
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('add', '--all'))
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('commit', '-m', 'Create isolated authority fixture'))
+            [void](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('remote', 'add', 'origin', 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'))
+            $authorityRevision = [string](Invoke-InterT60Git -Repository $authorityRoot -GitArguments @('rev-parse', 'HEAD'))
+
+            $producerPath = Join-Path $toolRoot 'source-native-producer.ps1'
+            $producerTemplate = @'
+$ErrorActionPreference = 'Stop'
+$toolId = [string]$env:STANDARD_VALIDATION_TOOL_ID
+$eventSkillId = [string]$env:STANDARD_VALIDATION_SKILL_ID
+$skillId = $eventSkillId
+$activeSkills = @(([string]$env:STANDARD_VALIDATION_ACTIVE_SKILLS -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+$skillRoot = [string]$env:STANDARD_VALIDATION_SKILL_ROOT
+if ($toolId -ceq 'static-analyzer' -and [string]::IsNullOrWhiteSpace($skillId)) {
+    if ($activeSkills.Count -ne 1) { throw 'InterT60 static native producer requires the exact one-skill fixture inventory.' }
+    $skillId = [string]$activeSkills[0]
+    $skillRoot = Join-Path ([string]$env:STANDARD_VALIDATION_SKILLS_ROOT) $skillId
+}
+$candidateId = [string]$env:STANDARD_VALIDATION_CANDIDATE_ID
+$workingDirectory = (Get-Location).Path
+$runRoot = Split-Path -Parent (Split-Path -Parent $workingDirectory)
+$pwshPath = '@@PWSH@@'
+$pwshSha = '@@PWSHSHA@@'
+$nodePath = '@@NODE@@'
+$nodeSha = '@@NODESHA@@'
+$skillToolsEntry = '@@ENTRY@@'
+$producerPath = '@@PRODUCER@@'
+function Get-LocalHash([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Write-Native([string]$Name, $Value) {
+    $path = Join-Path $runRoot $Name
+    $json = ConvertTo-Json -InputObject $Value -Depth 40 -Compress
+    [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+    return [pscustomobject][ordered]@{ path = $path; sha256 = (Get-LocalHash $path) }
+}
+$findings = @()
+$nativeReports = @()
+switch ($toolId) {
+    'package-adapter' { }
+    'skill-validator' {
+        $native = [pscustomobject][ordered]@{
+            skill_dir = $skillRoot; passed = $true; errors = 0; warnings = 0
+            results = @(
+                [pscustomobject][ordered]@{ level = 'pass'; file = 'SKILL.md'; category = 'schema'; message = 'required content present' },
+                [pscustomobject][ordered]@{ level = 'info'; file = 'extra.md'; category = 'fixture-note'; message = 'synthetic informational signal'; nativeDetail = 'retain complete source object' }
+            )
+        }
+        $nativeRef = Write-Native ('native-skill-validator-' + $skillId + '.json') $native
+        $relative = 'extra.md'
+        $fingerprintText = $skillId + "`n" + 'fixture-note' + "`n" + 'synthetic informational signal' + "`n" + $relative
+        $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData((New-Object Text.UTF8Encoding($false)).GetBytes($fingerprintText))).ToLowerInvariant()
+        $findings = @([pscustomobject][ordered]@{ severity = 'informational'; fingerprint = $fingerprint; ruleId = 'fixture-note'; message = 'synthetic informational signal'; path = ('skills/' + $skillId + '/extra.md') })
+        $nativeReports = @([pscustomobject][ordered]@{ skillId = $skillId; command = $pwshPath; commandSha256 = $pwshSha; arguments = @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $skillRoot); exitCode = 0; path = $nativeRef.path; sha256 = $nativeRef.sha256 })
+    }
+    'skill-tools' {
+        $sarif = [pscustomobject][ordered]@{
+            version = '2.1.0'
+            runs = @([pscustomobject][ordered]@{
+                tool = [pscustomobject][ordered]@{ driver = [pscustomobject][ordered]@{ name = 'skill-tools'; rules = @([pscustomobject][ordered]@{ id = 'fixture-quality-note' }) } }
+                results = @([pscustomobject][ordered]@{
+                    ruleId = 'fixture-quality-note'; ruleIndex = 0; level = 'note'
+                    locations = @(
+                        [pscustomobject][ordered]@{ physicalLocation = [pscustomobject][ordered]@{ artifactLocation = [pscustomobject][ordered]@{ uri = 'SKILL.md' } } },
+                        [pscustomobject][ordered]@{ physicalLocation = [pscustomobject][ordered]@{ artifactLocation = [pscustomobject][ordered]@{ uri = 'extra.md' } } }
+                    )
+                    message = [pscustomobject][ordered]@{ text = 'synthetic multi-location SARIF note' }
+                    fingerprints = [pscustomobject][ordered]@{ zFingerprint = 'later-fingerprint'; aFingerprint = 'stable-sarif-fingerprint' }
+                })
+            })
+        }
+        $nativeRef = Write-Native ('native-skill-tools-' + $skillId + '.sarif.json') $sarif
+        $findings = @(
+            [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'stable-sarif-fingerprint'; ruleId = 'fixture-quality-note'; message = 'synthetic multi-location SARIF note'; path = ('skills/' + $skillId + '/SKILL.md') },
+            [pscustomobject][ordered]@{ severity = 'informational'; fingerprint = 'stable-sarif-fingerprint'; ruleId = 'fixture-quality-note'; message = 'synthetic multi-location SARIF note'; path = ('skills/' + $skillId + '/extra.md') }
+        )
+        $nativeReports = @([pscustomobject][ordered]@{ skillId = $skillId; command = $nodePath; commandSha256 = $nodeSha; arguments = @($skillToolsEntry, 'check', $skillRoot, '--format', 'sarif', '--fail-on', 'warning', '--min-score', '91'); exitCode = 0; path = $nativeRef.path; sha256 = $nativeRef.sha256 })
+    }
+    'static-analyzer' {
+        $files = @(Get-ChildItem -LiteralPath $skillRoot -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($skillRoot.TrimEnd('\').Length + 1).Replace('\', '/') } | Sort-Object)
+        $nativePath = Join-Path $runRoot 'native-skillspector-static.json'
+        $nativeArguments = @('-NoProfile', '-NonInteractive', '-File', $producerPath, 'scan', $skillRoot, '--no-llm', '--format', 'json', '--output', $nativePath)
+        $native = [pscustomobject][ordered]@{
+            execution_successful = $true
+            analysis_completeness = [pscustomobject][ordered]@{ execution_successful = $true; is_complete = $true; status = 'complete'; coverage_percent = 100; ledger_exceptions = @(); scope_exclusions = @(); limitations = @() }
+            skill = [pscustomobject][ordered]@{ name = $skillId; source = $skillRoot }
+            metadata = [pscustomobject][ordered]@{ skillspector_version = '2.12.0' }
+            components = @($files | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$_ } })
+            issues = @([pscustomobject][ordered]@{ id = 'M42'; match_fingerprint = 'static-medium-fixture'; severity = 'MEDIUM'; explanation = 'synthetic ordinary MEDIUM finding'; location = [pscustomobject][ordered]@{ file = 'SKILL.md'; start_line = 1 } })
+            suppressed_count = 0; suppressed = @()
+        }
+        $nativeRef = Write-Native 'native-skillspector-static.json' $native
+        $findings = @([pscustomobject][ordered]@{ severity = 'medium'; fingerprint = 'static-medium-fixture'; ruleId = 'M42'; message = 'synthetic ordinary MEDIUM finding'; path = ('skills/' + $skillId + '/SKILL.md') })
+        $nativeReports = @([pscustomobject][ordered]@{ skillId = $skillId; command = $pwshPath; commandSha256 = $pwshSha; arguments = $nativeArguments; exitCode = 0; path = $nativeRef.path; sha256 = $nativeRef.sha256 })
+    }
+    default { throw "Unknown InterT60 source tool id '$toolId'." }
+}
+$envelope = [ordered]@{ schemaVersion = 1; status = 'passed'; decision = 'PASS'; candidateIdentity = $candidateId; skillId = $(if ([string]::IsNullOrWhiteSpace($eventSkillId)) { $null } else { $eventSkillId }); skillInventorySha256 = [string]$env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256; activeSkills = [string[]]$activeSkills; findings = [object[]]$findings; nativeReports = [object[]]$nativeReports }
+if ($toolId -ceq 'static-analyzer') { $envelope.analyzerCompleteness = 'complete' }
+ConvertTo-Json -InputObject ([pscustomobject]$envelope) -Depth 50 -Compress
+'@
+            $producerText = $producerTemplate.Replace('@@PWSH@@', $pwshPath).Replace('@@PWSHSHA@@', (Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 PowerShell executable')).Replace('@@NODE@@', $nodePath).Replace('@@NODESHA@@', (Get-StandardValidationFileSha256 -Path $nodePath -Context 'InterT60 Node runtime')).Replace('@@ENTRY@@', (Join-Path $toolRoot 'skill-tools-install/skill-tools.js')).Replace('@@PRODUCER@@', $producerPath)
+            [IO.File]::WriteAllText($producerPath, $producerText, (New-Object Text.UTF8Encoding($false)))
+
+            $pesterCheckPath = Join-Path $candidateRoot 'checks/pester.ps1'
+            $generalCheckPath = Join-Path $candidateRoot 'checks/general.ps1'
+            $pesterCheckTemplate = @'
+$ErrorActionPreference = 'Stop'
+$sourceRoot = (Get-Location).Path
+$runRoot = Split-Path -Parent $sourceRoot
+$coreRunId = [string]$env:STANDARD_VALIDATION_CORE_RUN_ID
+$checkId = [string]$env:STANDARD_VALIDATION_CORE_CHECK_ID
+if ($coreRunId -cnotmatch '^[a-f0-9]{32}$' -or [IO.Path]::GetFileName($runRoot) -cne $coreRunId -or $checkId -cne 'repository-pester') { throw 'InterT60 Pester check did not receive the actual run-owned context.' }
+. '@@AUTHORITY_RUNNER@@' -CandidateRoot $sourceRoot -AdapterPath (Join-Path $runRoot 'source-core-adapter.json') -ArtifactsRoot (Split-Path -Parent (Split-Path -Parent $runRoot)) -SourceRepository '@@SOURCE_REPOSITORY@@' -SourceRevision ('a' * 40) -BaseRevision ('a' * 40) -AuthorityRevision '@@AUTHORITY_REVISION@@' -RunId $coreRunId -DefineFunctionsOnly
+function Remove-InterT60OwnedBootstrapSignal {
+    param([Parameter(Mandatory)][string]$SnapshotRoot, [switch]$RequireExisting)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    $releasePath = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH
+    if ([string]::IsNullOrWhiteSpace($releasePath)) { throw 'InterT60 Windows Pester check did not receive its owned bootstrap release path.' }
+    if (-not [IO.Path]::IsPathRooted($releasePath)) { throw 'InterT60 bootstrap release path is not fully qualified.' }
+    $bootstrapCommand = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_COMMAND
+    if ([string]::IsNullOrWhiteSpace($bootstrapCommand) -or -not [IO.Path]::IsPathRooted($bootstrapCommand)) { throw 'InterT60 bootstrap command is not fully qualified.' }
+    $bootstrapCommandFull = Get-StandardValidationFullPath -Path $bootstrapCommand -Context 'InterT60 owned Windows bootstrap command'
+    $verifiedPwshPath = Get-StandardValidationFullPath -Path (Join-Path $PSHOME 'pwsh.exe') -Context 'InterT60 verified PowerShell command'
+    if (-not [string]::Equals($bootstrapCommandFull, $verifiedPwshPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'InterT60 bootstrap command does not equal the verified PowerShell executable.' }
+    Assert-StandardValidationRegularFile -Path $verifiedPwshPath -Context 'InterT60 verified PowerShell executable'
+    Assert-StandardValidationNoReparsePoints -Root $verifiedPwshPath -Context 'InterT60 verified PowerShell executable'
+    $releaseFull = Get-StandardValidationFullPath -Path $releasePath -Context 'InterT60 owned Windows bootstrap release path'
+    $snapshotFull = (Get-StandardValidationFullPath -Path $SnapshotRoot -Context 'InterT60 Pester snapshot root').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $releaseParent = [IO.Path]::GetDirectoryName($releaseFull).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    if (-not [string]::Equals($releaseParent, $snapshotFull, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($releaseFull) -cnotmatch '^b-[a-f0-9]{32}\.sig$') { throw 'InterT60 bootstrap marker is not the exact direct-child Windows release path.' }
+    Assert-StandardValidationNoReparsePoints -Root $snapshotFull -Context 'InterT60 Pester snapshot root'
+    if (-not [IO.File]::Exists($releaseFull)) {
+        if ($RequireExisting) { throw 'InterT60 owned bootstrap release marker is missing before candidate inventory.' }
+        return $releaseFull
+    }
+    Assert-StandardValidationRegularFile -Path $releaseFull -Context 'InterT60 owned Windows bootstrap marker'
+    Assert-StandardValidationNoReparsePoints -Root $releaseFull -Context 'InterT60 owned Windows bootstrap marker'
+    $actual = [IO.File]::ReadAllBytes($releaseFull)
+    $expected = (New-Object Text.UTF8Encoding($false, $true)).GetBytes('release' + [Environment]::NewLine)
+    if ($actual.Length -ne $expected.Length) { throw 'InterT60 bootstrap marker contents are not the exact release signal.' }
+    for ($index = 0; $index -lt $expected.Length; $index++) { if ($actual[$index] -ne $expected[$index]) { throw 'InterT60 bootstrap marker contents are not the exact release signal.' } }
+    [IO.File]::Delete($releaseFull)
+    if ([IO.File]::Exists($releaseFull)) { throw 'InterT60 did not remove the exact owned bootstrap release marker.' }
+    return $releaseFull
+}
+$bootstrapReleasePath = Remove-InterT60OwnedBootstrapSignal -SnapshotRoot $sourceRoot -RequireExisting
+$adapter = (Get-StandardValidationJsonSnapshot -Path (Join-Path $runRoot 'source-core-adapter.json') -Context 'InterT60 retained adapter').value
+$moduleManifest = '@@PESTER_MANIFEST@@'
+$moduleRoot = Split-Path -Parent $moduleManifest
+$moduleClosureBefore = Get-StandardValidationDirectoryClosureSha256 -Root $moduleRoot -Context 'InterT60 Pester 4.10.1 installed module closure before run'
+foreach ($file in @(Get-ChildItem -LiteralPath $moduleRoot -Recurse -File -Force)) {
+    $hash = Get-StandardValidationFileSha256 -Path $file.FullName -Context 'InterT60 Pester module payload'
+    if (@($adapter.sourceValidation.frozenFiles | Where-Object { [string]$_.path -ceq [string]$file.FullName -and [string]$_.sha256 -ceq $hash }).Count -ne 1) { throw 'InterT60 Pester module file is not frozen exactly once.' }
+}
+$testRoot = Join-Path $sourceRoot 'tests'
+$testFiles = @(Get-ChildItem -LiteralPath $testRoot -Filter '*.Tests.ps1' -File -Force | Sort-Object -Property Name -CaseSensitive | ForEach-Object { [string]$_.Name })
+if ($testFiles.Count -eq 0) { throw 'InterT60 Pester requires the full non-empty candidate Tests.ps1 inventory.' }
+$candidateInventory = Get-StandardValidationInventory -Root $sourceRoot -Context 'InterT60 Pester candidate snapshot before run'
+$snapshotRows = @($candidateInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$_.path; sha256 = [string]$_.sha256 } })
+$snapshotHash = Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $snapshotRows -Depth 3 -Compress)
+$module = @(Import-Module -Name $moduleManifest -Force -PassThru | Where-Object { [string]$_.Name -ceq 'Pester' } | Select-Object -First 1)
+if ($module.Count -ne 1 -or [string]$module[0].Version -cne '4.10.1') { throw 'InterT60 requires the actual Pester 4.10.1 module used by this runtime.' }
+$testPaths = @($testFiles | ForEach-Object { Join-Path $testRoot $_ })
+# Run every candidate Tests.ps1 file with no selectors; the Pester result is the discovery and execution evidence.
+$pesterResult = Invoke-Pester -Script $testPaths -PassThru -Quiet -Show None
+$testFilePath = Join-Path $testRoot 'Integration.Tests.ps1'
+$tokens = $null; $parseErrors = $null
+$candidateAst = [System.Management.Automation.Language.Parser]::ParseFile($testFilePath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'InterT60 candidate test file did not parse.' }
+$describeCommands = @($candidateAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Describe' }, $true))
+$contextCommands = @($candidateAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Context' }, $true))
+$itCommands = @($candidateAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'It' }, $true))
+if ($testFiles.Count -ne 1 -or $testFiles[0] -cne 'Integration.Tests.ps1' -or $describeCommands.Count -ne 1 -or $contextCommands.Count -ne 0 -or $itCommands.Count -ne 1) { throw 'InterT60 only accepts the complete single-file, single-Describe, single-It candidate fixture.' }
+$describeTitle = $describeCommands[0].CommandElements[1]
+$itTitle = $itCommands[0].CommandElements[1]
+$itBlocks = @($itCommands[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst] })
+if ($describeTitle -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $itTitle -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $itBlocks.Count -ne 1 -or $itCommands[0].CommandElements.Count -ne 3) { throw 'InterT60 candidate Pester cases must use literal names and one literal It script block.' }
+$caseRows = @($pesterResult.TestResult)
+if ($caseRows.Count -ne 1) { throw 'InterT60 actual Pester 4 result does not contain exactly one discovered candidate case.' }
+$row = $caseRows[0]
+if ([string]$row.Describe -cne [string]$describeTitle.Value -or [string]$row.Name -cne [string]$itTitle.Value -or [string]$row.Context -cne '' -or [string]$row.ParameterizedSuiteName -cne '' -or
+    $row.Parameters.Count -ne 0 -or [string]$row.Result -cne 'Passed' -or $row.Passed -isnot [bool] -or -not $row.Passed) { throw 'InterT60 Pester 4 result does not exactly match its unique source AST case.' }
+$extent = $itBlocks[0].ScriptBlock.Extent
+$rootFull = [IO.Path]::GetFullPath($testRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+$fileFull = [IO.Path]::GetFullPath([string]$extent.File)
+$comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if (-not $fileFull.StartsWith($rootFull, $comparison) -or [IO.Path]::GetFileName($fileFull) -cne $testFiles[0] -or [int]$extent.StartOffset -lt 0) { throw 'InterT60 AST case extent does not bind the complete candidate test file.' }
+$relative = [IO.Path]::GetRelativePath($testRoot, $fileFull).Replace('\', '/')
+$expandedPath = [string]$row.Describe + ' > ' + [string]$row.Name
+$tuple = ConvertTo-Json -InputObject ([object[]]@($relative.ToUpperInvariant(), [int]$extent.StartOffset, $expandedPath)) -Depth 3 -Compress
+$caseIdentity = [Convert]::ToBase64String((New-Object Text.UTF8Encoding($false)).GetBytes($tuple))
+$discovery = @([pscustomobject][ordered]@{ identity = $caseIdentity; sourceFile = $relative; sourceStartOffset = [int]$extent.StartOffset; sourceStartLine = [int]$extent.StartLineNumber; expandedPath = $expandedPath; result = [string]$row.Result; identityError = $null })
+$execution = @($discovery)
+$containers = @($testFiles)
+$moduleClosureAfter = Get-StandardValidationDirectoryClosureSha256 -Root $moduleRoot -Context 'InterT60 Pester 4.10.1 installed module closure after run'
+[void](Remove-InterT60OwnedBootstrapSignal -SnapshotRoot $sourceRoot)
+$candidateInventoryAfter = Get-StandardValidationInventory -Root $sourceRoot -Context 'InterT60 Pester candidate snapshot after run'
+if ($moduleClosureBefore -cne $moduleClosureAfter -or (Get-StandardValidationInventorySha256 -Inventory $candidateInventory) -cne (Get-StandardValidationInventorySha256 -Inventory $candidateInventoryAfter)) { throw 'InterT60 Pester changed the frozen candidate or module payload.' }
+Assert-StandardCoreFrozenFiles -Files @($adapter.sourceValidation.frozenFiles)
+$inconclusiveCount = [int]$pesterResult.InconclusiveCount
+$notRunCount = [int]$pesterResult.TotalCount - [int]$pesterResult.PassedCount - [int]$pesterResult.FailedCount - [int]$pesterResult.SkippedCount - [int]$pesterResult.PendingCount - $inconclusiveCount
+$complete = $pesterResult.TotalCount -eq 1 -and $pesterResult.PassedCount -eq 1 -and $pesterResult.FailedCount -eq 0 -and $pesterResult.SkippedCount -eq 0 -and $pesterResult.PendingCount -eq 0 -and $inconclusiveCount -eq 0 -and $notRunCount -eq 0 -and $discovery.Count -eq 1 -and $execution.Count -eq 1
+$errors = @($caseRows | Where-Object { [string]$_.Result -cne 'Passed' } | ForEach-Object { [string]$_.FailureMessage })
+$candidateSnapshotRows = @($candidateInventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$_.path; sha256 = [string]$_.sha256 } })
+$candidateSnapshotJson = ConvertTo-Json -InputObject $candidateSnapshotRows -Depth 3 -Compress
+$candidateSnapshotHash = Get-StandardValidationTextSha256 -Value $candidateSnapshotJson
+$snapshotDiagnosticPath = Join-Path $runRoot 'pester-snapshot-diagnostic.json'
+            $snapshotDiagnostic = [ordered]@{ schemaVersion = 1; candidateRoot = $sourceRoot; bootstrapReleasePath = $bootstrapReleasePath; rows = $candidateSnapshotRows; json = $candidateSnapshotJson; sha256 = $candidateSnapshotHash }
+$snapshotDiagnosticBytes = (New-Object Text.UTF8Encoding($false, $true)).GetBytes(($snapshotDiagnostic | ConvertTo-Json -Depth 10 -Compress))
+$snapshotDiagnosticStream = New-Object IO.FileStream($snapshotDiagnosticPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try { $snapshotDiagnosticStream.Write($snapshotDiagnosticBytes, 0, $snapshotDiagnosticBytes.Length); $snapshotDiagnosticStream.Flush($true) }
+finally { $snapshotDiagnosticStream.Dispose() }
+$cases = [ordered]@{
+    schemaVersion = 1; report = 'standard-core-pester-case-inventory-v1'; coreRunId = $coreRunId
+    candidateSnapshotIdentity = @{ coreRunId = $coreRunId; root = $sourceRoot }; candidateSnapshotSha256 = $candidateSnapshotHash
+    pesterModule = @{ version = [string]$module[0].Version; manifestPath = $moduleManifest; moduleRoot = $moduleRoot; closureSha256Before = $moduleClosureBefore; closureSha256After = $moduleClosureAfter }
+    runPath = 'tests'; runScope = 'complete-unfiltered-tests-tree'
+    testFileInventory = $testFiles; containerFileInventory = $containers; discoveredCaseFileInventory = @($discovery.sourceFile | Sort-Object -Unique)
+    caseDiscoveryCount = $discovery.Count; caseExecutionCount = $execution.Count; containerCount = $containers.Count
+    failedBlockCount = [int]$pesterResult.FailedCount; failedContainerCount = 0
+    terminalStatus = $(if ($complete) { 'complete' } else { 'failed' }); complete = [bool]$complete; errors = $errors
+    reportedCounts = @{ Passed = [int]$pesterResult.PassedCount; Failed = [int]$pesterResult.FailedCount; Skipped = [int]$pesterResult.SkippedCount; Inconclusive = $inconclusiveCount; NotRun = [int]$notRunCount }
+    shardIdentity = 'core-full'; shardCaseIdentities = @($execution.identity)
+    shardUnion = @{ discoveryCount = $discovery.Count; executionUnionCount = $execution.Count; complete = [bool]$complete }
+    discoveryCases = $discovery; executionCases = $execution
+}
+[void](Write-StandardCoreCapturedText -Path (Join-Path $runRoot 'repository-pester-case-inventory-v1.json') -Value ($cases | ConvertTo-Json -Depth 35))
+[ordered]@{ schemaVersion = 1; report = 'standard-core-pester-result-v1'; total = [int]$pesterResult.TotalCount; passed = [int]$pesterResult.PassedCount; failed = [int]$pesterResult.FailedCount; skipped = [int]$pesterResult.SkippedCount } | ConvertTo-Json -Compress
+if (-not $complete) { exit 1 }
+'@
+            $pesterCheckText = $pesterCheckTemplate.Replace('@@AUTHORITY_RUNNER@@', (Join-Path $authorityRoot 'scripts/Invoke-StandardValidation.ps1')).Replace('@@SOURCE_REPOSITORY@@', $sourceRepository).Replace('@@AUTHORITY_REVISION@@', $authorityRevision).Replace('@@PESTER_MANIFEST@@', $pesterManifest)
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $pesterCheckPath)) | Out-Null
+            [IO.File]::WriteAllText($pesterCheckPath, $pesterCheckText, (New-Object Text.UTF8Encoding($false)))
+            $generalCheckText = @'
+$ErrorActionPreference = 'Stop'
+if ([string]$env:STANDARD_VALIDATION_CORE_CHECK_ID -cne 'repository-general' -or [string]$env:STANDARD_VALIDATION_CORE_SKILLS -cne 'alpha') { throw 'InterT60 general check received unexpected context.' }
+if (-not (Test-Path -LiteralPath 'skills/alpha/SKILL.md' -PathType Leaf) -or -not (Test-Path -LiteralPath 'skills/alpha/extra.md' -PathType Leaf)) { throw 'InterT60 active Skill inventory is incomplete.' }
+if ([string]::IsNullOrWhiteSpace((Get-Content -Raw -LiteralPath 'skills/alpha/SKILL.md'))) { throw 'InterT60 SKILL.md is empty.' }
+Write-Output 'InterT60 complete general candidate check passed.'
+'@
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $generalCheckPath)) | Out-Null
+            [IO.File]::WriteAllText($generalCheckPath, $generalCheckText, (New-Object Text.UTF8Encoding($false)))
+            $candidateTestPath = Join-Path $candidateRoot 'tests/Integration.Tests.ps1'
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $candidateTestPath)) | Out-Null
+            $candidateTestText = @'
+Describe 'complete candidate skill suite' {
+    It 'keeps the full active Skill component set in the immutable candidate' {
+        $root = Split-Path -Parent $PSScriptRoot
+        if (-not (Test-Path -LiteralPath (Join-Path $root 'skills/alpha/SKILL.md') -PathType Leaf)) { throw 'Required SKILL.md was not present.' }
+        if (-not (Test-Path -LiteralPath (Join-Path $root 'skills/alpha/extra.md') -PathType Leaf)) { throw 'Required extra.md was not present.' }
+    }
+}
+'@
+            [IO.File]::WriteAllText($candidateTestPath, $candidateTestText, (New-Object Text.UTF8Encoding($false)))
+            $skillRoot = Join-Path $candidateRoot 'skills/alpha'
+            [IO.Directory]::CreateDirectory($skillRoot) | Out-Null
+            [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'), "---`nname: alpha`ndescription: Synthetic normal-path fixture skill.`n---`n# Alpha`nA deterministic integration fixture.", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText((Join-Path $skillRoot 'extra.md'), "# Optional component`nSynthetic complete inventory.", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText((Join-Path $candidateRoot 'README.md'), 'Immutable candidate base.', (New-Object Text.UTF8Encoding($false)))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('init', '-b', 'main'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('config', 'user.name', 'SYP314 integration fixture'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('config', 'user.email', 'syp314-fixture@example.test'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('add', '--', 'README.md'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('commit', '-m', 'Create candidate base'))
+            $baseRevision = [string](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('rev-parse', 'HEAD'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('add', '--all'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('commit', '-m', 'Add complete candidate fixture'))
+            $sourceRevision = [string](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('rev-parse', 'HEAD'))
+            [void](Invoke-InterT60Git -Repository $candidateRoot -GitArguments @('remote', 'add', 'origin', $sourceRepository))
+
+            $skillToolsRoot = Join-Path $toolRoot 'skill-tools-install'
+            [IO.Directory]::CreateDirectory($skillToolsRoot) | Out-Null
+            $shimPath = Join-Path $skillToolsRoot 'skill-tools.cmd'
+            $entryPointPath = Join-Path $skillToolsRoot 'skill-tools.js'
+            [IO.File]::WriteAllText($shimPath, "@echo off`r`nrem synthetic package launcher asset`r`n", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($entryPointPath, "// synthetic frozen package payload for native report binding`n", (New-Object Text.UTF8Encoding($false)))
+
+            $frozenByPath = @{}
+            $addFrozen = ({
+                param([string]$Path)
+                $full = [IO.Path]::GetFullPath($Path)
+                $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+                $key = $full.ToUpperInvariant()
+                if ($frozenByPath.ContainsKey($key) -and [string]$frozenByPath[$key].sha256 -cne $hash) { throw 'InterT60 frozen file has conflicting digests.' }
+                $frozenByPath[$key] = [pscustomobject][ordered]@{ path = $full; sha256 = $hash }
+            }).GetNewClosure()
+            & $addFrozen $pwshPath
+            & $addFrozen $nodePath
+            & $addFrozen $producerPath
+            & $addFrozen $shimPath
+            & $addFrozen $entryPointPath
+            foreach ($moduleFile in $pesterModuleFiles) { & $addFrozen ([string]$moduleFile.FullName) }
+
+            $toolPolicy = Get-Content -Raw -Encoding UTF8 (Join-Path $authorityRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+            $toolReceiptBindings = @()
+            $toolReceiptValues = @{}
+            foreach ($toolName in @('skill-validator', 'skill-tools', 'skillspector')) {
+                $receiptPath = Join-Path $receiptRoot ($toolName + '.json')
+                $isSkillTools = $toolName -ceq 'skill-tools'
+                $toolInstallRoot = if ($isSkillTools) { $skillToolsRoot } else { $PSHOME }
+                $executablePath = if ($isSkillTools) { $shimPath } else { $pwshPath }
+                $executableHash = Get-StandardValidationFileSha256 -Path $executablePath -Context 'InterT60 resolved tool executable'
+                $launcher = if ($isSkillTools) {
+                    [pscustomobject][ordered]@{ kind = 'windows-cmd-shim'; shimPath = $shimPath; shimSha256 = $executableHash; payloadPath = $entryPointPath; payloadSha256 = (Get-StandardValidationFileSha256 -Path $entryPointPath -Context 'InterT60 skill-tools entry point'); runtimePath = $nodePath; runtimeSha256 = (Get-StandardValidationFileSha256 -Path $nodePath -Context 'InterT60 skill-tools Node runtime') }
+                }
+                else { [pscustomobject][ordered]@{ kind = 'direct-executable'; shimPath = $null; shimSha256 = $null; payloadPath = $null; payloadSha256 = $null; runtimePath = $null; runtimeSha256 = $null } }
+                $closureHash = Get-StandardValidationDirectoryClosureSha256 -Root $toolInstallRoot -Context ("InterT60 {0} resolver install closure" -f $toolName)
+                $identityKind = switch ($toolName) { 'skill-validator' { 'go-module-version-build-info-and-binary-hash' }; 'skill-tools' { 'registry-integrity-and-locked-dependency-closure' }; 'skillspector' { 'release-commit-asset-metadata-dependency-closure-and-executable' } }
+                $version = if ($toolName -ceq 'skillspector') { '2.12.0' } else { '1.0.0' }
+                $receiptValue = [pscustomobject][ordered]@{
+                    schemaVersion = 1; toolName = $toolName; resolutionRunId = $runId
+                    resolvedAtUtc = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                    executionContext = 'local'; frozenForRun = $true; channel = 'latest-stable'; source = [string]$toolPolicy.tools.$toolName.source
+                    resolvedVersion = $version; resolvedIdentity = ("InterT60 synthetic native producer; executableSha256={0}" -f $executableHash); identityKind = $identityKind
+                    executablePath = $executablePath; executableSha256 = $executableHash; installRoot = $toolInstallRoot
+                    installedClosureSha256 = $closureHash; dependencyClosureSha256 = $closureHash; dependencyClosure = @()
+                    launcher = $launcher; launcherDigestSha256 = (Get-StandardValidationLauncherDigest -Launcher $launcher -Context 'InterT60 resolver launcher')
+                }
+                if ($isSkillTools) {
+                    $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $entryPointPath
+                    $receiptValue | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue ([string]$launcher.payloadSha256)
+                    $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $nodePath
+                    $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue ([string]$launcher.runtimeSha256)
+                    $receiptValue | Add-Member -NotePropertyName executableVerified -NotePropertyValue $true
+                }
+                [IO.File]::WriteAllText($receiptPath, ($receiptValue | ConvertTo-Json -Depth 40), (New-Object Text.UTF8Encoding($false)))
+                $toolReceiptValues[$toolName] = $receiptValue
+                $receiptHash = Get-StandardValidationFileSha256 -Path $receiptPath -Context 'InterT60 resolver receipt bytes'
+                $binding = [pscustomobject][ordered]@{ path = $receiptPath; sha256 = $receiptHash }
+                $toolReceiptBindings += $binding
+                & $addFrozen $receiptPath
+                & $addFrozen $executablePath
+            }
+            $frozenFiles = @($frozenByPath.Values | Sort-Object -Property path -CaseSensitive)
+            $sourceCommand = [pscustomobject][ordered]@{ command = $pwshPath; arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $producerPath) }
+            $sourceSpec = [pscustomobject][ordered]@{
+                packageAdapter = $sourceCommand; skillValidator = $sourceCommand; skillTools = $sourceCommand; staticAnalyzer = $sourceCommand
+                frozenFiles = $frozenFiles; toolReceipts = [object[]]$toolReceiptBindings
+                sourceReview = [pscustomobject][ordered]@{ schemaVersion = 1; contract = 'standard-source-human-review-v1' }
+            }
+            $checkArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File')
+            $adapter = [pscustomobject][ordered]@{
+                schemaVersion = 2; adapter = 'standard-core-adapter-v2'; skillsRoot = 'skills'; activeSkills = @('alpha')
+                checks = @(
+                    [pscustomobject][ordered]@{ id = 'repository-general'; kind = 'general'; executable = $pwshPath; executableSha256 = Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 general check executable'; arguments = @($checkArguments + @('checks/general.ps1')) },
+                    [pscustomobject][ordered]@{ id = 'repository-pester'; kind = 'pester'; executable = $pwshPath; executableSha256 = Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 Pester check executable'; arguments = @($checkArguments + @('checks/pester.ps1')) }
+                )
+                sourceValidation = $sourceSpec
+            }
+            $adapterPath = Join-Path $fixtureRoot 'source-adapter.json'
+            [IO.File]::WriteAllText($adapterPath, ($adapter | ConvertTo-Json -Depth 70), (New-Object Text.UTF8Encoding($false)))
+            $adapterSchema = Join-Path $authorityRoot 'docs/standards/schemas/standard-core-adapter-v2.schema.json'
+            if (-not (Test-Json -Json ([IO.File]::ReadAllText($adapterPath)) -SchemaFile $adapterSchema -ErrorAction SilentlyContinue)) { throw 'InterT60 constructed source adapter does not validate against the copied v2 schema.' }
+
+            $runnerChildPath = Join-Path $attemptRoot 'core-child.ps1'
+            $runnerChildText = @'
+param([Parameter(Mandatory=$true)][ValidateSet('run','read')][string]$Mode,[Parameter(Mandatory=$true)][string]$AuthorityRunner,[Parameter(Mandatory=$true)][string]$CandidateRoot,[Parameter(Mandatory=$true)][string]$AdapterPath,[Parameter(Mandatory=$true)][string]$ArtifactsRoot,[Parameter(Mandatory=$true)][string]$OutputPath,[Parameter(Mandatory=$true)][string]$SourceRepository,[Parameter(Mandatory=$true)][string]$SourceRevision,[Parameter(Mandatory=$true)][string]$BaseRevision,[Parameter(Mandatory=$true)][string]$AuthorityRevision,[Parameter(Mandatory=$true)][string]$RunId,[Parameter(Mandatory=$true)][string]$TrustedToolRoot,[Parameter(Mandatory=$true)][string]$TestPublicKeySha256)
+$ErrorActionPreference = 'Stop'
+. $AuthorityRunner -CandidateRoot $CandidateRoot -AdapterPath $AdapterPath -ArtifactsRoot $ArtifactsRoot -OutputPath $OutputPath -SourceRepository $SourceRepository -SourceRevision $SourceRevision -BaseRevision $BaseRevision -AuthorityRevision $AuthorityRevision -TrustedToolRoot $TrustedToolRoot -RunId $RunId -DefineFunctionsOnly
+$oldDefinition = [ordered]@{ relativePath = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.relativePath; fileName = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.fileName; sha256 = [string]$script:StandardValidationTrustAnchorDefinitions.humanApproval.sha256 }
+$exit = 1
+try {
+    $script:StandardValidationTrustAnchorDefinitions.humanApproval = [ordered]@{ relativePath = $oldDefinition.relativePath; fileName = $oldDefinition.fileName; sha256 = $TestPublicKeySha256 }
+    if ($Mode -ceq 'run') {
+        $result = Invoke-StandardCoreValidationRun -CandidateRoot $CandidateRoot -AdapterPath $AdapterPath -ArtifactsRoot $ArtifactsRoot -OutputPath $OutputPath -SourceRepository $SourceRepository -SourceRevision $SourceRevision -BaseRevision $BaseRevision -EventName 'local' -AuthorityRevision $AuthorityRevision -TimeoutSeconds 120 -TrustedToolRoot $TrustedToolRoot -SourceValidation $true -ValidationRunId $RunId
+        [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 100))
+        $exit = [int]$result.exitCode
+    }
+    else {
+        $report = (Get-StandardValidationJsonSnapshot -Path $OutputPath -Context 'InterT60 final source report' -PreserveDateStrings).value
+        [void](Assert-StandardCoreSourceCheckReport -Report $report -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -ExpectedAuthorityRevision $AuthorityRevision -ExpectedEventName 'local' -ArtifactsRoot $ArtifactsRoot -OutputPath $OutputPath -ProcessExitCode ([int]$report.exitCode))
+        [Console]::Out.WriteLine('InterT60 strict source reader passed.')
+        $exit = 0
+    }
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    $exit = 1
+}
+finally { $script:StandardValidationTrustAnchorDefinitions.humanApproval = $oldDefinition }
+exit $exit
+'@
+            [IO.File]::WriteAllText($runnerChildPath, $runnerChildText, (New-Object Text.UTF8Encoding($false)))
+            $requestedReportPath = Join-Path $artifactsRoot 'standard-core-validation.json'
+            $reportPath = Join-Path $artifactsRoot ('standard-core-validation-' + $runId + '.json')
+            $reviewRunRoot = Join-Path (Join-Path $artifactsRoot 'runs') $runId
+            $challengePath = Join-Path $reviewRunRoot 'source-human-review-challenge-v1.json'
+            $reviewReceiptPath = Join-Path $reviewRunRoot 'source-human-review-receipt-v1.json'
+            $runArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $runnerChildPath,
+                '-Mode', 'run', '-AuthorityRunner', (Join-Path $authorityRoot 'scripts/Invoke-StandardValidation.ps1'), '-CandidateRoot', $candidateRoot,
+                '-AdapterPath', $adapterPath, '-ArtifactsRoot', $artifactsRoot, '-OutputPath', $reportPath, '-SourceRepository', $sourceRepository,
+                '-SourceRevision', $sourceRevision, '-BaseRevision', $baseRevision, '-AuthorityRevision', $authorityRevision, '-RunId', $runId,
+                '-TrustedToolRoot', $trustedRoot, '-TestPublicKeySha256', $publicKeyHash)
+            $runStartInfo = New-Object Diagnostics.ProcessStartInfo
+            $runStartInfo.FileName = $pwshPath; $runStartInfo.WorkingDirectory = $fixtureRoot; $runStartInfo.UseShellExecute = $false
+            $runStartInfo.CreateNoWindow = $true; $runStartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $runStartInfo.RedirectStandardOutput = $true; $runStartInfo.RedirectStandardError = $true
+            foreach ($argument in $runArgs) { $runStartInfo.ArgumentList.Add([string]$argument) }
+            $runProcess = New-Object Diagnostics.Process; $runProcess.StartInfo = $runStartInfo
+            $runStartAttemptedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            try {
+                if (-not $runProcess.Start()) { throw 'InterT60 normal source-validation child Process.Start returned false.' }
+                $runProcessStarted = $true
+                $runStartedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            }
+            catch { $runStartFailure = $_.Exception.ToString(); throw }
+            $runProcessId = [int]$runProcess.Id
+            $runStdoutTask = $runProcess.StandardOutput.ReadToEndAsync()
+            $runStderrTask = $runProcess.StandardError.ReadToEndAsync()
+            $challengeWaitResult = Wait-InterT60Challenge -Path $challengePath -Process $runProcess -Started $runProcessStarted -TimeoutSeconds $challengeWaitLimitSeconds -WaitAfterKillMilliseconds 5000
+            $challengeWaitStartedAt = [string]$challengeWaitResult.waitStartedAt
+            $challengeWaitEndedAt = [string]$challengeWaitResult.waitEndedAt
+            $challengeObservedAt = $challengeWaitResult.challengeObservedAt
+            if (-not [bool]$challengeWaitResult.challengeExists) {
+                $runProcessOutcome = $challengeWaitResult.processOutcome
+                $runTerminatedByFixture = [bool]$runProcessOutcome.terminatedByFixture
+                $runTerminationFailure = $runProcessOutcome.terminationFailure
+                if ($null -ne $runProcessOutcome.exitCode) {
+                    $runExitCode = [int]$runProcessOutcome.exitCode
+                    $runEndedAt = [string]$runProcessOutcome.endedAt
+                    $runStdoutText = $runStdoutTask.GetAwaiter().GetResult()
+                    $runStderrText = $runStderrTask.GetAwaiter().GetResult()
+                    [IO.File]::WriteAllText($runOutput, $runStdoutText, (New-Object Text.UTF8Encoding($false)))
+                    [IO.File]::WriteAllText($runError, $runStderrText, (New-Object Text.UTF8Encoding($false)))
+                    $failedRunRecord = [pscustomobject][ordered]@{ attemptId = $attemptId; processId = $runProcessId; executable = $pwshPath; executableSha256 = Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 failed run child executable'; argv = [string[]]$runArgs; startAttemptedAt = $runStartAttemptedAt; startedAt = $runStartedAt; endedAt = $runEndedAt; exitCode = $runExitCode; terminatedByFixture = [bool]$runTerminatedByFixture; stdoutPath = $runOutput; stdoutSha256 = Get-StandardValidationFileSha256 -Path $runOutput -Context 'InterT60 failed run child stdout'; stderrPath = $runError; stderrSha256 = Get-StandardValidationFileSha256 -Path $runError -Context 'InterT60 failed run child stderr' }
+                    Write-InterT60CreateOnly -Path $runReceiptPath -Bytes ((New-Object Text.UTF8Encoding($false)).GetBytes(($failedRunRecord | ConvertTo-Json -Depth 40)))
+                }
+                $runExitNote = if ($null -eq $runExitCode) { 'unavailable' } else { [string]$runExitCode }
+                throw "InterT60 full normal source entry did not issue its challenge within $challengeWaitLimitSeconds seconds (started=$runProcessStarted, state=$($runProcessOutcome.state), terminatedByFixture=$runTerminatedByFixture, exit=$runExitNote, cleanup=$runTerminationFailure). stdout=$runStdoutText stderr=$runStderrText"
+            }
+
+            try {
+            $challengeHash = Get-StandardValidationFileSha256 -Path $challengePath -Context 'InterT60 same-run challenge bytes'
+            $challenge = [IO.File]::ReadAllText($challengePath) | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$challenge.binding.runId -cne $runId -or [string]$challenge.contract -cne 'standard-source-human-review-v1' -or @($challenge.findingOccurrences).Count -eq 0) { throw 'InterT60 challenge does not bind the active normal source run.' }
+            $dispositions = @($challenge.findingOccurrences | ForEach-Object {
+                $classification = if ([string]$_.severity -ceq 'medium') { 'ordinary' } else { 'retained' }
+                $decision = if ([string]$_.severity -ceq 'medium') { 'approved' } else { 'retained' }
+                [pscustomobject][ordered]@{
+                    occurrenceSha256 = [string]$_.occurrenceSha256; severity = [string]$_.severity; classification = $classification; decision = $decision
+                    rationale = 'Synthetic InterT60 test issuer disposition for this exact challenge occurrence.'
+                    scope = 'source-validation-only'; evidenceReferences = @([string]$_.occurrenceSha256)
+                }
+            })
+            $receipt = [pscustomobject][ordered]@{
+                schemaVersion = 1; contract = 'standard-source-human-review-v1'; scope = 'source-validation-only'
+                challengeSha256 = $challengeHash; runId = $runId; decision = 'approved'
+                approvalId = ('synthetic-normal-test-' + $attemptId); approver = 'Synthetic InterT60 Test Issuer'
+                hostId = 'isolated-test-process'; actorId = 'synthetic-fixture-only'
+                issuedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                findingDisposition = [object[]]$dispositions; signature = ''
+            }
+            $receiptPayload = Get-StandardCoreSourceReviewReceiptSignaturePayload -Receipt $receipt
+            $receipt.signature = [Convert]::ToBase64String($rsa.SignData((New-Object Text.UTF8Encoding($false)).GetBytes($receiptPayload), 'SHA256'))
+            $receiptJson = Convert-StandardValidationValueToCanonicalJson -Value $receipt -Context 'InterT60 signed synthetic receipt bytes'
+            Write-InterT60CreateOnly -Path $reviewReceiptPath -Bytes ((New-Object Text.UTF8Encoding($false, $true)).GetBytes($receiptJson))
+            }
+            catch { $issuerException = $_.Exception.ToString(); throw }
+
+            $runDeadline = [DateTime]::UtcNow.AddSeconds(270)
+            while (-not $runProcess.HasExited -and [DateTime]::UtcNow -lt $runDeadline) { Start-Sleep -Milliseconds 200 }
+            if (-not $runProcess.HasExited) {
+                $runTerminatedByFixture = $true
+                $runProcess.Kill($true)
+                if (-not $runProcess.WaitForExit(5000)) { throw 'InterT60 normal source-validation child did not exit within the 5-second post-kill bound.' }
+            }
+            $runExitCode = [int]$runProcess.ExitCode
+            $runEndedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $runStdoutText = $runStdoutTask.GetAwaiter().GetResult()
+            $runStderrText = $runStderrTask.GetAwaiter().GetResult()
+            [IO.File]::WriteAllText($runOutput, $runStdoutText, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($runError, $runStderrText, (New-Object Text.UTF8Encoding($false)))
+            if ($runExitCode -ne 0) { throw "InterT60 full normal source-validation process exited $runExitCode. stdout=$runStdoutText stderr=$runStderrText" }
+            $finalReport = $runStdoutText | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$finalReport.state -cne 'PASS' -or [int]$finalReport.exitCode -ne 0 -or [bool]$finalReport.releaseEligible -or
+                [string]$finalReport.sourceValidation.sourceReview.status -cne 'accepted') { throw 'InterT60 normal source entry did not produce an accepted source-only PASS report.' }
+            $challengeEvidence = [IO.File]::ReadAllText($challengePath) | ConvertFrom-Json -ErrorAction Stop
+            $mediumOccurrences = @($challengeEvidence.findingOccurrences | Where-Object { [string]$_.severity -ceq 'medium' })
+            $informationOccurrences = @($challengeEvidence.findingOccurrences | Where-Object { [string]$_.severity -ceq 'informational' })
+            if ($mediumOccurrences.Count -ne 1 -or $informationOccurrences.Count -ne 2 -or @($finalReport.sourceValidation.events).Count -ne 4 -or @($finalReport.checks).Count -ne 2 -or
+                @($finalReport.checks | Where-Object { [string]$_.status -cne 'passed' -or [int]$_.exitCode -ne 0 }).Count -ne 0 -or
+                [int]$finalReport.checks[1].testCounts.total -lt 1 -or [int]$finalReport.checks[1].testCounts.failed -ne 0) {
+                throw 'InterT60 report did not retain all actual native findings, source events, or complete passing general/Pester checks.'
+            }
+            $evidenceSchemaPath = Join-Path $authorityRoot 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+            if (-not (Test-Json -Json $runStdoutText -SchemaFile $evidenceSchemaPath -ErrorAction SilentlyContinue)) { throw 'InterT60 accepted normal report is not valid under the copied test-key-pinned v2 evidence schema.' }
+
+            $readerArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $runnerChildPath,
+                '-Mode', 'read', '-AuthorityRunner', (Join-Path $authorityRoot 'scripts/Invoke-StandardValidation.ps1'), '-CandidateRoot', $candidateRoot,
+                '-AdapterPath', $adapterPath, '-ArtifactsRoot', $artifactsRoot, '-OutputPath', $reportPath, '-SourceRepository', $sourceRepository,
+                '-SourceRevision', $sourceRevision, '-BaseRevision', $baseRevision, '-AuthorityRevision', $authorityRevision, '-RunId', $runId,
+                '-TrustedToolRoot', $trustedRoot, '-TestPublicKeySha256', $publicKeyHash)
+            $readerStartInfo = New-Object Diagnostics.ProcessStartInfo
+            $readerStartInfo.FileName = $pwshPath; $readerStartInfo.WorkingDirectory = $fixtureRoot; $readerStartInfo.UseShellExecute = $false
+            $readerStartInfo.CreateNoWindow = $true; $readerStartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $readerStartInfo.RedirectStandardOutput = $true; $readerStartInfo.RedirectStandardError = $true
+            foreach ($argument in $readerArgs) { $readerStartInfo.ArgumentList.Add([string]$argument) }
+            $readerProcess = New-Object Diagnostics.Process; $readerProcess.StartInfo = $readerStartInfo
+            $readerStartAttemptedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            try {
+                if (-not $readerProcess.Start()) { throw 'InterT60 strict full-reader child Process.Start returned false.' }
+                $readerProcessStarted = $true
+                $readerStartedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            }
+            catch { $readerStartFailure = $_.Exception.ToString(); throw }
+            $readerProcessId = [int]$readerProcess.Id
+            $readerStdoutTask = $readerProcess.StandardOutput.ReadToEndAsync()
+            $readerStderrTask = $readerProcess.StandardError.ReadToEndAsync()
+            if (-not $readerProcess.WaitForExit($readerWaitLimitSeconds * 1000)) {
+                $readerTerminatedByFixture = $true
+                $readerProcess.Kill($true)
+                if (-not $readerProcess.WaitForExit(5000)) { throw 'InterT60 strict full-reader child did not exit within the 5-second post-kill bound.' }
+            }
+            $readerExitCode = [int]$readerProcess.ExitCode
+            $readerEndedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            $readerStdoutText = $readerStdoutTask.GetAwaiter().GetResult()
+            $readerStderrText = $readerStderrTask.GetAwaiter().GetResult()
+            [IO.File]::WriteAllText($readerOutput, $readerStdoutText, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($readerError, $readerStderrText, (New-Object Text.UTF8Encoding($false)))
+            if ($readerExitCode -ne 0 -or $readerStdoutText -notmatch 'InterT60 strict source reader passed') { throw "InterT60 independent full report reader failed (exit=$readerExitCode). stdout=$readerStdoutText stderr=$readerStderrText" }
+
+            $runProcessRecord = [pscustomobject][ordered]@{ attemptId = $attemptId; processId = $runProcessId; executable = $pwshPath; executableSha256 = Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 run child executable'; argv = [string[]]$runArgs; startedAt = $runStartedAt; endedAt = $runEndedAt; exitCode = $runExitCode; stdoutPath = $runOutput; stdoutSha256 = Get-StandardValidationFileSha256 -Path $runOutput -Context 'InterT60 run child stdout'; stderrPath = $runError; stderrSha256 = Get-StandardValidationFileSha256 -Path $runError -Context 'InterT60 run child stderr'; challengePath = $challengePath; challengeSha256 = $challengeHash; reviewReceiptPath = $reviewReceiptPath; reviewReceiptSha256 = Get-StandardValidationFileSha256 -Path $reviewReceiptPath -Context 'InterT60 synthetic review receipt'; reportPath = $reportPath; reportSha256 = Get-StandardValidationFileSha256 -Path $reportPath -Context 'InterT60 final normal report' }
+            $readerProcessRecord = [pscustomobject][ordered]@{ attemptId = $attemptId; processId = $readerProcessId; executable = $pwshPath; executableSha256 = Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 reader child executable'; argv = [string[]]$readerArgs; startedAt = $readerStartedAt; endedAt = $readerEndedAt; exitCode = $readerExitCode; stdoutPath = $readerOutput; stdoutSha256 = Get-StandardValidationFileSha256 -Path $readerOutput -Context 'InterT60 reader child stdout'; stderrPath = $readerError; stderrSha256 = Get-StandardValidationFileSha256 -Path $readerError -Context 'InterT60 reader child stderr' }
+            Write-InterT60CreateOnly -Path $runReceiptPath -Bytes ((New-Object Text.UTF8Encoding($false)).GetBytes(($runProcessRecord | ConvertTo-Json -Depth 50)))
+            Write-InterT60CreateOnly -Path $readerReceiptPath -Bytes ((New-Object Text.UTF8Encoding($false)).GetBytes(($readerProcessRecord | ConvertTo-Json -Depth 30)))
+            $script:InterT60NormalEvidence = [pscustomobject][ordered]@{ attemptId = $attemptId; evidenceRoot = $attemptRoot; runReceiptPath = $runReceiptPath; readerReceiptPath = $readerReceiptPath; sourceEvents = @($finalReport.sourceValidation.events).Count; checkCount = @($finalReport.checks).Count; sourceReviewStatus = [string]$finalReport.sourceValidation.sourceReview.status; releaseEligible = [bool]$finalReport.releaseEligible }
+        }
+        finally {
+            if ($runProcessStarted -and $null -ne $runProcess) {
+                try {
+                    if (-not $runProcess.HasExited) {
+                        $runTerminatedByFixture = $true
+                        $runProcess.Kill($true)
+                        if (-not $runProcess.WaitForExit(5000)) { throw 'InterT60 Core child did not exit within the 5-second final cleanup bound.' }
+                    }
+                    if ($runProcess.HasExited) {
+                        if ($null -eq $runExitCode) { $runExitCode = [int]$runProcess.ExitCode }
+                        if ($null -eq $runEndedAt) { $runEndedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
+                    }
+                }
+                catch { $runTerminationFailure = $_.Exception.ToString() }
+            }
+            if ($readerProcessStarted -and $null -ne $readerProcess) {
+                try {
+                    if (-not $readerProcess.HasExited) {
+                        $readerTerminatedByFixture = $true
+                        $readerProcess.Kill($true)
+                        if (-not $readerProcess.WaitForExit(5000)) { throw 'InterT60 reader child did not exit within the 5-second final cleanup bound.' }
+                    }
+                    if ($readerProcess.HasExited) {
+                        if ($null -eq $readerExitCode) { $readerExitCode = [int]$readerProcess.ExitCode }
+                        if ($null -eq $readerEndedAt) { $readerEndedAt = [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture) }
+                    }
+                }
+                catch { $readerTerminationFailure = $_.Exception.ToString() }
+            }
+            try {
+                $runStdoutExists = Test-Path -LiteralPath $runOutput -PathType Leaf
+                $runStderrExists = Test-Path -LiteralPath $runError -PathType Leaf
+                $readerStdoutExists = Test-Path -LiteralPath $readerOutput -PathType Leaf
+                $readerStderrExists = Test-Path -LiteralPath $readerError -PathType Leaf
+                $actualProcessManifest = [ordered]@{
+                    schemaVersion = 1; evidence = 'intert60-actual-child-processes-v1'; attemptId = $attemptId; runId = $runId
+                    requestedReportPath = $requestedReportPath; reportPath = $reportPath; challengePath = $challengePath; reviewReceiptPath = $reviewReceiptPath
+                    challengeWaitLimitSeconds = $challengeWaitLimitSeconds; challengeWaitStartedAt = $challengeWaitStartedAt; challengeWaitEndedAt = $challengeWaitEndedAt; challengeObservedAt = $challengeObservedAt; readerWaitLimitSeconds = $readerWaitLimitSeconds
+                    challengeExistsAtFinally = [bool](-not [string]::IsNullOrWhiteSpace($challengePath) -and [IO.File]::Exists($challengePath))
+                    challengeSha256AtFinally = $(if (-not [string]::IsNullOrWhiteSpace($challengePath) -and [IO.File]::Exists($challengePath)) { Get-StandardValidationFileSha256 -Path $challengePath -Context 'InterT60 manifest challenge bytes' } else { $null })
+                    reviewReceiptExistsAtFinally = [bool](-not [string]::IsNullOrWhiteSpace($reviewReceiptPath) -and [IO.File]::Exists($reviewReceiptPath))
+                    issuerException = $issuerException
+                    startFailureProbe = $startFailureProbe; noChallengeTimeoutProbe = $noChallengeTimeoutProbe; noChallengeProbeFinalCleanup = $noChallengeProbeCleanup
+                    atomicProbePath = $atomicProbePath; atomicProbeSha256 = $atomicProbeHash; atomicProbeExpectedSha256 = $atomicProbeExpectedHash; atomicProbeDuplicateRejected = [bool]$atomicProbeDuplicateRejected
+                    processes = @(
+                        [pscustomobject][ordered]@{
+                            name = 'core-run'; started = [bool]$runProcessStarted; state = $(if (-not $runProcessStarted) { 'not-started' } elseif ($null -ne $runExitCode -and $runTerminatedByFixture) { 'terminated-by-fixture' } elseif ($null -ne $runExitCode) { 'completed' } elseif ($null -ne $runTerminationFailure) { 'termination-incomplete' } else { 'exit-unknown' })
+                            executable = $pwshPath; executableSha256 = $(if (-not [string]::IsNullOrWhiteSpace($pwshPath) -and (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 manifest Core executable' } else { $null })
+                            processId = $runProcessId; argv = [string[]]$runArgs; startAttemptedAt = $runStartAttemptedAt; startFailure = $runStartFailure; startedAt = $runStartedAt; endedAt = $runEndedAt; exitCode = $runExitCode; terminatedByFixture = [bool]$runTerminatedByFixture; terminationFailure = $runTerminationFailure
+                            stdoutPath = $(if ($runStdoutExists) { $runOutput } else { $null }); stdoutSha256 = $(if ($runStdoutExists) { Get-StandardValidationFileSha256 -Path $runOutput -Context 'InterT60 manifest Core stdout' } else { $null })
+                            stderrPath = $(if ($runStderrExists) { $runError } else { $null }); stderrSha256 = $(if ($runStderrExists) { Get-StandardValidationFileSha256 -Path $runError -Context 'InterT60 manifest Core stderr' } else { $null })
+                        },
+                        [pscustomobject][ordered]@{
+                            name = 'strict-reader'; started = [bool]$readerProcessStarted; state = $(if (-not $readerProcessStarted) { 'not-started' } elseif ($null -ne $readerExitCode -and $readerTerminatedByFixture) { 'terminated-by-fixture' } elseif ($null -ne $readerExitCode) { 'completed' } elseif ($null -ne $readerTerminationFailure) { 'termination-incomplete' } else { 'exit-unknown' })
+                            executable = $pwshPath; executableSha256 = $(if (-not [string]::IsNullOrWhiteSpace($pwshPath) -and (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { Get-StandardValidationFileSha256 -Path $pwshPath -Context 'InterT60 manifest reader executable' } else { $null })
+                            processId = $readerProcessId; argv = [string[]]$readerArgs; startAttemptedAt = $readerStartAttemptedAt; startFailure = $readerStartFailure; startedAt = $readerStartedAt; endedAt = $readerEndedAt; exitCode = $readerExitCode; terminatedByFixture = [bool]$readerTerminatedByFixture; terminationFailure = $readerTerminationFailure
+                            stdoutPath = $(if ($readerStdoutExists) { $readerOutput } else { $null }); stdoutSha256 = $(if ($readerStdoutExists) { Get-StandardValidationFileSha256 -Path $readerOutput -Context 'InterT60 manifest reader stdout' } else { $null })
+                            stderrPath = $(if ($readerStderrExists) { $readerError } else { $null }); stderrSha256 = $(if ($readerStderrExists) { Get-StandardValidationFileSha256 -Path $readerError -Context 'InterT60 manifest reader stderr' } else { $null })
+                        }
+                    )
+                }
+                Write-InterT60CreateOnly -Path (Join-Path $attemptRoot 'actual-process-manifest.json') -Bytes ((New-Object Text.UTF8Encoding($false)).GetBytes(($actualProcessManifest | ConvertTo-Json -Depth 50)))
+            }
+            catch { Write-Warning ('InterT60 could not preserve its supplemental process manifest: ' + $_.Exception.Message) }
+            $rsa.Dispose()
+        }
+
+        if ($null -eq $script:InterT60NormalEvidence -or [string]$script:InterT60NormalEvidence.attemptId -cne $attemptId) { throw 'InterT60 did not preserve its unique actual-process attempt receipt.' }
+        if (-not (Test-Path -LiteralPath $runReceiptPath -PathType Leaf) -or -not (Test-Path -LiteralPath $readerReceiptPath -PathType Leaf)) { throw 'InterT60 actual child process exit/argv receipts were not retained create-only.' }
+        if ([string]$script:InterT60NormalEvidence.sourceReviewStatus -cne 'accepted' -or [bool]$script:InterT60NormalEvidence.releaseEligible) { throw 'InterT60 accepted source review must remain release-ineligible.' }
     }
 }
 
@@ -5397,7 +7177,7 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
     # Purpose: Require the same JSON snapshot used for parsing to match its frozen binding before reuse.
     It 'UnitT35_rejects_receipt_bytes_changed_after_setup_binding' {
         $report=New-SourceGateFixture
-        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -ReturnReceiptMap
+        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
         $binding=$report.sourceValidation.toolReceipts[0]
         $originalBytes=[IO.File]::ReadAllBytes($binding.path)
         $mutatedBytes=New-Object byte[] ($originalBytes.Length+1)
@@ -5406,12 +7186,12 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         [IO.File]::WriteAllBytes($binding.path,$mutatedBytes)
 
         $retainedRejected=$false
-        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -RetainedReceiptMap $map -ToolNames @('skill-validator') }
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -RetainedReceiptMap $map -ToolNames @('skill-validator') }
         catch { $retainedRejected=$true }
         if(-not $retainedRejected){throw 'A retained resolver receipt must match its setup-time SHA binding before parsed data is reused.'}
 
         $fullRejected=$false
-        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId }
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root }
         catch { $fullRejected=$true }
         if(-not $fullRejected){throw 'A changed resolver receipt must not be parsed as if it were the frozen setup snapshot.'}
     }
@@ -5433,7 +7213,7 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         }
         $report.sourceValidation.frozenFiles += [pscustomobject]@{path=$script:SourceUntrustedEntryPoint;sha256=Get-StandardValidationFileSha256 -Path $script:SourceUntrustedEntryPoint -Context 'frozen untrusted native entry point'}
         $report.sourceValidation.frozenFiles += [pscustomobject]@{path=$script:SourceUntrustedNode;sha256=Get-StandardValidationFileSha256 -Path $script:SourceUntrustedNode -Context 'frozen untrusted native runtime'}
-        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -ReturnReceiptMap
+        $map=Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
         $nativeGroup=$map.groups.byTool['skill-validator']
         foreach($path in @($script:SourceUntrustedEntryPoint,$script:SourceUntrustedNode)){
             if(@($nativeGroup.sharedFiles | Where-Object {[string]$_.path -ceq $path}).Count -ne 1){throw "Native receipt extra '$path' must remain in the shared control set."}
