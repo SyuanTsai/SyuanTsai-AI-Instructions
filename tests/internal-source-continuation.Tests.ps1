@@ -493,27 +493,61 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: more than one supplied other-Skill report is invalid in the same decision.
-    # Purpose: keep rejected eligibility evidence schema-valid by emitting each failure reason once.
-    It 'UnitT47_emits_unique_failure_reasons_for_multiple_invalid_other_skill_reports' {
+    # Scenario: the same invalid other-Skill report path is supplied more than once in one decision.
+    # Purpose: keep every repeated output collection unique so rejected evidence still matches its strict schema.
+    It 'UnitT47_emits_unique_failure_reasons_and_report_hashes_for_repeated_invalid_other_skill_reports' {
         $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'multiple-invalid-other-reports') -IncludeOtherSkill
         $firstReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
         $firstReport.execution_successful = $false
         Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $firstReport
 
-        $secondReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
-        $secondReport.metadata.skillspector_version = 'invalid-version'
-        $secondPath = Join-Path (Split-Path -Parent $fixture.OtherScannerReportPaths[0]) 'second-invalid-other-report.json'
-        Write-ContinuationJson $secondPath $secondReport
-        $fixture.OtherScannerReportPaths = @($fixture.OtherScannerReportPaths[0], $secondPath)
+        $fixture.OtherScannerReportPaths = @($fixture.OtherScannerReportPaths[0], $fixture.OtherScannerReportPaths[0])
         $fixture.Report.candidate.activeSkills += 'configure-jira-api-access'
 
         $decision = Invoke-ContinuationFixture -Fixture $fixture
         $failureReasons = @($decision.failureReasons)
+        $otherScannerReportSha256 = @($decision.otherScannerReportSha256)
         Assert-Continuation ($decision.status -ceq 'rejected') 'Multiple invalid other-Skill reports did not reject eligibility.'
         Assert-Continuation ($failureReasons.Count -eq @($failureReasons | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate failure reasons.'
+        Assert-Continuation ($otherScannerReportSha256.Count -eq @($otherScannerReportSha256 | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate other-Skill report hashes.'
         $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
         Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Rejected eligibility with multiple invalid other-Skill reports does not match its strict schema.'
+    }
+
+    # Scenario: a target or other-Skill scanner report omits an array-valued collection that would otherwise count as empty.
+    # Purpose: require typed scanner collections so missing or null evidence cannot satisfy zero-count checks.
+    It 'UnitT48_rejects_missing_or_non_array_scanner_collections' {
+        foreach ($drift in @(
+                'target-missing-issues', 'target-null-suppressed', 'target-missing-scope-exclusions',
+                'target-null-limitations', 'other-missing-issues', 'other-null-suppressed',
+                'other-missing-ledger-exceptions', 'other-null-scope-exclusions', 'other-missing-limitations')) {
+            $includeOther = $drift.StartsWith('other-')
+            $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift) -IncludeOtherSkill:$includeOther
+            if ($includeOther) {
+                $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+                switch ($drift) {
+                    'other-missing-issues' { $otherReport.PSObject.Properties.Remove('issues') }
+                    'other-null-suppressed' { $otherReport.suppressed = $null }
+                    'other-missing-ledger-exceptions' { $otherReport.analysis_completeness.PSObject.Properties.Remove('ledger_exceptions') }
+                    'other-null-scope-exclusions' { $otherReport.analysis_completeness.scope_exclusions = $null }
+                    'other-missing-limitations' { $otherReport.analysis_completeness.PSObject.Properties.Remove('limitations') }
+                }
+                Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
+            }
+            else {
+                switch ($drift) {
+                    'target-missing-issues' { [void]$fixture.Scanner.Remove('issues') }
+                    'target-null-suppressed' { $fixture.Scanner.suppressed = $null }
+                    'target-missing-scope-exclusions' { [void]$fixture.Scanner.analysis_completeness.Remove('scope_exclusions') }
+                    'target-null-limitations' { $fixture.Scanner.analysis_completeness.limitations = $null }
+                }
+                Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+            }
+            $decision = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($decision.status -ceq 'rejected') "Scanner collection drift '$drift' was accepted."
+            $expectedReason = if ($includeOther) { 'internal-continuation-other-skill-report-invalid' } else { 'internal-continuation-scanner-report-invalid' }
+            Assert-Continuation (@($decision.failureReasons) -contains $expectedReason) "Scanner collection drift '$drift' did not report an invalid scanner report."
+        }
     }
 
     # Scenario: supplemental test aggregates are missing or drift from their candidate-bound raw process events.
@@ -550,18 +584,30 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: candidate bytes, revision, or canonical failure state changes after evidence was produced.
-    # Purpose: prevent stale continuation evidence from authorizing a different candidate.
+    # Scenario: candidate bytes, revision, canonical state, or typed release prohibition changes after evidence was produced.
+    # Purpose: prevent stale evidence and false-like non-Boolean values from authorizing a different candidate.
     It 'UnitT50_rejects_candidate_revision_and_canonical_state_drift' {
-        foreach ($drift in @('bytes', 'revision', 'canonical')) {
+        foreach ($drift in @(
+                'bytes', 'revision', 'canonical',
+                'report-release-missing', 'report-release-null', 'report-release-numeric',
+                'source-release-missing', 'source-release-null', 'source-release-numeric')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift)
             switch ($drift) {
                 bytes { [IO.File]::AppendAllText((Join-Path $fixture.CandidateRoot 'skills/manage-confluence-docs-as-code/SKILL.md'), 'changed') }
                 revision { $fixture.Report.candidate.sourceRevision = 'c' * 40 }
                 canonical { $fixture.Report.state = 'PASS'; $fixture.Report.exitCode = 0 }
+                'report-release-missing' { [void]$fixture.Report.Remove('releaseEligible') }
+                'report-release-null' { $fixture.Report.releaseEligible = $null }
+                'report-release-numeric' { $fixture.Report.releaseEligible = 0 }
+                'source-release-missing' { [void]$fixture.Report.sourceConformance.Remove('releaseEligible') }
+                'source-release-null' { $fixture.Report.sourceConformance.releaseEligible = $null }
+                'source-release-numeric' { $fixture.Report.sourceConformance.releaseEligible = 0 }
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($decision.status -ceq 'rejected') "Candidate drift '$drift' was accepted."
+            if ($drift -like '*-release-*') {
+                Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-state-invalid') "Canonical release drift '$drift' did not report invalid canonical state."
+            }
         }
     }
 }

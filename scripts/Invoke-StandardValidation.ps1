@@ -6248,11 +6248,13 @@ function New-StandardValidationInternalSourceContinuationEligibility {
 
     $sourceConformance = Get-StandardValidationProperty -Object $Report -Name 'sourceConformance'
     $stages = Get-StandardValidationProperty -Object $Report -Name 'stages'
+    $reportReleaseEligible = Get-StandardValidationProperty -Object $Report -Name 'releaseEligible'
+    $sourceConformanceReleaseEligible = Get-StandardValidationProperty -Object $sourceConformance -Name 'releaseEligible'
     if ([string](Get-StandardValidationProperty -Object $Report -Name 'state') -cne 'FAILED' -or
         [int](Get-StandardValidationProperty -Object $Report -Name 'exitCode') -ne 20 -or
-        [bool](Get-StandardValidationProperty -Object $Report -Name 'releaseEligible') -or
+        $reportReleaseEligible -isnot [bool] -or [bool]$reportReleaseEligible -or
         [string](Get-StandardValidationProperty -Object $sourceConformance -Name 'status') -cne 'failed' -or
-        [bool](Get-StandardValidationProperty -Object $sourceConformance -Name 'releaseEligible') -or
+        $sourceConformanceReleaseEligible -isnot [bool] -or [bool]$sourceConformanceReleaseEligible -or
         $stages.Count -ne 10) {
         [void]$reasons.Add('internal-continuation-canonical-state-invalid')
     }
@@ -6331,6 +6333,19 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $expectedLimitations = @((Get-StandardValidationProperty -Object $entry -Name 'expectedLimitations') | ForEach-Object { [string]$_ })
             $scannerExecutionSuccessful = Get-StandardValidationProperty -Object $scanner -Name 'execution_successful'
             $scannerIsComplete = Get-StandardValidationProperty -Object $completeness -Name 'is_complete'
+            $scannerCollectionsValid = $components -is [array] -and $exceptions -is [array] -and
+                $scopeExclusions -is [array] -and $limitations -is [array] -and
+                $analyzerStatuses -is [array] -and $issues -is [array] -and $suppressed -is [array]
+            if (-not $scannerCollectionsValid) {
+                [void]$reasons.Add('internal-continuation-scanner-report-invalid')
+            }
+            $components = @($components)
+            $exceptions = @($exceptions)
+            $scopeExclusions = @($scopeExclusions)
+            $limitations = @($limitations)
+            $analyzerStatuses = @($analyzerStatuses)
+            $issues = @($issues)
+            $suppressed = @($suppressed)
             [void]$scannerBindings.Add([pscustomobject][ordered]@{
                     skillId = $SkillId
                     path = [IO.Path]::GetFullPath($ScannerReportPath)
@@ -6531,6 +6546,17 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     $otherAnalyzerIds = @($otherAnalyzerStatuses | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'analyzer_id') } | Sort-Object)
                     $otherExecutionSuccessful = Get-StandardValidationProperty -Object $otherReport -Name 'execution_successful'
                     $otherIsComplete = Get-StandardValidationProperty -Object $otherCompleteness -Name 'is_complete'
+                    $otherCollectionsValid = $otherComponents -is [array] -and $otherIssues -is [array] -and
+                        $otherSuppressed -is [array] -and $otherExceptions -is [array] -and
+                        $otherExclusions -is [array] -and $otherLimitations -is [array] -and
+                        $otherAnalyzerStatuses -is [array]
+                    $otherComponents = @($otherComponents)
+                    $otherIssues = @($otherIssues)
+                    $otherSuppressed = @($otherSuppressed)
+                    $otherExceptions = @($otherExceptions)
+                    $otherExclusions = @($otherExclusions)
+                    $otherLimitations = @($otherLimitations)
+                    $otherAnalyzerStatuses = @($otherAnalyzerStatuses)
                     [void]$scannerBindings.Add([pscustomobject][ordered]@{
                             skillId = $otherSkillId
                             path = [IO.Path]::GetFullPath($otherScannerReportPath)
@@ -6554,7 +6580,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                             break
                         }
                     }
-                    if ($otherSkillId -cnotin $otherSkillIds -or
+                    if (-not $otherCollectionsValid -or $otherSkillId -cnotin $otherSkillIds -or
                         $otherExecutionSuccessful -isnot [bool] -or -not [bool]$otherExecutionSuccessful -or
                         [string](Get-StandardValidationProperty -Object $otherMetadata -Name 'skillspector_version') -cne
                             [string](Get-StandardValidationProperty -Object $entry -Name 'scannerVersion') -or
@@ -6608,6 +6634,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
     }
 
     $uniqueFailureReasons = @($reasons.ToArray() | Select-Object -Unique)
+    $uniqueOtherScannerReportSha256 = @($otherScannerReportSha256 | Select-Object -Unique)
     return [ordered]@{
         schemaVersion = 1
         contract = 'internal-source-continuation-eligibility-v1'
@@ -6621,7 +6648,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         contentSha256 = $candidateContentSha256
         policySha256 = $policySha256
         scannerReportSha256 = $scannerReportSha256
-        otherScannerReportSha256 = @($otherScannerReportSha256)
+        otherScannerReportSha256 = @($uniqueOtherScannerReportSha256)
         repositoryTestEvidenceSha256 = $repositoryTestEvidenceSha256
         canonicalState = [string](Get-StandardValidationProperty -Object $Report -Name 'state')
         canonicalExitCode = Get-StandardValidationProperty -Object $Report -Name 'exitCode'
