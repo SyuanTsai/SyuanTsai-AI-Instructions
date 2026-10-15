@@ -9,6 +9,7 @@
   "findingsBeforeFiltering": 7,
   "findingsAfterFiltering": 7,
   "suppressedCount": 0,
+  "expectedLimitations": ["Analyzer static_patterns_tool_misuse status: degraded."],
   "analyzerIds": [
     "artifact_integrity",
     "behavioral_ast",

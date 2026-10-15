@@ -5927,6 +5927,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         $policySnapshot = Get-StandardValidationJsonSnapshot -Path $actualPolicyPath -Context 'internal source continuation policy'
         $policySha256 = [string]$policySnapshot.sha256
         $policy = $policySnapshot.value
+        $authorityContinuationInventoryValid = $false
         if ($null -ne $script:StandardValidationAuthorityEvidence) {
             $authorityBinding = Get-StandardValidationProperty -Object $script:StandardValidationAuthorityEvidence -Name 'binding'
             if ($null -ne $authorityBinding -and [bool](Get-StandardValidationProperty -Object $authorityBinding -Name 'verified')) {
@@ -5957,10 +5958,10 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                         $authorityContinuationInventoryValid = $false
                     }
                 }
-                if (-not $authorityContinuationInventoryValid) {
-                    [void]$reasons.Add('internal-continuation-policy-not-authority-bound')
-                }
             }
+        }
+        if (-not $authorityContinuationInventoryValid) {
+            [void]$reasons.Add('internal-continuation-policy-not-authority-bound')
         }
         if ([int](Get-StandardValidationProperty -Object $policy -Name 'schemaVersion') -ne 1 -or
             [string](Get-StandardValidationProperty -Object $policy -Name 'policy') -cne 'internal-source-continuation-v1' -or
@@ -6083,6 +6084,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $allowedOtherStatuses = Get-StandardValidationProperty -Object $entry -Name 'allowedNonBlockingAnalyzerStatuses'
             $expectedAnalyzerIdValues = Get-StandardValidationProperty -Object $entry -Name 'expectedAnalyzerIds'
             $expectedAnalyzerIds = @($expectedAnalyzerIdValues | Sort-Object)
+            $expectedLimitations = @((Get-StandardValidationProperty -Object $entry -Name 'expectedLimitations') | ForEach-Object { [string]$_ })
 
             if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $SkillId -or
                 -not [bool](Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -or
@@ -6234,7 +6236,9 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                 }
             }
             if ($approvedDegradedCount -ne 1) { [void]$reasons.Add('internal-continuation-approved-analyzer-missing') }
-            if (@($limitations | Where-Object { -not ([string]$_).Contains($analyzerId, [StringComparison]::Ordinal) }).Count -ne 0) {
+            $actualLimitations = @($limitations | ForEach-Object { [string]$_ })
+            if ($actualLimitations.Count -ne $expectedLimitations.Count -or
+                ($actualLimitations -join "`n") -cne ($expectedLimitations -join "`n")) {
                 [void]$reasons.Add('internal-continuation-limitation-invalid')
             }
         }

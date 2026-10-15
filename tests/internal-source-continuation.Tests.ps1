@@ -131,6 +131,23 @@ Describe 'Internal source continuation policy' {
                 -ScannerReportPath $Fixture.ScannerReportPath `
                 -RepositoryTestEvidencePath $Fixture.RepositoryTestEvidencePath
         }
+
+        $continuationAuthorityPaths = @(
+            'docs/standards/internal-source-continuation.json',
+            'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+            'docs/standards/schemas/internal-source-continuation-v1.schema.json'
+        )
+        $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
+            binding = [pscustomobject][ordered]@{
+                verified = $true
+                selectedFiles = @($continuationAuthorityPaths | ForEach-Object {
+                        [pscustomobject][ordered]@{
+                            path = $_
+                            sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "internal continuation test authority file $_"
+                        }
+                    })
+            }
+        }
     }
 
     # Scenario: the central policy is the only authority that classifies an internal module.
@@ -151,6 +168,7 @@ Describe 'Internal source continuation policy' {
         $retainedShape = Get-Content -Raw -LiteralPath $retainedShapePath | ConvertFrom-Json
         Assert-Continuation ($policy.entries[0].scannerVersion -ceq $retainedShape.scannerVersion) 'The scanner version pin drifted from the retained SYP171 evidence.'
         Assert-Continuation (($policy.entries[0].expectedAnalyzerIds -join ',') -ceq ($retainedShape.analyzerIds -join ',')) 'The pinned SkillSpector analyzer inventory drifted from the retained SYP171 evidence.'
+        Assert-Continuation (($policy.entries[0].expectedLimitations -join "`n") -ceq ($retainedShape.expectedLimitations -join "`n")) 'The exact SkillSpector limitations inventory drifted from the retained SYP171 evidence.'
         Assert-Continuation (($policy.entries[0].allowedFindings.matchFingerprint -join ',') -ceq ($retainedShape.allowedFindingFingerprints -join ',')) 'The exact finding allowlist drifted from the retained SYP171 evidence.'
         $policyLocations = @($policy.entries[0].allowedFindings | Select-Object matchFingerprint, expectedOccurrences, allowedLocations) | ConvertTo-Json -Depth 10 -Compress
         $retainedLocations = @($retainedShape.allowedFindingLocations) | ConvertTo-Json -Depth 10 -Compress
@@ -163,12 +181,24 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation (($contract.evidence.internalSourceContinuation.protectedBindings -join ',') -ceq 'eventRepository,eventSourceRevision,canonicalRunId,launchBinding,candidateAcquisition,authorityRevision,scannerToolReceipt,staticRawEvent,supplementalTestInventory,supplementalRawEvents,cleanup,humanFindingDispositionReview,centralRevision,workflowRevision,authorityArchiveSha256') 'The protected adoption binding set drifted.'
     }
 
-    # Scenario: production authority evidence claims verification but binds different continuation-policy bytes.
-    # Purpose: prevent a local policy copy from widening the central allowlist after the authority snapshot was authenticated.
+    # Scenario: production authority evidence is missing, unverified, or binds different continuation-policy bytes.
+    # Purpose: require authenticated central authority before any eligibility can be emitted and prevent local allowlist widening.
     It 'UnitT15_rejects_policy_bytes_outside_the_authenticated_authority_snapshot' {
         $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'authority-policy-binding')
         $previousAuthorityEvidence = $script:StandardValidationAuthorityEvidence
         try {
+            $script:StandardValidationAuthorityEvidence = $null
+            $missing = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($missing.status -ceq 'rejected') 'Eligibility was emitted without authority evidence.'
+            Assert-Continuation (@($missing.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The missing authority binding failure was not reported.'
+
+            $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
+                binding = [pscustomobject][ordered]@{ verified = $false; selectedFiles = @() }
+            }
+            $unverified = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($unverified.status -ceq 'rejected') 'Eligibility was emitted with unverified authority evidence.'
+            Assert-Continuation (@($unverified.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The unverified authority binding failure was not reported.'
+
             $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
                 binding = [pscustomobject][ordered]@{
                     verified = $true
@@ -183,13 +213,12 @@ Describe 'Internal source continuation policy' {
             Assert-Continuation ($rejected.status -ceq 'rejected') 'Policy bytes outside the authenticated authority snapshot were accepted.'
             Assert-Continuation (@($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority policy binding failure was not reported.'
 
-            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[0].sha256 = Get-StandardValidationFileSha256 -Path $fixture.PolicyPath -Context 'internal continuation bound policy'
+            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[0].sha256 = $previousAuthorityEvidence.binding.selectedFiles[0].sha256
             $schemaRejected = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($schemaRejected.status -ceq 'rejected') 'Unbound continuation schema bytes were accepted.'
             Assert-Continuation (@($schemaRejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority schema binding failure was not reported.'
 
-            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[1].sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json') -Context 'internal continuation bound eligibility schema'
-            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[2].sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-v1.schema.json') -Context 'internal continuation bound policy schema'
+            $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
             $accepted = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($accepted.status -ceq 'eligible-for-protected-review') ($accepted.failureReasons -join ',')
         }
@@ -236,7 +265,7 @@ Describe 'Internal source continuation policy' {
     # Scenario: evidence contains a finding, another degraded analyzer, another reason, or failed supplemental tests.
     # Purpose: allow only the named parser limitation and preserve all other blocking semantics.
     It 'UnitT40_rejects_findings_unapproved_incompleteness_and_test_failures' {
-        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'tests', 'unverified-active-skill')) {
+        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'missing-limitation', 'extra-limitation', 'changed-limitation', 'tests', 'unverified-active-skill')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift)
             switch ($drift) {
                 finding { $fixture.Scanner.issues = @([ordered]@{ severity = 'HIGH'; message = 'blocked' }); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
@@ -249,6 +278,9 @@ Describe 'Internal source continuation policy' {
                 'missing-analyzer' { $fixture.Scanner.analysis_completeness.analyzer_statuses = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Select-Object -Skip 1); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 reason { $fixture.Scanner.analysis_completeness.ledger_exceptions[0].reason_code = 'unknown'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 'duplicate-exception-path' { $fixture.Scanner.analysis_completeness.ledger_exceptions[1].path = 'SKILL.md'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
+                'missing-limitation' { $fixture.Scanner.analysis_completeness.limitations = @(); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
+                'extra-limitation' { $fixture.Scanner.analysis_completeness.limitations += 'Analyzer static_patterns_tool_misuse status: degraded for an unregistered reason.'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
+                'changed-limitation' { $fixture.Scanner.analysis_completeness.limitations = @('Unexpected static_patterns_tool_misuse limitation.'); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 tests { $fixture.RepositoryTests.status = 'failed'; $fixture.RepositoryTests.testResult.failed = 1; Write-ContinuationJson $fixture.RepositoryTestEvidencePath $fixture.RepositoryTests }
                 'unverified-active-skill' { $fixture.Report.candidate.activeSkills += 'configure-jira-api-access' }
             }

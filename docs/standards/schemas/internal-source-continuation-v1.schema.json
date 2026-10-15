@@ -39,7 +39,7 @@
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceRepository", "skillId", "reasonCode", "analyzerId", "scannerSource", "scannerVersion", "expectedAnalyzerIds", "allowedComponentPatterns", "maximumIncompleteComponents", "allowedNonBlockingAnalyzerStatuses", "findingDispositionMode", "findingDispositionReview", "allowedFindings", "supplementalTests"],
+      "required": ["sourceRepository", "skillId", "reasonCode", "analyzerId", "scannerSource", "scannerVersion", "expectedAnalyzerIds", "allowedComponentPatterns", "maximumIncompleteComponents", "allowedNonBlockingAnalyzerStatuses", "expectedLimitations", "findingDispositionMode", "findingDispositionReview", "allowedFindings", "supplementalTests"],
       "properties": {
         "sourceRepository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" },
         "skillId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
@@ -63,6 +63,9 @@
         "maximumIncompleteComponents": { "type": "integer", "minimum": 1, "maximum": 256 },
         "allowedNonBlockingAnalyzerStatuses": {
           "const": ["completed", "not_applicable", "disabled"]
+        },
+        "expectedLimitations": {
+          "const": ["Analyzer static_patterns_tool_misuse status: degraded."]
         },
         "findingDispositionMode": { "const": "central-exact-allowlist" },
         "findingDispositionReview": { "$ref": "#/$defs/findingDispositionReview" },

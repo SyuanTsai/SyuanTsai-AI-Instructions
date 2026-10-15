@@ -57,6 +57,7 @@
       "allowedComponentPatterns": ["SKILL.md", "scripts/*.ps1", "scripts/*.psm1"],
       "maximumIncompleteComponents": 64,
       "allowedNonBlockingAnalyzerStatuses": ["completed", "not_applicable", "disabled"],
+      "expectedLimitations": ["Analyzer static_patterns_tool_misuse status: degraded."],
       "findingDispositionMode": "central-exact-allowlist",
       "findingDispositionReview": {
         "status": "required-at-protected-adoption",
