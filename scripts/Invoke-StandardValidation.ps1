@@ -6169,6 +6169,8 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $expectedAnalyzerIdValues = Get-StandardValidationProperty -Object $entry -Name 'expectedAnalyzerIds'
             $expectedAnalyzerIds = @($expectedAnalyzerIdValues | Sort-Object)
             $expectedLimitations = @((Get-StandardValidationProperty -Object $entry -Name 'expectedLimitations') | ForEach-Object { [string]$_ })
+            $scannerExecutionSuccessful = Get-StandardValidationProperty -Object $scanner -Name 'execution_successful'
+            $scannerIsComplete = Get-StandardValidationProperty -Object $completeness -Name 'is_complete'
             [void]$scannerBindings.Add([pscustomobject][ordered]@{
                     skillId = $SkillId
                     path = [IO.Path]::GetFullPath($ScannerReportPath)
@@ -6178,13 +6180,13 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                 })
 
             if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $SkillId -or
-                -not [bool](Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -or
+                $scannerExecutionSuccessful -isnot [bool] -or -not [bool]$scannerExecutionSuccessful -or
                 [string](Get-StandardValidationProperty -Object $scannerMetadata -Name 'skillspector_version') -cne
                     [string](Get-StandardValidationProperty -Object $entry -Name 'scannerVersion')) {
                 [void]$reasons.Add('internal-continuation-scanner-identity-invalid')
             }
             if ([string](Get-StandardValidationProperty -Object $completeness -Name 'status') -cne 'partial' -or
-                [bool](Get-StandardValidationProperty -Object $completeness -Name 'is_complete')) {
+                $scannerIsComplete -isnot [bool] -or [bool]$scannerIsComplete) {
                 [void]$reasons.Add('internal-continuation-completeness-state-invalid')
             }
             if ($components.Count -ne $skillInventory.Count -or
@@ -6367,6 +6369,8 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     $otherComponentPaths = @($otherComponents | ForEach-Object { ([string](Get-StandardValidationProperty -Object $_ -Name 'path')).Replace('\', '/') } | Sort-Object)
                     $otherInventoryPaths = @($otherInventory | ForEach-Object { ([string]$_.path).Replace('\', '/') } | Sort-Object)
                     $otherAnalyzerIds = @($otherAnalyzerStatuses | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'analyzer_id') } | Sort-Object)
+                    $otherExecutionSuccessful = Get-StandardValidationProperty -Object $otherReport -Name 'execution_successful'
+                    $otherIsComplete = Get-StandardValidationProperty -Object $otherCompleteness -Name 'is_complete'
                     [void]$scannerBindings.Add([pscustomobject][ordered]@{
                             skillId = $otherSkillId
                             path = [IO.Path]::GetFullPath($otherScannerReportPath)
@@ -6391,11 +6395,11 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                         }
                     }
                     if ($otherSkillId -cnotin $otherSkillIds -or
-                        -not [bool](Get-StandardValidationProperty -Object $otherReport -Name 'execution_successful') -or
+                        $otherExecutionSuccessful -isnot [bool] -or -not [bool]$otherExecutionSuccessful -or
                         [string](Get-StandardValidationProperty -Object $otherMetadata -Name 'skillspector_version') -cne
                             [string](Get-StandardValidationProperty -Object $entry -Name 'scannerVersion') -or
                         [string](Get-StandardValidationProperty -Object $otherCompleteness -Name 'status') -cne 'complete' -or
-                        -not [bool](Get-StandardValidationProperty -Object $otherCompleteness -Name 'is_complete') -or
+                        $otherIsComplete -isnot [bool] -or -not [bool]$otherIsComplete -or
                         [int](Get-StandardValidationProperty -Object $otherCompleteness -Name 'total_components') -ne $otherInventory.Count -or
                         [int](Get-StandardValidationProperty -Object $otherCompleteness -Name 'scanned_components') -ne $otherInventory.Count -or
                         $otherComponents.Count -ne $otherInventory.Count -or
