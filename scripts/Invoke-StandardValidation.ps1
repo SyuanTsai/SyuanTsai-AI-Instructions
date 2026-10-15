@@ -6449,7 +6449,7 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
 
 function New-StandardValidationInternalSourceContinuationEligibility {
     param(
-        [Parameter(Mandatory = $true)][string] $ReportPath,
+        [string] $ReportPath,
         [Parameter(Mandatory = $true)][string] $PolicyPath,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
@@ -6457,7 +6457,9 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         [Parameter(Mandatory = $true)][string] $ScannerReportPath,
         [string[]] $OtherScannerReportPaths = @(),
         [Parameter(Mandatory = $true)][string] $AuthorityArtifactsRoot,
-        [Parameter(Mandatory = $true)][string] $RepositoryTestEvidencePath
+        [string] $RepositoryTestEvidencePath,
+        [AllowNull()] $ReportObject,
+        [switch] $PreDispatch
     )
 
     $reasons = New-Object 'System.Collections.Generic.List[string]'
@@ -6470,13 +6472,27 @@ function New-StandardValidationInternalSourceContinuationEligibility {
     $candidateContentSha256 = $null
     $scannerBindings = New-Object 'System.Collections.Generic.List[object]'
     $Report = $null
-    try {
-        $reportSnapshot = Get-StandardValidationJsonSnapshot -Path $ReportPath -Context 'internal source continuation canonical report'
-        $Report = $reportSnapshot.value
+    if ($PreDispatch) {
+        if ($null -eq $ReportObject) {
+            [void]$reasons.Add('internal-continuation-pre-dispatch-report-invalid')
+            $Report = [pscustomobject][ordered]@{}
+        }
+        else {
+            $Report = $ReportObject
+        }
     }
-    catch {
-        [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid')
-        $Report = [pscustomobject][ordered]@{}
+    else {
+        try {
+            if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+                throw 'Canonical report path is required.'
+            }
+            $reportSnapshot = Get-StandardValidationJsonSnapshot -Path $ReportPath -Context 'internal source continuation canonical report'
+            $Report = $reportSnapshot.value
+        }
+        catch {
+            [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid')
+            $Report = [pscustomobject][ordered]@{}
+        }
     }
     $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
     $sourceRepository = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRepository')
@@ -6998,41 +7014,54 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             [void]$reasons.Add('internal-continuation-scanner-candidate-binding-invalid')
         }
 
-        try {
-            $testSnapshot = Get-StandardValidationJsonSnapshot -Path $RepositoryTestEvidencePath -Context 'internal source continuation repository tests'
-            $repositoryTestEvidenceSha256 = [string]$testSnapshot.sha256
-            $testEvidence = $testSnapshot.value
+        if (-not $PreDispatch) {
             try {
-                [void](Assert-StandardValidationInternalContinuationRunnerEvidence `
-                        -Report $Report `
-                        -ReportPath $ReportPath `
-                        -CandidateRoot $CandidateRoot `
-                        -RepositoryTestEvidencePath $RepositoryTestEvidencePath `
-                        -RepositoryTestEvidenceSha256 $repositoryTestEvidenceSha256)
+                if ([string]::IsNullOrWhiteSpace($RepositoryTestEvidencePath)) {
+                    throw 'Supplemental repository-test evidence path is required.'
+                }
+                $testSnapshot = Get-StandardValidationJsonSnapshot -Path $RepositoryTestEvidencePath -Context 'internal source continuation repository tests'
+                $repositoryTestEvidenceSha256 = [string]$testSnapshot.sha256
+                $testEvidence = $testSnapshot.value
+                try {
+                    [void](Assert-StandardValidationInternalContinuationRunnerEvidence `
+                            -Report $Report `
+                            -ReportPath $ReportPath `
+                            -CandidateRoot $CandidateRoot `
+                            -RepositoryTestEvidencePath $RepositoryTestEvidencePath `
+                            -RepositoryTestEvidenceSha256 $repositoryTestEvidenceSha256)
+                }
+                catch { [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid') }
+                try {
+                    [void](Assert-StandardValidationInternalContinuationRepositoryTestEvidence `
+                            -Report $Report `
+                            -Evidence $testEvidence `
+                            -PolicyEntry $entry `
+                            -CandidateId $candidateId `
+                            -SourceRevision $sourceRevision `
+                            -ContentSha256 $declaredContentSha256 `
+                            -EvidencePath $RepositoryTestEvidencePath `
+                            -EvidenceSha256 $repositoryTestEvidenceSha256)
+                }
+                catch { [void]$reasons.Add('internal-continuation-repository-test-process-evidence-invalid') }
             }
-            catch { [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid') }
-            try {
-                [void](Assert-StandardValidationInternalContinuationRepositoryTestEvidence `
-                        -Report $Report `
-                        -Evidence $testEvidence `
-                        -PolicyEntry $entry `
-                        -CandidateId $candidateId `
-                        -SourceRevision $sourceRevision `
-                        -ContentSha256 $declaredContentSha256 `
-                        -EvidencePath $RepositoryTestEvidencePath `
-                        -EvidenceSha256 $repositoryTestEvidenceSha256)
-            }
-            catch { [void]$reasons.Add('internal-continuation-repository-test-process-evidence-invalid') }
+            catch { [void]$reasons.Add('internal-continuation-repository-test-evidence-invalid') }
         }
-        catch { [void]$reasons.Add('internal-continuation-repository-test-evidence-invalid') }
     }
 
     $uniqueFailureReasons = @($reasons.ToArray() | Select-Object -Unique)
     $uniqueOtherScannerReportSha256 = @($otherScannerReportSha256 | Select-Object -Unique)
     return [ordered]@{
         schemaVersion = 1
-        contract = 'internal-source-continuation-eligibility-v1'
-        status = if ($uniqueFailureReasons.Count -eq 0) { 'eligible-for-protected-review' } else { 'rejected' }
+        contract = if ($PreDispatch) { 'internal-source-continuation-pre-dispatch-v1' } else { 'internal-source-continuation-eligibility-v1' }
+        status = if ($uniqueFailureReasons.Count -ne 0) {
+            'rejected'
+        }
+        elseif ($PreDispatch) {
+            'eligible-for-supplemental-dispatch'
+        }
+        else {
+            'eligible-for-protected-review'
+        }
         publishable = $false
         protectedAdoptionRequired = $true
         sourceRepository = $sourceRepository
@@ -10774,6 +10803,76 @@ function Invoke-StandardValidationRun {
                     throw 'Internal continuation review scope or Static failure is invalid.'
                 }
                 $continuationEntry = $matchingEntries[0]
+                $preDispatchReport = New-StandardValidationCandidateEvidence `
+                    -RunId $runId `
+                    -State $failureState `
+                    -ExitCode ([int]$script:StandardValidationExitCodes[$failureState]) `
+                    -ReleaseEligible $false `
+                    -Candidate $candidateEvidence `
+                    -Adapter $adapterEvidence `
+                    -Authority $authorityEvidence `
+                    -Stages $stages `
+                    -FailureState $failureState `
+                    -FailureMessage $failureMessage `
+                    -ArtifactRoot $artifactRootFull `
+                    -LockPath $lockPath `
+                    -DevelopmentHarness $false `
+                    -LaunchBinding $launchBinding
+                $preDispatchSourceConformance = New-StandardValidationSourceConformanceResult `
+                    -Report $preDispatchReport `
+                    -ExpectedSourceRevision $SourceRevision `
+                    -RepositoryTestEvidence $repositoryTestEvidence `
+                    -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
+                $preDispatchReport | Add-Member `
+                    -NotePropertyName sourceConformance `
+                    -NotePropertyValue $preDispatchSourceConformance `
+                    -Force
+
+                $staticEvent = @($stages[3].events)[0]
+                $staticRaw = Get-StandardValidationJson `
+                    -Path ([string](Get-StandardValidationProperty -Object $staticEvent -Name 'outputPath')) `
+                    -Context 'internal continuation pre-dispatch Static event'
+                $staticStdout = Get-StandardValidationProperty -Object $staticRaw -Name 'stdout'
+                if ($staticStdout -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$staticStdout)) {
+                    throw 'Internal continuation pre-dispatch Static output is unavailable.'
+                }
+                $staticEnvelope = ([string]$staticStdout) | ConvertFrom-Json -ErrorAction Stop
+                $nativeReports = Get-StandardValidationProperty -Object $staticEnvelope -Name 'nativeReports'
+                $continuationSkillId = [string](Get-StandardValidationRequiredProperty -Object $continuationEntry -Name 'skillId' -Context 'internal continuation review policy')
+                $targetNativeReports = @($nativeReports | Where-Object {
+                        [string](Get-StandardValidationProperty -Object $_ -Name 'skillId') -ceq $continuationSkillId
+                    })
+                if ($nativeReports -isnot [array] -or $targetNativeReports.Count -ne 1) {
+                    throw 'Internal continuation pre-dispatch scanner inventory is invalid.'
+                }
+                $otherNativeReportPaths = @($nativeReports | Where-Object {
+                        [string](Get-StandardValidationProperty -Object $_ -Name 'skillId') -cne $continuationSkillId
+                    } | ForEach-Object {
+                        [string](Get-StandardValidationProperty -Object $_ -Name 'path')
+                    })
+                $preDispatchDecision = New-StandardValidationInternalSourceContinuationEligibility `
+                    -PolicyPath $continuationPolicyPath `
+                    -CandidateRoot $snapshotRoot `
+                    -ExpectedSourceRevision $SourceRevision `
+                    -SkillId $continuationSkillId `
+                    -ScannerReportPath ([string](Get-StandardValidationProperty -Object $targetNativeReports[0] -Name 'path')) `
+                    -OtherScannerReportPaths $otherNativeReportPaths `
+                    -AuthorityArtifactsRoot $artifactRootFull `
+                    -ReportObject $preDispatchReport `
+                    -PreDispatch
+                if ([string]$preDispatchDecision.status -cne 'eligible-for-supplemental-dispatch') {
+                    throw "Internal continuation pre-dispatch evidence is ineligible: $(@($preDispatchDecision.failureReasons) -join ',')"
+                }
+                Register-StandardValidationEvidenceArtifact `
+                    -Path ([string](Get-StandardValidationProperty -Object $targetNativeReports[0] -Name 'path')) `
+                    -ExpectedSha256 ([string]$preDispatchDecision.scannerReportSha256) `
+                    -Context 'internal continuation target scanner report'
+                for ($scannerIndex = 0; $scannerIndex -lt $otherNativeReportPaths.Count; $scannerIndex++) {
+                    Register-StandardValidationEvidenceArtifact `
+                        -Path ([string]$otherNativeReportPaths[$scannerIndex]) `
+                        -ExpectedSha256 ([string]$preDispatchDecision.otherScannerReportSha256[$scannerIndex]) `
+                        -Context "internal continuation other scanner report $scannerIndex"
+                }
                 $continuationSuites = @($continuationEntry.supplementalTests.requiredSuites | ForEach-Object { [string]$_ })
                 $continuationObservations = @()
                 foreach ($suite in $continuationSuites) {

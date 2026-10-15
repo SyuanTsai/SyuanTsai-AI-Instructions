@@ -4572,7 +4572,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Equal $coreContract.ordinaryCli.defaultMode 'core-v2' 'The ordinary CLI must default to the v2 core.'
         Assert-Equal (@($coreContract.ordinaryCli.eventNames) -join ',') 'local,pre-push,pull_request,push,workflow_dispatch' 'Core event values must match the v2 evidence schema.'
         Assert-False ([bool]$coreContract.releaseEligible) 'Core validation must remain release-ineligible.'
-        Assert-Match $runner 'if \(-not \$DevelopmentHarness -and -not \$CompleteLifecycle\)' 'The runner must route the ordinary invocation through v2 before entering legacy gates.'
+        Assert-Match $runner 'if \(-not \$DevelopmentHarness -and -not \$CompleteLifecycle -and -not \$InternalSourceContinuationReview\)' 'The runner must route ordinary invocations through v2 while preserving the authenticated internal continuation route.'
         Assert-Match $runner 'Ordinary core mode accepts only standard-core-adapter-v2' 'An ordinary v1 adapter must fail with a versioned mode error.'
         $coreStart = $runner.IndexOf('function Invoke-StandardCoreValidationRun', [StringComparison]::Ordinal)
         $coreEnd = if ($coreStart -ge 0) { $runner.IndexOf('function Invoke-StandardValidationRun', $coreStart, [StringComparison]::Ordinal) } else { -1 }

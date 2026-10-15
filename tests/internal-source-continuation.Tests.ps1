@@ -299,6 +299,44 @@ Describe 'Internal source continuation policy' {
                 -RepositoryTestEvidencePath $Fixture.RepositoryTestEvidencePath
         }
 
+        function Sync-ContinuationScannerBinding {
+            param($Fixture)
+
+            Write-ContinuationJson -Path $Fixture.ScannerReportPath -Value $Fixture.Scanner
+            $scannerSha256 = Get-StandardValidationFileSha256 `
+                -Path $Fixture.ScannerReportPath `
+                -Context 'internal continuation pre-dispatch scanner fixture'
+            $event = $Fixture.Report.stages[3].events[0]
+            $raw = Get-Content -Raw -LiteralPath $event.outputPath | ConvertFrom-Json
+            $envelope = [string]$raw.stdout | ConvertFrom-Json
+            $nativeReport = @($envelope.nativeReports | Where-Object {
+                    [string]$_.skillId -ceq 'manage-confluence-docs-as-code'
+                })[0]
+            $nativeReport.sha256 = $scannerSha256
+            $changedStdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+            $raw.stdout = $changedStdout
+            $raw.process.stdout = $changedStdout
+            Write-ContinuationJson -Path $event.outputPath -Value $raw
+            $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $changedStdout -Stderr ([string]$raw.stderr)
+        }
+
+        function Invoke-ContinuationPreDispatchFixture {
+            param($Fixture)
+
+            $preDispatchReport = $Fixture.Report | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+            $preDispatchReport.PSObject.Properties.Remove('supplementalRepositoryTests')
+            return New-StandardValidationInternalSourceContinuationEligibility `
+                -PolicyPath $Fixture.PolicyPath `
+                -CandidateRoot $Fixture.CandidateRoot `
+                -ExpectedSourceRevision $Fixture.SourceRevision `
+                -SkillId 'manage-confluence-docs-as-code' `
+                -ScannerReportPath $Fixture.ScannerReportPath `
+                -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
+                -AuthorityArtifactsRoot $Fixture.AuthorityArtifactsRoot `
+                -ReportObject $preDispatchReport `
+                -PreDispatch
+        }
+
         $continuationAuthorityPaths = @(
             'docs/standards/internal-source-continuation.json',
             'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
@@ -458,6 +496,13 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation ($runnerText -match '\[bool\]\s+\$InternalSourceContinuationReview\s*=\s*\$false') 'The callable runner does not declare the internal continuation review route.'
         Assert-Continuation ($runnerText -match '-InternalSourceContinuationReview \(\[bool\]\$InternalSourceContinuationReview\)') 'The script entrypoint does not forward the internal continuation review route.'
         Assert-Continuation ($runnerText -match '-not \$CompleteLifecycle -and -not \$InternalSourceContinuationReview') 'Default core routing still intercepts the internal continuation review route.'
+        $continuationBlockStart = $runnerText.IndexOf('if ($InternalSourceContinuationReview)')
+        $continuationBlockEnd = $runnerText.IndexOf('if ($SourceMergeExceptionReview)', $continuationBlockStart)
+        $continuationBlock = $runnerText.Substring($continuationBlockStart, $continuationBlockEnd - $continuationBlockStart)
+        $preDispatchOffset = $continuationBlock.IndexOf('-PreDispatch')
+        $scannerRegistrationOffset = $continuationBlock.IndexOf("-Context 'internal continuation target scanner report'")
+        $supplementalCommandOffset = $continuationBlock.IndexOf('Invoke-StandardValidationCommandAndRecord')
+        Assert-Continuation ($preDispatchOffset -ge 0 -and $scannerRegistrationOffset -gt $preDispatchOffset -and $supplementalCommandOffset -gt $scannerRegistrationOffset) 'The authenticated runner does not evaluate and freeze scanner evidence before candidate command execution.'
 
         $fixture.RunnerAdapterResult.repositoryTests[0].command.arguments = @('--suite', 'different')
         $driftedScope = Test-StandardValidationInternalContinuationReviewScope `
@@ -471,6 +516,35 @@ Describe 'Internal source continuation policy' {
             -PolicyEntry $fixture.PolicyEntry `
             -RunRoot $fixture.RunRoot
         Assert-Continuation (-not $driftedScope) 'A drifted supplemental suite command was allowed to dispatch.'
+    }
+
+    # Scenario: Static is incomplete but the authenticated scanner evidence contains an unknown finding or a second degraded analyzer.
+    # Purpose: block every candidate command before dispatch unless the complete central technical policy already passes.
+    It 'UnitT19_blocks_supplemental_dispatch_before_unapproved_scanner_evidence' {
+        $validFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-valid')
+        $validDecision = Invoke-ContinuationPreDispatchFixture -Fixture $validFixture
+        Assert-Continuation ($validDecision.status -ceq 'eligible-for-supplemental-dispatch') ($validDecision.failureReasons -join ',')
+
+        $unknownFindingFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-unknown-finding')
+        $unknownFinding = $unknownFindingFixture.Scanner.issues[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        $unknownFinding.match_fingerprint = 'sha256:unknown-pre-dispatch-finding'
+        $unknownFindingFixture.Scanner.issues = @($unknownFindingFixture.Scanner.issues) + @($unknownFinding)
+        $unknownFindingFixture.Scanner.analysis_completeness.findings_before_filtering = $unknownFindingFixture.Scanner.issues.Count
+        $unknownFindingFixture.Scanner.analysis_completeness.findings_after_filtering = $unknownFindingFixture.Scanner.issues.Count
+        Sync-ContinuationScannerBinding -Fixture $unknownFindingFixture
+        $unknownFindingDecision = Invoke-ContinuationPreDispatchFixture -Fixture $unknownFindingFixture
+        Assert-Continuation ($unknownFindingDecision.status -ceq 'rejected') 'An unknown finding reached the supplemental dispatch boundary.'
+        Assert-Continuation (@($unknownFindingDecision.failureReasons) -contains 'internal-continuation-finding-not-allowed') 'The pre-dispatch evaluator did not identify the unknown finding.'
+
+        $extraDegradedFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-extra-degraded')
+        $additionalAnalyzer = @($extraDegradedFixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object {
+                [string]$_.analyzer_id -cne 'static_patterns_tool_misuse'
+            })[0]
+        $additionalAnalyzer.status = 'degraded'
+        Sync-ContinuationScannerBinding -Fixture $extraDegradedFixture
+        $extraDegradedDecision = Invoke-ContinuationPreDispatchFixture -Fixture $extraDegradedFixture
+        Assert-Continuation ($extraDegradedDecision.status -ceq 'rejected') 'A second degraded analyzer reached the supplemental dispatch boundary.'
+        Assert-Continuation (@($extraDegradedDecision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'The pre-dispatch evaluator did not identify the additional degraded analyzer.'
     }
 
     # Scenario: one central-listed internal Skill is partial only because the approved parser analyzer degraded.
