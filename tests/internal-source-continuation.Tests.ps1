@@ -396,7 +396,7 @@ Describe 'Internal source continuation policy' {
     # Scenario: evidence contains a finding, another degraded analyzer, another reason, or failed supplemental tests.
     # Purpose: allow only the named parser limitation and preserve all other blocking semantics.
     It 'UnitT40_rejects_findings_unapproved_incompleteness_and_test_failures' {
-        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'missing-limitation', 'extra-limitation', 'changed-limitation', 'tests', 'unverified-active-skill')) {
+        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'completed-undercoverage', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'missing-limitation', 'extra-limitation', 'changed-limitation', 'tests', 'unverified-active-skill')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift)
             switch ($drift) {
                 finding { $fixture.Scanner.issues = @([ordered]@{ severity = 'HIGH'; message = 'blocked' }); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
@@ -406,6 +406,12 @@ Describe 'Internal source continuation policy' {
                 'hidden-finding' { $fixture.Scanner.analysis_completeness.findings_before_filtering = 8; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 'suppressed-finding' { $fixture.Scanner.suppressed_count = 1; $fixture.Scanner.suppressed = @([ordered]@{ id = 'hidden' }); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 analyzer { $fixture.Scanner.analysis_completeness.analyzer_statuses += [ordered]@{ analyzer_id = 'unknown'; status = 'degraded'; planned_work = 1; completed = 0; partial = 1; skipped = 0; failed = 0; unaccounted = 0 }; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
+                'completed-undercoverage' {
+                    $completedAnalyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
+                    $completedAnalyzer.planned_work = 1
+                    $completedAnalyzer.completed = 1
+                    Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+                }
                 'missing-analyzer' { $fixture.Scanner.analysis_completeness.analyzer_statuses = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Select-Object -Skip 1); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 reason { $fixture.Scanner.analysis_completeness.ledger_exceptions[0].reason_code = 'unknown'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 'duplicate-exception-path' { $fixture.Scanner.analysis_completeness.ledger_exceptions[1].path = 'SKILL.md'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
@@ -417,7 +423,46 @@ Describe 'Internal source continuation policy' {
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($decision.status -ceq 'rejected') "Evidence drift '$drift' was accepted."
+            if ($drift -ceq 'completed-undercoverage') {
+                Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'Target-Skill analyzer undercoverage did not report an invalid analyzer status.'
+            }
         }
+    }
+
+    # Scenario: a completed analyzer in another active Skill accounts for fewer components than that Skill contains.
+    # Purpose: require every completed analyzer to cover the full inventory, including non-target Skills.
+    It 'UnitT45_rejects_other_skill_completed_analyzer_undercoverage' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'other-completed-undercoverage') -IncludeOtherSkill
+        $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+        $otherReport.analysis_completeness.analyzer_statuses[0].planned_work = 0
+        $otherReport.analysis_completeness.analyzer_statuses[0].completed = 0
+        Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
+        $decision = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($decision.status -ceq 'rejected') 'An other-Skill analyzer that omitted the full component inventory was accepted as completed.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-other-skill-report-invalid') 'Other-Skill analyzer undercoverage did not report an invalid scanner report.'
+    }
+
+    # Scenario: more than one supplied other-Skill report is invalid in the same decision.
+    # Purpose: keep rejected eligibility evidence schema-valid by emitting each failure reason once.
+    It 'UnitT47_emits_unique_failure_reasons_for_multiple_invalid_other_skill_reports' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'multiple-invalid-other-reports') -IncludeOtherSkill
+        $firstReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+        $firstReport.execution_successful = $false
+        Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $firstReport
+
+        $secondReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+        $secondReport.metadata.skillspector_version = 'invalid-version'
+        $secondPath = Join-Path (Split-Path -Parent $fixture.OtherScannerReportPaths[0]) 'second-invalid-other-report.json'
+        Write-ContinuationJson $secondPath $secondReport
+        $fixture.OtherScannerReportPaths = @($fixture.OtherScannerReportPaths[0], $secondPath)
+        $fixture.Report.candidate.activeSkills += 'configure-jira-api-access'
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture
+        $failureReasons = @($decision.failureReasons)
+        Assert-Continuation ($decision.status -ceq 'rejected') 'Multiple invalid other-Skill reports did not reject eligibility.'
+        Assert-Continuation ($failureReasons.Count -eq @($failureReasons | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate failure reasons.'
+        $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
+        Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Rejected eligibility with multiple invalid other-Skill reports does not match its strict schema.'
     }
 
     # Scenario: candidate bytes, revision, or canonical failure state changes after evidence was produced.

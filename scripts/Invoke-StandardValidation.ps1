@@ -6318,7 +6318,8 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     continue
                 }
                 $completeCountsInvalid = $currentStatus -ceq 'completed' -and
-                    ($plannedWork -ne $completedWork -or $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
+                    ($plannedWork -ne $totalComponents -or $completedWork -ne $totalComponents -or
+                    $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
                 $inactiveCountsInvalid = $currentStatus -in @('not_applicable', 'disabled') -and
                     ($plannedWork -ne 0 -or $completedWork -ne 0 -or $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
                 if ($currentStatus -cnotin $allowedOtherStatuses -or $completeCountsInvalid -or $inactiveCountsInvalid) {
@@ -6383,7 +6384,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                         $otherFailed = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'failed')
                         $otherUnaccounted = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'unaccounted')
                         if ($otherStatus -cnotin $allowedOtherStatuses -or
-                            ($otherStatus -ceq 'completed' -and ($otherPlanned -ne $otherCompleted -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
+                            ($otherStatus -ceq 'completed' -and ($otherPlanned -ne $otherInventory.Count -or $otherCompleted -ne $otherInventory.Count -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
                             ($otherStatus -in @('not_applicable', 'disabled') -and ($otherPlanned -ne 0 -or $otherCompleted -ne 0 -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0))) {
                             $otherAnalyzerStateInvalid = $true
                             break
@@ -6448,10 +6449,11 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         catch { [void]$reasons.Add('internal-continuation-repository-test-evidence-invalid') }
     }
 
+    $uniqueFailureReasons = @($reasons.ToArray() | Select-Object -Unique)
     return [ordered]@{
         schemaVersion = 1
         contract = 'internal-source-continuation-eligibility-v1'
-        status = if ($reasons.Count -eq 0) { 'eligible-for-protected-review' } else { 'rejected' }
+        status = if ($uniqueFailureReasons.Count -eq 0) { 'eligible-for-protected-review' } else { 'rejected' }
         publishable = $false
         protectedAdoptionRequired = $true
         sourceRepository = $sourceRepository
@@ -6468,7 +6470,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         eligibleOperationAfterProtectedAdoption = @('source-merge')
         forbiddenOperations = @('release', 'install', 'publish', 'catalog-adoption')
         releaseEligible = $false
-        failureReasons = @($reasons.ToArray())
+        failureReasons = @($uniqueFailureReasons)
     }
 }
 
