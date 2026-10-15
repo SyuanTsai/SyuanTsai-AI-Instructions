@@ -4978,6 +4978,12 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push origin') 'An explicit git push whose ref type cannot be established must fail closed.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'git push --mirror') 'A mirror push must be release-affecting because it can publish tag refs.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: docker/build-push-action@0123456789012345678901234567890123456789`nwith:`n  push: true") 'A Docker build-push action must be release-affecting because its push input can publish an image.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'uses: vendor/release-action@v1') 'A release action with an explicit ref must remain release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: 'vendor/publish-action@v2'") 'A quoted publish action with an explicit ref must remain release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'uses: vendor/action/deploy@v3') 'A nested deploy action with an explicit ref must remain release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'uses: vendor/release-action/dist@v1') 'A release-marked action repository with a nested action path must remain release-affecting.'
+        Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text "uses: 'vendor/publish-action/subdir@v2'") 'A quoted publish-marked action repository with a nested action path must remain release-affecting.'
+        Assert-False (Test-AuthorityConsumerReleaseAffectingCommand -Text 'uses: vendor/release-action/dist') 'A release-marked action repository without an explicit ref must not be treated as a complete action identity.'
         Assert-True (Test-AuthorityConsumerReleaseAffectingCommand -Text 'docker buildx build --platform linux/amd64 --push .') 'A Docker buildx build with --push must be release-affecting because it publishes an image.'
         $quotedStableRuntimeUrl = @'
 - shell: pwsh
@@ -5060,11 +5066,26 @@ jobs:
     if: ${{ always() }}
     steps:
       - run: echo cleanup
+  observer:
+    if: ${{ always() }}
+    steps:
+      - name: Observe Stage 4 scanner evidence (diagnostic)
+        shell: pwsh
+        run: |
+          $inventory = @(
+            'references/publish-plan.schema.json',
+            'scripts/ConfluencePublish.psm1'
+          )
+          Write-Output ($inventory -join ', ')
 '@
         Assert-AuthorityConsumerReleaseFailurePropagation -WorkflowPath 'fixture.yml' -Text $workflow -CanonicalRelativePath 'scripts/Validate.ps1'
         foreach ($unsafe in @(
             $workflow.Replace('- run: ./scripts/Validate.ps1', "- continue-on-error: true`n        run: ./scripts/Validate.ps1"),
             $workflow.Replace('- run: gh release create v1.0.0', "- if: `${{ always() }}`n        run: gh release create v1.0.0"),
+            $workflow.Replace('- run: gh release create v1.0.0', "- uses: vendor/release-action@v1`n        if: `${{ always() }}"),
+            $workflow.Replace('- run: gh release create v1.0.0', "- uses: vendor/release-action/dist@v1`n        if: `${{ always() }}"),
+            $workflow.Replace('- run: gh release create v1.0.0', "- uses: 'vendor/publish-action/subdir@v2'`n        if: `${{ always() }}"),
+            $workflow.Replace('- run: gh release create v1.0.0', "- continue-on-error: true`n        uses: 'vendor/publish-action@v2'"),
             $workflow.Replace('run: ./scripts/Validate.ps1', 'run: ./scripts/Validate.ps1 || true'),
             $workflow.Replace('  canonical:', "  canonical:`n    continue-on-error: true"),
             $workflow.Replace('  release:', "  release:`n    if: `${{ always() }}")
@@ -5073,6 +5094,19 @@ jobs:
             try { Assert-AuthorityConsumerReleaseFailurePropagation -WorkflowPath 'fixture.yml' -Text $unsafe -CanonicalRelativePath 'scripts/Validate.ps1' }
             catch { $failure = $_.Exception.Message }
             Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) 'Canonical/release suppression must remain blocked.'
+        }
+
+        foreach ($helperStep in @(
+            '      - run: ./scripts/publish.ps1',
+            "      - shell: pwsh`n        run: ./scripts/publish.ps1",
+            "      - shell: pwsh`n        run: & './scripts/publish.ps1'",
+            "      - shell: custom-shell {0}`n        run: ./scripts/publish.ps1"
+        )) {
+            $helperWorkflow = "on: push`njobs:`n  publish:`n    steps:`n$helperStep`n"
+            $helperFailure = $null
+            try { Assert-AuthorityConsumerReleaseFailurePropagation -WorkflowPath 'fixture.yml' -Text $helperWorkflow -CanonicalRelativePath 'scripts/Validate.ps1' }
+            catch { $helperFailure = $_.Exception.Message }
+            Assert-Match $helperFailure 'opaque local release helper' 'Existing direct, PowerShell, quoted, and unknown-runner publish helpers must remain fail-closed.'
         }
     }
 
