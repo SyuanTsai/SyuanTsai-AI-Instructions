@@ -454,6 +454,10 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation ($fixture.RepositoryTests.status -ceq 'passed' -and $fixture.RepositoryTests.decision -ceq 'PASS') 'The runner aggregate does not expose the validator-required result shape.'
         Assert-Continuation (($fixture.RepositoryTests.suites -join ',') -ceq 'focused,canonical') 'The runner aggregate suite inventory drifted from central policy.'
         Assert-Continuation ($fixture.Report.supplementalRepositoryTests.evidenceSha256 -ceq (Get-StandardValidationFileSha256 -Path $fixture.RepositoryTestEvidencePath -Context 'runner supplemental evidence')) 'The canonical report did not register the exact runner aggregate bytes.'
+        $runnerText = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1')
+        Assert-Continuation ($runnerText -match '\[bool\]\s+\$InternalSourceContinuationReview\s*=\s*\$false') 'The callable runner does not declare the internal continuation review route.'
+        Assert-Continuation ($runnerText -match '-InternalSourceContinuationReview \(\[bool\]\$InternalSourceContinuationReview\)') 'The script entrypoint does not forward the internal continuation review route.'
+        Assert-Continuation ($runnerText -match '-not \$CompleteLifecycle -and -not \$InternalSourceContinuationReview') 'Default core routing still intercepts the internal continuation review route.'
 
         $fixture.RunnerAdapterResult.repositoryTests[0].command.arguments = @('--suite', 'different')
         $driftedScope = Test-StandardValidationInternalContinuationReviewScope `

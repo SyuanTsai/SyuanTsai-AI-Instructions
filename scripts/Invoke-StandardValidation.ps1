@@ -9964,13 +9964,14 @@ function Invoke-StandardValidationRun {
         [string] $PostInstallEvidencePath,
         [bool] $CompleteLifecycle = $false,
         [bool] $SourceMergeExceptionReview = $false,
+        [bool] $InternalSourceContinuationReview = $false,
         [bool] $ProtectedSourceMergeCheck = $false,
         [string] $ProtectedCentralRevision = '',
         [string] $ProtectedWorkflowRevision = '',
         [string] $ProtectedAuthorityArchiveSha256 = ''
     )
 
-    if (-not $DevelopmentHarness -and -not $CompleteLifecycle) {
+    if (-not $DevelopmentHarness -and -not $CompleteLifecycle -and -not $InternalSourceContinuationReview) {
         $coreConflicts = New-Object 'System.Collections.Generic.List[string]'
         foreach ($entry in @(
                 @('CandidateArchivePath', $CandidateArchivePath),
@@ -11165,6 +11166,7 @@ $result = Invoke-StandardValidationRun `
     -PostInstallEvidencePath $PostInstallEvidencePath `
     -CompleteLifecycle ([bool]$CompleteLifecycle) `
     -SourceMergeExceptionReview ([bool]$SourceMergeExceptionReview) `
+    -InternalSourceContinuationReview ([bool]$InternalSourceContinuationReview) `
     -ProtectedSourceMergeCheck ([bool]$ProtectedSourceMergeCheck) `
     -ProtectedCentralRevision $ProtectedCentralRevision `
     -ProtectedWorkflowRevision $ProtectedWorkflowRevision `
